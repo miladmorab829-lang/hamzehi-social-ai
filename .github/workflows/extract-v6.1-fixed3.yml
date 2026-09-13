@@ -1,0 +1,37 @@
+name: Extract V6.1-fixed3
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract project ZIP
+        run: |
+          test -f hamzehi-social-ai-v6.1-fixed3.zip
+          rm -rf /tmp/hamzehi-v6.1
+          mkdir -p /tmp/hamzehi-v6.1
+          unzip -q hamzehi-social-ai-v6.1-fixed3.zip -d /tmp/hamzehi-v6.1
+          cp -R /tmp/hamzehi-v6.1/. .
+          rm -f hamzehi-social-ai-v6.1-fixed3.zip
+
+      - name: Commit extracted project
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Extract HAMZEHI SOCIAL AI V6.1-fixed3"
+            git push
+          fi
