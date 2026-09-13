@@ -1,0 +1,64 @@
+{
+  "project": "HAMZEHI SOCIAL AI",
+  "version": "V6.1",
+  "primary": "Cloudflare Worker + D1",
+  "backup_status": "not deployed",
+  "hard_constraints": {
+    "website_integration": false,
+    "r2": false,
+    "github_dependency": false,
+    "approval_required": true
+  },
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "38e9f60ccdefde7ac58cbc7385d51aade0699a081c82e3500acfff461a6a21e1",
+      "bytes": 393
+    },
+    {
+      "path": "tests/V6.1-test-plan.md",
+      "sha256": "f195e6821ca9894878bd838dd5bc6ef133aacd258de62a5f45df10b9f0da0d9f",
+      "bytes": 452
+    },
+    {
+      "path": "tests/test-plan.md",
+      "sha256": "fd0678bcec2f4519985a6ab318a8d2940d2df3dc5465de44d879f041f639e026",
+      "bytes": 379
+    },
+    {
+      "path": "dashboard/index.html",
+      "sha256": "039157c7b6eb52ce960eb5ee4c7bec9b6f23ef6a02348825f4c3dc3222b4e682",
+      "bytes": 1839
+    },
+    {
+      "path": "worker/wrangler.toml",
+      "sha256": "9d2768c8c48424a154e6661aee79d422cc505c8a5bb5de51af72bb0446412515",
+      "bytes": 314
+    },
+    {
+      "path": "docs/V5.6-V6.0.md",
+      "sha256": "d1a63f00a8354a374740a97b44ce85afbe5750aa8d452cf5af69e0d75666a1b3",
+      "bytes": 1081
+    },
+    {
+      "path": "docs/RECOVERY-RUNBOOK.md",
+      "sha256": "bc5ac96c9482eeafcc7528e458e466042d6f237dbbd726af24e5574fbfbad936",
+      "bytes": 564
+    },
+    {
+      "path": "docs/V6.1-DISASTER-RECOVERY.md",
+      "sha256": "853d2e69cce589ab2dfc80d007b4cab026b9939e58ae9d9094969aae1e5742ef",
+      "bytes": 964
+    },
+    {
+      "path": "database/schema.sql",
+      "sha256": "8d32e08526330c6e50c2e21641181f489f3654185deebe695c0c989143ce4ace",
+      "bytes": 1829
+    },
+    {
+      "path": "worker/src/index.js",
+      "sha256": "f753638bc8ae2b01f14cee9851d6d37f634d617578005b37aa9a7109a8ac8fbd",
+      "bytes": 9756
+    }
+  ]
+}
