@@ -5,8 +5,7 @@ compatibility_date = "2026-09-11"
 crons = ["0 7 * * *","*/15 * * * *"]
 [[d1_databases]]
 binding = "DB"
-database_name = "hamzehi-social-ai"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "40b272c5-e368-4c33-8a41-7c63db98d7e8"
 [vars]
 OPENAI_MODEL = "gpt-5.6-luna"
 RATE_LIMIT_PER_MINUTE = "60"
