@@ -546,27 +546,29 @@ export default {
           website_integration: false
         });
       }
-if (
-  req.method === "GET" &&
-  u.pathname === "/api/diagnostic/location"
-) {
-  if (!auth(req, env))
-    return json(
-      { ok: false, error: "Unauthorized" },
-      401
-    );
 
-  const cf = req.cf || {};
+      if (
+        req.method === "GET" &&
+        u.pathname === "/api/diagnostic/location"
+      ) {
+        if (!auth(req, env))
+          return json(
+            { ok: false, error: "Unauthorized" },
+            401
+          );
 
-  return json({
-    ok: true,
-    diagnostic: "worker_incoming_location",
-    country: cf.country || null,
-    colo: cf.colo || null,
-    city: cf.city || null,
-    timezone: cf.timezone || null
-  });
-}     
+        const cf = req.cf || {};
+
+        return json({
+          ok: true,
+          diagnostic: "worker_incoming_location",
+          country: cf.country || null,
+          colo: cf.colo || null,
+          city: cf.city || null,
+          timezone: cf.timezone || null
+        });
+      }
+
       if (
         req.method === "GET" &&
         u.pathname === "/api/recovery/validate"
@@ -887,11 +889,246 @@ if (
         });
       }
 
+      /* =========================================================
+         V6.6 — APPROVAL DASHBOARD
+         فقط Dashboard اضافه شده؛ APIهای قبلی دست نخورده‌اند.
+         ========================================================= */
+
+      if (
+        req.method === "GET" &&
+        u.pathname === "/dashboard"
+      ) {
+        return new Response(`<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HAMZEHI SOCIAL AI — Approval</title>
+<style>
+body{
+  margin:0;
+  background:#111;
+  color:#eee;
+  font-family:Arial,sans-serif
+}
+main{
+  max-width:700px;
+  margin:auto;
+  padding:18px
+}
+h1{
+  font-size:22px
+}
+input,button{
+  width:100%;
+  box-sizing:border-box;
+  padding:13px;
+  margin:6px 0;
+  border-radius:8px;
+  border:1px solid #444;
+  background:#1b1b1b;
+  color:#fff
+}
+button{
+  cursor:pointer;
+  background:#333
+}
+.card{
+  border:1px solid #333;
+  border-radius:12px;
+  padding:14px;
+  margin:12px 0;
+  background:#181818
+}
+.meta{
+  color:#aaa;
+  font-size:13px;
+  line-height:1.8
+}
+.caption{
+  white-space:pre-wrap;
+  line-height:1.8
+}
+.actions{
+  display:flex;
+  gap:8px
+}
+.actions button{
+  flex:1
+}
+</style>
+</head>
+<body>
+<main>
+
+<h1>HAMZEHI SOCIAL AI</h1>
+<p>Approval Dashboard</p>
+
+<input
+  id="token"
+  type="password"
+  placeholder="ADMIN TOKEN"
+>
+
+<button onclick="loadContent()">
+نمایش محتوای در انتظار تأیید
+</button>
+
+<div id="status"></div>
+<div id="items"></div>
+
+</main>
+
+<script>
+let token="";
+
+function headers(){
+  return {
+    "Authorization":"Bearer "+token,
+    "Content-Type":"application/json"
+  };
+}
+
+async function loadContent(){
+  token=document.getElementById("token").value.trim();
+
+  if(!token){
+    document.getElementById("status").textContent=
+      "ADMIN TOKEN را وارد کنید.";
+    return;
+  }
+
+  const status=document.getElementById("status");
+  const items=document.getElementById("items");
+
+  status.textContent="در حال دریافت...";
+  items.innerHTML="";
+
+  try{
+    const r=await fetch(
+      "/api/content?status=generated",
+      {
+        headers:headers()
+      }
+    );
+
+    const d=await r.json();
+
+    if(!r.ok){
+      throw new Error(
+        d.error || "Request failed"
+      );
+    }
+
+    const pending=(d.items||[]).filter(
+      x=>x.approval_status==="pending"
+    );
+
+    status.textContent=
+      "تعداد در انتظار تأیید: "+pending.length;
+
+    for(const x of pending){
+
+      const card=document.createElement("div");
+      card.className="card";
+
+      card.innerHTML=
+        "<b>"+esc(x.topic||"")+"</b>"+
+        "<div class='meta'>"+
+        "Platform: "+esc(x.platform||"")+"<br>"+
+        "Language: "+esc(x.language||"")+"<br>"+
+        "Market: "+esc(x.market||"")+
+        "</div>"+
+        "<p>"+esc(x.hook||"")+"</p>"+
+        "<div class='caption'>"+
+        esc(x.caption||"")+
+        "</div>"+
+        "<p>"+esc(x.cta||"")+"</p>"+
+        "<div class='meta'>"+
+        esc(x.hashtags||"")+
+        "</div>"+
+        "<div class='actions'>"+
+        "<button onclick='approve(\""+
+        x.id+
+        "\",\"approved\")'>تأیید</button>"+
+        "<button onclick='approve(\""+
+        x.id+
+        "\",\"rejected\")'>رد</button>"+
+        "</div>";
+
+      items.appendChild(card);
+    }
+
+  }catch(e){
+
+    status.textContent=
+      "خطا: "+e.message;
+  }
+}
+
+async function approve(id,status){
+
+  try{
+
+    const r=await fetch(
+      "/api/content/approve",
+      {
+        method:"POST",
+        headers:headers(),
+        body:JSON.stringify({
+          content_id:id,
+          status:status,
+          reason:
+            status==="approved"
+              ? "Approved from dashboard"
+              : "Rejected from dashboard"
+        })
+      }
+    );
+
+    const d=await r.json();
+
+    if(!r.ok || !d.ok){
+      throw new Error(
+        d.error || "Approval failed"
+      );
+    }
+
+    await loadContent();
+
+  }catch(e){
+
+    document.getElementById("status").textContent=
+      "خطا: "+e.message;
+  }
+}
+
+function esc(v){
+  return String(v??"")
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;")
+    .replace(/'/g,"&#039;");
+}
+</script>
+
+</body>
+</html>`,{
+          headers:{
+            "Content-Type":"text/html; charset=utf-8",
+            "Cache-Control":"no-store"
+          }
+        });
+      }
+
       return json(
         { ok: false, error: "Not found" },
         404
       );
+
     } catch (e) {
+
       return json(
         {
           ok: false,
