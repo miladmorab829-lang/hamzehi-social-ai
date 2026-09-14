@@ -1015,10 +1015,14 @@ async function loadContent(){
     const d=await r.json();
 
     if(!r.ok){
-      throw new Error(
-        d.error || "Request failed"
-      );
-    }
+  if(r.status === 401){
+    throw new Error("رمز مدیر اشتباه است.");
+  }
+
+  throw new Error(
+    d.error || "Request failed"
+  );
+}
 
     const pending=(d.items||[]).filter(
       x=>x.approval_status==="pending"
