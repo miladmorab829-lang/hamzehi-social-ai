@@ -566,8 +566,7 @@ if (
     city: cf.city || null,
     timezone: cf.timezone || null
   });
-
-      
+}     
       if (
         req.method === "GET" &&
         u.pathname === "/api/recovery/validate"
