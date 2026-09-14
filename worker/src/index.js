@@ -52,6 +52,19 @@ async function approved(env, id) {
   return q?.status === "approved";
 }
 
+async function openaiCheck(env) {
+  if (!env.OPENAI_API_KEY)
+    return { status: "SKIP", details: "OPENAI_API_KEY not configured" };
+
+  const r = await fetch("https://api.openai.com/v1/models", {
+    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` }
+  });
+
+  return r.ok
+    ? { status: "PASS", details: "OpenAI credential accepted" }
+    : { status: "FAIL", details: `OpenAI returned ${r.status}` };
+}
+
 async function telegramCheck(env) {
   if (!env.TELEGRAM_BOT_TOKEN)
     return { status: "SKIP", details: "TELEGRAM_BOT_TOKEN not configured" };
@@ -110,6 +123,7 @@ async function releaseTest(env) {
     details: "Publish endpoint requires approved content"
   }));
 
+  await add("OpenAI", () => openaiCheck(env));
   await add("Telegram", () => telegramCheck(env));
   await add("Instagram", () => instagramCheck(env));
 
@@ -122,81 +136,59 @@ async function releaseTest(env) {
   return checks;
 }
 
-function safeJson(text) {
+function responseText(data) {
+  if (typeof data?.output_text === "string") return data.output_text;
+
+  const parts = [];
+  for (const item of data?.output || []) {
+    for (const c of item?.content || []) {
+      if (typeof c?.text === "string") parts.push(c.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+function safeJson(value) {
+  if (value && typeof value === "object") {
+    if (value.response && typeof value.response === "object") return value.response;
+    if (value.result && typeof value.result === "object") return value.result;
+    return value;
+  }
+
+  const text = String(value ?? "");
   try {
     return JSON.parse(text);
   } catch {
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      return JSON.parse(text.slice(start, end + 1));
-    }
+    if (start >= 0 && end > start) return JSON.parse(text.slice(start, end + 1));
     throw Error("AI provider did not return valid JSON");
   }
 }
 
 async function generateWithWorkersAI(env, system, user) {
   if (!env.AI || typeof env.AI.run !== "function")
-    throw Error("Workers AI is not configured");
+    throw Error("Workers AI fallback is not configured");
 
-  const result = await env.AI.run(
-    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-    {
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user }
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          type: "object",
-          properties: {
-            hook: { type: "string" },
-            body: { type: "string" },
-            caption: { type: "string" },
-            cta: { type: "string" },
-            hashtags: {
-              type: "array",
-              items: { type: "string" }
-            },
-            visual_prompt: { type: "string" }
-          },
-          required: [
-            "hook",
-            "body",
-            "caption",
-            "cta",
-            "hashtags",
-            "visual_prompt"
-          ]
-        }
-      },
-      max_tokens: 1200
-    }
-  );
+  const result = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user }
+    ],
+    response_format: { type: "json_object" },
+    max_tokens: 1200
+  });
 
-  const text = typeof result === "string"
-    ? result
-    : (
-        result?.response ||
-        result?.result?.response ||
-        result?.output_text ||
-        ""
-      );
-
-  if (!text)
-    throw Error("Workers AI returned empty output");
-
-  return safeJson(text);
+  if (!result) throw Error("Workers AI returned empty output");
+  return safeJson(result);
 }
 
 async function generateContent(env, b) {
-  if (!env.AI || typeof env.AI.run !== "function")
-    throw Error("Workers AI is not configured");
+  if (!env.OPENAI_API_KEY && (!env.AI || typeof env.AI.run !== "function"))
+    throw Error("No AI provider configured");
 
   const topic = String(b.topic || "").trim();
-  if (!topic)
-    throw Error("topic is required");
+  if (!topic) throw Error("topic is required");
 
   const platform = String(b.platform || "instagram");
   const language = String(b.language || "fa-IR");
@@ -208,66 +200,68 @@ async function generateContent(env, b) {
 
   const system = `
 You are HAMZEHI SOCIAL AI, a controlled social-content generator.
-
 Generate content ONLY from the supplied topic and facts.
-
-NEVER invent or imply business facts:
-price, inventory, availability, delivery time, guarantee,
-certification, material/specification, address, phone number,
-website, customer claim, partnership, discount, or result.
-
+NEVER invent or imply business facts: price, inventory, availability,
+delivery time, guarantee, certification, material/specification, address,
+phone number, website, customer claim, partnership, discount, or result.
 If a fact is not supplied, do not state it as fact.
-
 Write natural Persian or Iraqi Arabic according to the requested language.
-
 Return JSON only with keys:
 hook, body, caption, cta, hashtags, visual_prompt.
-
 Hashtags must be an array of strings.
-
 Keep the output practical for the requested platform.
 `;
 
   const user = JSON.stringify({
-    topic,
-    platform,
-    language,
-    market,
-    content_type: contentType,
-    objective,
-    tone,
-    supplied_facts: facts || "(none)"
+    topic, platform, language, market, content_type: contentType,
+    objective, tone, supplied_facts: facts || "(none)"
   });
 
-  const x = await generateWithWorkersAI(
-    env,
-    system,
-    user
-  );
+  let x;
+  let provider = "openai";
 
-  if (
-    !x.hook ||
-    !x.body ||
-    !x.caption ||
-    !x.cta ||
-    !x.visual_prompt
-  ) {
-    throw Error("Generated content is incomplete");
+  if (env.OPENAI_API_KEY) {
+    const r = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: env.OPENAI_MODEL || "gpt-5.6-luna",
+        input: [
+          { role: "system", content: [{ type: "input_text", text: system }] },
+          { role: "user", content: [{ type: "input_text", text: user }] }
+        ],
+        text: { format: { type: "json_object" } }
+      })
+    });
+
+    const data = await r.json();
+    if (r.ok) {
+      x = safeJson(responseText(data));
+    } else {
+      const detail = data?.error?.message || `OpenAI returned ${r.status}`;
+      const regionBlocked = /country|region|territory|unsupported/i.test(detail);
+      if (!regionBlocked || !env.AI) throw Error(detail);
+      provider = "workers_ai_fallback";
+      x = await generateWithWorkersAI(env, system, user);
+    }
+  } else {
+    provider = "workers_ai_fallback";
+    x = await generateWithWorkersAI(env, system, user);
   }
+
+  if (!x.hook || !x.body || !x.caption || !x.cta || !x.visual_prompt)
+    throw Error("Generated content is incomplete");
 
   const hashtags = Array.isArray(x.hashtags)
     ? x.hashtags.map(String).slice(0, 20)
     : [];
 
   return {
-    provider: "workers_ai",
-    topic,
-    platform,
-    language,
-    market,
-    content_type: contentType,
-    objective,
-    tone,
+    provider, topic, platform, language, market,
+    content_type: contentType, objective, tone,
     hook: String(x.hook),
     body: String(x.body),
     caption: String(x.caption),
@@ -285,54 +279,27 @@ async function createGeneratedContent(env, b) {
   await env.DB.prepare(
     "INSERT INTO contents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
   ).bind(
-    id,
-    g.topic,
-    g.platform,
-    g.language,
-    g.market,
-    g.content_type,
-    g.objective,
-    g.tone,
-    g.hook,
-    g.body,
-    g.caption,
-    g.cta,
-    g.hashtags,
-    g.visual_prompt,
-    "generated",
-    t,
-    t
+    id, g.topic, g.platform, g.language, g.market, g.content_type,
+    g.objective, g.tone, g.hook, g.body, g.caption, g.cta,
+    g.hashtags, g.visual_prompt, "generated", t, t
   ).run();
 
   await env.DB.prepare(
     "INSERT INTO approval_queue VALUES(?,?,?,?,?,?)"
   ).bind(
-    uid(),
-    id,
-    "pending",
+    uid(), id, "pending",
     "Generated by AI; human approval required before publishing",
-    t,
-    t
+    t, t
   ).run();
 
-  await audit(
-    env,
-    "content_generated",
-    "Content generated and queued for approval",
-    {
-      content_id: id,
-      platform: g.platform,
-      language: g.language,
-      market: g.market
-    }
-  );
+  await audit(env, "content_generated", "Content generated and queued for approval", {
+    content_id: id,
+    platform: g.platform,
+    language: g.language,
+    market: g.market
+  });
 
-  return {
-    id,
-    ...g,
-    status: "generated",
-    approval_status: "pending"
-  };
+  return { id, ...g, status: "generated", approval_status: "pending" };
 }
 
 async function listContent(env, status) {
@@ -367,49 +334,23 @@ async function setApproval(env, id, status, reason = "") {
     "SELECT id FROM contents WHERE id=?"
   ).bind(id).first();
 
-  if (!c)
-    throw Error("Content not found");
+  if (!c) throw Error("Content not found");
 
   const t = now();
 
   await env.DB.prepare(
     "INSERT INTO approval_queue VALUES(?,?,?,?,?,?)"
-  ).bind(
-    uid(),
-    id,
-    status,
-    reason,
-    t,
-    t
-  ).run();
+  ).bind(uid(), id, status, reason, t, t).run();
 
   await env.DB.prepare(
-    "UPDATE contents SET status=?, updated_at=? WHERE id=?"
-  ).bind(
-    status === "approved"
-      ? "approved"
-      : status === "rejected"
-        ? "rejected"
-        : "generated",
-    t,
-    id
-  ).run();
+    "UPDATE contents SET status=?,updated_at=? WHERE id=?"
+  ).bind(status === "approved" ? "approved" : "generated", t, id).run();
 
-  await audit(
-    env,
-    "approval_changed",
-    `Content ${status}`,
-    {
-      content_id: id,
-      status,
-      reason
-    }
-  );
+  await audit(env, "approval_changed", `Content ${status}`, {
+    content_id: id, status, reason
+  });
 
-  return {
-    id,
-    status
-  };
+  return { id, status };
 }
 
 async function publish(env, b) {
@@ -420,8 +361,7 @@ async function publish(env, b) {
     "SELECT * FROM contents WHERE id=?"
   ).bind(b.content_id).first();
 
-  if (!c)
-    throw Error("Content not found");
+  if (!c) throw Error("Content not found");
 
   const out = [];
 
@@ -429,20 +369,15 @@ async function publish(env, b) {
     if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID)
       throw Error("Telegram credentials missing");
 
-    const text = [
-      c.hook,
-      c.body,
-      c.caption,
-      c.cta
-    ].filter(Boolean).join("\n\n");
+    const text = [c.hook, c.body, c.caption, c.cta]
+      .filter(Boolean)
+      .join("\n\n");
 
     const r = await fetch(
       `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           chat_id: env.TELEGRAM_CHAT_ID,
           text
@@ -457,30 +392,22 @@ async function publish(env, b) {
 
     out.push({
       platform: "telegram",
-      external_id: String(
-        d.result?.message_id || ""
-      )
+      external_id: String(d.result?.message_id || "")
     });
   }
 
   if (b.platform === "instagram" || b.platform === "both") {
-    if (
-      !env.INSTAGRAM_ACCESS_TOKEN ||
-      !env.INSTAGRAM_ACCOUNT_ID
-    ) {
+    if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID)
       throw Error("Instagram credentials missing");
-    }
 
     if (!b.media_url)
       throw Error("Public media_url required for Instagram");
 
     const p = new URLSearchParams({
       image_url: b.media_url,
-      caption: [
-        c.caption,
-        c.cta,
-        c.hashtags
-      ].filter(Boolean).join("\n\n"),
+      caption: [c.caption, c.cta, c.hashtags]
+        .filter(Boolean)
+        .join("\n\n"),
       access_token: env.INSTAGRAM_ACCESS_TOKEN
     });
 
@@ -517,21 +444,14 @@ async function publish(env, b) {
 
     out.push({
       platform: "instagram",
-      external_id: String(
-        xd.id || ad.id
-      )
+      external_id: String(xd.id || ad.id)
     });
   }
 
-  await audit(
-    env,
-    "content_published",
-    "Approved content published",
-    {
-      content_id: b.content_id,
-      platform: b.platform
-    }
-  );
+  await audit(env, "content_published", "Approved content published", {
+    content_id: b.content_id,
+    platform: b.platform
+  });
 
   return out;
 }
@@ -545,25 +465,22 @@ async function recovery(env) {
   for (const x of r.results || []) {
     try {
       const claim = await env.DB.prepare(
-        "UPDATE retry_queue SET status='running',attempts=attempts+1," +
-        "updated_at=? WHERE id=? AND status='queued'"
+        "UPDATE retry_queue SET status='running',attempts=attempts+1,updated_at=? " +
+        "WHERE id=? AND status='queued'"
       ).bind(now(), x.id).run();
 
-      if (!claim.meta?.changes)
-        continue;
+      if (!claim.meta?.changes) continue;
 
       const p = JSON.parse(x.payload_json);
 
-      if (x.operation === "publish") {
+      if (x.operation === "publish")
         await publish(env, p);
-      } else {
+      else
         throw Error("Unsupported retry operation");
-      }
 
       await env.DB.prepare(
         "UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?"
       ).bind(now(), x.id).run();
-
     } catch (e) {
       const attempts = Number(x.attempts) + 1;
       const status =
@@ -572,14 +489,12 @@ async function recovery(env) {
           : "queued";
 
       await env.DB.prepare(
-        "UPDATE retry_queue SET status=?,last_error=?," +
-        "next_attempt_at=?,updated_at=? WHERE id=?"
+        "UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?"
       ).bind(
         status,
         e.message,
         new Date(
-          Date.now() +
-          Math.min(3600000, 2 ** attempts * 60000)
+          Date.now() + Math.min(3600000, 2 ** attempts * 60000)
         ).toISOString(),
         now(),
         x.id
@@ -597,23 +512,16 @@ export default {
     const u = new URL(req.url);
 
     try {
-      if (!(await rate(env, req))) {
+      if (!(await rate(env, req)))
         return json(
-          {
-            ok: false,
-            error: "Rate limit exceeded"
-          },
+          { ok: false, error: "Rate limit exceeded" },
           429
         );
-      }
 
-      if (
-        req.method === "GET" &&
-        u.pathname === "/api/health"
-      ) {
+      if (req.method === "GET" && u.pathname === "/api/health") {
         return json({
           ok: true,
-          version: "V6.4-workers-primary",
+          version: "V6.5-openai-primary",
           production: true,
           approval_required: true,
           auto_publish: false,
@@ -628,21 +536,12 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
-        const required = [
-          "DB",
-          "ADMIN_TOKEN"
-        ];
-
-        const missing = required.filter(
-          k => !env[k]
-        );
+        const required = ["DB", "ADMIN_TOKEN"];
+        const missing = required.filter(k => !env[k]);
 
         return json({
           ok: missing.length === 0,
@@ -663,10 +562,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -682,10 +578,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -705,10 +598,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -716,10 +606,7 @@ export default {
 
         return json({
           ok: true,
-          content: await createGeneratedContent(
-            env,
-            b
-          )
+          content: await createGeneratedContent(env, b)
         });
       }
 
@@ -729,10 +616,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -750,10 +634,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -776,10 +657,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -798,10 +676,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -826,9 +701,7 @@ export default {
               `SELECT COUNT(*) n FROM ${t}`
             ).first();
 
-            counts[t] = Number(
-              r?.n || 0
-            );
+            counts[t] = Number(r?.n || 0);
           } catch {
             counts[t] = "unavailable";
           }
@@ -844,6 +717,7 @@ export default {
           generated_at: now(),
           tables: counts,
           secrets: [
+            "OPENAI_API_KEY",
             "ADMIN_TOKEN",
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_CHAT_ID",
@@ -859,17 +733,11 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
-        const body = await req.json().catch(
-          () => ({})
-        );
-
+        const body = await req.json().catch(() => ({}));
         const id = uid();
 
         await env.DB.prepare(
@@ -894,10 +762,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -917,10 +782,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -940,10 +802,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -977,10 +836,7 @@ export default {
       ) {
         if (!auth(req, env))
           return json(
-            {
-              ok: false,
-              error: "Unauthorized"
-            },
+            { ok: false, error: "Unauthorized" },
             401
           );
 
@@ -995,13 +851,9 @@ export default {
       }
 
       return json(
-        {
-          ok: false,
-          error: "Not found"
-        },
+        { ok: false, error: "Not found" },
         404
       );
-
     } catch (e) {
       return json(
         {
