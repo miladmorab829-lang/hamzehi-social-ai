@@ -60,9 +60,26 @@ async function openaiCheck(env) {
     headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` }
   });
 
-  return r.ok
-    ? { status: "PASS", details: "OpenAI credential accepted" }
-    : { status: "FAIL", details: `OpenAI returned ${r.status}` };
+  if (r.ok)
+    return { status: "PASS", details: "OpenAI credential accepted" };
+
+  let details = `OpenAI returned ${r.status}`;
+
+  try {
+    const data = await r.json();
+    const message = data?.error?.message;
+    const type = data?.error?.type;
+    const code = data?.error?.code;
+
+    details = [
+      details,
+      type ? `type=${type}` : "",
+      code ? `code=${code}` : "",
+      message ? `message=${message}` : ""
+    ].filter(Boolean).join(" | ");
+  } catch {}
+
+  return { status: "FAIL", details };
 }
 
 async function telegramCheck(env) {
