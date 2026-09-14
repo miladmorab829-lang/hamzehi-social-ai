@@ -546,7 +546,28 @@ export default {
           website_integration: false
         });
       }
+if (
+  req.method === "GET" &&
+  u.pathname === "/api/diagnostic/location"
+) {
+  if (!auth(req, env))
+    return json(
+      { ok: false, error: "Unauthorized" },
+      401
+    );
 
+  const cf = req.cf || {};
+
+  return json({
+    ok: true,
+    diagnostic: "worker_incoming_location",
+    country: cf.country || null,
+    colo: cf.colo || null,
+    city: cf.city || null,
+    timezone: cf.timezone || null
+  });
+
+      
       if (
         req.method === "GET" &&
         u.pathname === "/api/recovery/validate"
