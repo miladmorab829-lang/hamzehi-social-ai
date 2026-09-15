@@ -665,17 +665,12 @@ export default {
 
     try {
       if (req.method === "GET" && u.pathname === "/dashboard") {
-  const dashboardBody = new TextEncoder().encode("\uFEFF" + dashboardHtml());
+        return new Response(dashboardHtml(), {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+        });
+      }
 
-  return new Response(dashboardBody, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/html; charset=UTF-8",
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff"
-    }
-  });
-}
       if (!(await rate(env, req)))
         return json({ ok: false, error: "Rate limit exceeded" }, 429);
 
