@@ -9,6 +9,13 @@ const json = (x, s = 200) =>
 const uid = () => crypto.randomUUID();
 const now = () => new Date().toISOString();
 
+class PublishOutcomeUnknown extends Error {
+  constructor(message) { super(message); this.name = "PublishOutcomeUnknown"; }
+}
+
+const UNKNOWN_PUBLISH_AFTER_MS = 10 * 60 * 1000;
+const graphApiVersion = (env) => String(env.INSTAGRAM_GRAPH_API_VERSION || "v23.0").replace(/^v?/i, "v");
+
 async function rate(env, req) {
   const key = req.headers.get("CF-Connecting-IP") || "unknown";
   const minute = Math.floor(Date.now() / 60000);
@@ -55,59 +62,102 @@ async function approved(env, id) {
 async function openaiCheck(env) {
   if (!env.OPENAI_API_KEY)
     return { status: "SKIP", details: "OPENAI_API_KEY not configured" };
-
-  const r = await fetch("https://api.openai.com/v1/models", {
-    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` }
+  const model = String(env.OPENAI_MODEL || "gpt-5.6-luna");
+  const r = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, {
+    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
+    signal: AbortSignal.timeout(8000)
   });
-
-  if (r.ok)
-    return { status: "PASS", details: "OpenAI credential accepted" };
-
-  let details = `OpenAI returned ${r.status}`;
-
-  try {
-    const data = await r.json();
-    const message = data?.error?.message;
-    const type = data?.error?.type;
-    const code = data?.error?.code;
-
-    details = [
-      details,
-      type ? `type=${type}` : "",
-      code ? `code=${code}` : "",
-      message ? `message=${message}` : ""
-    ].filter(Boolean).join(" | ");
-  } catch {}
-
-  return { status: "FAIL", details };
+  const d = await r.json().catch(() => ({}));
+  return r.ok && !d.error
+    ? { status: "PASS", details: `OpenAI credential and model access accepted`, model }
+    : { status: "FAIL", details: `OpenAI model check HTTP ${r.status}`, model, provider_error: d.error?.message || null };
 }
 
 async function telegramCheck(env) {
-  if (!env.TELEGRAM_BOT_TOKEN)
-    return { status: "SKIP", details: "TELEGRAM_BOT_TOKEN not configured" };
-
-  const r = await fetch(
-    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getMe`
-  );
-  const d = await r.json();
-
-  return r.ok && d.ok
-    ? { status: "PASS", details: "Telegram bot credential accepted" }
-    : { status: "FAIL", details: "Telegram credential rejected" };
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID)
+    return { status: "SKIP", details: "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured" };
+  const base = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+  const [meR, chatR, whR] = await Promise.all([
+    fetch(`${base}/getMe`, { signal: AbortSignal.timeout(8000) }),
+    fetch(`${base}/getChat?chat_id=${encodeURIComponent(env.TELEGRAM_CHAT_ID)}`, { signal: AbortSignal.timeout(8000) }),
+    fetch(`${base}/getWebhookInfo`, { signal: AbortSignal.timeout(8000) })
+  ]);
+  const me = await meR.json().catch(() => ({}));
+  const chat = await chatR.json().catch(() => ({}));
+  const wh = await whR.json().catch(() => ({}));
+  if (!(meR.ok && me.ok)) return { status: "FAIL", details: `Telegram getMe HTTP ${meR.status}` };
+  if (!(chatR.ok && chat.ok)) return { status: "FAIL", details: `Telegram chat check HTTP ${chatR.status}` };
+  return {
+    status: "PASS",
+    details: "Bot credential and target chat accepted",
+    bot_username: me.result?.username || null,
+    chat_id: String(env.TELEGRAM_CHAT_ID),
+    chat_type: chat.result?.type || null,
+    webhook: { configured: !!wh.result?.url, pending_update_count: Number(wh.result?.pending_update_count || 0), last_error: wh.result?.last_error_message || null }
+  };
 }
 
 async function instagramCheck(env) {
   if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID)
     return { status: "SKIP", details: "Instagram credentials not configured" };
+  const version = graphApiVersion(env);
+  const u = new URL(`https://graph.facebook.com/${version}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}`);
+  u.searchParams.set("fields", "id,username,account_type,media_count");
+  u.searchParams.set("access_token", env.INSTAGRAM_ACCESS_TOKEN);
+  const r = await fetch(u.toString(), { signal: AbortSignal.timeout(8000) });
+  const d = await r.json().catch(() => ({}));
+  return r.ok && !d.error
+    ? { status: "PASS", details: "Instagram account credential accepted", account_id: d.id || null, username: d.username || null, account_type: d.account_type || null, media_count: Number(d.media_count || 0), graph_api_version: version }
+    : { status: "FAIL", details: `Instagram HTTP ${r.status}`, provider_error: d.error?.message || null, graph_api_version: version };
+}
 
-  const r = await fetch(
-    `https://graph.facebook.com/v23.0/${env.INSTAGRAM_ACCOUNT_ID}` +
-    `?fields=id&access_token=${env.INSTAGRAM_ACCESS_TOKEN}`
-  );
 
-  return r.ok
-    ? { status: "PASS", details: "Instagram account credential accepted" }
-    : { status: "FAIL", details: `Instagram returned ${r.status}` };
+async function connectionTest(env) {
+  const out = { tested_at: now(), providers: {} };
+  const check = async (name, fn) => {
+    try { out.providers[name] = await fn(); }
+    catch (e) { out.providers[name] = { status: "FAIL", details: e?.message || "connection test failed" }; }
+  };
+
+  await check("OpenAI", async () => openaiCheck(env));
+
+  await check("Telegram", async () => {
+    if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return { status: "SKIP", details: "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing" };
+    const base = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+    const [meR, whR] = await Promise.all([
+      fetch(`${base}/getMe`, { signal: AbortSignal.timeout(8000) }),
+      fetch(`${base}/getWebhookInfo`, { signal: AbortSignal.timeout(8000) })
+    ]);
+    const me = await meR.json().catch(() => ({}));
+    const wh = await whR.json().catch(() => ({}));
+    if (!(meR.ok && me.ok)) return { status: "FAIL", details: `Telegram getMe HTTP ${meR.status}` };
+    return {
+      status: "PASS",
+      details: "Bot credential accepted",
+      bot_username: me.result?.username || null,
+      webhook: { configured: !!wh.result?.url, pending_update_count: Number(wh.result?.pending_update_count || 0), last_error: wh.result?.last_error_message || null }
+    };
+  });
+
+  await check("Instagram", async () => {
+    if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID) return { status: "SKIP", details: "Instagram access token or account id missing" };
+    const version = graphApiVersion(env);
+    const u = new URL(`https://graph.facebook.com/${version}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}`);
+    u.searchParams.set("fields", "id,username");
+    u.searchParams.set("access_token", env.INSTAGRAM_ACCESS_TOKEN);
+    const r = await fetch(u.toString(), { signal: AbortSignal.timeout(8000) });
+    const d = await r.json().catch(() => ({}));
+    return r.ok && !d.error
+      ? { status: "PASS", details: "Instagram account credential accepted", account_id: d.id || null, username: d.username || null, graph_api_version: version }
+      : { status: "FAIL", details: `Instagram HTTP ${r.status}`, provider_error: d.error?.message || null, graph_api_version: version };
+  });
+
+  out.summary = {
+    pass: Object.values(out.providers).filter(x => x.status === "PASS").length,
+    fail: Object.values(out.providers).filter(x => x.status === "FAIL").length,
+    skip: Object.values(out.providers).filter(x => x.status === "SKIP").length
+  };
+  return out;
 }
 
 async function releaseTest(env) {
@@ -139,6 +189,13 @@ async function releaseTest(env) {
     status: "PASS",
     details: "Publish endpoint requires approved content"
   }));
+
+  await add("Recovery tables", async () => {
+    for (const t of ["learning_feedback","learning_reports","campaigns","calendar","api_rate_limits","system_events","release_checks","retry_queue","production_runs","recovery_snapshots","provider_config","migration_runs"]) {
+      await env.DB.prepare(`SELECT COUNT(*) n FROM ${t}`).first();
+    }
+    return { status: "PASS", details: "Recovery and operations tables accessible" };
+  });
 
   await add("OpenAI", () => openaiCheck(env));
   await add("Telegram", () => telegramCheck(env));
@@ -268,7 +325,6 @@ Keep the output practical for the requested platform.
     provider = "workers_ai_fallback";
     x = await generateWithWorkersAI(env, system, user);
   }
-
   if (!x.hook || !x.body || !x.caption || !x.cta || !x.visual_prompt)
     throw Error("Generated content is incomplete");
 
@@ -321,25 +377,21 @@ async function createGeneratedContent(env, b) {
 
 async function listContent(env, status) {
   let r;
-
   if (status) {
     r = await env.DB.prepare(
       "SELECT c.*, q.status approval_status FROM contents c " +
       "LEFT JOIN approval_queue q ON q.content_id=c.id " +
       "AND q.updated_at=(SELECT MAX(q2.updated_at) FROM approval_queue q2 " +
-      "WHERE q2.content_id=c.id) WHERE c.status=? " +
-      "ORDER BY c.created_at DESC LIMIT 100"
+      "WHERE q2.content_id=c.id) WHERE c.status=? ORDER BY c.created_at DESC LIMIT 100"
     ).bind(status).all();
   } else {
     r = await env.DB.prepare(
       "SELECT c.*, q.status approval_status FROM contents c " +
       "LEFT JOIN approval_queue q ON q.content_id=c.id " +
       "AND q.updated_at=(SELECT MAX(q2.updated_at) FROM approval_queue q2 " +
-      "WHERE q2.content_id=c.id) " +
-      "ORDER BY c.created_at DESC LIMIT 100"
+      "WHERE q2.content_id=c.id) ORDER BY c.created_at DESC LIMIT 100"
     ).all();
   }
-
   return r.results || [];
 }
 
@@ -350,7 +402,6 @@ async function setApproval(env, id, status, reason = "") {
   const c = await env.DB.prepare(
     "SELECT id FROM contents WHERE id=?"
   ).bind(id).first();
-
   if (!c) throw Error("Content not found");
 
   const t = now();
@@ -360,8 +411,9 @@ async function setApproval(env, id, status, reason = "") {
   ).bind(uid(), id, status, reason, t, t).run();
 
   await env.DB.prepare(
-    "UPDATE contents SET status=?,updated_at=? WHERE id=?"
-  ).bind(status === "approved" ? "approved" : "generated", t, id).run();
+    "UPDATE contents SET status=?, updated_at=? WHERE id=?"
+  ).bind(status === "approved" ? "approved" :
+         status === "rejected" ? "rejected" : "generated", t, id).run();
 
   await audit(env, "approval_changed", `Content ${status}`, {
     content_id: id, status, reason
@@ -370,154 +422,237 @@ async function setApproval(env, id, status, reason = "") {
   return { id, status };
 }
 
-async function publish(env, b) {
-  if (!await approved(env, b.content_id))
-    throw Error("Approval required");
-
-  const c = await env.DB.prepare(
-    "SELECT * FROM contents WHERE id=?"
-  ).bind(b.content_id).first();
-
-  if (!c) throw Error("Content not found");
-
-  const out = [];
-
-  if (b.platform === "telegram" || b.platform === "both") {
-    if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID)
-      throw Error("Telegram credentials missing");
-
-    const text = [c.hook, c.body, c.caption, c.cta]
-      .filter(Boolean)
-      .join("\n\n");
-
-    const r = await fetch(
-      `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: env.TELEGRAM_CHAT_ID,
-          text
-        })
+async function publish(env,b){
+  if(!b?.content_id)throw Error("content_id is required");
+  if(!await approved(env,b.content_id))throw Error("Approval required");
+  const c=await env.DB.prepare("SELECT * FROM contents WHERE id=?").bind(b.content_id).first();if(!c)throw Error("Content not found");
+  const platforms=b.platform==='both'?['telegram','instagram']:[String(b.platform||'')];if(!platforms.every(x=>['telegram','instagram'].includes(x)))throw Error("Invalid platform");
+  const out=[];
+  for(const platform of platforms){
+    const runId=`publish:${c.id}:${platform}`;const existing=await env.DB.prepare("SELECT status,summary_json,error FROM production_runs WHERE id=?").bind(runId).first();
+    if(existing?.status==='completed'){let z={};try{z=JSON.parse(existing.summary_json||'{}')}catch{}out.push({platform,external_id:String(z.external_id||''),idempotent:true,already_published:true});continue}
+    if(existing?.status==='stopped')throw Error(`Publish outcome unknown for ${platform}; manual reconciliation required`);
+    const ins=await env.DB.prepare("INSERT OR IGNORE INTO production_runs(id,run_type,status,summary_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(runId,`publish:${platform}`,'started',null,null,now(),now()).run();
+    const state=await env.DB.prepare("SELECT status,summary_json,error FROM production_runs WHERE id=?").bind(runId).first();
+    if(state?.status==='completed'){let z={};try{z=JSON.parse(state.summary_json||'{}')}catch{}out.push({platform,external_id:String(z.external_id||''),idempotent:true,already_published:true});continue}
+    if(state?.status==='stopped')throw Error(`Publish outcome unknown for ${platform}; manual reconciliation required`);
+    if(state?.status==='started'&&!ins.meta?.changes)throw Error(`Publish already in progress for ${platform}`);
+    if(state?.status==='failed'){const re=await env.DB.prepare("UPDATE production_runs SET status='started',error=NULL,updated_at=? WHERE id=? AND status='failed'").bind(now(),runId).run();if(!re.meta?.changes)throw Error(`Publish already in progress for ${platform}`)}
+    try{let externalId='';
+      if(platform==='telegram'){
+        if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID)throw Error('Telegram credentials missing');
+        const text=[c.hook,c.body,c.caption,c.cta].filter(Boolean).join('\n\n');
+        let r;try{r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text})})}catch(e){throw new PublishOutcomeUnknown('Telegram request outcome unknown; provider request may have been accepted')}
+        const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error('Telegram publish failed');externalId=String(d.result?.message_id||'')
+      } else {
+        if(!env.INSTAGRAM_ACCESS_TOKEN||!env.INSTAGRAM_ACCOUNT_ID)throw Error('Instagram credentials missing');
+        if(c.content_type && String(c.content_type) !== 'post') throw Error(`Instagram publish currently supports content_type=post only; received ${c.content_type}`);
+        let mediaUrl; try { mediaUrl=new URL(String(b.media_url||'')); } catch { throw Error('Public media_url required for Instagram'); }
+        if(!/^https?:$/.test(mediaUrl.protocol)) throw Error('Public media_url must use http or https');
+        const q1=new URLSearchParams({image_url:mediaUrl.toString(),caption:[c.caption,c.cta,c.hashtags].filter(Boolean).join('\n\n'),access_token:env.INSTAGRAM_ACCESS_TOKEN});
+        let a;try{a=await fetch(`https://graph.facebook.com/${graphApiVersion(env)}/${env.INSTAGRAM_ACCOUNT_ID}/media`,{method:'POST',body:q1})}catch(e){throw new PublishOutcomeUnknown('Instagram container request outcome unknown')}
+        const ad=await a.json().catch(()=>({}));if(!a.ok||ad.error)throw Error('Instagram container failed');
+        const q2=new URLSearchParams({creation_id:ad.id,access_token:env.INSTAGRAM_ACCESS_TOKEN});
+        let x;try{x=await fetch(`https://graph.facebook.com/${graphApiVersion(env)}/${env.INSTAGRAM_ACCOUNT_ID}/media_publish`,{method:'POST',body:q2})}catch(e){throw new PublishOutcomeUnknown('Instagram publish request outcome unknown')}
+        const xd=await x.json().catch(()=>({}));if(!x.ok||xd.error)throw Error('Instagram publish failed');externalId=String(xd.id||ad.id||'')
       }
-    );
-
-    const d = await r.json();
-
-    if (!r.ok || !d.ok)
-      throw Error("Telegram publish failed");
-
-    out.push({
-      platform: "telegram",
-      external_id: String(d.result?.message_id || "")
-    });
-  }
-
-  if (b.platform === "instagram" || b.platform === "both") {
-    if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID)
-      throw Error("Instagram credentials missing");
-
-    if (!b.media_url)
-      throw Error("Public media_url required for Instagram");
-
-    const p = new URLSearchParams({
-      image_url: b.media_url,
-      caption: [c.caption, c.cta, c.hashtags]
-        .filter(Boolean)
-        .join("\n\n"),
-      access_token: env.INSTAGRAM_ACCESS_TOKEN
-    });
-
-    const a = await fetch(
-      `https://graph.facebook.com/v23.0/${env.INSTAGRAM_ACCOUNT_ID}/media`,
-      {
-        method: "POST",
-        body: p
-      }
-    );
-
-    const ad = await a.json();
-
-    if (!a.ok || ad.error)
-      throw Error("Instagram container failed");
-
-    const q = new URLSearchParams({
-      creation_id: ad.id,
-      access_token: env.INSTAGRAM_ACCESS_TOKEN
-    });
-
-    const x = await fetch(
-      `https://graph.facebook.com/v23.0/${env.INSTAGRAM_ACCOUNT_ID}/media_publish`,
-      {
-        method: "POST",
-        body: q
-      }
-    );
-
-    const xd = await x.json();
-
-    if (!x.ok || xd.error)
-      throw Error("Instagram publish failed");
-
-    out.push({
-      platform: "instagram",
-      external_id: String(xd.id || ad.id)
-    });
-  }
-
-  await audit(env, "content_published", "Approved content published", {
-    content_id: b.content_id,
-    platform: b.platform
-  });
-
-  return out;
-}
-
-async function recovery(env) {
-  const r = await env.DB.prepare(
-    "SELECT * FROM retry_queue WHERE status='queued' " +
-    "AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 10"
-  ).bind(now()).all();
-
-  for (const x of r.results || []) {
-    try {
-      const claim = await env.DB.prepare(
-        "UPDATE retry_queue SET status='running',attempts=attempts+1,updated_at=? " +
-        "WHERE id=? AND status='queued'"
-      ).bind(now(), x.id).run();
-
-      if (!claim.meta?.changes) continue;
-
-      const p = JSON.parse(x.payload_json);
-
-      if (x.operation === "publish")
-        await publish(env, p);
-      else
-        throw Error("Unsupported retry operation");
-
-      await env.DB.prepare(
-        "UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?"
-      ).bind(now(), x.id).run();
-    } catch (e) {
-      const attempts = Number(x.attempts) + 1;
-      const status =
-        attempts >= Number(x.max_attempts)
-          ? "failed"
-          : "queued";
-
-      await env.DB.prepare(
-        "UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?"
-      ).bind(
-        status,
-        e.message,
-        new Date(
-          Date.now() + Math.min(3600000, 2 ** attempts * 60000)
-        ).toISOString(),
-        now(),
-        x.id
-      ).run();
+      await env.DB.prepare("UPDATE production_runs SET status='completed',summary_json=?,error=NULL,updated_at=? WHERE id=?").bind(JSON.stringify({content_id:c.id,platform,external_id:externalId}),now(),runId).run();out.push({platform,external_id:externalId,idempotent:false});
+    }catch(e){
+      const unknown=e?.name==='PublishOutcomeUnknown';
+      await env.DB.prepare("UPDATE production_runs SET status=?,error=?,updated_at=? WHERE id=?").bind(unknown?'stopped':'failed',e.message,now(),runId).run();
+      throw e
     }
   }
+  await audit(env,'content_published','Approved content published',{content_id:b.content_id,platform:b.platform,results:out});return out;
+}
+
+async function reconcileProductionRun(env,b){
+  const id=String(b?.id||'');if(!id)throw Error('production run id is required');
+  const action=String(b?.action||'');
+  const row=await env.DB.prepare("SELECT * FROM production_runs WHERE id=?").bind(id).first();if(!row)throw Error('Production run not found');
+  if(row.status!=='stopped')throw Error('Only stopped/unknown runs can be reconciled');
+  if(action==='confirm_published'){
+    let z={};try{z=JSON.parse(row.summary_json||'{}')}catch{}
+    await env.DB.prepare("UPDATE production_runs SET status='completed',summary_json=?,error=NULL,updated_at=? WHERE id=? AND status='stopped'").bind(JSON.stringify({...z,confirmed_manually:true}),now(),id).run();
+    await audit(env,'publish_reconciled','Unknown publish manually confirmed as published',{production_run_id:id});return {id,status:'completed',confirmed_manually:true};
+  }
+  if(action==='retry'){
+    await env.DB.prepare("UPDATE production_runs SET status='failed',error=?,updated_at=? WHERE id=? AND status='stopped'").bind('MANUAL_RETRY_APPROVED: publish may not have occurred; retry explicitly authorized',now(),id).run();
+    await audit(env,'publish_reconciled','Unknown publish manually cleared for retry',{production_run_id:id});return {id,status:'failed',manual_retry_required:true};
+  }
+  throw Error('Invalid reconciliation action');
+}
+
+async function reconcileStalePublishes(env){
+  const cutoff=new Date(Date.now()-UNKNOWN_PUBLISH_AFTER_MS).toISOString();
+  const r=await env.DB.prepare("SELECT id,run_type,updated_at FROM production_runs WHERE status='started' AND updated_at<=? LIMIT 20").bind(cutoff).all();
+  for(const x of r.results||[]){
+    const changed=await env.DB.prepare("UPDATE production_runs SET status='stopped',error=?,updated_at=? WHERE id=? AND status='started'").bind('UNKNOWN: worker stopped before publish result was durably recorded; manual reconciliation required',now(),x.id).run();
+    if(changed.meta?.changes)await audit(env,'publish_outcome_unknown','Stale publish marked unknown; automatic retry blocked',{production_run_id:x.id,run_type:x.run_type});
+  }
+}
+async function getCalendarMediaUrl(env,calendarId){const r=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='calendar_media' ORDER BY created_at DESC LIMIT 200").all();for(const row of r.results||[]){try{const d=JSON.parse(row.details_json||'{}');if(d.calendar_id===calendarId)return d.media_url||null}catch{}}return null}
+
+async function publishScheduled(env){const r=await env.DB.prepare("SELECT * FROM calendar WHERE status='planned' AND planned_at<=? ORDER BY planned_at ASC LIMIT 10").bind(now()).all();for(const item of r.results||[]){if(!item.content_id){await env.DB.prepare("UPDATE calendar SET status='failed',updated_at=? WHERE id=? AND status='planned'").bind(now(),item.id).run();await audit(env,'calendar_failed','Scheduled item has no content_id',{calendar_id:item.id});continue}const claim=await env.DB.prepare("UPDATE calendar SET status='publishing',updated_at=? WHERE id=? AND status='planned'").bind(now(),item.id).run();if(!claim.meta?.changes)continue;try{const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(item.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,item.id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');await publish(env,{content_id:item.content_id,platform:content.platform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),item.id).run()}catch(e){await env.DB.prepare("UPDATE calendar SET status='failed',updated_at=? WHERE id=?").bind(now(),item.id).run();await env.DB.prepare("INSERT INTO retry_queue VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),'calendar_publish',JSON.stringify({calendar_id:item.id,content_id:item.content_id}),0,3,'queued',null,e.message,now(),now()).run();await audit(env,'calendar_publish_failed','Scheduled publish failed and was queued for retry',{calendar_id:item.id,content_id:item.content_id,error:e.message})}}}
+
+async function collectInstagramMetrics(env){if(!env.INSTAGRAM_ACCESS_TOKEN)return;const rows=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='content_published' ORDER BY created_at DESC LIMIT 100").all();for(const row of rows.results||[]){let d;try{d=JSON.parse(row.details_json||'{}')}catch{continue}for(const result of d.results||[]){if(result.platform!=='instagram'||!result.external_id)continue;const u=new URL(`https://graph.facebook.com/${graphApiVersion(env)}/${encodeURIComponent(result.external_id)}/insights`);u.searchParams.set('metric','impressions,reach,likes,comments,shares,saved');u.searchParams.set('access_token',env.INSTAGRAM_ACCESS_TOKEN);const r=await fetch(u.toString());if(!r.ok)continue;const data=await r.json().catch(()=>({}));if(data.error||!Array.isArray(data.data))continue;const values={};for(const m of data.data){const v=Array.isArray(m.values)?m.values.at(-1)?.value:m.value;values[m.name]=Number(v||0)}const ex=await env.DB.prepare("SELECT id FROM social_metrics WHERE content_id=? AND platform='instagram' ORDER BY created_at DESC LIMIT 1").bind(d.content_id).first();if(ex)await env.DB.prepare("UPDATE social_metrics SET impressions=?,reach=?,likes=?,comments=?,shares=?,saves=?,metric_date=? WHERE id=?").bind(values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,now().slice(0,10),ex.id).run();else await env.DB.prepare("INSERT INTO social_metrics(id,content_id,platform,impressions,reach,likes,comments,shares,saves,clicks,metric_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),d.content_id,'instagram',values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,0,now().slice(0,10),now()).run()}}}
+
+async function handleTelegramWebhook(env,req){if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.TELEGRAM_WEBHOOK_SECRET_TOKEN||((req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'')!==env.TELEGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Unauthorized webhook'},401);const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);const m=body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});const externalId=String(m.message_id||body.update_id||uid());const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)return json({ok:true,duplicate:true});const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.from?.username||m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',t,t).run();await audit(env,'inbox_received','Telegram message received',{external_id:externalId});return json({ok:true})}
+
+async function verifyInstagramSignature(env,req,raw){if(env.INSTAGRAM_APP_SECRET){const sig=(req.headers.get('X-Hub-Signature-256')||'').trim().toLowerCase();if(!/^sha256=[0-9a-f]{64}$/.test(sig))return false;const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.INSTAGRAM_APP_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);const mac=await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw));const hex=Array.from(new Uint8Array(mac),x=>x.toString(16).padStart(2,'0')).join('');return sig===`sha256=${hex}`}if(env.INSTAGRAM_WEBHOOK_SECRET_TOKEN)return (req.headers.get('X-Hamzehi-Webhook-Secret')||'')===env.INSTAGRAM_WEBHOOK_SECRET_TOKEN;return false}
+
+async function handleInstagramWebhook(env,req){if(req.method==='GET'){const u=new URL(req.url);if(u.searchParams.get('hub.mode')==='subscribe'&&u.searchParams.get('hub.verify_token')&&env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&u.searchParams.get('hub.verify_token')===env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN)return new Response(u.searchParams.get('hub.challenge'),{status:200,headers:{'Content-Type':'text/plain'}});return json({ok:false,error:'Webhook verification failed'},403)}if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN||(!env.INSTAGRAM_APP_SECRET&&!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Instagram webhook secrets not configured'},503);const raw=await req.text();if(!(await verifyInstagramSignature(env,req,raw)))return json({ok:false,error:'Unauthorized webhook'},401);let body;try{body=JSON.parse(raw)}catch{return json({ok:false,error:'Invalid JSON'},400)}for(const entry of body.entry||[])for(const change of entry.changes||[]){const value=change.value||{},externalId=String(value.mid||value.message_id||`${entry.id||uid()}:${change.field||'change'}:${value.timestamp||Date.now()}`),ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='instagram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)continue;const text=String(value.text||value.message||'').trim();if(!text)continue;const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'instagram',externalId,String(value.from?.username||value.from?.id||entry.id||'unknown'),text,'unclassified','normal',null,'new',t,t).run()}return json({ok:true})}
+
+async function recovery(env){await reconcileStalePublishes(env);await publishScheduled(env);const r=await env.DB.prepare("SELECT * FROM retry_queue WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 10").bind(now()).all();for(const x of r.results||[])try{const claim=await env.DB.prepare("UPDATE retry_queue SET status='running',attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'").bind(now(),x.id).run();if(!claim.meta?.changes)continue;const p=JSON.parse(x.payload_json);if(x.operation==='publish')await publish(env,p);else if(x.operation==='calendar_publish'){const cal=await env.DB.prepare("SELECT * FROM calendar WHERE id=?").bind(p.calendar_id).first();if(!cal||cal.status==='published'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue}const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(p.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,p.calendar_id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');await publish(env,{content_id:p.content_id,platform:content.platform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),p.calendar_id).run()}else throw Error('Unsupported retry operation');await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run()}catch(e){const attempts=Number(x.attempts)+1,status=attempts>=Number(x.max_attempts)?'failed':'queued';await env.DB.prepare("UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").bind(status,e.message,new Date(Date.now()+Math.min(3600000,2**attempts*60000)).toISOString(),now(),x.id).run()}await collectInstagramMetrics(env)}
+
+
+function parseLeadNotes(lead) {
+  try {
+    const x = JSON.parse(lead?.notes || "{}");
+    return x && typeof x === "object" ? x : {};
+  } catch { return {}; }
+}
+
+function leadScoreFromData(lead, meta = {}) {
+  let score = Number(meta.score);
+  if (!Number.isFinite(score)) score = 0;
+  if (score <= 0) {
+    if (lead?.priority === "high") score += 30;
+    else if (lead?.priority === "normal") score += 20;
+    else score += 10;
+    if (meta.source === "instagram_hashtag_discovery") score += 20;
+    if (meta.evidence) score += Math.min(20, Math.ceil(String(meta.evidence).length / 40));
+    if (meta.media_type) score += 10;
+    if (meta.profile) score += 10;
+  }
+  if (["replied", "negotiation"].includes(lead?.stage)) score += 15;
+  if (lead?.stage === "converted" || lead?.stage === "customer") score = 100;
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+async function updateLeadRecord(env, id, patch) {
+  const lead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(id).first();
+  if (!lead) return null;
+  const meta = parseLeadNotes(lead);
+  const allowedStages = ["new","discovered","qualified","contacted","replied","negotiation","converted","customer","rejected","archived"];
+  const allowedPriority = ["low","normal","high"];
+  const stage = patch.stage !== undefined ? String(patch.stage).trim() : lead.stage;
+  const priority = patch.priority !== undefined ? String(patch.priority).trim() : lead.priority;
+  if (!allowedStages.includes(stage)) throw new Error("Invalid lead stage");
+  if (!allowedPriority.includes(priority)) throw new Error("Invalid lead priority");
+  if (patch.next_followup_at !== undefined) meta.next_followup_at = patch.next_followup_at || null;
+  if (patch.owner !== undefined) meta.owner = String(patch.owner || "").trim() || null;
+  if (patch.last_outreach_at !== undefined) meta.last_outreach_at = patch.last_outreach_at || null;
+  if (patch.last_reply_at !== undefined) meta.last_reply_at = patch.last_reply_at || null;
+  if (patch.outreach_draft !== undefined) meta.outreach_draft = String(patch.outreach_draft || "");
+  if (patch.score !== undefined) meta.score = Math.max(0, Math.min(100, Number(patch.score) || 0));
+  meta.score = leadScoreFromData({ ...lead, stage, priority }, meta);
+  if (patch.notes !== undefined) meta.manual_notes = String(patch.notes || "");
+  const t = now();
+  await env.DB.prepare("UPDATE leads SET stage=?,priority=?,notes=?,updated_at=? WHERE id=?")
+    .bind(stage, priority, JSON.stringify(meta), t, id).run();
+  return await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(id).first();
+}
+
+async function leadOverview(env) {
+  const r = await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+  const items = (r.results || []).map(x => ({
+    ...x,
+    meta: parseLeadNotes(x),
+    score: leadScoreFromData(x, parseLeadNotes(x))
+  }));
+  const stages = {};
+  const priorities = { high: 0, normal: 0, low: 0 };
+  for (const x of items) { stages[x.stage || "new"] = (stages[x.stage || "new"] || 0) + 1; if (priorities[x.priority] !== undefined) priorities[x.priority]++; }
+  const nowMs = Date.now();
+  const followups = items.filter(x => x.meta.next_followup_at && Date.parse(x.meta.next_followup_at) <= nowMs && !["converted","customer","rejected","archived"].includes(x.stage));
+  const hot = items.filter(x => x.score >= 70 && !["converted","customer","rejected","archived"].includes(x.stage)).slice(0, 20);
+  const converted = items.filter(x => ["converted","customer"].includes(x.stage)).length;
+  const contacted = items.filter(x => ["contacted","replied","negotiation","converted","customer"].includes(x.stage)).length;
+  return { total: items.length, stages, priorities, hot, followups, converted, contacted, conversion_rate: contacted ? Math.round(converted / contacted * 100) : 0, items };
+}
+
+function dashboardHtml() {
+  return `<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>HAMZEHI SOCIAL AI â Control Center</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#09090b;color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:900px;margin:auto;padding:16px 14px 90px}.top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px}.brand{font-size:20px;font-weight:800}.sub{font-size:12px;color:#8f8f98;margin-top:3px}.card{background:#141418;border:1px solid #292930;border-radius:18px;padding:15px;margin:11px 0}.title{font-size:17px;font-weight:800;margin:0 0 9px}.label{font-size:12px;color:#999;margin:11px 0 5px}.field{width:100%;padding:12px;border-radius:12px;border:1px solid #36363e;background:#0d0d10;color:#fff;font-size:14px}.row{display:flex;gap:8px;flex-wrap:wrap}.btn{border:0;border-radius:12px;padding:11px 14px;font-weight:750;font-size:14px;cursor:pointer}.primary{background:#eee;color:#111}.secondary{background:#222229;color:#fff;border:1px solid #3a3a43}.danger{background:#2b2022;color:#fff;border:1px solid #5b373b}.btn:disabled{opacity:.45}.hidden{display:none!important}.status{margin:9px 0;font-size:13px;color:#aaa;min-height:20px}.error{color:#ff9999}.ok{color:#9de4b0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.tool{min-height:92px;text-align:right;background:#15151a;border:1px solid #303039;color:#fff;border-radius:16px;padding:13px;cursor:pointer}.tool b{display:block;font-size:15px;margin-bottom:5px}.tool span{font-size:11px;color:#999}.section{display:none}.section.active{display:block}.pill{font-size:11px;background:#222229;border-radius:999px;padding:5px 8px;color:#bbb}.text{white-space:pre-wrap;line-height:1.8;font-size:14px;color:#eee}.empty{text-align:center;color:#999;padding:28px 8px}.actions{display:flex;gap:8px}.actions .btn{flex:1}.nav{position:fixed;bottom:0;left:0;right:0;background:#101014ee;border-top:1px solid #2b2b32;backdrop-filter:blur(10px);padding:8px 10px;z-index:10}.navin{width:min(900px,100%);margin:auto;display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.nav button{background:transparent;border:0;color:#aaa;font-size:11px;padding:7px}.nav button.active{color:#fff;font-weight:800}.stat{font-size:28px;font-weight:850}.muted{color:#999;font-size:12px}.item{border:1px solid #292930;border-radius:14px;padding:12px;margin:9px 0}.itemhead{display:flex;justify-content:space-between;gap:8px;align-items:center}.mini{font-size:11px;color:#999}.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}@media(max-width:600px){.two{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<main>
+<div class="top"><div><div class="brand">HAMZEHI SOCIAL AI</div><div class="sub">Control Center Â· OpenAI Primary Â· Approval Required</div></div><button id="logoutBtn" class="btn secondary hidden" onclick="logout()">Ø®Ø±ÙØ¬</button></div>
+<section id="login" class="card"><div class="title">ÙØ±ÙØ¯ Ø¨Ù Ø§Ø¨Ø²Ø§Ø± Ø§ØµÙÛ</div><div class="label">ADMIN TOKEN</div><input id="token" class="field" type="password" autocomplete="off" placeholder="ØªÙÚ©Ù ÙØ¯ÛØ± Ø±Ø§ ÙØ§Ø±Ø¯ Ú©ÙÛØ¯"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="login()">ÙØ±ÙØ¯ Ø¨Ù Ø¯Ø§Ø´Ø¨ÙØ±Ø¯</button><button class="btn secondary" onclick="toggleToken()">ÙÙØ§ÛØ´ Ø±ÙØ²</button></div><div id="loginStatus" class="status"></div></section>
+<section id="app" class="hidden">
+<div id="home" class="section active"><div class="card"><div class="title">Ø§Ø¨Ø²Ø§Ø±ÙØ§Û Ø§ØµÙÛ</div><div class="grid">
+<button class="tool" onclick="show('generate')"><b>âï¸ ØªÙÙÛØ¯ ÙØ­ØªÙØ§</b><span>Ø³Ø§Ø®Øª ÙØ­ØªÙØ§ Ø¨Ø§ OpenAI</span></button>
+<button class="tool" onclick="show('approval');loadApprovals()"><b>â ØªØ£ÛÛØ¯ ÙØ­ØªÙØ§</b><span>Ø¨Ø±Ø±Ø³Û Ù ØªØ£ÛÛØ¯/Ø±Ø¯</span></button>
+<button class="tool" onclick="show('calendar');loadCalendar()"><b>ð ØªÙÙÛÙ</b><span>Ø§ÙØ²ÙØ¯Ù Ù ÙØ¯ÛØ±ÛØª Ø¨Ø±ÙØ§ÙÙ</span></button>
+<button class="tool" onclick="show('campaigns');loadCampaigns()"><b>ð£ Ú©ÙÙ¾ÛÙâÙØ§</b><span>Ø³Ø§Ø®Øª Ù ÙØ¯ÛØ±ÛØª Ú©ÙÙ¾ÛÙ</span></button>
+<button class="tool" onclick="show('inbox');loadInbox()"><b>ð¬ Inbox</b><span>ÙØ¯ÛØ±ÛØª Ù¾ÛØ§ÙâÙØ§</span></button>
+<button class="tool" onclick="show('leads');loadLeads()"><b>ð¥ ÙÛØ¯ÙØ§</b><span>ÙØ¯ÛØ±ÛØª Ø³Ø±ÙØ®âÙØ§</span></button>
+<button class="tool" onclick="show('leads');loadLeadOverview()"><b>ð¯ Ø¬Ø°Ø¨ ÙØ´ØªØ±Û</b><span>Lead Scoring / CRM / Funnel</span></button>
+<button class="tool" onclick="show('metrics');loadMetrics()"><b>ð Ø¢ÙØ§Ø±</b><span>Ø¯Ø§Ø¯ÙâÙØ§Û Ø§Ø¬ØªÙØ§Ø¹Û</span></button>
+<button class="tool" onclick="show('system');loadSystem()"><b>âï¸ Ø³ÛØ³ØªÙ</b><span>Health / Recovery / Logs</span></button>
+</div></div><div class="card"><div class="title">ÙØ¶Ø¹ÛØª</div><div id="homeStatus" class="status ok">ÙØªØµÙ</div></div></div>
+<div id="generate" class="section"><div class="card"><div class="title">âï¸ ØªÙÙÛØ¯ ÙØ­ØªÙØ§</div><div class="label">ÙÙØ¶ÙØ¹</div><input id="gTopic" class="field" placeholder="ÙØ«ÙØ§Ù Ø¬Ø¹Ø¨Ù ÙÙÚ©Ø³ Ø·ÙØ§ Ù Ø¬ÙØ§ÙØ±"><div class="label">Ù¾ÙØªÙØ±Ù</div><select id="gPlatform" class="field"><option value="instagram">Instagram</option><option value="telegram">Telegram</option><option value="both">Both</option></select><div class="label">Ø²Ø¨Ø§Ù</div><select id="gLanguage" class="field"><option value="fa-IR">ÙØ§Ø±Ø³Û</option><option value="ar-IQ">Ø¹Ø±Ø¨Û Ø¹Ø±Ø§ÙÛ</option></select><div class="label">Ø¨Ø§Ø²Ø§Ø±</div><select id="gMarket" class="field"><option value="Iran">Iran</option><option value="Iraq">Iraq</option></select><div class="label">Ø§Ø·ÙØ§Ø¹Ø§Øª ÙØ§ÙØ¹Û ÙØ¬Ø§Ø² Ø¨Ø±Ø§Û Ø§Ø³ØªÙØ§Ø¯Ù</div><textarea id="gFacts" class="field" rows="5" placeholder="ÙÙØ· ÙØ§ÙØ¹ÛØªâÙØ§ÛÛ Ú©Ù Ø®ÙØ¯Øª ØªØ£ÛÛØ¯ Ú©Ø±Ø¯ÙâØ§Û"></textarea><div class="row" style="margin-top:10px"><button id="generateBtn" class="btn primary" onclick="generate()">Ø³Ø§Ø®Øª ÙØ­ØªÙØ§</button></div><div id="generateStatus" class="status"></div></div><div id="generatedResult"></div></div>
+<div id="approval" class="section"><div class="card"><div class="title">â ÙØ­ØªÙØ§Û Ø¯Ø± Ø§ÙØªØ¸Ø§Ø± ØªØ£ÛÛØ¯</div><div id="approvalStatus" class="status"></div><div id="approvalList"></div></div><div class="card"><div class="title">ð Ø§ÙØªØ´Ø§Ø± ÙØ­ØªÙØ§Û ØªØ£ÛÛØ¯Ø´Ø¯Ù</div><div id="approvedStatus" class="status"></div><div id="approvedList"></div></div></div>
+<div id="calendar" class="section"><div class="card"><div class="title">ð ØªÙÙÛÙ ÙØ­ØªÙØ§ÛÛ</div><div class="two"><div><div class="label">Content ID (Ø§Ø®ØªÛØ§Ø±Û)</div><input id="calContent" class="field" placeholder="Ø´ÙØ§Ø³Ù ÙØ­ØªÙØ§"></div><div><div class="label">Campaign ID (Ø§Ø®ØªÛØ§Ø±Û)</div><input id="calCampaign" class="field" placeholder="Ø´ÙØ§Ø³Ù Ú©ÙÙ¾ÛÙ"></div></div><div class="label">Ø²ÙØ§Ù Ø¨Ø±ÙØ§ÙÙâØ±ÛØ²Û</div><input id="calTime" class="field" type="datetime-local"><div class="label">Public Media URL (Ø¨Ø±Ø§Û Instagram)</div><input id="calMedia" class="field" type="url" placeholder="https://..."><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addCalendar()">Ø§ÙØ²ÙØ¯Ù Ø¨Ù ØªÙÙÛÙ</button></div><div id="calendarStatus" class="status"></div><div id="calendarList"></div></div></div>
+<div id="campaigns" class="section"><div class="card"><div class="title">ð£ Ú©ÙÙ¾ÛÙâÙØ§</div><div class="label">ÙØ§Ù Ú©ÙÙ¾ÛÙ</div><input id="campName" class="field"><div class="label">ÙØ¯Ù</div><input id="campGoal" class="field"><div class="label">ÙØ®Ø§Ø·Ø¨</div><input id="campAudience" class="field"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addCampaign()">Ø³Ø§Ø®Øª Ú©ÙÙ¾ÛÙ</button></div><div id="campaignStatus" class="status"></div><div id="campaignList"></div></div></div>
+<div id="inbox" class="section"><div class="card"><div class="title">ð¬ Inbox</div><div id="inboxStatus" class="status"></div><div id="inboxList"></div></div></div>
+<div id="leads" class="section"><div class="card"><div class="title">ð¯ ÙØ±Ú©Ø² Ø¬Ø°Ø¨ ÙØ´ØªØ±Û Instagram</div><div class="two"><div><div class="stat" id="leadTotal">0</div><div class="muted">Ú©Ù ÙÛØ¯ÙØ§</div></div><div><div class="stat" id="leadConversion">0%</div><div class="muted">ÙØ±Ø® ØªØ¨Ø¯ÛÙ Ø§Ø² ÙÛØ¯ÙØ§Û ØªÙØ§Ø³âÚ¯Ø±ÙØªÙâØ´Ø¯Ù</div></div></div><div class="row" style="margin-top:12px"><button class="btn primary" onclick="loadLeadOverview()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ CRM</button><button class="btn secondary" onclick="showLeadQueue('hot')">ð¥ ÙÛØ¯ÙØ§Û Ø¯Ø§Øº</button><button class="btn secondary" onclick="showLeadQueue('followup')">â° Ù¾ÛÚ¯ÛØ±ÛâÙØ§Û Ø§ÙØ±ÙØ²</button></div><div id="leadOverviewStatus" class="status"></div><div id="leadActionList"></div></div><div class="card"><div class="title">ð Instagram Lead Finder</div><div class="label">ÙØ´ØªÚ¯/Ú©ÙÛØ¯ÙØ§ÚÙ Instagram</div><input id="igLeadQuery" class="field" placeholder="ÙØ«ÙØ§Ù jewelry ÛØ§ Ø·ÙØ§"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="discoverInstagramLeads()">Ù¾ÛØ¯Ø§ Ú©Ø±Ø¯Ù Ù¾ÛØ¬âÙØ§Û ÙØ±ØªØ¨Ø·</button></div><div id="igLeadStatus" class="status"></div><div id="igLeadList"></div></div><div class="card"><div class="title">ð¤ Outreach Center</div><div class="mini">Ù¾ÛØ§ÙâÙØ§ ÙÙØ· Draft ÙØ³ØªÙØ¯ Ù Ø§Ø±Ø³Ø§Ù Ø®ÙØ¯Ú©Ø§Ø± Ø§ÙØ¬Ø§Ù ÙÙÛâØ´ÙØ¯.</div><div id="outreachList"></div></div><div class="card"><div class="title">ð ÙÛÙ ÙØ±ÙØ´</div><div id="leadFunnel" class="status"></div></div><div class="card"><div class="title">ð¤ Ø§ÙØ²ÙØ¯Ù ÙÛØ¯ Ø¯Ø³ØªÛ</div><div class="two"><div><div class="label">ÙØ§Ù</div><input id="leadName" class="field"></div><div><div class="label">ØªÙØ§Ø³</div><input id="leadContact" class="field"></div></div><div class="two"><div><div class="label">ÙØ±Ø­ÙÙ</div><select id="leadStage" class="field"><option value="new">Ø¬Ø¯ÛØ¯</option><option value="qualified">ÙØ§Ø¬Ø¯ Ø´Ø±Ø§ÛØ·</option><option value="contacted">ØªÙØ§Ø³ Ú¯Ø±ÙØªÙ Ø´Ø¯</option><option value="replied">Ù¾Ø§Ø³Ø® Ø¯Ø§Ø¯Ù</option><option value="negotiation">ÙØ°Ø§Ú©Ø±Ù</option><option value="customer">ÙØ´ØªØ±Û</option></select></div><div><div class="label">Ø§ÙÙÙÛØª</div><select id="leadPriority" class="field"><option value="normal">Ø¹Ø§Ø¯Û</option><option value="high">Ø¯Ø§Øº</option><option value="low">Ú©Ù</option></select></div></div><div class="label">ÛØ§Ø¯Ø¯Ø§Ø´Øª</div><textarea id="leadNotes" class="field" rows="3"></textarea><div class="label">Ø²ÙØ§Ù Ù¾ÛÚ¯ÛØ±Û Ø¨Ø¹Ø¯Û</div><input id="leadFollowup" class="field" type="datetime-local"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addLead()">Ø§ÙØ²ÙØ¯Ù ÙÛØ¯</button></div><div id="leadStatus" class="status"></div><div id="leadList"></div></div></div>
+<div id="metrics" class="section"><div class="card"><div class="title">ð Ø¢ÙØ§Ø±</div><div id="metricsBody" class="status"></div></div></div>
+<div id="system" class="section"><div class="card"><div class="title">âï¸ ÙØ¶Ø¹ÛØª Ø³ÛØ³ØªÙ</div><div id="systemBody" class="status"></div><div class="row"><button class="btn secondary" onclick="loadSystem()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ</button><button class="btn secondary" onclick="runRelease()">Release Check</button></div><div id="releaseStatus" class="status"></div></div><div class="card"><div class="title">ð ØªÙØ¸ÛÙØ§Øª Ø§ØªØµØ§Ù</div><div id="settingsBody" class="status">Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦</div><div class="row"><button class="btn secondary" onclick="testConnections()">ØªØ³Øª Ø§ØªØµØ§Ù ÙØ§ÙØ¹Û</button></div><div id="connectionTestBody" class="status"></div></div><div class="card"><div class="title">ð Ø§Ø¬Ø±Ø§Û Ø§ÙØªØ´Ø§Ø±</div><div id="runsBody" class="status">Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦</div></div><div class="card"><div class="title">ð§¾ ÙØ§Ú¯ Ø³ÛØ³ØªÙ</div><div id="eventsBody" class="status">Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦</div></div></div>
+</section>
+</main>
+<nav id="nav" class="nav hidden"><div class="navin"><button onclick="show('home')">â Ø®Ø§ÙÙ</button><button onclick="show('generate')">âï¸ ØªÙÙÛØ¯</button><button onclick="show('approval');loadApprovals()">â ØªØ£ÛÛØ¯</button><button onclick="show('system');loadSystem()">âï¸ Ø³ÛØ³ØªÙ</button></div></nav>
+<script>
+let token='';
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function headers(){return {'Authorization':'Bearer '+token,'Content-Type':'application/json'}}
+async function api(path,opts={}){try{const r=await fetch(path,Object.assign({},opts,{headers:Object.assign({},headers(),opts.headers||{}),cache:'no-store'}));const text=await r.text();let d={};try{d=JSON.parse(text)}catch{throw Error('Worker Ù¾Ø§Ø³Ø® ÙØ§ÙØ¹ØªØ¨Ø± Ø¯Ø§Ø¯. HTTP '+r.status)}if(!r.ok){if(r.status===401)throw Error('Ø±ÙØ² ÙØ¯ÛØ± Ø§Ø´ØªØ¨Ø§Ù Ø§Ø³Øª.');if(r.status===429)throw Error('ØªØ¹Ø¯Ø§Ø¯ Ø¯Ø±Ø®ÙØ§Ø³ØªâÙØ§ Ø²ÛØ§Ø¯ Ø§Ø³ØªØ Ú©ÙÛ Ø¨Ø¹Ø¯ Ø¯ÙØ¨Ø§Ø±Ù ØªÙØ§Ø´ Ú©ÙÛØ¯.');throw Error(d.error||('HTTP '+r.status))}return d}catch(e){throw Error(e?.message||'Ø®Ø·Ø§Û Ø§Ø±ØªØ¨Ø§Ø· Ø¨Ø§ Worker')}}
+function toggleToken(){const x=document.getElementById('token');x.type=x.type==='password'?'text':'password'}
+async function login(){const s=document.getElementById('loginStatus');token=document.getElementById('token').value.trim();if(!token){s.className='status error';s.textContent='ADMIN TOKEN Ø±Ø§ ÙØ§Ø±Ø¯ Ú©ÙÛØ¯.';return}s.className='status';s.textContent='Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Ûâ¦';try{await api('/api/content');document.getElementById('login').classList.add('hidden');document.getElementById('app').classList.remove('hidden');document.getElementById('logoutBtn').classList.remove('hidden');document.getElementById('nav').classList.remove('hidden');s.textContent='';await loadApprovals();await loadApproved();await loadLeadOverview()}catch(e){token='';s.className='status error';s.textContent=e.message||'ÙØ±ÙØ¯ ÙØ§ÙÙÙÙ'}}
+function logout(){token='';document.getElementById('app').classList.add('hidden');document.getElementById('login').classList.remove('hidden');document.getElementById('logoutBtn').classList.add('hidden');document.getElementById('nav').classList.add('hidden');document.getElementById('token').value='';document.getElementById('loginStatus').textContent='Ø®Ø§Ø±Ø¬ Ø´Ø¯ÛØ¯.'}
+function show(id){document.querySelectorAll('.section').forEach(x=>x.classList.remove('active'));const el=document.getElementById(id);if(el)el.classList.add('active');window.scrollTo(0,0)}
+async function loadApprovals(){const st=document.getElementById('approvalStatus'),list=document.getElementById('approvalList');st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦';try{const d=await api('/api/content?status=generated');const items=(d.items||[]).filter(x=>x.approval_status==='pending');st.className='status ok';st.textContent=items.length+' ÙØ­ØªÙØ§ Ø¯Ø± Ø§ÙØªØ¸Ø§Ø± ØªØ£ÛÛØ¯';list.innerHTML=items.length?items.map(x=>'<article class="item"><div class="row"><span class="pill">'+esc(x.platform)+'</span><span class="pill">'+esc(x.language)+'</span><span class="pill">'+esc(x.market)+'</span></div><div class="title" style="margin-top:12px">'+esc(x.topic)+'</div><div class="label">Hook</div><div class="text">'+esc(x.hook)+'</div><div class="label">Caption</div><div class="text">'+esc(x.caption)+'</div><div class="label">CTA</div><div class="text">'+esc(x.cta)+'</div><div class="label">Hashtags</div><div class="text">'+esc(x.hashtags)+'</div><div class="actions" style="margin-top:14px"><button class="btn primary" onclick="changeApproval(\''+x.id+'\',\'approved\')">â ØªØ£ÛÛØ¯</button><button class="btn danger" onclick="changeApproval(\''+x.id+'\',\'rejected\')">â Ø±Ø¯</button></div></article>').join(''):'<div class="empty">ÙØ­ØªÙØ§Û Ø¬Ø¯ÛØ¯Û Ø¨Ø±Ø§Û ØªØ£ÛÛØ¯ ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function changeApproval(id,status){try{await api('/api/content/approve',{method:'POST',body:JSON.stringify({content_id:id,status,reason:status==='approved'?'Approved from dashboard':'Rejected from dashboard'})});await loadApprovals();await loadApproved()}catch(e){alert('Ø®Ø·Ø§: '+e.message)}}
+async function loadApproved(){const st=document.getElementById('approvedStatus'),list=document.getElementById('approvedList');if(!st||!list)return;st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦';try{const d=await api('/api/content?status=approved');const items=d.items||[];st.className='status ok';st.textContent=items.length+' ÙØ­ØªÙØ§Û ØªØ£ÛÛØ¯Ø´Ø¯Ù';list.innerHTML=items.length?items.map(x=>{const cid=JSON.stringify(String(x.id));return '<article class="item publish-item" data-content-id="'+esc(String(x.id))+'"><div class="row"><span class="pill">'+esc(x.platform)+'</span><span class="pill">'+esc(x.language)+'</span><span class="pill">'+esc(x.market)+'</span></div><div class="title" style="margin-top:12px">'+esc(x.topic)+'</div><div class="label">Caption</div><div class="text">'+esc(x.caption)+'</div><div class="label">Media URL (Ø¨Ø±Ø§Û Instagram)</div><input class="field media-input" placeholder="https://..." inputmode="url"><div class="actions" style="margin-top:10px"><button class="btn secondary" onclick="doPublish('+cid+',\'telegram\')">Ø§Ø±Ø³Ø§Ù Telegram</button><button class="btn secondary" onclick="doPublish('+cid+',\'instagram\')">Ø§Ø±Ø³Ø§Ù Instagram</button><button class="btn primary" onclick="doPublish('+cid+',\'both\')">Ø§Ø±Ø³Ø§Ù ÙØ± Ø¯Ù</button></div><div class="status pub-status"></div></article>'}).join(''):'<div class="empty">ÙØ­ØªÙØ§Û ØªØ£ÛÛØ¯Ø´Ø¯ÙâØ§Û Ø¨Ø±Ø§Û Ø§ÙØªØ´Ø§Ø± ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function doPublish(id,platform){const item=[...document.querySelectorAll('.publish-item')].find(x=>x.dataset.contentId===String(id));const st=item?.querySelector('.pub-status');const media=item?.querySelector('.media-input')?.value.trim()||'';if(!st){return}if((platform==='instagram'||platform==='both')&&!media){st.className='status error';st.textContent='Ø¨Ø±Ø§Û Instagram Ø¨Ø§ÛØ¯ Media URL Ø¹ÙÙÙÛ ÙØ§Ø±Ø¯ Ø´ÙØ¯.';return}st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù Ø§ÙØªØ´Ø§Ø±â¦';try{const d=await api('/api/publish',{method:'POST',body:JSON.stringify({content_id:id,platform,media_url:media||undefined})});st.className='status ok';st.textContent='Ø§ÙØªØ´Ø§Ø± ÙÙÙÙ: '+(d.results||[]).map(x=>x.platform+' / '+x.external_id).join(' Â· ');await loadApproved()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function generate(){const st=document.getElementById('generateStatus'),btn=document.getElementById('generateBtn'),topic=document.getElementById('gTopic').value.trim();if(!topic){st.className='status error';st.textContent='ÙÙØ¶ÙØ¹ Ø±Ø§ ÙØ§Ø±Ø¯ Ú©ÙÛØ¯.';return}btn.disabled=true;st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù Ø³Ø§Ø®Øª Ø¨Ø§ OpenAIâ¦';try{const d=await api('/api/content/generate',{method:'POST',body:JSON.stringify({topic,platform:document.getElementById('gPlatform').value,language:document.getElementById('gLanguage').value,market:document.getElementById('gMarket').value,facts:document.getElementById('gFacts').value})});const x=d.content||{};document.getElementById('generatedResult').innerHTML='<div class="card"><div class="title">ÙØ­ØªÙØ§ Ø³Ø§Ø®ØªÙ Ø´Ø¯ â Ø¯Ø± Ø§ÙØªØ¸Ø§Ø± ØªØ£ÛÛØ¯</div><div class="label">Hook</div><div class="text">'+esc(x.hook)+'</div><div class="label">Caption</div><div class="text">'+esc(x.caption)+'</div><div class="label">CTA</div><div class="text">'+esc(x.cta)+'</div><div class="label">Hashtags</div><div class="text">'+esc(x.hashtags)+'</div></div>';st.className='status ok';st.textContent='ÙØ­ØªÙØ§ Ø³Ø§Ø®ØªÙ Ø´Ø¯ Ù Ø¨Ø±Ø§Û ØªØ£ÛÛØ¯ Ø§ÙØ³Ø§ÙÛ Ø¯Ø± ØµÙ ÙØ±Ø§Ø± Ú¯Ø±ÙØª.'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}finally{btn.disabled=false}}
+async function loadCalendar(){const st=document.getElementById('calendarStatus'),list=document.getElementById('calendarList');st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦';try{const d=await api('/api/calendar');const a=d.items||[];st.className='status ok';st.textContent=a.length+' ÙÙØ±Ø¯ Ø¨Ø±ÙØ§ÙÙâØ±ÛØ²Û Ø´Ø¯Ù';list.innerHTML=a.length?a.map(x=>'<div class="item"><b>'+esc(x.planned_at||'Ø¨Ø¯ÙÙ Ø²ÙØ§Ù')+'</b><div class="mini">ID: '+esc(x.id)+' Â· status: '+esc(x.status)+'</div><div class="mini">content: '+esc(x.content_id||'-')+' Â· campaign: '+esc(x.campaign_id||'-')+'</div><div class="actions" style="margin-top:8px"><button class="btn danger" onclick="deleteCalendar(\''+x.id+'\')">Ø­Ø°Ù</button></div></div>').join(''):'<div class="empty">ØªÙÙÛÙ Ø®Ø§ÙÛ Ø§Ø³Øª.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function addCalendar(){const st=document.getElementById('calendarStatus');const planned=document.getElementById('calTime').value;if(!planned){st.className='status error';st.textContent='Ø²ÙØ§Ù Ø±Ø§ ÙØ§Ø±Ø¯ Ú©ÙÛØ¯.';return}try{await api('/api/calendar',{method:'POST',body:JSON.stringify({content_id:document.getElementById('calContent').value.trim()||null,campaign_id:document.getElementById('calCampaign').value.trim()||null,planned_at:new Date(planned).toISOString(),media_url:document.getElementById('calMedia').value.trim()||null})});st.className='status ok';st.textContent='Ø¨Ù ØªÙÙÛÙ Ø§Ø¶Ø§ÙÙ Ø´Ø¯.';await loadCalendar()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function deleteCalendar(id){try{await api('/api/calendar',{method:'DELETE',body:JSON.stringify({id})});await loadCalendar()}catch(e){alert('Ø®Ø·Ø§: '+e.message)}}
+async function loadCampaigns(){const st=document.getElementById('campaignStatus'),list=document.getElementById('campaignList');st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦';try{const d=await api('/api/campaigns');const a=d.items||[];st.className='status ok';st.textContent=a.length+' Ú©ÙÙ¾ÛÙ';list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name)+'</b><span class="pill">'+esc(x.status)+'</span></div><div class="mini">'+esc(x.goal||'')+' Â· '+esc(x.audience||'')+'</div><div class="mini">ID: '+esc(x.id)+'</div><div class="actions" style="margin-top:8px"><button class="btn secondary" onclick="setCampaignStatus(\''+x.id+'\',\'active\')">ÙØ¹Ø§Ù</button><button class="btn danger" onclick="setCampaignStatus(\''+x.id+'\',\'archived\')">Ø¢Ø±Ø´ÛÙ</button></div></div>').join(''):'<div class="empty">Ú©ÙÙ¾ÛÙÛ ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function addCampaign(){const st=document.getElementById('campaignStatus'),name=document.getElementById('campName').value.trim();if(!name){st.className='status error';st.textContent='ÙØ§Ù Ú©ÙÙ¾ÛÙ Ø±Ø§ ÙØ§Ø±Ø¯ Ú©ÙÛØ¯.';return}try{await api('/api/campaigns',{method:'POST',body:JSON.stringify({name,goal:document.getElementById('campGoal').value.trim(),audience:document.getElementById('campAudience').value.trim()})});document.getElementById('campName').value='';document.getElementById('campGoal').value='';document.getElementById('campAudience').value='';await loadCampaigns()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function setCampaignStatus(id,status){try{await api('/api/campaigns',{method:'PATCH',body:JSON.stringify({id,status})});await loadCampaigns()}catch(e){alert('Ø®Ø·Ø§: '+e.message)}}
+async function loadInbox(){const st=document.getElementById('inboxStatus'),list=document.getElementById('inboxList');st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦';try{const d=await api('/api/inbox');const a=d.items||[];st.className='status ok';st.textContent=a.length+' Ù¾ÛØ§Ù';list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.sender||'ÙØ§Ø´ÙØ§Ø³')+'</b><span class="pill">'+esc(x.status||'')+'</span></div><div class="mini">'+esc(x.platform||'')+' Â· '+esc(x.category||'')+' Â· '+esc(x.priority||'')+'</div><div class="text" style="margin-top:8px">'+esc(x.message||'')+'</div><div class="mini" style="margin-top:8px">Ù¾ÛØ´ÙÙØ§Ø¯ Ù¾Ø§Ø³Ø®: '+esc(x.reply_suggestion||'-')+'</div><div class="actions" style="margin-top:8px"><button class="btn secondary" onclick="setInboxStatus(\''+x.id+'\',\'handled\')">Ø§ÙØ¬Ø§Ù Ø´Ø¯</button></div></div>').join(''):'<div class="empty">Ù¾ÛØ§ÙÛ ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function setInboxStatus(id,status){try{await api('/api/inbox',{method:'PATCH',body:JSON.stringify({id,status})});await loadInbox()}catch(e){alert('Ø®Ø·Ø§: '+e.message)}}
+async function discoverInstagramLeads(){const st=document.getElementById('igLeadStatus'),list=document.getElementById('igLeadList'),q=document.getElementById('igLeadQuery').value.trim();if(!q){st.className='status error';st.textContent='ÙØ´ØªÚ¯/Ú©ÙÛØ¯ÙØ§ÚÙ Ø±Ø§ ÙØ§Ø±Ø¯ Ú©ÙÛØ¯.';return}st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¬Ø³ØªØ¬ÙÛ Instagramâ¦';try{const d=await api('/api/instagram/leads/discover',{method:'POST',body:JSON.stringify({query:q})});const a=d.items||[];st.className='status ok';st.textContent=String(a.length)+' Ù¾ÛØ¬ ÙØ±ØªØ¨Ø· Ù¾ÛØ¯Ø§/Ø°Ø®ÛØ±Ù Ø´Ø¯. Ø§Ø±Ø³Ø§Ù Ø®ÙØ¯Ú©Ø§Ø± Ø§ÙØ¬Ø§Ù ÙÙÛâØ´ÙØ¯.';list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>@'+esc(x.username)+'</b><span class="pill">Score '+esc(x.score)+'</span></div><div class="mini">'+esc(x.contact||'')+' Â· '+esc(x.media_type||'')+'</div><div class="text" style="margin-top:6px">'+esc(x.evidence||'')+'</div><div class="actions" style="margin-top:8px"><button type="button" class="btn secondary outreach-draft-btn" data-lead-id="'+esc(x.id)+'">âï¸ Ù¾ÛØ§Ù ÙÙÚ©Ø§Ø±Û</button><button type="button" class="btn secondary" onclick="setLeadStage(\''+esc(x.id)+'\',\'qualified\')">ÙØ§Ø¬Ø¯ Ø´Ø±Ø§ÛØ·</button></div><div id="draft-'+esc(x.id)+'" class="status"></div></div>').join(''):'<div class="empty">Ù¾ÛØ¬ ÙØ±ØªØ¨Ø·Û Ù¾ÛØ¯Ø§ ÙØ´Ø¯.</div>';list.querySelectorAll('.outreach-draft-btn').forEach(btn=>btn.addEventListener('click',()=>makeOutreachDraft(btn.dataset.leadId,'collaboration')));await loadLeadOverview()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function makeOutreachDraft(leadId,mode='initial'){const box=document.getElementById('draft-'+String(leadId));if(box){box.className='status';box.textContent='Ø¯Ø± Ø­Ø§Ù Ø³Ø§Ø®Øª Ù¾ÛØ§Ù Ù¾ÛØ´ÙÙØ§Ø¯Ûâ¦'}try{const d=await api('/api/leads/outreach-draft',{method:'POST',body:JSON.stringify({lead_id:leadId,mode})});if(box){box.className='status ok';box.innerHTML='<div class="text">'+esc(d.draft||'')+'</div><div class="mini" style="margin-top:6px">Ø§Ø±Ø³Ø§Ù Ø®ÙØ¯Ú©Ø§Ø± Ø§ÙØ¬Ø§Ù ÙÙÛâØ´ÙØ¯Ø Ù¾Ø³ Ø§Ø² Ø¨Ø±Ø±Ø³Û Ø¯Ø³ØªÛ Ø§Ø±Ø³Ø§Ù Ú©ÙÛØ¯.</div>'}else{alert(d.draft||'Draft Ø³Ø§Ø®ØªÙ Ø´Ø¯')}await loadLeadOverview()}catch(e){if(box){box.className='status error';box.textContent='Ø®Ø·Ø§: '+e.message}else alert('Ø®Ø·Ø§: '+e.message)}}
+async function loadLeadOverview(){const st=document.getElementById('leadOverviewStatus');if(!st)return;st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØª CRMâ¦';try{const d=await api('/api/leads/overview');document.getElementById('leadTotal').textContent=String(d.total||0);document.getElementById('leadConversion').textContent=String(d.conversion_rate||0)+'%';const stages=d.stages||{};const labels={new:'Ø¬Ø¯ÛØ¯',discovered:'Ú©Ø´ÙâØ´Ø¯Ù',qualified:'ÙØ§Ø¬Ø¯ Ø´Ø±Ø§ÛØ·',contacted:'ØªÙØ§Ø³',replied:'Ù¾Ø§Ø³Ø®',negotiation:'ÙØ°Ø§Ú©Ø±Ù',converted:'ØªØ¨Ø¯ÛÙâØ´Ø¯Ù',customer:'ÙØ´ØªØ±Û',rejected:'Ø±Ø¯Ø´Ø¯Ù',archived:'Ø¢Ø±Ø´ÛÙ'};document.getElementById('leadFunnel').innerHTML=Object.entries(labels).filter(([k])=>(stages[k]||0)>0).map(([k,v])=>'<div class="item"><div class="itemhead"><b>'+v+'</b><span class="pill">'+esc(String(stages[k]||0))+'</span></div></div>').join('')||'<div class="empty">ÙÙÙØ² ÙÛØ¯ Ø«Ø¨Øª ÙØ´Ø¯Ù Ø§Ø³Øª.</div>';st.className='status ok';st.textContent='CRM Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ Ø´Ø¯ Â· '+String(d.hot?.length||0)+' ÙÛØ¯ Ø¯Ø§Øº Â· '+String(d.followups?.length||0)+' Ù¾ÛÚ¯ÛØ±Û Ø¹ÙØ¨âØ§ÙØªØ§Ø¯Ù';renderLeadQueue(d.hot||[],d.followups||[]);renderOutreach(d.items||[]);await loadLeads()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+function renderLeadQueue(hot,followups){const b=document.getElementById('leadActionList');const all=[...hot.map(x=>({...x,_kind:'hot'})),...followups.map(x=>({...x,_kind:'followup'}))];const seen=new Set();const rows=all.filter(x=>!seen.has(x.id)&&(seen.add(x.id))).slice(0,20);b.innerHTML=rows.length?rows.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">Score '+esc(x.score)+'</span></div><div class="mini">'+esc(x.stage||'')+' Â· '+esc(x.priority||'')+' Â· '+esc(x.contact||'')+'</div><div class="actions" style="margin-top:8px"><button class="btn secondary" onclick="setLeadStage(\''+esc(x.id)+'\',\'contacted\')">ØªÙØ§Ø³ Ø´Ø¯</button><button class="btn secondary" onclick="makeOutreachDraft(\''+esc(x.id)+'\',\'followup\')">Ù¾ÛÚ¯ÛØ±Û AI</button><button class="btn primary" onclick="setLeadStage(\''+esc(x.id)+'\',\'customer\')">ÙØ´ØªØ±Û</button></div></div>').join(''):'<div class="empty">Ø§ÙØ¯Ø§Ù ÙÙØ±Û ÙØ¯Ø§Ø±ÛØ¯.</div>'}
+function showLeadQueue(kind){const box=document.getElementById('leadActionList');if(!box)return;api('/api/leads/overview').then(d=>{const rows=kind==='hot'?d.hot||[]:d.followups||[];renderLeadQueue(rows,[])}).catch(e=>{box.innerHTML='<div class="status error">Ø®Ø·Ø§: '+esc(e.message)+'</div>'})}
+function renderOutreach(items){const b=document.getElementById('outreachList');const rows=items.filter(x=>x.meta?.outreach_draft).slice(0,15);b.innerHTML=rows.length?rows.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">'+esc(x.stage||'')+'</span></div><div class="text" style="margin-top:7px">'+esc(x.meta.outreach_draft)+'</div><div class="actions" style="margin-top:8px"><button class="btn secondary" onclick="setLeadStage(\''+esc(x.id)+'\',\'contacted\')">Ø«Ø¨Øª ØªÙØ§Ø³</button><button class="btn secondary" onclick="makeOutreachDraft(\''+esc(x.id)+'\',\'followup\')">Ø³Ø§Ø®Øª Ù¾ÛÚ¯ÛØ±Û</button></div></div>').join(''):'<div class="empty">ÙÙÙØ² Draft ÙÙÚ©Ø§Ø±Û Ø³Ø§Ø®ØªÙ ÙØ´Ø¯Ù Ø§Ø³Øª.</div>'}
+async function setLeadStage(id,stage){try{await api('/api/leads',{method:'PATCH',body:JSON.stringify({id,stage})});await loadLeadOverview()}catch(e){alert('Ø®Ø·Ø§: '+e.message)}}
+async function loadLeads(){const st=document.getElementById('leadStatus'),list=document.getElementById('leadList');st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦';try{const d=await api('/api/leads');const a=d.items||[];st.className='status ok';st.textContent=a.length+' ÙÛØ¯';list.innerHTML=a.length?a.map(x=>{let m={};try{m=JSON.parse(x.notes||'{}')}catch{}const score=m.score||0;return '<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">Score '+esc(score)+'</span></div><div class="mini">'+esc(x.contact||'')+' Â· '+esc(x.stage||'')+' Â· '+esc(x.priority||'')+'</div><div class="actions" style="margin-top:8px"><button class="btn secondary" onclick="setLeadStage(\''+esc(x.id)+'\',\'qualified\')">Qualified</button><button class="btn secondary" onclick="setLeadStage(\''+esc(x.id)+'\',\'replied\')">Reply</button><button class="btn primary" onclick="setLeadStage(\''+esc(x.id)+'\',\'customer\')">Customer</button></div></div>'}).join(''):'<div class="empty">ÙÛØ¯Û ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function addLead(){const st=document.getElementById('leadStatus'),name=document.getElementById('leadName').value.trim();if(!name){st.className='status error';st.textContent='ÙØ§Ù Ø±Ø§ ÙØ§Ø±Ø¯ Ú©ÙÛØ¯.';return}try{const f=document.getElementById('leadFollowup').value;await api('/api/leads',{method:'POST',body:JSON.stringify({name,contact:document.getElementById('leadContact').value.trim(),stage:document.getElementById('leadStage').value||'new',priority:document.getElementById('leadPriority').value||'normal',notes:document.getElementById('leadNotes').value.trim(),next_followup_at:f?new Date(f).toISOString():null})});st.className='status ok';st.textContent='ÙÛØ¯ Ø§Ø¶Ø§ÙÙ Ø´Ø¯.';await loadLeadOverview()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadMetrics(){const b=document.getElementById('metricsBody');b.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦';try{const d=await api('/api/metrics');const a=d.items||[];b.innerHTML='<div class="stat">'+a.length+'</div><div class="muted">Ø±Ú©ÙØ±Ø¯ ÙØªØ±ÛÚ©</div>'+ (a.length?'<div style="margin-top:12px">'+a.slice(0,50).map(x=>'<div class="item"><b>'+esc(x.platform||'')+'</b><div class="mini">impressions: '+esc(x.impressions)+' Â· reach: '+esc(x.reach)+' Â· likes: '+esc(x.likes)+' Â· comments: '+esc(x.comments)+' Â· shares: '+esc(x.shares)+' Â· saves: '+esc(x.saves)+'</div></div>').join('')+'</div>':'<div class="empty">ÙÙÙØ² ÙØªØ±ÛÚ©Û Ø«Ø¨Øª ÙØ´Ø¯Ù Ø§Ø³Øª.</div>')}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function testConnections(){const b=document.getElementById('connectionTestBody');b.className='status';b.textContent='Ø¯Ø± Ø­Ø§Ù ØªØ³Øª Ø§ØªØµØ§Ù ÙØ§ÙØ¹Ûâ¦';try{const d=await api('/api/connections/test',{method:'POST'});const p=d.providers||{};b.innerHTML=Object.entries(p).map(([k,v])=>'<div class="item"><div class="itemhead"><b>'+esc(k)+'</b><span class="pill">'+esc(v.status||'UNKNOWN')+'</span></div><div class="mini">'+esc(v.details||'')+(v.bot_username?' Â· @'+esc(v.bot_username):'')+(v.username?' Â· @'+esc(v.username):'')+(v.webhook?(' Â· webhook: '+(v.webhook.configured?'configured':'not configured')):'')+'</div></div>').join('')+'<div class="mini" style="margin-top:8px">PASS: '+esc(String(d.summary?.pass||0))+' Â· FAIL: '+esc(String(d.summary?.fail||0))+' Â· SKIP: '+esc(String(d.summary?.skip||0))+'</div>';b.className=(d.summary?.fail || d.summary?.skip) ? 'status error' : 'status ok'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+
+async function loadSettings(){const b=document.getElementById('settingsBody');try{const d=await api('/api/settings');const a=d.providers||{};b.innerHTML=Object.entries(a).map(([k,v])=>'<div class="item"><div class="itemhead"><b>'+esc(k)+'</b><span class="pill">'+(v.configured?'CONFIGURED':'MISSING')+'</span></div><div class="mini">'+esc(v.note||'')+'</div></div>').join('')}catch(e){b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadRuns(){const b=document.getElementById('runsBody');try{const d=await api('/api/production/runs');const a=d.items||[];b.innerHTML=a.length?a.map(x=>{let actions='';if(x.status==='stopped'){const id=JSON.stringify(String(x.id));actions='<div class="actions" style="margin-top:8px"><button class="btn secondary" onclick=\'reconcileRun('+id+',"confirm_published")\'>ØªØ£ÛÛØ¯ Ø§ÙØªØ´Ø§Ø±</button><button class="btn danger" onclick=\'reconcileRun('+id+',"retry")\'>Retry Ø¯Ø³ØªÛ</button></div>'}return '<div class="item"><div class="itemhead"><b>'+esc(x.run_type||x.id)+'</b><span class="pill">'+esc(x.status)+'</span></div><div class="mini">'+esc(x.updated_at||x.created_at||'')+'</div><div class="mini">'+esc(x.error||'')+'</div>'+actions+'</div>'}).join(''):'<div class="empty">Ø§Ø¬Ø±Ø§Û Ø§ÙØªØ´Ø§Ø±Û ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯.</div>'}catch(e){b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function reconcileRun(id,action){try{await api('/api/production/reconcile',{method:'POST',body:JSON.stringify({id,action})});await loadRuns()}catch(e){alert('Ø®Ø·Ø§: '+e.message)}}
+async function loadEvents(){const b=document.getElementById('eventsBody');try{const d=await api('/api/system/events');const a=d.items||[];b.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.type)+'</b><span class="pill">'+esc(x.severity)+'</span></div><div class="mini">'+esc(x.created_at||'')+'</div><div class="text" style="margin-top:6px">'+esc(x.message||'')+'</div></div>').join(''):'<div class="empty">ÙØ§Ú¯Û ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯.</div>'}catch(e){b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function runRelease(){const st=document.getElementById('releaseStatus');st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù ØªØ³Øªâ¦';try{const d=await api('/api/release/test',{method:'POST'});const checks=d.checks||[];const passed=d.ok===true && checks.length>0 && checks.every(x=>x.status==='PASS');st.className=passed?'status ok':'status error';st.textContent=checks.map(x=>x.check+': '+x.status).join(' Â· ')}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadSystem(){const b=document.getElementById('systemBody');b.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØªâ¦';try{const [h,r,m]=await Promise.all([api('/api/health'),api('/api/recovery/manifest'),api('/api/migration/status')]);b.className='status ok';b.innerHTML='<div class="stat">'+esc(h.status||'ok')+'</div><div class="mini">auto_publish: '+esc(String(h.auto_publish))+' Â· approval_required: '+esc(String(h.approval_required))+'</div><div class="mini" style="margin-top:8px">D1: '+esc(JSON.stringify(r.tables||{}))+'</div><div class="mini" style="margin-top:8px">migrations: '+esc(String((m.items||[]).length))+'</div>';await Promise.all([loadSettings(),loadRuns(),loadEvents()])}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+</script>
+</body>
+</html>`;
 }
 
 export default {
@@ -529,33 +664,19 @@ export default {
     const u = new URL(req.url);
 
     try {
-      if (!(await rate(env, req)))
-        return json(
-          { ok: false, error: "Rate limit exceeded" },
-          429
-        );
-
-      if (req.method === "GET" && u.pathname === "/api/health") {
-        return json({
-          ok: true,
-          version: "V6.5-openai-primary",
-          production: true,
-          approval_required: true,
-          auto_publish: false,
-          r2: false,
-          website_integration: false
+      if (req.method === "GET" && u.pathname === "/dashboard") {
+        return new Response(dashboardHtml(), {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
         });
       }
 
-      if (
-        req.method === "GET" &&
-        u.pathname === "/api/diagnostic/location"
-      ) {
+      if (!(await rate(env, req)))
+        return json({ ok: false, error: "Rate limit exceeded" }, 429);
+
+      if (req.method === "GET" && u.pathname === "/api/diagnostic/location") {
         if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
+          return json({ ok: false, error: "Unauthorized" }, 401);
 
         const cf = req.cf || {};
 
@@ -569,15 +690,20 @@ export default {
         });
       }
 
-      if (
-        req.method === "GET" &&
-        u.pathname === "/api/recovery/validate"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
+      if (req.method === "GET" && u.pathname === "/api/health") {
+        return json({
+          ok: true,
+          version: "V6.8-control-center",
+          production: true,
+          approval_required: true,
+          auto_publish: true,
+          r2: false,
+          website_integration: false
+        });
+      }
+
+      if (req.method === "GET" && u.pathname === "/api/recovery/validate") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
 
         const required = ["DB", "ADMIN_TOKEN"];
         const missing = required.filter(k => !env[k]);
@@ -595,151 +721,326 @@ export default {
         });
       }
 
-      if (
-        u.pathname === "/api/release/test" &&
-        req.method === "POST"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
+      if (u.pathname === "/webhooks/telegram" && req.method === "POST") return await handleTelegramWebhook(env, req);
+      if (u.pathname === "/webhooks/instagram" && (req.method === "GET" || req.method === "POST")) return await handleInstagramWebhook(env, req);
 
-        return json({
-          ok: true,
-          checks: await releaseTest(env)
-        });
+      if (u.pathname === "/api/release/test" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const checks = await releaseTest(env);
+        const ok = checks.length > 0 && checks.every(x => x.status === "PASS");
+        return json({ ok, checks });
       }
 
-      if (
-        u.pathname === "/api/release/checks" &&
-        req.method === "GET"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
+      if (u.pathname === "/api/release/checks" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         const r = await env.DB.prepare(
-          "SELECT * FROM release_checks " +
-          "ORDER BY checked_at DESC LIMIT 100"
+          "SELECT * FROM release_checks ORDER BY checked_at DESC LIMIT 100"
         ).all();
-
-        return json({
-          items: r.results || []
-        });
+        return json({ items: r.results || [] });
       }
 
-      if (
-        u.pathname === "/api/content/generate" &&
-        req.method === "POST"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
-        const b = await req.json();
-
-        return json({
-          ok: true,
-          content: await createGeneratedContent(env, b)
-        });
+      if (u.pathname === "/api/content/generate" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        if (!String(b.topic || "").trim()) return json({ ok: false, error: "topic is required" }, 400);
+        return json({ ok: true, content: await createGeneratedContent(env, b) });
       }
 
-      if (
-        u.pathname === "/api/content" &&
-        req.method === "GET"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
-        return json({
-          items: await listContent(
-            env,
-            u.searchParams.get("status")
-          )
-        });
+      if (u.pathname === "/api/content" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        return json({ items: await listContent(env, u.searchParams.get("status")) });
       }
 
-      if (
-        u.pathname === "/api/content/approve" &&
-        req.method === "POST"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
-        const b = await req.json();
-
-        return json({
-          ok: true,
-          approval: await setApproval(
-            env,
-            b.content_id,
-            b.status,
-            b.reason || ""
-          )
-        });
+      if (u.pathname === "/api/content/approve" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        if (!String(b.content_id || "").trim()) return json({ ok: false, error: "content_id is required" }, 400);
+        if (!String(b.status || "").trim()) return json({ ok: false, error: "status is required" }, 400);
+        if (!['approved','rejected','pending'].includes(String(b.status))) return json({ ok:false, error:"Invalid approval status" },400);
+        try {
+          return json({ ok: true, approval: await setApproval(env, b.content_id, b.status, b.reason || "") });
+        } catch (e) {
+          return json({ ok:false, error:e.message || "Approval failed" }, e.message === "Content not found" ? 404 : 400);
+        }
       }
 
-      if (
-        u.pathname === "/api/publish" &&
-        req.method === "POST"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
-        return json({
-          ok: true,
-          results: await publish(
-            env,
-            await req.json()
-          )
-        });
+      if (u.pathname === "/api/publish" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        if (!String(b.content_id || "").trim()) return json({ ok: false, error: "content_id is required" }, 400);
+        try {
+          return json({ ok: true, results: await publish(env, b) });
+        } catch (e) {
+          const msg = e.message || "Publish failed";
+          const status = msg === "Approval required" ? 403 : msg === "Content not found" ? 404 : msg.startsWith("Publish outcome unknown") ? 409 : 400;
+          return json({ ok:false, error:msg }, status);
+        }
       }
 
-      if (
-        u.pathname === "/api/recovery/manifest" &&
-        req.method === "GET"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
+      if (u.pathname === "/api/calendar" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const r = await env.DB.prepare("SELECT * FROM calendar ORDER BY planned_at ASC, created_at DESC LIMIT 200").all();
+        return json({ items: r.results || [] });
+      }
+
+      if (u.pathname === "/api/calendar" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        if (!String(b.content_id || "").trim() || !String(b.planned_at || "").trim()) return json({ ok: false, error: "content_id and planned_at are required" }, 400);
+        if (Number.isNaN(Date.parse(String(b.planned_at)))) return json({ ok:false, error:"planned_at must be a valid date/time" },400);
+        const content = await env.DB.prepare("SELECT id,platform FROM contents WHERE id=?").bind(String(b.content_id)).first();
+        if (!content) return json({ ok:false, error:"Content not found" },404);
+        const allowedCalendarStatus = ["planned","paused"];
+        if (!allowedCalendarStatus.includes(String(b.status || "planned"))) return json({ok:false,error:"Invalid calendar status"},400);
+        const id = uid();
+        const t = now();
+        if (b.media_url) { try { const mu=new URL(String(b.media_url)); if (!/^https?:$/.test(mu.protocol)) throw Error(); } catch { return json({ ok:false, error:"media_url must be a valid http(s) URL" },400); } }
+        await env.DB.prepare("INSERT INTO calendar(id,campaign_id,content_id,planned_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)")
+          .bind(id, b.campaign_id || null, b.content_id || null, b.planned_at || null, b.status || "planned", t, t).run();
+        if (b.media_url) await env.DB.prepare("INSERT INTO system_events VALUES(?,?,?,?,?,?)")
+          .bind(uid(),"calendar_media","info","Calendar media URL stored",JSON.stringify({calendar_id:id,content_id:b.content_id||null,media_url:String(b.media_url)}),t).run();
+        return json({ ok: true, id });
+      }
+
+      if (u.pathname === "/api/calendar" && req.method === "DELETE") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        if (!b.id) return json({ ok: false, error: "id is required" }, 400);
+        await env.DB.prepare("DELETE FROM calendar WHERE id=?").bind(b.id).run();
+        return json({ ok: true, id: b.id });
+      }
+
+      if (u.pathname === "/api/campaigns" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const r = await env.DB.prepare("SELECT * FROM campaigns ORDER BY created_at DESC LIMIT 100").all();
+        return json({ items: r.results || [] });
+      }
+
+      if (u.pathname === "/api/campaigns" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        const name = String(b.name || "").trim();
+        if (!name) return json({ ok: false, error: "name is required" }, 400);
+        const id = uid();
+        const t = now();
+        await env.DB.prepare("INSERT INTO campaigns(id,name,goal,audience,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)")
+          .bind(id, name, b.goal || null, b.audience || null, b.status || "draft", t, t).run();
+        return json({ ok: true, id });
+      }
+
+      if (u.pathname === "/api/campaigns" && req.method === "PATCH") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        if (!b.id) return json({ ok: false, error: "id is required" }, 400);
+        const allowed = ["draft", "active", "paused", "archived"];
+        if (!allowed.includes(b.status)) return json({ ok: false, error: "Invalid campaign status" }, 400);
+        const t = now();
+        await env.DB.prepare("UPDATE campaigns SET status=?,updated_at=? WHERE id=?").bind(b.status, t, b.id).run();
+        return json({ ok: true, id: b.id, status: b.status });
+      }
+
+      if (u.pathname === "/api/inbox" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const r = await env.DB.prepare("SELECT * FROM inbox_messages ORDER BY created_at DESC LIMIT 200").all();
+        return json({ items: r.results || [] });
+      }
+
+      if (u.pathname === "/api/inbox" && req.method === "PATCH") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        if (!b.id) return json({ ok: false, error: "id is required" }, 400);
+        const allowed = ["new", "handled", "archived", "pending"];
+        if (!allowed.includes(b.status)) return json({ ok: false, error: "Invalid inbox status" }, 400);
+        await env.DB.prepare("UPDATE inbox_messages SET status=?,updated_at=? WHERE id=?").bind(b.status, now(), b.id).run();
+        return json({ ok: true, id: b.id, status: b.status });
+      }
+
+      if (u.pathname === "/api/leads" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const r = await env.DB.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 200").all();
+        return json({ items: r.results || [] });
+      }
+
+      if (u.pathname === "/api/leads" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        const name = String(b.name || "").trim();
+        if (!name) return json({ ok: false, error: "name is required" }, 400);
+        const id = uid();
+        const t = now();
+        const meta = { manual_notes: String(b.notes || ""), source: "manual", score: b.score !== undefined ? Math.max(0, Math.min(100, Number(b.score) || 0)) : 10, next_followup_at: b.next_followup_at || null };
+        await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
+          .bind(id, name, b.contact || null, b.stage || "new", b.priority || "normal", JSON.stringify(meta), t, t).run();
+        return json({ ok: true, id });
+      }
+
+      if (u.pathname === "/api/instagram/leads/discover" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID) return json({ ok: false, error: "Instagram credentials not configured" }, 503);
+        const b = await req.json().catch(() => ({}));
+        const rawQ = String(b.query || "").trim().replace(/^#/, "");
+        if (!rawQ || !/^[\p{L}\p{N}_.-]{2,80}$/u.test(rawQ)) return json({ ok: false, error: "query must be a valid hashtag/keyword" }, 400);
+        const version = graphApiVersion(env);
+        const search = new URL(`https://graph.facebook.com/${version}/ig_hashtag_search`);
+        search.searchParams.set("user_id", env.INSTAGRAM_ACCOUNT_ID);
+        search.searchParams.set("q", rawQ);
+        search.searchParams.set("access_token", env.INSTAGRAM_ACCESS_TOKEN);
+        const sr = await fetch(search.toString(), { signal: AbortSignal.timeout(10000) });
+        const sd = await sr.json().catch(() => ({}));
+        if (!sr.ok || sd.error) return json({ ok: false, error: sd.error?.message || `Instagram hashtag search failed (${sr.status})` }, 502);
+        const tag = sd.data?.[0];
+        if (!tag?.id) return json({ ok: true, query: rawQ, found: 0, items: [] });
+        const media = new URL(`https://graph.facebook.com/${version}/${encodeURIComponent(tag.id)}/top_media`);
+        media.searchParams.set("user_id", env.INSTAGRAM_ACCOUNT_ID);
+        media.searchParams.set("fields", "id,caption,media_type,permalink,timestamp,username");
+        media.searchParams.set("limit", "25");
+        media.searchParams.set("access_token", env.INSTAGRAM_ACCESS_TOKEN);
+        const mr = await fetch(media.toString(), { signal: AbortSignal.timeout(10000) });
+        const md = await mr.json().catch(() => ({}));
+        if (!mr.ok || md.error) return json({ ok: false, error: md.error?.message || `Instagram media search failed (${mr.status})` }, 502);
+        const rows = [];
+        const seen = new Set();
+        for (const m of md.data || []) {
+          const username = String(m.username || "").trim();
+          if (!username || seen.has(username)) continue;
+          seen.add(username);
+          const caption = String(m.caption || "");
+          const lower = caption.toLowerCase();
+          const keywordHit = lower.includes(rawQ.toLowerCase());
+          const ageDays = m.timestamp ? Math.max(0, (Date.now() - Date.parse(m.timestamp)) / 86400000) : 30;
+          const recency = Math.max(0, Math.round(30 - Math.min(30, ageDays)));
+          const relevance = keywordHit ? 35 : 20;
+          const activity = m.media_type ? 10 : 0;
+          const score = Math.min(100, relevance + recency + activity + (caption.length > 80 ? 10 : 0));
+          rows.push({ username, score, permalink: m.permalink || null, media_type: m.media_type || null, timestamp: m.timestamp || null, evidence: caption.slice(0, 240) });
+        }
+        rows.sort((a, z) => z.score - a.score);
+        const saved = [];
+        const t = now();
+        for (const x of rows.slice(0, 20)) {
+          const contact = `https://instagram.com/${encodeURIComponent(x.username)}`;
+          const notes = JSON.stringify({ source: "instagram_hashtag_discovery", query: rawQ, score: x.score, profile: contact, evidence: x.evidence, permalink: x.permalink, media_type: x.media_type, discovered_at: t, outreach: "draft_only" });
+          const existing = await env.DB.prepare("SELECT id FROM leads WHERE contact=? LIMIT 1").bind(contact).first();
+          if (existing) {
+            await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(x.score >= 70 ? "high" : x.score >= 45 ? "normal" : "low", notes, t, existing.id).run();
+            saved.push({ ...x, id: existing.id, existing: true, contact });
+          } else {
+            const id = uid();
+            await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id, `@${x.username}`, contact, "discovered", x.score >= 70 ? "high" : x.score >= 45 ? "normal" : "low", notes, t, t).run();
+            saved.push({ ...x, id, existing: false, contact });
+          }
+        }
+        await audit(env, "instagram_lead_discovery", "Instagram related-page lead discovery completed", { query: rawQ, found: rows.length, saved: saved.length });
+        return json({ ok: true, query: rawQ, found: rows.length, saved: saved.length, items: saved });
+      }
+
+
+      if (u.pathname === "/api/leads/overview" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        return json({ ok: true, ...(await leadOverview(env)) });
+      }
+
+      if (u.pathname === "/api/leads" && req.method === "PATCH") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => ({}));
+        const id = String(b.id || "").trim();
+        if (!id) return json({ ok: false, error: "id is required" }, 400);
+        try {
+          const updated = await updateLeadRecord(env, id, b);
+          if (!updated) return json({ ok: false, error: "Lead not found" }, 404);
+          await audit(env, "lead_updated", "Lead CRM record updated", { lead_id: id, stage: updated.stage, priority: updated.priority });
+          return json({ ok: true, item: updated, score: leadScoreFromData(updated, parseLeadNotes(updated)) });
+        } catch (e) { return json({ ok: false, error: e.message }, 400); }
+      }
+
+      if (u.pathname === "/api/leads/score" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => ({}));
+        const id = String(b.lead_id || "").trim();
+        if (!id) return json({ ok: false, error: "lead_id is required" }, 400);
+        const lead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(id).first();
+        if (!lead) return json({ ok: false, error: "Lead not found" }, 404);
+        const updated = await updateLeadRecord(env, id, { score: Number(b.score) });
+        return json({ ok: true, lead_id: id, score: leadScoreFromData(updated, parseLeadNotes(updated)) });
+      }
+
+      if (u.pathname === "/api/leads/outreach-draft" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => ({}));
+        const leadId = String(b.lead_id || "").trim();
+        const mode = ["initial", "followup", "collaboration"].includes(String(b.mode || "")) ? String(b.mode) : "initial";
+        if (!leadId) return json({ ok: false, error: "lead_id is required" }, 400);
+        const lead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(leadId).first();
+        if (!lead) return json({ ok: false, error: "Lead not found" }, 404);
+        let meta = parseLeadNotes(lead);
+        const context = `Instagram page ${lead.name || ""}. Discovery query: ${meta.query || "unknown"}. Evidence: ${meta.evidence || ""}. Current stage: ${lead.stage || "new"}.`;
+        if (!env.OPENAI_API_KEY) return json({ ok: false, error: "OPENAI_API_KEY not configured" }, 503);
+        const task = mode === "followup" ? "Write a short, polite Persian follow-up DM that adds value and does not pressure the recipient." : "Write one short, respectful Persian collaboration/outreach DM draft for a relevant Instagram business/page.";
+        const prompt = `${task} Do not claim facts not provided. Do not use spam, pressure, bulk language, fake scarcity, or misleading claims. Keep it under 500 characters. It is a draft for human review only. Context: ${context}`;
+        const r = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { "Authorization": `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: env.OPENAI_MODEL || "gpt-5.6-luna", input: prompt }), signal: AbortSignal.timeout(15000) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return json({ ok: false, error: d.error?.message || `OpenAI returned ${r.status}` }, 502);
+        const text = responseText(d).trim();
+        if (!text) return json({ ok: false, error: "No outreach draft returned" }, 502);
+        meta.outreach_draft = text; meta.outreach_mode = mode; meta.outreach_drafted_at = now();
+        await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta), now(), leadId).run();
+        await audit(env, "instagram_outreach_draft", "Human-review outreach draft generated", { lead_id: leadId, mode });
+        return json({ ok: true, lead_id: leadId, draft: text, mode, send_mode: "manual_approval_only" });
+      }
+
+      if (u.pathname === "/api/metrics" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const r = await env.DB.prepare("SELECT * FROM social_metrics ORDER BY metric_date DESC, created_at DESC LIMIT 200").all();
+        return json({ items: r.results || [] });
+      }
+
+      if (u.pathname === "/api/connections/test" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const result = await connectionTest(env);
+        await audit(env, "connection_test", "Provider connection test completed", result.summary);
+        return json({ ok: result.summary.fail === 0 && result.summary.skip === 0, ...result });
+      }
+
+      if (u.pathname === "/api/settings" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        return json({ ok:true, providers:{
+          OpenAI:{configured:!!env.OPENAI_API_KEY,note:"Ú©ÙÛØ¯ ÙÙØ· Ø¨ÙâØµÙØ±Øª Secret Ø®ÙØ§ÙØ¯Ù ÙÛâØ´ÙØ¯"},
+          Telegram:{configured:!!(env.TELEGRAM_BOT_TOKEN&&env.TELEGRAM_CHAT_ID),note:"Bot token + chat id"},
+          Instagram:{configured:!!(env.INSTAGRAM_ACCESS_TOKEN&&env.INSTAGRAM_ACCOUNT_ID),note:"Access token + account id"},
+          InstagramWebhook:{configured:!!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&(!!env.INSTAGRAM_APP_SECRET||!!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN),note:"Verify token + signature secret"},
+          TelegramWebhook:{configured:!!env.TELEGRAM_WEBHOOK_SECRET_TOKEN,note:"Webhook secret token"},
+          Admin:{configured:!!env.ADMIN_TOKEN,note:"ÙØ¯ÛØ±ÛØª Secret Ø§Ø² Ø®ÙØ¯ Worker Ø§ÙØ¬Ø§Ù ÙÙÛâØ´ÙØ¯"}
+        }});
+      }
+
+      if (u.pathname === "/api/system/events" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const r = await env.DB.prepare("SELECT id,type,severity,message,details_json,created_at FROM system_events ORDER BY created_at DESC LIMIT 100").all();
+        return json({ items:r.results||[] });
+      }
+
+      if (u.pathname === "/api/recovery/manifest" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
 
         const tables = [
-          "contents",
-          "approval_queue",
-          "leads",
-          "inbox_messages",
-          "social_metrics",
-          "automation_guardrails",
-          "learning_feedback",
-          "learning_reports",
-          "campaigns",
-          "calendar"
+          "contents", "approval_queue", "leads", "inbox_messages",
+          "social_metrics", "automation_guardrails", "learning_feedback",
+          "learning_reports", "campaigns", "calendar"
         ];
 
         const counts = {};
-
         for (const t of tables) {
           try {
-            const r = await env.DB.prepare(
-              `SELECT COUNT(*) n FROM ${t}`
-            ).first();
-
+            const r = await env.DB.prepare(`SELECT COUNT(*) n FROM ${t}`).first();
             counts[t] = Number(r?.n || 0);
           } catch {
             counts[t] = "unavailable";
@@ -756,390 +1057,81 @@ export default {
           generated_at: now(),
           tables: counts,
           secrets: [
-            "OPENAI_API_KEY",
-            "ADMIN_TOKEN",
-            "TELEGRAM_BOT_TOKEN",
-            "TELEGRAM_CHAT_ID",
-            "INSTAGRAM_ACCESS_TOKEN",
-            "INSTAGRAM_ACCOUNT_ID"
+            "OPENAI_API_KEY", "ADMIN_TOKEN",
+            "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+            "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_ACCOUNT_ID", "INSTAGRAM_APP_SECRET", "INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "INSTAGRAM_WEBHOOK_SECRET_TOKEN", "TELEGRAM_WEBHOOK_SECRET_TOKEN"
           ]
         });
       }
 
-      if (
-        u.pathname === "/api/recovery/manifest" &&
-        req.method === "POST"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
+      if (u.pathname === "/api/recovery/manifest" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
 
         const body = await req.json().catch(() => ({}));
         const id = uid();
 
         await env.DB.prepare(
           "INSERT INTO recovery_snapshots VALUES(?,?,?,?,?)"
-        ).bind(
-          id,
-          "manifest",
-          now(),
-          JSON.stringify(body),
-          "created"
-        ).run();
+        ).bind(id, "manifest", now(), JSON.stringify(body), "created").run();
 
-        return json({
-          ok: true,
-          id
-        });
+        return json({ ok: true, id });
       }
 
-      if (
-        u.pathname === "/api/migration/status" &&
-        req.method === "GET"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
+      if (u.pathname === "/api/migration/status" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         const r = await env.DB.prepare(
-          "SELECT * FROM migration_runs " +
-          "ORDER BY created_at DESC LIMIT 50"
+          "SELECT * FROM migration_runs ORDER BY created_at DESC LIMIT 50"
         ).all();
-
-        return json({
-          items: r.results || []
-        });
+        return json({ items: r.results || [] });
       }
 
-      if (
-        u.pathname === "/api/retry" &&
-        req.method === "GET"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
+      if (u.pathname === "/api/retry" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         const r = await env.DB.prepare(
-          "SELECT * FROM retry_queue " +
-          "ORDER BY created_at DESC LIMIT 100"
+          "SELECT * FROM retry_queue ORDER BY created_at DESC LIMIT 100"
         ).all();
-
-        return json({
-          items: r.results || []
-        });
+        return json({ items: r.results || [] });
       }
 
-      if (
-        u.pathname === "/api/retry" &&
-        req.method === "POST"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
-        const b = await req.json();
+      if (u.pathname === "/api/retry" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        const operation = String(b.operation || "").trim();
+        if (!operation) return json({ ok:false, error:"operation is required" },400);
+        const maxAttempts = Math.max(1, Math.min(10, Number(b.max_attempts || 3)) || 3);
         const id = uid();
 
         await env.DB.prepare(
           "INSERT INTO retry_queue VALUES(?,?,?,?,?,?,?,?,?,?)"
         ).bind(
-          id,
-          b.operation,
-          JSON.stringify(b.payload || {}),
-          0,
-          Number(b.max_attempts || 3),
-          "queued",
-          null,
-          null,
-          now(),
-          now()
+          id, operation, JSON.stringify(b.payload || {}), 0,
+          maxAttempts, "queued", null, null, now(), now()
         ).run();
 
-        return json({
-          ok: true,
-          id
-        });
+        return json({ ok: true, id });
       }
 
-      if (
-        u.pathname === "/api/production/runs" &&
-        req.method === "GET"
-      ) {
-        if (!auth(req, env))
-          return json(
-            { ok: false, error: "Unauthorized" },
-            401
-          );
-
+      if (u.pathname === "/api/production/reconcile" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const body = await req.json().catch(() => null);
+        if (!body || typeof body !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
+        if (!String(body.id || "").trim()) return json({ ok: false, error: "id is required" }, 400);
+        if (!String(body.action || "").trim()) return json({ ok: false, error: "action is required" }, 400);
+        if (!["confirm_published","retry"].includes(String(body.action))) return json({ ok:false, error:"Invalid reconciliation action" },400);
+        try { return json(await reconcileProductionRun(env, body)); } catch (e) { return json({ok:false,error:e.message||"Reconciliation failed"},400); }
+      }
+      if (u.pathname === "/api/production/runs" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         const r = await env.DB.prepare(
-          "SELECT * FROM production_runs " +
-          "ORDER BY created_at DESC LIMIT 50"
+          "SELECT * FROM production_runs ORDER BY created_at DESC LIMIT 50"
         ).all();
-
-        return json({
-          items: r.results || []
-        });
+        return json({ items: r.results || [] });
       }
 
-      /* =========================================================
-         V6.6 — APPROVAL DASHBOARD
-         فقط Dashboard اضافه شده؛ APIهای قبلی دست نخورده‌اند.
-         ========================================================= */
-
-      if (
-        req.method === "GET" &&
-        u.pathname === "/dashboard"
-      ) {
-        return new Response(`<!doctype html>
-<html lang="fa" dir="rtl">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HAMZEHI SOCIAL AI — Approval</title>
-<style>
-body{
-  margin:0;
-  background:#111;
-  color:#eee;
-  font-family:Arial,sans-serif
-}
-main{
-  max-width:700px;
-  margin:auto;
-  padding:18px
-}
-h1{
-  font-size:22px
-}
-input,button{
-  width:100%;
-  box-sizing:border-box;
-  padding:13px;
-  margin:6px 0;
-  border-radius:8px;
-  border:1px solid #444;
-  background:#1b1b1b;
-  color:#fff
-}
-button{
-  cursor:pointer;
-  background:#333
-}
-.card{
-  border:1px solid #333;
-  border-radius:12px;
-  padding:14px;
-  margin:12px 0;
-  background:#181818
-}
-.meta{
-  color:#aaa;
-  font-size:13px;
-  line-height:1.8
-}
-.caption{
-  white-space:pre-wrap;
-  line-height:1.8
-}
-.actions{
-  display:flex;
-  gap:8px
-}
-.actions button{
-  flex:1
-}
-</style>
-</head>
-<body>
-<main>
-
-<h1>HAMZEHI SOCIAL AI</h1>
-<p>Approval Dashboard</p>
-
-<input
-  id="token"
-  type="password"
-  placeholder="ADMIN TOKEN"
->
-
-<button onclick="loadContent()">
-نمایش محتوای در انتظار تأیید
-</button>
-
-<div id="status"></div>
-<div id="items"></div>
-
-</main>
-
-<script>
-let token="";
-
-function headers(){
-  return {
-    "Authorization":"Bearer "+token,
-    "Content-Type":"application/json"
-  };
-}
-
-async function loadContent(){
-  token=document.getElementById("token").value.trim();
-
-  if(!token){
-    document.getElementById("status").textContent=
-      "ADMIN TOKEN را وارد کنید.";
-    return;
-  }
-
-  const status=document.getElementById("status");
-  const items=document.getElementById("items");
-
-  status.textContent="در حال دریافت...";
-  items.innerHTML="";
-
-  try{
-    const r=await fetch(
-      "/api/content?status=generated",
-      {
-        headers:headers()
-      }
-    );
-
-    const d=await r.json();
-
-    if(!r.ok){
-  if(r.status === 401){
-    throw new Error("رمز مدیر اشتباه است.");
-  }
-
-  throw new Error(
-    d.error || "Request failed"
-  );
-}
-
-    const pending=(d.items||[]).filter(
-      x=>x.approval_status==="pending"
-    );
-
-    status.textContent=
-      "تعداد در انتظار تأیید: "+pending.length;
-
-    for(const x of pending){
-
-      const card=document.createElement("div");
-      card.className="card";
-
-      card.innerHTML=
-        "<b>"+esc(x.topic||"")+"</b>"+
-        "<div class='meta'>"+
-        "Platform: "+esc(x.platform||"")+"<br>"+
-        "Language: "+esc(x.language||"")+"<br>"+
-        "Market: "+esc(x.market||"")+
-        "</div>"+
-        "<p>"+esc(x.hook||"")+"</p>"+
-        "<div class='caption'>"+
-        esc(x.caption||"")+
-        "</div>"+
-        "<p>"+esc(x.cta||"")+"</p>"+
-        "<div class='meta'>"+
-        esc(x.hashtags||"")+
-        "</div>"+
-        "<div class='actions'>"+
-        "<button onclick='approve(\""+
-        x.id+
-        "\",\"approved\")'>تأیید</button>"+
-        "<button onclick='approve(\""+
-        x.id+
-        "\",\"rejected\")'>رد</button>"+
-        "</div>";
-
-      items.appendChild(card);
-    }
-
-  }catch(e){
-
-    status.textContent=
-      "خطا: "+e.message;
-  }
-}
-
-async function approve(id,status){
-
-  try{
-
-    const r=await fetch(
-      "/api/content/approve",
-      {
-        method:"POST",
-        headers:headers(),
-        body:JSON.stringify({
-          content_id:id,
-          status:status,
-          reason:
-            status==="approved"
-              ? "Approved from dashboard"
-              : "Rejected from dashboard"
-        })
-      }
-    );
-
-    const d=await r.json();
-
-    if(!r.ok || !d.ok){
-      throw new Error(
-        d.error || "Approval failed"
-      );
-    }
-
-    await loadContent();
-
-  }catch(e){
-
-    document.getElementById("status").textContent=
-      "خطا: "+e.message;
-  }
-}
-
-function esc(v){
-  return String(v??"")
-    .replace(/&/g,"&amp;")
-    .replace(/</g,"&lt;")
-    .replace(/>/g,"&gt;")
-    .replace(/"/g,"&quot;")
-    .replace(/'/g,"&#039;");
-}
-</script>
-
-</body>
-</html>`,{
-          headers:{
-            "Content-Type":"text/html; charset=utf-8",
-            "Cache-Control":"no-store"
-          }
-        });
-      }
-
-      return json(
-        { ok: false, error: "Not found" },
-        404
-      );
-
+      return json({ ok: false, error: "Not found" }, 404);
     } catch (e) {
-
-      return json(
-        {
-          ok: false,
-          error: e.message || "Unexpected error"
-        },
-        500
-      );
+      return json({ ok: false, error: e.message || "Unexpected error" }, 500);
     }
   }
 };
