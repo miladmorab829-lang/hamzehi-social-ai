@@ -15,6 +15,8 @@ class PublishOutcomeUnknown extends Error {
 
 const UNKNOWN_PUBLISH_AFTER_MS = 10 * 60 * 1000;
 const graphApiVersion = (env) => String(env.INSTAGRAM_GRAPH_API_VERSION || "v23.0").replace(/^v?/i, "v");
+const instagramApiMode = (env) => String(env.INSTAGRAM_API_MODE || "instagram_login").trim().toLowerCase() === "facebook_login" ? "facebook_login" : "instagram_login";
+const instagramGraphBase = (env) => instagramApiMode(env) === "facebook_login" ? `https://graph.facebook.com/${graphApiVersion(env)}` : `https://graph.instagram.com/${graphApiVersion(env)}`;
 
 async function rate(env, req) {
   const key = req.headers.get("CF-Connecting-IP") || "unknown";
@@ -100,15 +102,16 @@ async function telegramCheck(env) {
 async function instagramCheck(env) {
   if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID)
     return { status: "SKIP", details: "Instagram credentials not configured" };
+  const mode = instagramApiMode(env);
   const version = graphApiVersion(env);
-  const u = new URL(`https://graph.facebook.com/${version}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}`);
+  const u = new URL(`${instagramGraphBase(env)}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}`);
   u.searchParams.set("fields", "id,username,account_type,media_count");
   u.searchParams.set("access_token", env.INSTAGRAM_ACCESS_TOKEN);
   const r = await fetch(u.toString(), { signal: AbortSignal.timeout(8000) });
   const d = await r.json().catch(() => ({}));
   return r.ok && !d.error
-    ? { status: "PASS", details: "Instagram account credential accepted", account_id: d.id || null, username: d.username || null, account_type: d.account_type || null, media_count: Number(d.media_count || 0), graph_api_version: version }
-    : { status: "FAIL", details: `Instagram HTTP ${r.status}`, provider_error: d.error?.message || null, graph_api_version: version };
+    ? { status: "PASS", details: `Instagram ${mode === "instagram_login" ? "Login" : "Facebook Login"} credential accepted`, account_id: d.id || null, username: d.username || null, account_type: d.account_type || null, media_count: Number(d.media_count || 0), api_mode: mode, graph_api_version: version }
+    : { status: "FAIL", details: `Instagram HTTP ${r.status}`, provider_error: d.error?.message || null, api_mode: mode, graph_api_version: version };
 }
 
 
@@ -139,18 +142,7 @@ async function connectionTest(env) {
     };
   });
 
-  await check("Instagram", async () => {
-    if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID) return { status: "SKIP", details: "Instagram access token or account id missing" };
-    const version = graphApiVersion(env);
-    const u = new URL(`https://graph.facebook.com/${version}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}`);
-    u.searchParams.set("fields", "id,username");
-    u.searchParams.set("access_token", env.INSTAGRAM_ACCESS_TOKEN);
-    const r = await fetch(u.toString(), { signal: AbortSignal.timeout(8000) });
-    const d = await r.json().catch(() => ({}));
-    return r.ok && !d.error
-      ? { status: "PASS", details: "Instagram account credential accepted", account_id: d.id || null, username: d.username || null, graph_api_version: version }
-      : { status: "FAIL", details: `Instagram HTTP ${r.status}`, provider_error: d.error?.message || null, graph_api_version: version };
-  });
+  await check("Instagram", async () => instagramCheck(env));
 
   out.summary = {
     pass: Object.values(out.providers).filter(x => x.status === "PASS").length,
@@ -450,10 +442,10 @@ async function publish(env,b){
         let mediaUrl; try { mediaUrl=new URL(String(b.media_url||'')); } catch { throw Error('Public media_url required for Instagram'); }
         if(!/^https?:$/.test(mediaUrl.protocol)) throw Error('Public media_url must use http or https');
         const q1=new URLSearchParams({image_url:mediaUrl.toString(),caption:[c.caption,c.cta,c.hashtags].filter(Boolean).join('\n\n'),access_token:env.INSTAGRAM_ACCESS_TOKEN});
-        let a;try{a=await fetch(`https://graph.facebook.com/${graphApiVersion(env)}/${env.INSTAGRAM_ACCOUNT_ID}/media`,{method:'POST',body:q1})}catch(e){throw new PublishOutcomeUnknown('Instagram container request outcome unknown')}
+        let a;try{a=await fetch(`${instagramGraphBase(env)}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}/media`,{method:'POST',body:q1})}catch(e){throw new PublishOutcomeUnknown('Instagram container request outcome unknown')}
         const ad=await a.json().catch(()=>({}));if(!a.ok||ad.error)throw Error('Instagram container failed');
         const q2=new URLSearchParams({creation_id:ad.id,access_token:env.INSTAGRAM_ACCESS_TOKEN});
-        let x;try{x=await fetch(`https://graph.facebook.com/${graphApiVersion(env)}/${env.INSTAGRAM_ACCOUNT_ID}/media_publish`,{method:'POST',body:q2})}catch(e){throw new PublishOutcomeUnknown('Instagram publish request outcome unknown')}
+        let x;try{x=await fetch(`${instagramGraphBase(env)}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}/media_publish`,{method:'POST',body:q2})}catch(e){throw new PublishOutcomeUnknown('Instagram publish request outcome unknown')}
         const xd=await x.json().catch(()=>({}));if(!x.ok||xd.error)throw Error('Instagram publish failed');externalId=String(xd.id||ad.id||'')
       }
       await env.DB.prepare("UPDATE production_runs SET status='completed',summary_json=?,error=NULL,updated_at=? WHERE id=?").bind(JSON.stringify({content_id:c.id,platform,external_id:externalId}),now(),runId).run();out.push({platform,external_id:externalId,idempotent:false});
@@ -495,7 +487,7 @@ async function getCalendarMediaUrl(env,calendarId){const r=await env.DB.prepare(
 
 async function publishScheduled(env){const r=await env.DB.prepare("SELECT * FROM calendar WHERE status='planned' AND planned_at<=? ORDER BY planned_at ASC LIMIT 10").bind(now()).all();for(const item of r.results||[]){if(!item.content_id){await env.DB.prepare("UPDATE calendar SET status='failed',updated_at=? WHERE id=? AND status='planned'").bind(now(),item.id).run();await audit(env,'calendar_failed','Scheduled item has no content_id',{calendar_id:item.id});continue}const claim=await env.DB.prepare("UPDATE calendar SET status='publishing',updated_at=? WHERE id=? AND status='planned'").bind(now(),item.id).run();if(!claim.meta?.changes)continue;try{const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(item.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,item.id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');await publish(env,{content_id:item.content_id,platform:content.platform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),item.id).run()}catch(e){await env.DB.prepare("UPDATE calendar SET status='failed',updated_at=? WHERE id=?").bind(now(),item.id).run();await env.DB.prepare("INSERT INTO retry_queue VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),'calendar_publish',JSON.stringify({calendar_id:item.id,content_id:item.content_id}),0,3,'queued',null,e.message,now(),now()).run();await audit(env,'calendar_publish_failed','Scheduled publish failed and was queued for retry',{calendar_id:item.id,content_id:item.content_id,error:e.message})}}}
 
-async function collectInstagramMetrics(env){if(!env.INSTAGRAM_ACCESS_TOKEN)return;const rows=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='content_published' ORDER BY created_at DESC LIMIT 100").all();for(const row of rows.results||[]){let d;try{d=JSON.parse(row.details_json||'{}')}catch{continue}for(const result of d.results||[]){if(result.platform!=='instagram'||!result.external_id)continue;const u=new URL(`https://graph.facebook.com/${graphApiVersion(env)}/${encodeURIComponent(result.external_id)}/insights`);u.searchParams.set('metric','impressions,reach,likes,comments,shares,saved');u.searchParams.set('access_token',env.INSTAGRAM_ACCESS_TOKEN);const r=await fetch(u.toString());if(!r.ok)continue;const data=await r.json().catch(()=>({}));if(data.error||!Array.isArray(data.data))continue;const values={};for(const m of data.data){const v=Array.isArray(m.values)?m.values.at(-1)?.value:m.value;values[m.name]=Number(v||0)}const ex=await env.DB.prepare("SELECT id FROM social_metrics WHERE content_id=? AND platform='instagram' ORDER BY created_at DESC LIMIT 1").bind(d.content_id).first();if(ex)await env.DB.prepare("UPDATE social_metrics SET impressions=?,reach=?,likes=?,comments=?,shares=?,saves=?,metric_date=? WHERE id=?").bind(values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,now().slice(0,10),ex.id).run();else await env.DB.prepare("INSERT INTO social_metrics(id,content_id,platform,impressions,reach,likes,comments,shares,saves,clicks,metric_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),d.content_id,'instagram',values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,0,now().slice(0,10),now()).run()}}}
+async function collectInstagramMetrics(env){if(!env.INSTAGRAM_ACCESS_TOKEN)return;const rows=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='content_published' ORDER BY created_at DESC LIMIT 100").all();for(const row of rows.results||[]){let d;try{d=JSON.parse(row.details_json||'{}')}catch{continue}for(const result of d.results||[]){if(result.platform!=='instagram'||!result.external_id)continue;const u=new URL(`${instagramGraphBase(env)}/${encodeURIComponent(result.external_id)}/insights`);u.searchParams.set('metric','impressions,reach,likes,comments,shares,saved');u.searchParams.set('access_token',env.INSTAGRAM_ACCESS_TOKEN);const r=await fetch(u.toString());if(!r.ok)continue;const data=await r.json().catch(()=>({}));if(data.error||!Array.isArray(data.data))continue;const values={};for(const m of data.data){const v=Array.isArray(m.values)?m.values.at(-1)?.value:m.value;values[m.name]=Number(v||0)}const ex=await env.DB.prepare("SELECT id FROM social_metrics WHERE content_id=? AND platform='instagram' ORDER BY created_at DESC LIMIT 1").bind(d.content_id).first();if(ex)await env.DB.prepare("UPDATE social_metrics SET impressions=?,reach=?,likes=?,comments=?,shares=?,saves=?,metric_date=? WHERE id=?").bind(values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,now().slice(0,10),ex.id).run();else await env.DB.prepare("INSERT INTO social_metrics(id,content_id,platform,impressions,reach,likes,comments,shares,saves,clicks,metric_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),d.content_id,'instagram',values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,0,now().slice(0,10),now()).run()}}}
 
 async function handleTelegramWebhook(env,req){if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.TELEGRAM_WEBHOOK_SECRET_TOKEN||((req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'')!==env.TELEGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Unauthorized webhook'},401);const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);const m=body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});const externalId=String(m.message_id||body.update_id||uid());const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)return json({ok:true,duplicate:true});const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.from?.username||m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',t,t).run();await audit(env,'inbox_received','Telegram message received',{external_id:externalId});return json({ok:true})}
 
@@ -898,11 +890,12 @@ export default {
       if (u.pathname === "/api/instagram/leads/discover" && req.method === "POST") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID) return json({ ok: false, error: "Instagram credentials not configured" }, 503);
+        if (instagramApiMode(env) === "instagram_login") return json({ ok: false, error: "Instagram Lead Finder hashtag discovery requires Facebook Login mode; Instagram Login does not expose this endpoint" }, 501);
         const b = await req.json().catch(() => ({}));
         const rawQ = String(b.query || "").trim().replace(/^#/, "");
         if (!rawQ || !/^[\p{L}\p{N}_.-]{2,80}$/u.test(rawQ)) return json({ ok: false, error: "query must be a valid hashtag/keyword" }, 400);
         const version = graphApiVersion(env);
-        const search = new URL(`https://graph.facebook.com/${version}/ig_hashtag_search`);
+        const search = new URL(`${instagramGraphBase(env)}/ig_hashtag_search`);
         search.searchParams.set("user_id", env.INSTAGRAM_ACCOUNT_ID);
         search.searchParams.set("q", rawQ);
         search.searchParams.set("access_token", env.INSTAGRAM_ACCESS_TOKEN);
@@ -911,7 +904,7 @@ export default {
         if (!sr.ok || sd.error) return json({ ok: false, error: sd.error?.message || `Instagram hashtag search failed (${sr.status})` }, 502);
         const tag = sd.data?.[0];
         if (!tag?.id) return json({ ok: true, query: rawQ, found: 0, items: [] });
-        const media = new URL(`https://graph.facebook.com/${version}/${encodeURIComponent(tag.id)}/top_media`);
+        const media = new URL(`${instagramGraphBase(env)}/${encodeURIComponent(tag.id)}/top_media`);
         media.searchParams.set("user_id", env.INSTAGRAM_ACCOUNT_ID);
         media.searchParams.set("fields", "id,caption,media_type,permalink,timestamp,username");
         media.searchParams.set("limit", "25");
@@ -1027,7 +1020,7 @@ export default {
         return json({ ok:true, providers:{
           OpenAI:{configured:!!env.OPENAI_API_KEY,note:"Ú©ÙÛØ¯ ÙÙØ· Ø¨ÙâØµÙØ±Øª Secret Ø®ÙØ§ÙØ¯Ù ÙÛâØ´ÙØ¯"},
           Telegram:{configured:!!(env.TELEGRAM_BOT_TOKEN&&env.TELEGRAM_CHAT_ID),note:"Bot token + chat id"},
-          Instagram:{configured:!!(env.INSTAGRAM_ACCESS_TOKEN&&env.INSTAGRAM_ACCOUNT_ID),note:"Access token + account id"},
+          Instagram:{configured:!!(env.INSTAGRAM_ACCESS_TOKEN&&env.INSTAGRAM_ACCOUNT_ID),note:`${instagramApiMode(env)==="instagram_login"?"Instagram Login":"Facebook Login"} Â· Access token + account id`},
           InstagramWebhook:{configured:!!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&(!!env.INSTAGRAM_APP_SECRET||!!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN),note:"Verify token + signature secret"},
           TelegramWebhook:{configured:!!env.TELEGRAM_WEBHOOK_SECRET_TOKEN,note:"Webhook secret token"},
           Admin:{configured:!!env.ADMIN_TOKEN,note:"ÙØ¯ÛØ±ÛØª Secret Ø§Ø² Ø®ÙØ¯ Worker Ø§ÙØ¬Ø§Ù ÙÙÛâØ´ÙØ¯"}
