@@ -118,6 +118,21 @@ class PublishOutcomeUnknown extends Error {
 }
 
 const UNKNOWN_PUBLISH_AFTER_MS = 10 * 60 * 1000;
+
+// Explicit pipeline contract used by the final audit and health checks.
+// This is metadata only; execution order remains implemented by the existing functions.
+const CONTENT_PIPELINE_STAGES = Object.freeze([
+  'PLAN',
+  'GENERATE',
+  'VALIDATE',
+  'STORE',
+  'APPROVE',
+  'SCHEDULE',
+  'PUBLISH',
+  'VERIFY',
+  'ANALYZE',
+  'OPTIMIZE'
+]);
 const graphApiVersion = (env) => String(env.INSTAGRAM_GRAPH_API_VERSION || "v23.0").replace(/^v?/i, "v");
 const instagramApiMode = (env) => String(env.INSTAGRAM_API_MODE || "instagram_login").trim().toLowerCase() === "facebook_login" ? "facebook_login" : "instagram_login";
 const instagramGraphBase = (env) => instagramApiMode(env) === "facebook_login" ? `https://graph.facebook.com/${graphApiVersion(env)}` : `https://graph.instagram.com/${graphApiVersion(env)}`;
@@ -327,6 +342,12 @@ async function releaseTest(env) {
     return { status: "PASS", details: "Core tables accessible" };
   });
 
+  await add("Content distribution store", async () => {
+    await ensureDistributionStore(env);
+    await env.DB.prepare("SELECT COUNT(*) n FROM content_distribution").first();
+    return { status:"PASS", details:"Telegram/website/WhatsApp distribution queue accessible" };
+  });
+
   await add("Approval boundary", async () => ({
     status: "PASS",
     details: "Publish endpoint requires approved content"
@@ -499,6 +520,8 @@ async function createGeneratedContent(env, b) {
     g.hashtags, g.visual_prompt, "generated", t, t
   ).run();
 
+  try { await autoAttachTelegramMedia(env, id); } catch (e) { await audit(env, "content_media_autoattach_failed", "Automatic media attachment failed without blocking content generation", { content_id: id, error: e.message }); }
+
   await env.DB.prepare(
     "INSERT INTO approval_queue VALUES(?,?,?,?,?,?)"
   ).bind(
@@ -515,6 +538,119 @@ async function createGeneratedContent(env, b) {
   });
 
   return { id, ...g, status: "generated", approval_status: "pending" };
+}
+
+
+const AUTO_CONTENT_DEFAULT_CONFIG = {
+  enabled: true,
+  interval_hours: 12,
+  platform: "telegram",
+  language: "fa-IR",
+  market: "Iran",
+  content_type: "post",
+  objective: "engagement",
+  tone: "luxury, professional"
+};
+
+const AUTO_CONTENT_TOPICS_FA = [
+  "Ø§ÛØ¯ÙâÙØ§ÛÛ Ø¨Ø±Ø§Û Ø§Ø±Ø§Ø¦Ù Ø´ÛÚ© Ù ÙÛÙÛÙØ§Ù Ø²ÛÙØ±Ø¢ÙØ§Øª",
+  "ÚØ±Ø§ Ø¨Ø³ØªÙâØ¨ÙØ¯Û Ø¨Ø®Ø´Û Ø§Ø² ØªØ¬Ø±Ø¨Ù ÙØ¯ÛÙ Ø¯Ø§Ø¯Ù Ø§Ø³ØªØ",
+  "Ø±Ø§ÙÙÙØ§Û Ø§ÙØªØ®Ø§Ø¨ Ø³Ø¨Ú© ÙÙØ§Ø³Ø¨ Ø¬Ø¹Ø¨Ù Ø¨Ø±Ø§Û Ø²ÛÙØ±Ø¢ÙØ§Øª",
+  "Ø¬Ø²Ø¦ÛØ§Øª Ú©ÙÚÚ© Ø¯Ø± Ø§Ø±Ø§Ø¦Ù ÙÙÚ©Ø³ Ø²ÛÙØ±Ø¢ÙØ§Øª",
+  "ÚØ·ÙØ± ÙÙØ§ÛØ´ Ø²ÛÙØ±Ø¢ÙØ§Øª Ø±Ø§ Ø³Ø§Ø¯ÙâØªØ± Ù Ø­Ø±ÙÙâØ§ÛâØªØ± Ú©ÙÛÙØ",
+  "Ø§ÛØ¯ÙâÙØ§Û ÙØ­ØªÙØ§ÛÛ Ø¨Ø±Ø§Û ÙØ¹Ø±ÙÛ Ø¸Ø±Ø§ÙØª Ù Ø¨Ø³ØªÙâØ¨ÙØ¯Û Ø²ÛÙØ±Ø¢ÙØ§Øª"
+];
+
+async function ensureAutoContentStore(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+}
+
+async function getAutoContentConfig(env) {
+  await ensureAutoContentStore(env);
+  const row = await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_content_config'").first();
+  let cfg = { ...AUTO_CONTENT_DEFAULT_CONFIG };
+  try { if (row?.value) cfg = { ...cfg, ...JSON.parse(row.value) }; } catch {}
+  cfg.enabled = cfg.enabled !== false;
+  cfg.interval_hours = Math.min(24, Math.max(1, Number(cfg.interval_hours) || 12));
+  if (!['instagram','telegram','both','priority'].includes(String(cfg.platform))) cfg.platform='telegram';
+  if (!['fa-IR','ar-IQ'].includes(String(cfg.language))) cfg.language='fa-IR';
+  if (!['Iran','Iraq'].includes(String(cfg.market))) cfg.market='Iran';
+  return cfg;
+}
+
+async function chooseAutoContentTopic(env) {
+  const recent = await env.DB.prepare("SELECT topic FROM contents ORDER BY created_at DESC LIMIT 20").all();
+  const used = new Set((recent.results || []).map(x => String(x.topic || '').trim()));
+  return AUTO_CONTENT_TOPICS_FA.find(x => !used.has(x)) || AUTO_CONTENT_TOPICS_FA[Math.floor(Date.now()/3600000) % AUTO_CONTENT_TOPICS_FA.length];
+}
+
+async function runAutoContentGeneration(env, source = "scheduled", force = false) {
+  const cfg = await getAutoContentConfig(env);
+  if (!cfg.enabled) return { ok:true, skipped:true, reason:"disabled" };
+
+  const last = await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_content_last_generated_at'").first();
+  const lastMs = Date.parse(String(last?.value || '')) || 0;
+  if (!force && lastMs && Date.now() - lastMs < cfg.interval_hours * 3600000) {
+    return { ok:true, skipped:true, reason:"interval", next_after:new Date(lastMs + cfg.interval_hours*3600000).toISOString() };
+  }
+
+  // Claim a short-lived generation lock before calling the provider.
+  const claim = now();
+  await env.DB.prepare("INSERT OR IGNORE INTO system_kv(key,value,updated_at) VALUES(?,?,?)")
+    .bind('auto_content_generation_lock', claim, claim).run();
+  const lock = await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_content_generation_lock'").first();
+  const lockMs = Date.parse(String(lock?.value || '')) || 0;
+  if (lock?.value !== claim && lockMs && Date.now() - lockMs < 10*60*1000) {
+    return { ok:true, skipped:true, reason:"locked" };
+  }
+  if (lock?.value !== claim) {
+    await env.DB.prepare("UPDATE system_kv SET value=?,updated_at=? WHERE key='auto_content_generation_lock'").bind(claim,claim).run();
+  }
+
+  try {
+    const topic = await chooseAutoContentTopic(env);
+    const content = await createGeneratedContent(env, {
+      topic,
+      platform: cfg.platform,
+      language: cfg.language,
+      market: cfg.market,
+      content_type: cfg.content_type,
+      objective: cfg.objective,
+      tone: cfg.tone,
+      facts: ""
+    });
+    await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)")
+      .bind('auto_content_last_generated_at', claim, claim).run();
+    await env.DB.prepare("DELETE FROM system_kv WHERE key='auto_content_generation_lock' AND value=?").bind(claim).run();
+    await audit(env, "auto_content_generated", "Scheduled content generated automatically and queued for approval", {
+      content_id: content.id, source, topic, interval_hours: cfg.interval_hours
+    });
+    return { ok:true, generated:true, content_id:content.id, topic };
+  } catch (e) {
+    // Release the claim on failure so a later scheduled run can retry.
+    await env.DB.prepare("DELETE FROM system_kv WHERE key='auto_content_generation_lock' AND value=?").bind(claim).run();
+    await audit(env, "auto_content_generation_failed", "Automatic content generation failed", { source, error:e.message });
+    return { ok:false, error:e.message };
+  }
+}
+
+async function getAutoContentStatus(env) {
+  const cfg = await getAutoContentConfig(env);
+  const last = await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_content_last_generated_at'").first();
+  const pending = await env.DB.prepare("SELECT COUNT(*) n FROM approval_queue WHERE status='pending'").first();
+  const generatedToday = await env.DB.prepare("SELECT COUNT(*) n FROM contents WHERE created_at>=?").bind(new Date(Date.now()-24*3600000).toISOString()).first();
+  const next = last?.value && Date.parse(last.value) ? new Date(Date.parse(last.value)+cfg.interval_hours*3600000).toISOString() : null;
+  return {
+    enabled: cfg.enabled,
+    interval_hours: cfg.interval_hours,
+    platform: cfg.platform,
+    language: cfg.language,
+    market: cfg.market,
+    last_generated_at: last?.value || null,
+    next_generation_at: next,
+    generated_last_24h: Number(generatedToday?.n || 0),
+    pending_approval: Number(pending?.n || 0)
+  };
 }
 
 async function listContent(env, status) {
@@ -537,6 +673,217 @@ async function listContent(env, status) {
   return r.results || [];
 }
 
+
+async function ensureDistributionStore(env){
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS content_distribution (id TEXT PRIMARY KEY, content_id TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, planned_at TEXT, external_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(content_id,target))`).run();
+}
+
+async function queueContentDistribution(env, contentId, targets = ["telegram","website","whatsapp"], plannedAt = null){
+  await ensureDistributionStore(env);
+  const t=now();
+  for(const target of targets){
+    if(!["telegram","website","whatsapp"].includes(String(target))) continue;
+    await env.DB.prepare(`INSERT OR IGNORE INTO content_distribution(id,content_id,target,status,planned_at,external_id,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`)
+      .bind(uid(),contentId,String(target),"awaiting_approval",plannedAt,null,null,t,t).run();
+  }
+}
+
+async function activateApprovedDistribution(env, contentId){
+  await ensureDistributionStore(env);
+  const t=now();
+  const exists=await env.DB.prepare("SELECT COUNT(*) n FROM content_distribution WHERE content_id=?").bind(contentId).first();
+  if(!Number(exists?.n||0)) await queueContentDistribution(env,contentId);
+  // All three priority destinations share one publication window. Nothing is sent immediately on approval.
+  // This prevents WhatsApp from bypassing the Calendar and keeps Website/WhatsApp/Telegram in sync.
+  const c=await env.DB.prepare("SELECT id,platform FROM contents WHERE id=?").bind(contentId).first();
+  if(c){
+    const existing=await env.DB.prepare("SELECT planned_at FROM calendar WHERE content_id=? AND status IN ('planned','publishing','published') ORDER BY created_at DESC LIMIT 1").bind(contentId).first();
+    const at=existing?.planned_at || new Date(Math.ceil((Date.now()+60*60*1000)/900000)*900000).toISOString();
+    if(!existing){
+      const cid=uid();
+      await env.DB.prepare("INSERT INTO calendar(id,campaign_id,content_id,planned_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(cid,null,contentId,at,"planned",t,t).run();
+    }
+    await env.DB.prepare("UPDATE content_distribution SET status='queued',planned_at=?,updated_at=? WHERE content_id=? AND status='awaiting_approval'").bind(at,t,contentId).run();
+  }
+}
+
+async function sendWhatsAppText(env, text){
+  if(!env.WHATSAPP_ACCESS_TOKEN || !env.WHATSAPP_PHONE_NUMBER_ID || !env.WHATSAPP_TO)
+    return {status:"manual_required",error:"WhatsApp Cloud API secrets are not configured (WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_TO)"};
+  const version=String(env.WHATSAPP_GRAPH_API_VERSION||"v23.0").replace(/^v?/i,"v");
+  const url=`https://graph.facebook.com/${version}/${encodeURIComponent(env.WHATSAPP_PHONE_NUMBER_ID)}/messages`;
+  const r=await fetchWithRetry(url,{method:"POST",headers:{Authorization:`Bearer ${env.WHATSAPP_ACCESS_TOKEN}`,"Content-Type":"application/json"},body:JSON.stringify({messaging_product:"whatsapp",to:String(env.WHATSAPP_TO),type:"text",text:{preview_url:false,body:String(text).slice(0,4096)}})},2,12000);
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok || d.error) throw Error(d.error?.message||`WhatsApp Cloud API HTTP ${r.status}`);
+  return {status:"published",external_id:String(d.messages?.[0]?.id||"")};
+}
+
+async function reconcileStaleContentDistributions(env){
+  await ensureDistributionStore(env);
+  const cutoff=new Date(Date.now()-15*60*1000).toISOString();
+  await env.DB.prepare("UPDATE content_distribution SET status='queued',error='Recovered stale processing claim',updated_at=? WHERE status='processing' AND updated_at<?").bind(now(),cutoff).run();
+}
+
+async function getContentDistributionStatus(env, contentId){
+  await ensureDistributionStore(env);
+  const rows=await env.DB.prepare("SELECT target,status,planned_at,external_id,error,created_at,updated_at FROM content_distribution WHERE content_id=? ORDER BY target ASC").bind(String(contentId)).all();
+  const items=rows.results||[];
+  return {content_id:String(contentId),items,summary:{total:items.length,published:items.filter(x=>x.status==='published').length,ready:items.filter(x=>x.status==='ready').length,queued:items.filter(x=>x.status==='queued'||x.status==='awaiting_approval').length,failed:items.filter(x=>x.status==='failed').length,manual_required:items.filter(x=>x.status==='manual_required').length,processing:items.filter(x=>x.status==='processing').length}};
+}
+
+async function getDistributionOverview(env){
+  await ensureDistributionStore(env);
+  const rows=await env.DB.prepare("SELECT target,status,COUNT(*) n FROM content_distribution GROUP BY target,status ORDER BY target,status").all();
+  const targets={telegram:{},website:{},whatsapp:{}};
+  for(const r of rows.results||[]) if(targets[r.target]) targets[r.target][r.status]=Number(r.n||0);
+  const latest=await env.DB.prepare("SELECT d.content_id,d.target,d.status,d.planned_at,d.external_id,d.error,d.updated_at,c.topic FROM content_distribution d LEFT JOIN contents c ON c.id=d.content_id ORDER BY d.updated_at DESC LIMIT 30").all();
+  return {targets,latest:latest.results||[]};
+}
+
+async function sendTelegramDistribution(env, contentId){
+  if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID) throw Error('Telegram credentials missing');
+  const c=await env.DB.prepare("SELECT hook,body,caption,cta FROM contents WHERE id=?").bind(contentId).first();
+  if(!c) throw Error('Content not found');
+  const text=[c.hook,c.body,c.caption,c.cta].filter(Boolean).join('\n\n').trim();
+  await ensureContentMediaStore(env);
+  const media=await env.DB.prepare("SELECT * FROM content_media WHERE content_id=? AND status='ready' ORDER BY created_at DESC LIMIT 1").bind(contentId).first();
+  const base=`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+  let endpoint='sendMessage', payload={chat_id:env.TELEGRAM_CHAT_ID,text};
+  if(media?.media_type==='photo'){endpoint='sendPhoto';payload={chat_id:env.TELEGRAM_CHAT_ID,photo:String(media.source_id),caption:text.slice(0,1024)};}
+  else if(media?.media_type==='video'){endpoint='sendVideo';payload={chat_id:env.TELEGRAM_CHAT_ID,video:String(media.source_id),caption:text.slice(0,1024)};}
+  let r;
+  try{r=await fetch(`${base}/${endpoint}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});}catch(e){throw Error('Telegram request outcome unknown; provider request may have been accepted');}
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.ok) throw Error(d.description||'Telegram publish failed');
+  return {status:'published',external_id:String(d.result?.message_id||'')};
+}
+
+async function processContentDistribution(env){
+  await ensureDistributionStore(env);
+  await reconcileStaleContentDistributions(env);
+  const rows=await env.DB.prepare("SELECT d.*,c.platform,c.caption,c.body,c.cta FROM content_distribution d JOIN contents c ON c.id=d.content_id WHERE d.status='queued' AND (d.planned_at IS NULL OR d.planned_at<=?) ORDER BY d.created_at ASC LIMIT 20").bind(now()).all();
+  for(const candidate of rows.results||[]){
+    const claimed=await env.DB.prepare("UPDATE content_distribution SET status='processing',updated_at=? WHERE id=? AND status='queued'").bind(now(),candidate.id).run();
+    if(!claimed.meta?.changes) continue;
+    const d={...candidate,status:'processing'};
+    try{
+      if(d.target==='telegram'){
+        const result=await sendTelegramDistribution(env,d.content_id);
+        await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(result.external_id||null,now(),d.id).run();
+        await audit(env,'telegram_content_published','Approved content published through Telegram distribution queue',{content_id:d.content_id,external_id:result.external_id||null});
+        continue;
+      }
+      if(d.target==='website'){
+        const visible=await env.DB.prepare("SELECT c.id FROM contents c JOIN content_distribution cd ON cd.content_id=c.id AND cd.target='website' WHERE c.id=? AND c.status='approved' AND cd.id=?").bind(d.content_id,d.id).first();
+        if(!visible) throw Error('Website content is not visible in the approved feed');
+        await env.DB.prepare("UPDATE content_distribution SET status='published',error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(now(),d.id).run();
+        await audit(env,'website_content_published','Approved content verified and published to the website feed',{content_id:d.content_id});
+        continue;
+      }
+      if(d.target==='whatsapp'){
+        const text=[d.caption||d.body||'',d.cta||''].filter(Boolean).join('\n\n').trim();
+        const result=await sendWhatsAppText(env,text);
+        if(result.status==='manual_required'){
+          await env.DB.prepare("UPDATE content_distribution SET status='manual_required',error=?,updated_at=? WHERE id=? AND status='processing'").bind(result.error,now(),d.id).run();
+          continue;
+        }
+        await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(result.external_id||null,now(),d.id).run();
+        await audit(env,'whatsapp_content_published','Approved content sent through WhatsApp Cloud API',{content_id:d.content_id,external_id:result.external_id||null});
+        continue;
+      }
+      throw Error('Unsupported distribution target: '+d.target);
+    }catch(e){
+      await env.DB.prepare("UPDATE content_distribution SET status='failed',error=?,updated_at=? WHERE id=? AND status='processing'").bind(e.message,now(),d.id).run();
+      await env.DB.prepare("INSERT INTO retry_queue VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),'content_distribution',JSON.stringify({distribution_id:d.id,content_id:d.content_id,target:d.target}),0,3,'queued',null,e.message,now(),now()).run();
+      await audit(env,'content_distribution_failed','Content distribution failed and was queued for retry',{content_id:d.content_id,target:d.target,error:e.message});
+    }
+  }
+}
+
+
+async function ensureContentMediaStore(env){
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS content_media (id TEXT PRIMARY KEY, content_id TEXT NOT NULL, source_type TEXT NOT NULL, source_id TEXT NOT NULL, media_type TEXT NOT NULL, media_url TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(content_id,source_type,source_id))`).run();
+}
+
+function mediaProxyUrl(id){ return `/media/telegram?id=${encodeURIComponent(id)}`; }
+
+function mediaMatchScore(topic, caption){
+  const norm=x=>String(x||'').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim().split(/\s+/).filter(w=>w.length>=3);
+  const a=new Set(norm(topic)); const b=new Set(norm(caption)); let score=0; for(const w of a) if(b.has(w)) score++; return score;
+}
+
+async function autoAttachTelegramMedia(env, contentId){
+  await ensureContentMediaStore(env);
+  const c=await env.DB.prepare("SELECT id,topic,caption FROM contents WHERE id=?").bind(contentId).first();
+  if(!c) return {attached:false,reason:'content_not_found'};
+  const existing=await env.DB.prepare("SELECT id FROM content_media WHERE content_id=? LIMIT 1").bind(contentId).first();
+  if(existing) return {attached:true,existing:true,id:existing.id};
+  const rows=await env.DB.prepare("SELECT * FROM telegram_media_sources ORDER BY created_at DESC LIMIT 20").all();
+  let best=null,bestScore=0;
+  for(const r of rows.results||[]){ const score=mediaMatchScore(c.topic,r.caption); if(score>bestScore){best=r;bestScore=score;} }
+  if(!best || bestScore<1) return {attached:false,reason:'no_confident_match'};
+  const t=now(), id=uid();
+  await env.DB.prepare("INSERT OR IGNORE INTO content_media(id,content_id,source_type,source_id,media_type,media_url,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+    .bind(id,contentId,'telegram',best.id,best.media_type,mediaProxyUrl(best.id),'ready',t,t).run();
+  await audit(env,'content_media_attached','Telegram media attached to content',{content_id:contentId,media_id:best.id,media_type:best.media_type,match_score:bestScore});
+  return {attached:true,id,source_id:best.id,media_type:best.media_type,media_url:mediaProxyUrl(best.id),match_score:bestScore};
+}
+
+async function getContentMedia(env, contentId){
+  await ensureContentMediaStore(env);
+  const r=await env.DB.prepare("SELECT * FROM content_media WHERE content_id=? ORDER BY created_at DESC").bind(contentId).all();
+  return r.results||[];
+}
+
+async function attachContentMedia(env,b){
+  await ensureContentMediaStore(env);
+  const contentId=String(b?.content_id||''), sourceId=String(b?.telegram_media_id||'');
+  if(!contentId||!sourceId) throw Error('content_id and telegram_media_id are required');
+  const c=await env.DB.prepare("SELECT id FROM contents WHERE id=?").bind(contentId).first(); if(!c) throw Error('Content not found');
+  const m=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=?").bind(sourceId).first(); if(!m) throw Error('Telegram media not found');
+  const t=now(), id=uid();
+  await env.DB.prepare("INSERT OR REPLACE INTO content_media(id,content_id,source_type,source_id,media_type,media_url,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+    .bind(id,contentId,'telegram',sourceId,m.media_type,mediaProxyUrl(sourceId),'ready',t,t).run();
+  await audit(env,'content_media_attached','Telegram media manually attached to content',{content_id:contentId,media_id:sourceId,media_type:m.media_type});
+  return {id,content_id:contentId,source_id:sourceId,media_type:m.media_type,media_url:mediaProxyUrl(sourceId),status:'ready'};
+}
+
+async function publicTelegramMediaProxy(env,req){
+  if(req.method!=='GET') return new Response('Method not allowed',{status:405});
+  const id=new URL(req.url).searchParams.get('id'); if(!id) return new Response('Missing media id',{status:400});
+  await ensureTelegramMediaTable(env);
+  const row=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=?").bind(id).first();
+  if(!row) return new Response('Media not found',{status:404});
+  if(!env.TELEGRAM_BOT_TOKEN) return new Response('Telegram not configured',{status:503});
+  const base=`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+  const fr=await fetch(`${base}/getFile?file_id=${encodeURIComponent(row.file_id)}`); const fd=await fr.json().catch(()=>({}));
+  if(!fr.ok||!fd.ok||!fd.result?.file_path) return new Response('Telegram file lookup failed',{status:502});
+  const media=await fetch(`${base.replace('/bot'+env.TELEGRAM_BOT_TOKEN,'')}/file/bot${env.TELEGRAM_BOT_TOKEN}/${fd.result.file_path}`);
+  if(!media.ok) return new Response('Telegram media fetch failed',{status:502});
+  const h=new Headers(); h.set('Content-Type',media.headers.get('Content-Type')||'application/octet-stream'); h.set('Cache-Control','public, max-age=300');
+  return new Response(media.body,{status:200,headers:h});
+}
+
+async function getContentPipelineStatus(env){
+  await ensureDistributionStore(env);
+  const counts={generated:0,pending_approval:0,approved:0,rejected:0,scheduled:0,published:0,failed:0,manual_required:0};
+  const rows=await env.DB.prepare("SELECT status, COUNT(*) n FROM contents GROUP BY status").all();
+  for(const r of rows.results||[]) if(Object.prototype.hasOwnProperty.call(counts,String(r.status))) counts[String(r.status)]=Number(r.n||0);
+  const ap=await env.DB.prepare("SELECT status, COUNT(*) n FROM approval_queue GROUP BY status").all();
+  counts.pending_approval=0; for(const r of ap.results||[]) if(r.status==='pending') counts.pending_approval=Number(r.n||0);
+  const dist=await env.DB.prepare("SELECT status, COUNT(*) n FROM content_distribution GROUP BY status").all();
+  for(const r of dist.results||[]){const st=String(r.status),n=Number(r.n||0);if(st==='queued')counts.scheduled+=n;else if(st==='published')counts.published+=n;else if(st==='failed')counts.failed+=n;else if(st==='manual_required')counts.manual_required+=n;}
+  const last=await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_content_last_generated_at'").first();
+  return {counts,last_generated_at:last?.value||null,checked_at:now()};
+}
+
+async function getWebsiteContent(env, limit=20){
+  await ensureDistributionStore(env);
+  const n=Math.min(50,Math.max(1,Number(limit)||20));
+  const r=await env.DB.prepare("SELECT c.id,c.topic,c.language,c.market,c.content_type,c.hook,c.body,c.caption,c.cta,c.hashtags,c.visual_prompt,c.created_at,c.updated_at, m.media_url, m.media_type FROM contents c JOIN content_distribution d ON d.content_id=c.id AND d.target='website' LEFT JOIN content_media m ON m.content_id=c.id AND m.status='ready' WHERE c.status='approved' AND d.status IN ('queued','ready','published') ORDER BY c.created_at DESC LIMIT ?").bind(n).all();
+  return r.results||[];
+}
+
 async function setApproval(env, id, status, reason = "") {
   if (!["approved", "rejected", "pending"].includes(status))
     throw Error("Invalid approval status");
@@ -557,6 +904,8 @@ async function setApproval(env, id, status, reason = "") {
   ).bind(status === "approved" ? "approved" :
          status === "rejected" ? "rejected" : "generated", t, id).run();
 
+  if(status === "approved") await activateApprovedDistribution(env, id);
+
   await audit(env, "approval_changed", `Content ${status}`, {
     content_id: id, status, reason
   });
@@ -564,11 +913,23 @@ async function setApproval(env, id, status, reason = "") {
   return { id, status };
 }
 
+function resolvePublishPlatforms(requestedPlatform){
+  const p=String(requestedPlatform||'');
+  // `priority` is the locked multi-destination content mode. The calendar's direct
+  // publish step sends only Telegram; Website and WhatsApp are handled by the
+  // shared content_distribution queue at the same planned_at time.
+  if(p==='priority') return ['telegram'];
+  if(p==='both') return ['telegram','instagram'];
+  return [p];
+}
+
 async function publish(env,b){
   if(!b?.content_id)throw Error("content_id is required");
   if(!await approved(env,b.content_id))throw Error("Approval required");
   const c=await env.DB.prepare("SELECT * FROM contents WHERE id=?").bind(b.content_id).first();if(!c)throw Error("Content not found");
-  const platforms=b.platform==='both'?['telegram','instagram']:[String(b.platform||'')];if(!platforms.every(x=>['telegram','instagram'].includes(x)))throw Error("Invalid platform");
+  const requestedPlatform=String(b.platform||'');
+  const platforms=resolvePublishPlatforms(requestedPlatform);
+  if(!platforms.every(x=>['telegram','instagram'].includes(x)))throw Error("Invalid platform");
   const out=[];
   for(const platform of platforms){
     const runId=`publish:${c.id}:${platform}`;const existing=await env.DB.prepare("SELECT status,summary_json,error FROM production_runs WHERE id=?").bind(runId).first();
@@ -584,7 +945,18 @@ async function publish(env,b){
       if(platform==='telegram'){
         if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID)throw Error('Telegram credentials missing');
         const text=[c.hook,c.body,c.caption,c.cta].filter(Boolean).join('\n\n');
-        let r;try{r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text})})}catch(e){throw new PublishOutcomeUnknown('Telegram request outcome unknown; provider request may have been accepted')}
+        await ensureContentMediaStore(env);
+        const media=await env.DB.prepare("SELECT * FROM content_media WHERE content_id=? AND status='ready' ORDER BY created_at DESC LIMIT 1").bind(c.id).first();
+        let r;
+        try {
+          if(media?.media_type==='photo'){
+            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,photo:String(media.source_id),caption:text.slice(0,1024)})});
+          } else if(media?.media_type==='video'){
+            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,video:String(media.source_id),caption:text.slice(0,1024)})});
+          } else {
+            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text})});
+          }
+        } catch(e){throw new PublishOutcomeUnknown('Telegram request outcome unknown; provider request may have been accepted')}
         const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error('Telegram publish failed');externalId=String(d.result?.message_id||'')
       } else {
         if(!env.INSTAGRAM_ACCESS_TOKEN||!env.INSTAGRAM_ACCOUNT_ID)throw Error('Instagram credentials missing');
@@ -635,7 +1007,7 @@ async function reconcileStalePublishes(env){
 }
 async function getCalendarMediaUrl(env,calendarId){const r=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='calendar_media' ORDER BY created_at DESC LIMIT 200").all();for(const row of r.results||[]){try{const d=JSON.parse(row.details_json||'{}');if(d.calendar_id===calendarId)return d.media_url||null}catch{}}return null}
 
-async function publishScheduled(env){const r=await env.DB.prepare("SELECT * FROM calendar WHERE status='planned' AND planned_at<=? ORDER BY planned_at ASC LIMIT 10").bind(now()).all();for(const item of r.results||[]){if(!item.content_id){await env.DB.prepare("UPDATE calendar SET status='failed',updated_at=? WHERE id=? AND status='planned'").bind(now(),item.id).run();await audit(env,'calendar_failed','Scheduled item has no content_id',{calendar_id:item.id});continue}const claim=await env.DB.prepare("UPDATE calendar SET status='publishing',updated_at=? WHERE id=? AND status='planned'").bind(now(),item.id).run();if(!claim.meta?.changes)continue;try{const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(item.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,item.id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');await publish(env,{content_id:item.content_id,platform:content.platform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),item.id).run()}catch(e){await env.DB.prepare("UPDATE calendar SET status='failed',updated_at=? WHERE id=?").bind(now(),item.id).run();await env.DB.prepare("INSERT INTO retry_queue VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),'calendar_publish',JSON.stringify({calendar_id:item.id,content_id:item.content_id}),0,3,'queued',null,e.message,now(),now()).run();await audit(env,'calendar_publish_failed','Scheduled publish failed and was queued for retry',{calendar_id:item.id,content_id:item.content_id,error:e.message})}}}
+async function publishScheduled(env){const r=await env.DB.prepare("SELECT * FROM calendar WHERE status='planned' AND planned_at<=? ORDER BY planned_at ASC LIMIT 10").bind(now()).all();for(const item of r.results||[]){if(!item.content_id){await env.DB.prepare("UPDATE calendar SET status='failed',updated_at=? WHERE id=? AND status='planned'").bind(now(),item.id).run();await audit(env,'calendar_failed','Scheduled item has no content_id',{calendar_id:item.id});continue}const claim=await env.DB.prepare("UPDATE calendar SET status='publishing',updated_at=? WHERE id=? AND status='planned'").bind(now(),item.id).run();if(!claim.meta?.changes)continue;try{const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(item.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,item.id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');const publishPlatform=resolvePublishPlatforms(content.platform)[0];const published=await publish(env,{content_id:item.content_id,platform:publishPlatform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),item.id).run();await ensureDistributionStore(env);for(const result of (published||[])){if(result.platform==='telegram')await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE content_id=? AND target='telegram'").bind(result.external_id||null,now(),item.content_id).run()}}catch(e){await env.DB.prepare("UPDATE calendar SET status='failed',updated_at=? WHERE id=?").bind(now(),item.id).run();await env.DB.prepare("INSERT INTO retry_queue VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),'calendar_publish',JSON.stringify({calendar_id:item.id,content_id:item.content_id}),0,3,'queued',null,e.message,now(),now()).run();await audit(env,'calendar_publish_failed','Scheduled publish failed and was queued for retry',{calendar_id:item.id,content_id:item.content_id,error:e.message})}}}
 
 async function collectInstagramMetrics(env){if(!env.INSTAGRAM_ACCESS_TOKEN)return;const rows=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='content_published' ORDER BY created_at DESC LIMIT 100").all();for(const row of rows.results||[]){let d;try{d=JSON.parse(row.details_json||'{}')}catch{continue}for(const result of d.results||[]){if(result.platform!=='instagram'||!result.external_id)continue;const u=new URL(`${instagramGraphBase(env)}/${encodeURIComponent(result.external_id)}/insights`);u.searchParams.set('metric','impressions,reach,likes,comments,shares,saved');u.searchParams.set('access_token',env.INSTAGRAM_ACCESS_TOKEN);const r=await fetch(u.toString());if(!r.ok)continue;const data=await r.json().catch(()=>({}));if(data.error||!Array.isArray(data.data))continue;const values={};for(const m of data.data){const v=Array.isArray(m.values)?m.values.at(-1)?.value:m.value;values[m.name]=Number(v||0)}const ex=await env.DB.prepare("SELECT id FROM social_metrics WHERE content_id=? AND platform='instagram' ORDER BY created_at DESC LIMIT 1").bind(d.content_id).first();if(ex)await env.DB.prepare("UPDATE social_metrics SET impressions=?,reach=?,likes=?,comments=?,shares=?,saves=?,metric_date=? WHERE id=?").bind(values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,now().slice(0,10),ex.id).run();else await env.DB.prepare("INSERT INTO social_metrics(id,content_id,platform,impressions,reach,likes,comments,shares,saves,clicks,metric_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),d.content_id,'instagram',values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,0,now().slice(0,10),now()).run()}}}
 
@@ -679,7 +1051,34 @@ async function verifyInstagramSignature(env,req,raw){if(env.INSTAGRAM_APP_SECRET
 
 async function handleInstagramWebhook(env,req){if(req.method==='GET'){const u=new URL(req.url);if(u.searchParams.get('hub.mode')==='subscribe'&&u.searchParams.get('hub.verify_token')&&env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&u.searchParams.get('hub.verify_token')===env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN)return new Response(u.searchParams.get('hub.challenge'),{status:200,headers:{'Content-Type':'text/plain'}});return json({ok:false,error:'Webhook verification failed'},403)}if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN||(!env.INSTAGRAM_APP_SECRET&&!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Instagram webhook secrets not configured'},503);const raw=await req.text();if(!(await verifyInstagramSignature(env,req,raw)))return json({ok:false,error:'Unauthorized webhook'},401);let body;try{body=JSON.parse(raw)}catch{return json({ok:false,error:'Invalid JSON'},400)}for(const entry of body.entry||[])for(const change of entry.changes||[]){const value=change.value||{},externalId=String(value.mid||value.message_id||`${entry.id||uid()}:${change.field||'change'}:${value.timestamp||Date.now()}`),ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='instagram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)continue;const text=String(value.text||value.message||'').trim();if(!text)continue;const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'instagram',externalId,String(value.from?.username||value.from?.id||entry.id||'unknown'),text,'unclassified','normal',null,'new',t,t).run()}return json({ok:true})}
 
-async function recovery(env){await reconcileStalePublishes(env);await publishScheduled(env);const r=await env.DB.prepare("SELECT * FROM retry_queue WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 10").bind(now()).all();for(const x of r.results||[])try{const claim=await env.DB.prepare("UPDATE retry_queue SET status='running',attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'").bind(now(),x.id).run();if(!claim.meta?.changes)continue;const p=JSON.parse(x.payload_json);if(x.operation==='publish')await publish(env,p);else if(x.operation==='calendar_publish'){const cal=await env.DB.prepare("SELECT * FROM calendar WHERE id=?").bind(p.calendar_id).first();if(!cal||cal.status==='published'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue}const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(p.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,p.calendar_id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');await publish(env,{content_id:p.content_id,platform:content.platform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),p.calendar_id).run()}else throw Error('Unsupported retry operation');await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run()}catch(e){const attempts=Number(x.attempts)+1,status=attempts>=Number(x.max_attempts)?'failed':'queued';await env.DB.prepare("UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").bind(status,e.message,new Date(Date.now()+Math.min(3600000,2**attempts*60000)).toISOString(),now(),x.id).run()}await collectInstagramMetrics(env)}
+async function recovery(env){await reconcileStalePublishes(env);await reconcileStaleContentDistributions(env);await publishScheduled(env);await processContentDistribution(env);const r=await env.DB.prepare("SELECT * FROM retry_queue WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 10").bind(now()).all();for(const x of r.results||[])try{const claim=await env.DB.prepare("UPDATE retry_queue SET status='running',attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'").bind(now(),x.id).run();if(!claim.meta?.changes)continue;const p=JSON.parse(x.payload_json);if(x.operation==='publish')await publish(env,p);else if(x.operation==='content_distribution'){
+        const d=await env.DB.prepare("SELECT * FROM content_distribution WHERE id=?").bind(p.distribution_id).first();
+        if(!d||d.status==='published'||d.status==='ready'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue;}
+        if(d.status!=='failed')throw Error('Distribution is not retryable');
+        if(d.target==='website'){
+          await env.DB.prepare("UPDATE content_distribution SET status='queued',planned_at=?,error=NULL,updated_at=? WHERE id=?").bind(now(),now(),d.id).run();
+        } else if(d.target==='whatsapp'){
+          const c=await env.DB.prepare("SELECT caption,body,cta FROM contents WHERE id=?").bind(d.content_id).first();
+          if(!c)throw Error('Content not found');
+          const text=[c.caption||c.body||'',c.cta||''].filter(Boolean).join("\n\n").trim();
+          const result=await sendWhatsAppText(env,text);
+          if(result.status==='manual_required'){
+            await env.DB.prepare("UPDATE content_distribution SET status='manual_required',error=?,updated_at=? WHERE id=? AND status!='published'").bind(result.error,now(),d.id).run();
+            await audit(env,'whatsapp_content_manual_required','WhatsApp distribution requires configured Cloud API credentials',{content_id:d.content_id});
+            await env.DB.prepare("UPDATE retry_queue SET status='completed',last_error=?,updated_at=? WHERE id=?").bind(result.error,now(),x.id).run();
+            continue;
+          }
+          await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=?").bind(result.external_id||null,now(),d.id).run();
+          await audit(env,'whatsapp_content_published_retry','Failed WhatsApp content distribution retried successfully',{content_id:d.content_id,external_id:result.external_id||null});
+        } else if(d.target==='telegram'){
+          const result=await sendTelegramDistribution(env,d.content_id);
+          await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=?").bind(result.external_id||null,now(),d.id).run();
+          await audit(env,'telegram_content_published_retry','Failed Telegram content distribution retried successfully',{content_id:d.content_id,external_id:result.external_id||null});
+        } else throw Error('Unsupported distribution target');
+      }else if(x.operation==='calendar_publish'){const cal=await env.DB.prepare("SELECT * FROM calendar WHERE id=?").bind(p.calendar_id).first();if(!cal||cal.status==='published'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue}const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(p.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,p.calendar_id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');const publishPlatform=resolvePublishPlatforms(content.platform)[0];await publish(env,{content_id:p.content_id,platform:publishPlatform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),p.calendar_id).run()}else throw Error('Unsupported retry operation');await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run()}catch(e){const attempts=Number(x.attempts)+1,status=attempts>=Number(x.max_attempts)?'failed':'queued';if(x.operation==='content_distribution'){
+        try{const p2=JSON.parse(x.payload_json||'{}');if(p2.distribution_id)await env.DB.prepare("UPDATE content_distribution SET status='failed',error=?,updated_at=? WHERE id=? AND status!='published'").bind(e.message,now(),p2.distribution_id).run()}catch{}
+      }
+      await env.DB.prepare("UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").bind(status,e.message,new Date(Date.now()+Math.min(3600000,2**attempts*60000)).toISOString(),now(),x.id).run()}await collectInstagramMetrics(env)}
 
 
 function parseLeadNotes(lead) {
@@ -848,7 +1247,7 @@ function sectionFa(value){let s=String(value??'');for(let i=0;i<3;i++){const r=r
 function headers(){return {'Authorization':'Bearer '+token,'Content-Type':'application/json'}}
 async function api(path,opts={}){try{const r=await fetch(path,Object.assign({},opts,{headers:Object.assign({},headers(),opts.headers||{}),cache:'no-store'}));const text=await r.text();let d={};try{d=JSON.parse(text)}catch{throw Error('Worker \u067e\u0627\u0633\u062e \u0646\u0627\u0645\u0639\u062a\u0628\u0631 \u062f\u0627\u062f. HTTP '+r.status)}if(!r.ok){if(r.status===401)throw Error('\u0631\u0645\u0632 \u0645\u062f\u06cc\u0631 \u0627\u0634\u062a\u0628\u0627\u0647 \u0627\u0633\u062a.');if(r.status===429)throw Error('\u062a\u0639\u062f\u0627\u062f \u062f\u0631\u062e\u0648\u0627\u0633\u062a\u200c\u0647\u0627 \u0632\u06cc\u0627\u062f \u0627\u0633\u062a\u061b \u06a9\u0645\u06cc \u0628\u0639\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0644\u0627\u0634 \u06a9\u0646\u06cc\u062f.');throw Error(d.error||('HTTP '+r.status))}return d}catch(e){throw Error(e?.message||'\u062e\u0637\u0627\u06cc \u0627\u0631\u062a\u0628\u0627\u0637 \u0628\u0627 Worker')}}
 function toggleToken(){const x=document.getElementById('token');x.type=x.type==='password'?'text':'password'}
-async function performLogin(){const s=document.getElementById('loginStatus'),btn=document.getElementById('loginBtn');token=document.getElementById('token').value.trim();if(!token){s.className='status error';s.textContent='ADMIN TOKEN \u0631\u0627 \u0648\u0627\u0631\u062f \u06a9\u0646\u06cc\u062f.';return}btn.disabled=true;s.className='status';s.textContent='\u062f\u0631 \u062d\u0627\u0644 \u0628\u0631\u0631\u0633\u06cc...';const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);try{await api('/api/content',{signal:controller.signal});document.getElementById('login').classList.add('hidden');document.getElementById('app').classList.remove('hidden');document.getElementById('logoutBtn').classList.remove('hidden');document.getElementById('nav').classList.remove('hidden');s.textContent='';await loadApprovals();await loadApproved();await loadLeadOverview()}catch(e){token='';s.className='status error';s.textContent=e?.name==='AbortError'?'\u0627\u0631\u062a\u0628\u0627\u0637 \u0628\u0627 Worker \u067e\u0627\u0633\u062e \u0646\u062f\u0627\u062f. \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0644\u0627\u0634 \u06a9\u0646\u06cc\u062f.' : (e.message||'\u0648\u0631\u0648\u062f \u0646\u0627\u0645\u0648\u0641\u0642')}finally{clearTimeout(timer);btn.disabled=false}}
+async function performLogin(){const s=document.getElementById('loginStatus'),btn=document.getElementById('loginBtn');token=document.getElementById('token').value.trim();if(!token){s.className='status error';s.textContent='ADMIN TOKEN \u0631\u0627 \u0648\u0627\u0631\u062f \u06a9\u0646\u06cc\u062f.';return}btn.disabled=true;s.className='status';s.textContent='\u062f\u0631 \u062d\u0627\u0644 \u0628\u0631\u0631\u0633\u06cc...';const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);try{await api('/api/content',{signal:controller.signal});document.getElementById('login').classList.add('hidden');document.getElementById('app').classList.remove('hidden');document.getElementById('logoutBtn').classList.remove('hidden');document.getElementById('nav').classList.remove('hidden');s.textContent='';await loadApprovals();await loadApproved();await loadLeadOverview();await loadAutoContentStatus();await loadContentPipeline();await loadDistributionOverview()}catch(e){token='';s.className='status error';s.textContent=e?.name==='AbortError'?'\u0627\u0631\u062a\u0628\u0627\u0637 \u0628\u0627 Worker \u067e\u0627\u0633\u062e \u0646\u062f\u0627\u062f. \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0644\u0627\u0634 \u06a9\u0646\u06cc\u062f.' : (e.message||'\u0648\u0631\u0648\u062f \u0646\u0627\u0645\u0648\u0641\u0642')}finally{clearTimeout(timer);btn.disabled=false}}
 async function downloadTelegramMedia(id){return shareTelegramMedia(id)}
 async function shareTelegramMedia(id){try{const r=await fetch('/api/telegram/media/file?id='+encodeURIComponent(id),{headers:headers(),cache:'no-store'});if(!r.ok)throw Error('Ø¯Ø±ÛØ§ÙØª Ø±Ø³Ø§ÙÙ ÙØ§ÙÙÙÙ Ø¨ÙØ¯');const blob=await r.blob();const type=blob.type||'application/octet-stream';const ext=type.includes('video')?'mp4':type.includes('png')?'png':'jpg';const file=new File([blob],'HAMZEHI-BOX-Story.'+ext,{type});if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:'HAMZEHI BOX'});return}const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),60000)}catch(e){if(e&&e.name==='AbortError')return;alert('Ø®Ø·Ø§: '+e.message)}}
 async function loadWhatsappStory(){const st=document.getElementById('whatsappStoryStatus'),list=document.getElementById('whatsappStoryList');if(!st||!list)return;st.textContent=safeFa('Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØª Ø±Ø³Ø§ÙÙâÙØ§â¦');try{const d=await api('/api/telegram/media?limit=12');const a=d.items||[];st.className='status ok';st.textContent=sectionFa(a.length+' Ø±Ø³Ø§ÙÙ Ø¢ÙØ§Ø¯Ù Ø§Ø³Øª');list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>ð± '+esc(sectionFa(x.media_type))+'</b><span class="pill">'+esc(sectionFa(x.created_at||''))+'</span></div><div class="mini">'+esc(sectionFa(x.caption||'Ø¨Ø¯ÙÙ Ú©Ù¾Ø´Ù'))+'</div><div class="actions" style="margin-top:10px"><button class="btn primary" onclick="shareTelegramMedia(&quot;'+esc(x.id)+'&quot;)">Ø§Ø±Ø³Ø§Ù Ø¨Ù WhatsApp / Ø¯Ø§ÙÙÙØ¯</button></div></div>').join(''):'<div class="empty">'+sectionFa('ÙÙÙØ² Ø±Ø³Ø§ÙÙâØ§Û Ø§Ø² Ú©Ø§ÙØ§Ù Ø¯Ø±ÛØ§ÙØª ÙØ´Ø¯Ù Ø§Ø³Øª.')+'</div>'}catch(e){st.className='status error';st.textContent=sectionFa('Ø®Ø·Ø§: '+e.message)}}
@@ -858,6 +1257,14 @@ async function setupTelegramMedia(){const st=document.getElementById('telegramMe
 setInterval(()=>{if(token&&document.getElementById('app')&&!document.getElementById('app').classList.contains('hidden'))loadAdAutopilotStatus()},20000);
 function logout(){token='';document.getElementById('app').classList.add('hidden');document.getElementById('login').classList.remove('hidden');document.getElementById('logoutBtn').classList.add('hidden');document.getElementById('nav').classList.add('hidden');document.getElementById('token').value='';document.getElementById('loginStatus').textContent='\u062e\u0627\u0631\u062c \u0634\u062f\u06cc\u062f.'}
 function show(id){document.querySelectorAll('.section').forEach(x=>x.classList.remove('active'));const el=document.getElementById(id);if(el)el.classList.add('active');window.scrollTo(0,0)}
+async function loadContentPipeline(){const b=document.getElementById('contentPipelineStatus');if(!b)return;try{const d=await api('/api/content/pipeline'),c=d.pipeline?.counts||{};b.className='status ok';b.innerHTML='<div class="two"><div><b>ØªÙÙÛØ¯</b><div class="stat">'+esc(String(c.generated||0))+'</div></div><div><b>ØªØ£ÛÛØ¯</b><div class="stat">'+esc(String(c.pending_approval||0))+'</div></div><div><b>Ø²ÙØ§ÙâØ¨ÙØ¯Û</b><div class="stat">'+esc(String(c.scheduled||0))+'</div></div><div><b>ÙÙØªØ´Ø±Ø´Ø¯Ù</b><div class="stat">'+esc(String(c.published||0))+'</div></div></div><div class="mini" style="margin-top:8px">Ø®Ø·Ø§: '+esc(String(c.failed||0))+' Â· Ø§ÙØ¯Ø§Ù Ø¯Ø³ØªÛ: '+esc(String(c.manual_required||0))+'</div><div class="mini" style="margin-top:5px">Ø¢Ø®Ø±ÛÙ ØªÙÙÛØ¯ Ø®ÙØ¯Ú©Ø§Ø±: '+esc(d.pipeline?.last_generated_at||'ÙÙÙØ² Ø§ÙØ¬Ø§Ù ÙØ´Ø¯Ù')+'</div>'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+
+async function loadDistributionOverview(){const b=document.getElementById('distributionOverview');if(!b)return;try{const d=await api('/api/distribution/overview'),t=d.overview?.targets||{};const label=x=>'\u0645\u0646\u062a\u0634\u0631: '+(x.published||0)+' \u00b7 \u0635\u0641: '+((x.queued||0)+(x.awaiting_approval||0))+' \u00b7 \u062e\u0637\u0627: '+(x.failed||0)+' \u00b7 \u062f\u0633\u062a\u06cc: '+(x.manual_required||0);b.className='status ok';b.innerHTML='<div class="two"><div><b>Telegram</b><div class="mini">'+esc(label(t.telegram||{}))+'</div></div><div><b>Website</b><div class="mini">'+esc(label(t.website||{}))+'</div></div><div><b>WhatsApp</b><div class="mini">'+esc(label(t.whatsapp||{}))+'</div></div></div>'}catch(e){b.className='status error';b.textContent='\u062e\u0637\u0627: '+e.message}}
+
+async function loadAutoContentStatus(){const b=document.getElementById('autoContentStatus');if(!b)return;try{const d=await api('/api/content/automation');const a=d.automation||{};b.className='status '+(a.enabled?'ok':'');b.innerHTML='<b>'+ (a.enabled?'ð¢ ÙÙØªÙØ± Ø®ÙØ¯Ú©Ø§Ø± Ø±ÙØ´Ù Ø§Ø³Øª':'â¸ ÙÙØªÙØ± Ø®ÙØ¯Ú©Ø§Ø± Ø®Ø§ÙÙØ´ Ø§Ø³Øª')+'</b><div class="mini" style="margin-top:7px">ÙØ§ØµÙÙ ØªÙÙÛØ¯: '+esc(String(a.interval_hours||12))+' Ø³Ø§Ø¹Øª Â· ØªÙÙÛØ¯ Û²Û´ Ø³Ø§Ø¹Øª Ø§Ø®ÛØ±: '+esc(String(a.generated_last_24h||0))+' Â· Ø¯Ø± Ø§ÙØªØ¸Ø§Ø± ØªØ£ÛÛØ¯: '+esc(String(a.pending_approval||0))+'</div><div class="mini" style="margin-top:5px">Ø¢Ø®Ø±ÛÙ ØªÙÙÛØ¯: '+esc(a.last_generated_at||'ÙÙÙØ² Ø§ÙØ¬Ø§Ù ÙØ´Ø¯Ù')+'</div><div class="mini" style="margin-top:5px">ØªÙÙÛØ¯ Ø¨Ø¹Ø¯Û: '+esc(a.next_generation_at||'Ù¾Ø³ Ø§Ø² Ø§Ø¬Ø±Ø§Û Scheduler')+'</div>'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function toggleAutoContent(){const b=document.getElementById('autoContentToggle');if(!b)return;try{const d=await api('/api/content/automation');const enabled=!!d.automation?.enabled;await api('/api/content/automation',{method:'POST',body:JSON.stringify({enabled:!enabled})});await loadAutoContentStatus()}catch(e){alert('Ø®Ø·Ø§: '+e.message)}}
+async function runAutoContentNow(){const b=document.getElementById('autoContentStatus');if(b){b.className='status';b.textContent='Ø¯Ø± Ø­Ø§Ù ØªÙÙÛØ¯ Ø®ÙØ¯Ú©Ø§Ø± ÙØ­ØªÙØ§â¦'}try{const d=await api('/api/content/automation/run',{method:'POST'});if(b){b.className=d.ok?'status ok':'status error';b.textContent=d.generated?'ÙØ­ØªÙØ§ Ø³Ø§Ø®ØªÙ Ø´Ø¯ Ù ÙØ§Ø±Ø¯ ØµÙ ØªØ£ÛÛØ¯ Ø´Ø¯: '+d.topic:(d.skipped?'ÙØ¹ÙØ§Ù ÙÙØ¨Øª ØªÙÙÛØ¯ ÙØ±Ø³ÛØ¯Ù Ø§Ø³Øª.':('Ø®Ø·Ø§: '+(d.error||'ÙØ§ÙØ´Ø®Øµ')))}await loadApprovals();await loadAutoContentStatus()}catch(e){if(b){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}}
+
 async function loadApprovals(){const st=document.getElementById('approvalStatus'),list=document.getElementById('approvalList');st.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026';try{const d=await api('/api/content?status=generated');const items=(d.items||[]).filter(x=>x.approval_status==='pending');st.className='status ok';st.textContent=items.length+' \u0645\u062d\u062a\u0648\u0627 \u062f\u0631 \u0627\u0646\u062a\u0638\u0627\u0631 \u062a\u0623\u06cc\u06cc\u062f';list.innerHTML=items.length?items.map(x=>'<article class="item"><div class="row"><span class="pill">'+esc(x.platform)+'</span><span class="pill">'+esc(x.language)+'</span><span class="pill">'+esc(x.market)+'</span></div><div class="title" style="margin-top:12px">'+esc(x.topic)+'</div><div class="label">Hook</div><div class="text">'+esc(x.hook)+'</div><div class="label">Caption</div><div class="text">'+esc(x.caption)+'</div><div class="label">CTA</div><div class="text">'+esc(x.cta)+'</div><div class="label">Hashtags</div><div class="text">'+esc(x.hashtags)+'</div><div class="actions" style="margin-top:14px"><button class="btn primary" onclick="changeApproval(&quot;'+x.id+'&quot;,&quot;approved&quot;)">\u2713 \u062a\u0623\u06cc\u06cc\u062f</button><button class="btn danger" onclick="changeApproval(&quot;'+x.id+'&quot;,&quot;rejected&quot;)">\u2715 \u0631\u062f</button></div></article>').join(''):'<div class="empty">\u0645\u062d\u062a\u0648\u0627\u06cc \u062c\u062f\u06cc\u062f\u06cc \u0628\u0631\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f \u0648\u062c\u0648\u062f \u0646\u062f\u0627\u0631\u062f.</div>'}catch(e){st.className='status error';st.textContent='\u062e\u0637\u0627: '+e.message}}
 async function changeApproval(id,status){try{await api('/api/content/approve',{method:'POST',body:JSON.stringify({content_id:id,status,reason:status==='approved'?'Approved from dashboard':'Rejected from dashboard'})});await loadApprovals();await loadApproved()}catch(e){alert('\u062e\u0637\u0627: '+e.message)}}
 async function loadApproved(){const st=document.getElementById('approvedStatus'),list=document.getElementById('approvedList');if(!st||!list)return;st.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026';try{const d=await api('/api/content?status=approved');const items=d.items||[];st.className='status ok';st.textContent=items.length+' \u0645\u062d\u062a\u0648\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f\u0634\u062f\u0647';list.innerHTML=items.length?items.map(x=>{const cid=esc(JSON.stringify(String(x.id)));return '<article class="item publish-item" data-content-id="'+esc(String(x.id))+'"><div class="row"><span class="pill">'+esc(x.platform)+'</span><span class="pill">'+esc(x.language)+'</span><span class="pill">'+esc(x.market)+'</span></div><div class="title" style="margin-top:12px">'+esc(x.topic)+'</div><div class="label">Caption</div><div class="text">'+esc(x.caption)+'</div><div class="label">Media URL (\u0628\u0631\u0627\u06cc Instagram)</div><input class="field media-input" placeholder="https://..." inputmode="url"><div class="actions" style="margin-top:10px"><button class="btn secondary" onclick="doPublish('+cid+',&quot;telegram&quot;)">\u0627\u0631\u0633\u0627\u0644 Telegram</button><button class="btn secondary" onclick="doPublish('+cid+',&quot;instagram&quot;)">\u0627\u0631\u0633\u0627\u0644 Instagram</button><button class="btn primary" onclick="doPublish('+cid+',&quot;both&quot;)">\u0627\u0631\u0633\u0627\u0644 \u0647\u0631 \u062f\u0648</button></div><div class="status pub-status"></div></article>'}).join(''):'<div class="empty">\u0645\u062d\u062a\u0648\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f\u0634\u062f\u0647\u200c\u0627\u06cc \u0628\u0631\u0627\u06cc \u0627\u0646\u062a\u0634\u0627\u0631 \u0648\u062c\u0648\u062f \u0646\u062f\u0627\u0631\u062f.</div>'}catch(e){st.className='status error';st.textContent='\u062e\u0637\u0627: '+e.message}}
@@ -916,8 +1323,9 @@ function dashboardHtml() {
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>HAMZEHI SOCIAL AI \u2014 Control Center</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#09090b;color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{width:min(900px,100%);margin:auto;padding:28px 18px 110px}.top{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:4px 0 24px;padding:0 2px}.brand{font-size:20px;font-weight:800}.sub{font-size:12px;color:#8f8f98;margin-top:3px}.card{background:#141418;border:1px solid #292930;border-radius:20px;padding:20px;margin:18px 0;box-shadow:0 10px 30px rgba(0,0,0,.12)}.title{font-size:18px;font-weight:800;margin:0 0 14px;line-height:1.5}.label{font-size:12px;color:#999;margin:16px 0 7px}.field{width:100%;padding:15px 14px;border-radius:14px;border:1px solid #36363e;background:#0d0d10;color:#fff;font-size:15px;min-height:50px}.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.btn{border:0;border-radius:14px;padding:13px 17px;font-weight:750;font-size:14px;cursor:pointer;min-height:48px}.primary{background:#eee;color:#111}.secondary{background:#222229;color:#fff;border:1px solid #3a3a43}.danger{background:#2b2022;color:#fff;border:1px solid #5b373b}.btn:disabled{opacity:.45}.hidden{display:none!important}.status{margin:9px 0;font-size:13px;color:#aaa;min-height:20px}.error{color:#ff9999}.ok{color:#9de4b0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.tool{min-height:92px;text-align:right;background:#15151a;border:1px solid #303039;color:#fff;border-radius:16px;padding:13px;cursor:pointer}.tool b{display:block;font-size:15px;margin-bottom:5px}.tool span{font-size:11px;color:#999}.section{display:none}.section.active{display:block}.pill{font-size:11px;background:#222229;border-radius:999px;padding:5px 8px;color:#bbb}.text{white-space:pre-wrap;line-height:1.8;font-size:14px;color:#eee}.empty{text-align:center;color:#999;padding:28px 8px}.actions{display:flex;gap:8px}.actions .btn{flex:1}.nav{position:fixed;bottom:0;left:0;right:0;background:#101014ee;border-top:1px solid #2b2b32;backdrop-filter:blur(10px);padding:8px 10px;z-index:10}.navin{width:min(900px,100%);margin:auto;display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.nav button{background:transparent;border:0;color:#aaa;font-size:11px;padding:7px}.nav button.active{color:#fff;font-weight:800}.stat{font-size:28px;font-weight:850}.muted{color:#999;font-size:12px}.item{border:1px solid #292930;border-radius:14px;padding:12px;margin:9px 0}.itemhead{display:flex;justify-content:space-between;gap:8px;align-items:center}.mini{font-size:11px;color:#999}.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}@media(max-width:600px){.two{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}}
-<style>@media(max-width:600px){main{padding:24px 14px 105px}.card{padding:18px;margin:16px 0}.top{margin-bottom:20px}.row .btn{flex:1;min-width:140px}.actions{gap:10px}}</style></style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#09090b;color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Arabic",Tahoma,sans-serif;direction:rtl;text-align:right;-webkit-text-size-adjust:100%}main{width:min(900px,100%);margin:auto;padding:28px 18px 110px}.top{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:4px 0 24px;padding:0 2px}.brand{font-size:20px;font-weight:800}.sub{font-size:12px;color:#8f8f98;margin-top:3px}.card{background:#141418;border:1px solid #292930;border-radius:20px;padding:20px;margin:18px 0;box-shadow:0 10px 30px rgba(0,0,0,.12)}.title{font-size:18px;font-weight:800;margin:0 0 14px;line-height:1.5}.label{font-size:12px;color:#999;margin:16px 0 7px}.field{width:100%;padding:15px 14px;border-radius:14px;border:1px solid #36363e;background:#0d0d10;color:#fff;font-size:15px;min-height:50px}.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.btn{border:0;border-radius:14px;padding:13px 17px;font-weight:750;font-size:14px;cursor:pointer;min-height:48px}.primary{background:#eee;color:#111}.secondary{background:#222229;color:#fff;border:1px solid #3a3a43}.danger{background:#2b2022;color:#fff;border:1px solid #5b373b}.btn:disabled{opacity:.45}.hidden{display:none!important}.status{margin:9px 0;font-size:13px;color:#aaa;min-height:20px}.error{color:#ff9999}.ok{color:#9de4b0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.tool{min-height:92px;text-align:right;background:#15151a;border:1px solid #303039;color:#fff;border-radius:16px;padding:13px;cursor:pointer}.tool b{display:block;font-size:15px;margin-bottom:5px}.tool span{font-size:11px;color:#999}.section{display:none}.section.active{display:block}.pill{font-size:11px;background:#222229;border-radius:999px;padding:5px 8px;color:#bbb}.text{white-space:pre-wrap;line-height:1.8;font-size:14px;color:#eee;direction:rtl;unicode-bidi:plaintext;text-align:right;overflow-wrap:anywhere}.status,.mini,.muted,.empty,.item,.title,.label,.tool,.sub{direction:rtl;unicode-bidi:plaintext;text-align:right}.field{direction:rtl;unicode-bidi:plaintext;text-align:right}.field::placeholder{direction:rtl;text-align:right}.empty{text-align:center;color:#999;padding:28px 8px}.actions{display:flex;gap:8px}.actions .btn{flex:1}.nav{position:fixed;bottom:0;left:0;right:0;background:#101014ee;border-top:1px solid #2b2b32;backdrop-filter:blur(10px);padding:8px 10px;z-index:10}.navin{width:min(900px,100%);margin:auto;display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.nav button{background:transparent;border:0;color:#aaa;font-size:11px;padding:7px}.nav button.active{color:#fff;font-weight:800}.stat{font-size:28px;font-weight:850}.muted{color:#999;font-size:12px}.item{border:1px solid #292930;border-radius:14px;padding:12px;margin:9px 0}.itemhead{display:flex;justify-content:space-between;gap:8px;align-items:center}.mini{font-size:11px;color:#999}.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}@media(max-width:600px){.two{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}}
+@media(max-width:600px){main{padding:24px 14px 105px}.card{padding:18px;margin:16px 0}.top{margin-bottom:20px}.row .btn{flex:1;min-width:140px}.actions{gap:10px}}
+</style>
 </head>
 <body>
 <main>
@@ -937,8 +1345,8 @@ function dashboardHtml() {
 <button class="tool" onclick="show('whatsappStory');loadWhatsappStory()"><b>\ud83d\udcf1 \u0627\u0633\u062a\u0648\u0631\u06cc WhatsApp</b><span>\u0622\u0645\u0627\u062f\u0647\u200c\u0633\u0627\u0632\u06cc \u0639\u06a9\u0633 \u0648 \u0648\u06cc\u062f\u0626\u0648 \u0628\u0631\u0627\u06cc \u0627\u0633\u062a\u0648\u0631\u06cc</span></button>
 <button class="tool" onclick="show('metrics');loadMetrics()"><b>\ud83d\udcca \u0622\u0645\u0627\u0631</b><span>\u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0627\u062c\u062a\u0645\u0627\u0639\u06cc</span></button>
 <button class="tool" onclick="show('system');loadSystem()"><b>\u2699\ufe0f \u0633\u06cc\u0633\u062a\u0645</b><span>Health / Recovery / Logs</span></button>
-</div></div><div class="card"><div class="title">\u0648\u0636\u0639\u06cc\u062a</div><div id="homeStatus" class="status ok">\u0645\u062a\u0635\u0644</div></div></div>
-<div id="generate" class="section"><div class="card"><div class="title">\u270d\ufe0f \u062a\u0648\u0644\u06cc\u062f \u0645\u062d\u062a\u0648\u0627</div><div class="label">\u0645\u0648\u0636\u0648\u0639</div><input id="gTopic" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b \u062c\u0639\u0628\u0647 \u0644\u0648\u06a9\u0633 \u0637\u0644\u0627 \u0648 \u062c\u0648\u0627\u0647\u0631"><div class="label">\u067e\u0644\u062a\u0641\u0631\u0645</div><select id="gPlatform" class="field"><option value="instagram">Instagram</option><option value="telegram">Telegram</option><option value="both">Both</option></select><div class="label">\u0632\u0628\u0627\u0646</div><select id="gLanguage" class="field"><option value="fa-IR">\u0641\u0627\u0631\u0633\u06cc</option><option value="ar-IQ">\u0639\u0631\u0628\u06cc \u0639\u0631\u0627\u0642\u06cc</option></select><div class="label">\u0628\u0627\u0632\u0627\u0631</div><select id="gMarket" class="field"><option value="Iran">Iran</option><option value="Iraq">Iraq</option></select><div class="label">\u0627\u0637\u0644\u0627\u0639\u0627\u062a \u0648\u0627\u0642\u0639\u06cc \u0645\u062c\u0627\u0632 \u0628\u0631\u0627\u06cc \u0627\u0633\u062a\u0641\u0627\u062f\u0647</div><textarea id="gFacts" class="field" rows="5" placeholder="\u0641\u0642\u0637 \u0648\u0627\u0642\u0639\u06cc\u062a\u200c\u0647\u0627\u06cc\u06cc \u06a9\u0647 \u062e\u0648\u062f\u062a \u062a\u0623\u06cc\u06cc\u062f \u06a9\u0631\u062f\u0647\u200c\u0627\u06cc"></textarea><div class="row" style="margin-top:10px"><button id="generateBtn" class="btn primary" onclick="generate()">\u0633\u0627\u062e\u062a \u0645\u062d\u062a\u0648\u0627</button></div><div id="generateStatus" class="status"></div></div><div id="generatedResult"></div></div>
+</div></div><div class="card"><div class="title">\u0648\u0636\u0639\u06cc\u062a</div><div id="homeStatus" class="status ok">\u0645\u062a\u0635\u0644</div></div><div class="card"><div class="title">ð ÙØ¶Ø¹ÛØª Pipeline ÙØ­ØªÙØ§</div><div class="mini">ÙØ¶Ø¹ÛØª ÙØ§ÙØ¹Û ÙØ­ØªÙØ§ Ø§Ø² ØªÙÙÛØ¯ ØªØ§ Ø§ÙØªØ´Ø§Ø±.</div><div id="contentPipelineStatus" class="status">Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Ûâ¦</div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadContentPipeline()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ ÙØ¶Ø¹ÛØª</button></div></div><div class="card"><div class="title">\ud83d\udce1 \u0648\u0636\u0639\u06cc\u062a \u0627\u0646\u062a\u0634\u0627\u0631 \u0633\u0647-\u0645\u0642\u0635\u062f\u06cc</div><div class="mini">\u0648\u0636\u0639\u06cc\u062a \u0648\u0627\u0642\u0639\u06cc Telegram\u060c Website \u0648 WhatsApp \u0627\u0632 \u0635\u0641 \u062a\u0648\u0632\u06cc\u0639.</div><div id="distributionOverview" class="status">\u062f\u0631 \u062d\u0627\u0644 \u0628\u0631\u0631\u0633\u06cc\u2026</div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadDistributionOverview()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u0648\u0636\u0639\u06cc\u062a</button></div></div><div class="card"><div class="title">\ud83e\udde0 ÙÙØªÙØ± ØªÙÙÛØ¯ ÙØ­ØªÙØ§Û Ø®ÙØ¯Ú©Ø§Ø±</div><div class="mini">Ø³ÛØ³ØªÙ Ø¨Ø¯ÙÙ ÙÛØ§Ø² Ø¨Ù ÙØ±ÙØ¯ Ø±ÙØ²Ø§ÙÙØ Ø·Ø¨Ù ÙØ§ØµÙÙ Ø²ÙØ§ÙÛ ØªÙØ¸ÛÙâØ´Ø¯Ù ÙØ­ØªÙØ§ ÙÛâØ³Ø§Ø²Ø¯ Ù Ø¢Ù Ø±Ø§ Ø¯Ø± ØµÙ ØªØ£ÛÛØ¯ ÙØ±Ø§Ø± ÙÛâØ¯ÙØ¯.</div><div id="autoContentStatus" class="status">Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Ûâ¦</div><div class="row" style="margin-top:10px"><button id="autoContentToggle" class="btn secondary" onclick="toggleAutoContent()">Ø±ÙØ´Ù/Ø®Ø§ÙÙØ´</button><button class="btn primary" onclick="runAutoContentNow()">ØªÙÙÛØ¯ ÙÙÛÙ Ø­Ø§ÙØ§</button><button class="btn secondary" onclick="show('approval');loadApprovals()">ÙØ´Ø§ÙØ¯Ù ØµÙ ØªØ£ÛÛØ¯</button></div></div></div>
+<div id="generate" class="section"><div class="card"><div class="title">\u270d\ufe0f \u062a\u0648\u0644\u06cc\u062f \u0645\u062d\u062a\u0648\u0627</div><div class="label">\u0645\u0648\u0636\u0648\u0639</div><input id="gTopic" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b \u062c\u0639\u0628\u0647 \u0644\u0648\u06a9\u0633 \u0637\u0644\u0627 \u0648 \u062c\u0648\u0627\u0647\u0631"><div class="label">\u067e\u0644\u062a\u0641\u0631\u0645</div><select id="gPlatform" class="field"><option value="instagram">Instagram</option><option value="telegram">Telegram</option><option value="both">Instagram + Telegram</option><option value="priority">Telegram + Website + WhatsApp</option></select><div class="label">\u0632\u0628\u0627\u0646</div><select id="gLanguage" class="field"><option value="fa-IR">\u0641\u0627\u0631\u0633\u06cc</option><option value="ar-IQ">\u0639\u0631\u0628\u06cc \u0639\u0631\u0627\u0642\u06cc</option></select><div class="label">\u0628\u0627\u0632\u0627\u0631</div><select id="gMarket" class="field"><option value="Iran">Iran</option><option value="Iraq">Iraq</option></select><div class="label">\u0627\u0637\u0644\u0627\u0639\u0627\u062a \u0648\u0627\u0642\u0639\u06cc \u0645\u062c\u0627\u0632 \u0628\u0631\u0627\u06cc \u0627\u0633\u062a\u0641\u0627\u062f\u0647</div><textarea id="gFacts" class="field" rows="5" placeholder="\u0641\u0642\u0637 \u0648\u0627\u0642\u0639\u06cc\u062a\u200c\u0647\u0627\u06cc\u06cc \u06a9\u0647 \u062e\u0648\u062f\u062a \u062a\u0623\u06cc\u06cc\u062f \u06a9\u0631\u062f\u0647\u200c\u0627\u06cc"></textarea><div class="row" style="margin-top:10px"><button id="generateBtn" class="btn primary" onclick="generate()">\u0633\u0627\u062e\u062a \u0645\u062d\u062a\u0648\u0627</button></div><div id="generateStatus" class="status"></div></div><div id="generatedResult"></div></div>
 <div id="approval" class="section"><div class="card"><div class="title">\u2705 \u0645\u062d\u062a\u0648\u0627\u06cc \u062f\u0631 \u0627\u0646\u062a\u0638\u0627\u0631 \u062a\u0623\u06cc\u06cc\u062f</div><div id="approvalStatus" class="status"></div><div id="approvalList"></div></div><div class="card"><div class="title">\ud83d\ude80 \u0627\u0646\u062a\u0634\u0627\u0631 \u0645\u062d\u062a\u0648\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f\u0634\u062f\u0647</div><div id="approvedStatus" class="status"></div><div id="approvedList"></div></div></div>
 <div id="calendar" class="section"><div class="card"><div class="title">\ud83d\udcc5 \u062a\u0642\u0648\u06cc\u0645 \u0645\u062d\u062a\u0648\u0627\u06cc\u06cc</div><div class="two"><div><div class="label">Content ID (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</div><input id="calContent" class="field" placeholder="\u0634\u0646\u0627\u0633\u0647 \u0645\u062d\u062a\u0648\u0627"></div><div><div class="label">Campaign ID (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</div><input id="calCampaign" class="field" placeholder="\u0634\u0646\u0627\u0633\u0647 \u06a9\u0645\u067e\u06cc\u0646"></div></div><div class="label">\u0632\u0645\u0627\u0646 \u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc</div><input id="calTime" class="field" type="datetime-local"><div class="label">Public Media URL (\u0628\u0631\u0627\u06cc Instagram)</div><input id="calMedia" class="field" type="url" placeholder="https://..."><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addCalendar()">\u0627\u0641\u0632\u0648\u062f\u0646 \u0628\u0647 \u062a\u0642\u0648\u06cc\u0645</button></div><div id="calendarStatus" class="status"></div><div id="calendarList"></div></div></div>
 <div id="campaigns" class="section"><div class="card"><div class="title">\ud83d\udce3 \u06a9\u0645\u067e\u06cc\u0646\u200c\u0647\u0627</div><div class="label">\u0646\u0627\u0645 \u06a9\u0645\u067e\u06cc\u0646</div><input id="campName" class="field"><div class="label">\u0647\u062f\u0641</div><input id="campGoal" class="field"><div class="label">\u0645\u062e\u0627\u0637\u0628</div><input id="campAudience" class="field"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addCampaign()">\u0633\u0627\u062e\u062a \u06a9\u0645\u067e\u06cc\u0646</button></div><div id="campaignStatus" class="status"></div><div id="campaignList"></div></div></div>
@@ -958,8 +1366,11 @@ function dashboardHtml() {
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(recovery(env));
     if (event?.cron === "*/15 * * * *") {
+      ctx.waitUntil((async()=>{
+        await runAutoContentGeneration(env,"scheduled");
+        await recovery(env);
+      })());
       ctx.waitUntil((async()=>{
         try {
           await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
@@ -1049,7 +1460,8 @@ export default {
           approval_required: true,
           auto_publish: true,
           r2: false,
-          website_integration: false
+          website_integration: true,
+          website_feed: "/api/site/content"
         });
       }
 
@@ -1065,7 +1477,7 @@ export default {
           checks: {
             d1: !!env.DB,
             admin_token: !!env.ADMIN_TOKEN,
-            website_integration: false,
+            website_integration: true,
             r2: false,
             github_dependency: false
           }
@@ -1091,6 +1503,81 @@ export default {
           "SELECT * FROM release_checks ORDER BY checked_at DESC LIMIT 100"
         ).all();
         return json({ items: r.results || [] });
+      }
+
+      if (u.pathname === "/api/content/automation" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
+        return json({ ok:true, automation: await getAutoContentStatus(env) });
+      }
+
+      if (u.pathname === "/api/content/automation" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
+        const b = await req.json().catch(() => ({}));
+        const current = await getAutoContentConfig(env);
+        const cfg = { ...current };
+        if (b.enabled !== undefined) cfg.enabled = !!b.enabled;
+        if (b.interval_hours !== undefined) cfg.interval_hours = Math.min(24, Math.max(1, Number(b.interval_hours) || 12));
+        if (b.platform !== undefined && ['instagram','telegram','both','priority'].includes(String(b.platform))) cfg.platform = String(b.platform);
+        if (b.language !== undefined && ['fa-IR','ar-IQ'].includes(String(b.language))) cfg.language = String(b.language);
+        if (b.market !== undefined && ['Iran','Iraq'].includes(String(b.market))) cfg.market = String(b.market);
+        const t=now();
+        await ensureAutoContentStore(env);
+        await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind('auto_content_config',JSON.stringify(cfg),t).run();
+        await audit(env,'auto_content_config_updated','Automatic content engine configuration updated',{config:cfg});
+        return json({ok:true,automation:await getAutoContentStatus(env)});
+      }
+
+      if (u.pathname === "/api/content/automation/run" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
+        return json(await runAutoContentGeneration(env,"manual",true));
+      }
+
+      if (u.pathname === "/api/content/pipeline" && req.method === "GET") {
+        if(!auth(req,env)) return json({ok:false,error:"Unauthorized"},401);
+        return json({ok:true,pipeline:await getContentPipelineStatus(env)});
+      }
+      if (u.pathname === "/api/content/media" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const contentId=u.searchParams.get("content_id"); if(!contentId) return json({ok:false,error:"content_id is required"},400);
+        return json({ok:true,items:await getContentMedia(env,contentId)});
+      }
+      if (u.pathname === "/api/content/media" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        return json({ok:true,media:await attachContentMedia(env,await req.json().catch(()=>({})))});
+      }
+      if (u.pathname === "/api/content/media/auto" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({})); if(!b.content_id) return json({ok:false,error:"content_id is required"},400);
+        return json({ok:true,result:await autoAttachTelegramMedia(env,String(b.content_id))});
+      }
+      if (u.pathname === "/media/telegram" && req.method === "GET") return await publicTelegramMediaProxy(env,req);
+
+      if (u.pathname === "/api/site/content" && req.method === "GET") {
+        return new Response(JSON.stringify({ok:true,items:await getWebsiteContent(env,u.searchParams.get("limit")||20)}),{status:200,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"public, max-age=60","Access-Control-Allow-Origin":"*"}});
+      }
+
+      if (u.pathname === "/api/content/distribution" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        await ensureDistributionStore(env);
+        const r=await env.DB.prepare("SELECT * FROM content_distribution ORDER BY created_at DESC LIMIT 200").all();
+        return json({items:r.results||[]});
+      }
+
+      if (u.pathname === "/api/distribution/overview" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        return json({ok:true,overview:await getDistributionOverview(env)});
+      }
+
+      if (u.pathname === "/api/distribution/status" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const contentId=String(u.searchParams.get("content_id")||"").trim();
+        if(!contentId) return json({ok:false,error:"content_id is required"},400);
+        return json({ok:true,distribution:await getContentDistributionStatus(env,contentId)});
+      }
+
+      if (u.pathname === "/api/whatsapp/status" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        return json({ok:true,configured:!!(env.WHATSAPP_ACCESS_TOKEN&&env.WHATSAPP_PHONE_NUMBER_ID&&env.WHATSAPP_TO),mode:"cloud_api_text",status_publish:"not_supported_by_this_worker_path",required_secrets:["WHATSAPP_ACCESS_TOKEN","WHATSAPP_PHONE_NUMBER_ID","WHATSAPP_TO"]});
       }
 
       if (u.pathname === "/api/content/generate" && req.method === "POST") {
@@ -1681,6 +2168,7 @@ export default {
           Instagram:{configured:!!(env.INSTAGRAM_ACCESS_TOKEN&&env.INSTAGRAM_ACCOUNT_ID),note:`${instagramApiMode(env)==="instagram_login"?"Instagram Login":"Facebook Login"} Â· Access token + account id`},
           InstagramWebhook:{configured:!!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&(!!env.INSTAGRAM_APP_SECRET||!!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN),note:"Verify token + signature secret"},
           TelegramWebhook:{configured:!!env.TELEGRAM_WEBHOOK_SECRET_TOKEN,note:"Webhook secret token"},
+          WhatsApp:{configured:!!(env.WHATSAPP_ACCESS_TOKEN&&env.WHATSAPP_PHONE_NUMBER_ID&&env.WHATSAPP_TO),note:"Cloud API text delivery; Status publishing is not provided by this path"},
           Admin:{configured:!!env.ADMIN_TOKEN,note:"ÙØ¯ÛØ±ÛØª Secret Ø§Ø² Ø®ÙØ¯ Worker Ø§ÙØ¬Ø§Ù ÙÙÛâØ´ÙØ¯"}
         }});
       }
@@ -1696,7 +2184,7 @@ export default {
 
         const tables = [
           "contents", "approval_queue", "leads", "inbox_messages",
-          "social_metrics", "automation_guardrails", "learning_feedback",
+          "social_metrics", "automation_guardrails", "content_distribution", "retry_queue", "learning_feedback",
           "learning_reports", "campaigns", "calendar"
         ];
 
@@ -1713,7 +2201,7 @@ export default {
         return json({
           ok: true,
           provider_independent: true,
-          website_integration: false,
+          website_integration: true,
           r2: false,
           github_dependency: false,
           approval_required: true,
@@ -1722,7 +2210,7 @@ export default {
           secrets: [
             "OPENAI_API_KEY", "ADMIN_TOKEN",
             "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
-            "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_ACCOUNT_ID", "INSTAGRAM_APP_SECRET", "INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "INSTAGRAM_WEBHOOK_SECRET_TOKEN", "TELEGRAM_WEBHOOK_SECRET_TOKEN"
+            "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_ACCOUNT_ID", "INSTAGRAM_APP_SECRET", "INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "INSTAGRAM_WEBHOOK_SECRET_TOKEN", "TELEGRAM_WEBHOOK_SECRET_TOKEN", "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_TO"
           ]
         });
       }
