@@ -168,15 +168,42 @@ async function approved(env, id) {
 async function openaiCheck(env) {
   if (!env.OPENAI_API_KEY)
     return { status: "SKIP", details: "OPENAI_API_KEY not configured" };
+
   const model = String(env.OPENAI_MODEL || "gpt-5.6-luna");
-  const r = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(model)}`, {
-    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
-    signal: AbortSignal.timeout(8000)
+  const r = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      input: "Reply with OK only."
+    }),
+    signal: AbortSignal.timeout(15000)
   });
+
+  const requestId = r.headers.get("x-request-id") || null;
   const d = await r.json().catch(() => ({}));
-  return r.ok && !d.error
-    ? { status: "PASS", details: `OpenAI credential and model access accepted`, model }
-    : { status: "FAIL", details: `OpenAI model check HTTP ${r.status}`, model, provider_error: d.error?.message || null };
+
+  if (r.ok && !d.error) {
+    return {
+      status: "PASS",
+      details: "OpenAI Responses API credential and model access accepted",
+      model,
+      request_id: requestId
+    };
+  }
+
+  return {
+    status: "FAIL",
+    details: `OpenAI Responses API HTTP ${r.status}`,
+    model,
+    provider_error: d.error?.message || null,
+    provider_error_type: d.error?.type || null,
+    provider_error_code: d.error?.code || null,
+    request_id: requestId
+  };
 }
 
 async function telegramCheck(env) {
