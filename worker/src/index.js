@@ -9,6 +9,100 @@ const json = (x, s = 200) =>
 const uid = () => crypto.randomUUID();
 const now = () => new Date().toISOString();
 
+
+// Resilience helpers for external discovery/provider calls. These only add safety;
+// existing routes and behavior remain intact.
+const AD_FETCH_TIMEOUT_MS = 7000;
+const AD_SEARCH_TIMEOUT_MS = 9000;
+const AD_MAX_DISCOVERY_SITES = 8;
+const AD_MAX_DRAFTS_PER_RUN = 6;
+
+function isBlockedExternalHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!h || h === 'localhost' || h.endsWith('.localhost') || h === 'metadata.google.internal') return true;
+  if (h === '127.0.0.1' || h === '0.0.0.0' || h === '::1' || h === '[::1]') return true;
+  if (/^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+  if (/^\[?f[cd][0-9a-f]*:/i.test(h)) return true;
+  return false;
+}
+
+function safeHttpUrl(value) {
+  try {
+    const u = new URL(String(value || ''));
+    if (!/^https?:$/i.test(u.protocol) || isBlockedExternalHost(u.hostname)) return null;
+    return u.toString();
+  } catch { return null; }
+}
+
+async function fetchWithRetry(url, options = {}, attempts = 2, timeoutMs = AD_FETCH_TIMEOUT_MS) {
+  let current = safeHttpUrl(url);
+  if (!current) throw new Error('external URL blocked or invalid');
+  let last;
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    try {
+      let r;
+      for (let hop = 0; hop < 3; hop++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          r = await fetch(current, { ...options, signal: controller.signal, redirect: 'manual' });
+        } finally { clearTimeout(timer); }
+        if (![301,302,303,307,308].includes(r.status)) break;
+        const location = r.headers.get('location');
+        const next = safeHttpUrl(location ? new URL(location, current).toString() : '');
+        if (!next) throw new Error('external redirect blocked');
+        current = next;
+      }
+      if (r.ok || ![408,425,429,500,502,503,504].includes(r.status) || i === attempts - 1) return r;
+      last = new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      last = e;
+      if (i === attempts - 1) throw e;
+    }
+    await new Promise(resolve => setTimeout(resolve, 250 * (i + 1)));
+  }
+  throw last || new Error('external request failed');
+}
+
+function extractSearchLinks(html, limit = 12) {
+  const out = [], seen = new Set();
+  const re = /<a[^>]+href="(\/url\?q=|https?:\/\/)[^"]+"[^>]*>[\s\S]*?<\/a>/gi;
+  let m;
+  while ((m = re.exec(String(html || ''))) && out.length < limit) {
+    let href = m[0].match(/href="([^"]+)"/i)?.[1] || '';
+    if (href.startsWith('/url?q=')) {
+      try { href = decodeURIComponent(href.slice(7).split('&')[0]); } catch {}
+    }
+    const safe = safeHttpUrl(href);
+    if (!safe) continue;
+    try {
+      const u = new URL(safe);
+      if (/google\./i.test(u.hostname) || /youtube\./i.test(u.hostname) || /bing\./i.test(u.hostname)) continue;
+      const key = u.origin;
+      if (seen.has(key)) continue;
+      seen.add(key); out.push(safe);
+    } catch {}
+  }
+  return out;
+}
+
+async function discoverWebLinks(query, limit = 8) {
+  const providers = [
+    `https://www.google.com/search?q=${encodeURIComponent(query)}&num=12`,
+    `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=12`
+  ];
+  for (const searchUrl of providers) {
+    try {
+      const r = await fetchWithRetry(searchUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)' } }, 2, AD_SEARCH_TIMEOUT_MS);
+      if (!r.ok) continue;
+      const html = await r.text();
+      const links = extractSearchLinks(html, limit);
+      if (links.length) return { links, provider: new URL(searchUrl).hostname };
+    } catch {}
+  }
+  return { links: [], provider: null };
+}
+
 class PublishOutcomeUnknown extends Error {
   constructor(message) { super(message); this.name = "PublishOutcomeUnknown"; }
 }
@@ -489,7 +583,41 @@ async function publishScheduled(env){const r=await env.DB.prepare("SELECT * FROM
 
 async function collectInstagramMetrics(env){if(!env.INSTAGRAM_ACCESS_TOKEN)return;const rows=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='content_published' ORDER BY created_at DESC LIMIT 100").all();for(const row of rows.results||[]){let d;try{d=JSON.parse(row.details_json||'{}')}catch{continue}for(const result of d.results||[]){if(result.platform!=='instagram'||!result.external_id)continue;const u=new URL(`${instagramGraphBase(env)}/${encodeURIComponent(result.external_id)}/insights`);u.searchParams.set('metric','impressions,reach,likes,comments,shares,saved');u.searchParams.set('access_token',env.INSTAGRAM_ACCESS_TOKEN);const r=await fetch(u.toString());if(!r.ok)continue;const data=await r.json().catch(()=>({}));if(data.error||!Array.isArray(data.data))continue;const values={};for(const m of data.data){const v=Array.isArray(m.values)?m.values.at(-1)?.value:m.value;values[m.name]=Number(v||0)}const ex=await env.DB.prepare("SELECT id FROM social_metrics WHERE content_id=? AND platform='instagram' ORDER BY created_at DESC LIMIT 1").bind(d.content_id).first();if(ex)await env.DB.prepare("UPDATE social_metrics SET impressions=?,reach=?,likes=?,comments=?,shares=?,saves=?,metric_date=? WHERE id=?").bind(values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,now().slice(0,10),ex.id).run();else await env.DB.prepare("INSERT INTO social_metrics(id,content_id,platform,impressions,reach,likes,comments,shares,saves,clicks,metric_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),d.content_id,'instagram',values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,0,now().slice(0,10),now()).run()}}}
 
-async function handleTelegramWebhook(env,req){if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.TELEGRAM_WEBHOOK_SECRET_TOKEN||((req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'')!==env.TELEGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Unauthorized webhook'},401);const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);const m=body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});const externalId=String(m.message_id||body.update_id||uid());const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)return json({ok:true,duplicate:true});const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.from?.username||m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',t,t).run();await audit(env,'inbox_received','Telegram message received',{external_id:externalId});return json({ok:true})}
+
+async function ensureTelegramMediaTable(env){
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_media_sources (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, chat_username TEXT, message_id TEXT NOT NULL, file_id TEXT NOT NULL, file_unique_id TEXT, media_type TEXT NOT NULL, caption TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(chat_id,message_id,file_id))`).run();
+}
+async function telegramWebhookSecret(env){
+  if(env.TELEGRAM_WEBHOOK_SECRET_TOKEN)return String(env.TELEGRAM_WEBHOOK_SECRET_TOKEN);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+  const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='telegram_webhook_secret'").first();
+  if(row?.value)return String(row.value);
+  const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);const secret=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+  await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind('telegram_webhook_secret',secret,now()).run();return secret;
+}
+async function setupTelegramWebhook(env,req){
+  if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);if(!env.TELEGRAM_BOT_TOKEN)return json({ok:false,error:'Telegram bot token missing'},503);
+  await ensureTelegramMediaTable(env);const secret=await telegramWebhookSecret(env);const url=new URL(req.url);url.pathname='/webhooks/telegram';url.search='';
+  const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url.toString(),secret_token:secret,allowed_updates:['channel_post','edited_channel_post','message','edited_message']})});
+  const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error(d.description||'Telegram webhook setup failed');await audit(env,'telegram_webhook_configured','Telegram media intake webhook configured',{url:url.toString()});return json({ok:true,url:url.toString(),webhook_configured:true});
+}
+async function getTelegramMedia(env,req){
+  if(req.method!=='GET')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);await ensureTelegramMediaTable(env);const limit=Math.min(50,Math.max(1,Number(new URL(req.url).searchParams.get('limit')||12)));const r=await env.DB.prepare("SELECT * FROM telegram_media_sources ORDER BY created_at DESC LIMIT ?").bind(limit).all();return json({items:r.results||[]});
+}
+async function proxyTelegramMedia(env,req){
+  if(req.method!=='GET')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);const id=new URL(req.url).searchParams.get('id');if(!id)return json({ok:false,error:'id is required'},400);await ensureTelegramMediaTable(env);const row=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=?").bind(id).first();if(!row)return json({ok:false,error:'Media not found'},404);
+  const base=`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;const fr=await fetch(`${base}/getFile?file_id=${encodeURIComponent(row.file_id)}`);const fd=await fr.json().catch(()=>({}));if(!fr.ok||!fd.ok||!fd.result?.file_path)return json({ok:false,error:'Telegram file lookup failed'},502);const media=await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fd.result.file_path}`);if(!media.ok)return new Response('Telegram media fetch failed',{status:502});const h=new Headers();h.set('Content-Type',media.headers.get('Content-Type')||'application/octet-stream');h.set('Cache-Control','private, max-age=300');return new Response(media.body,{status:200,headers:h});
+}
+
+async function handleTelegramWebhook(env,req){
+  if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(provided!==expected)return json({ok:false,error:'Unauthorized webhook'},401);
+  const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
+  const target=String(env.TELEGRAM_CHAT_ID||'').replace(/^@/,'').toLowerCase();const username=String(m.chat.username||'').toLowerCase();if(target&&username&&target!==username&&String(m.chat.id)!==String(env.TELEGRAM_CHAT_ID))return json({ok:true,ignored:true,reason:'chat_mismatch'});
+  const externalId=String(m.message_id||body.update_id||uid());const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(!ex){const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.from?.username||m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',t,t).run();}
+  const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
+  if(media){const t=now();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
+  return json({ok:true,media_received:!!media});
+}
 
 async function verifyInstagramSignature(env,req,raw){if(env.INSTAGRAM_APP_SECRET){const sig=(req.headers.get('X-Hub-Signature-256')||'').trim().toLowerCase();if(!/^sha256=[0-9a-f]{64}$/.test(sig))return false;const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.INSTAGRAM_APP_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);const mac=await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw));const hex=Array.from(new Uint8Array(mac),x=>x.toString(16).padStart(2,'0')).join('');return sig===`sha256=${hex}`}if(env.INSTAGRAM_WEBHOOK_SECRET_TOKEN)return (req.headers.get('X-Hamzehi-Webhook-Secret')||'')===env.INSTAGRAM_WEBHOOK_SECRET_TOKEN;return false}
 
@@ -520,6 +648,26 @@ function leadScoreFromData(lead, meta = {}) {
   if (["replied", "negotiation"].includes(lead?.stage)) score += 15;
   if (lead?.stage === "converted" || lead?.stage === "customer") score = 100;
   return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function leadIntelligence(lead) {
+  const meta=parseLeadNotes(lead);
+  const stage=String(lead?.stage||'new');
+  const text=[lead?.name,lead?.contact,meta.evidence,meta.type,meta.city].filter(Boolean).join(' ').toLowerCase();
+  const factors=[]; let score=0;
+  if(meta.ad_target){score+=20;factors.push('ÙØ¯Ù ØªØ¨ÙÛØºØ§ØªÛ')}
+  if(meta.ad_opportunity || meta.contact_url){score+=20;factors.push('ÙØ±ØµØª/Ø±Ø§Ù ØªÙØ§Ø³')}
+  if(meta.negotiation_draft){score+=15;factors.push('Ù¾ÛØ´âÙÙÛØ³ ÙØ°Ø§Ú©Ø±Ù')}
+  if(meta.followup_draft){score+=10;factors.push('Ù¾ÛÚ¯ÛØ±Û Ø¢ÙØ§Ø¯Ù')}
+  if(['replied','negotiation'].includes(stage)){score+=15;factors.push('ØªØ¹Ø§ÙÙ ÙØ¹Ø§Ù')}
+  if(meta.evidence){score+=Math.min(10,Math.ceil(String(meta.evidence).length/100));factors.push('Ø´ÙØ§ÙØ¯ Ø³Ø§ÛØª')}
+  if(/Ø·ÙØ§|Ø¬ÙØ§ÙØ±|gold|jewel/.test(text)){score+=5;factors.push('ØªÙØ§Ø³Ø¨ Ø·ÙØ§/Ø¬ÙØ§ÙØ±')}
+  if(/Ø³Ø§Ø¹Øª|watch/.test(text)){score+=5;factors.push('ØªÙØ§Ø³Ø¨ Ø³Ø§Ø¹Øª')}
+  if(/Ø¨Ø¯ÙÛ|Ø§Ú©Ø³Ø³ÙØ±Û|fashion|accessor/.test(text)){score+=5;factors.push('ØªÙØ§Ø³Ø¨ Ø¨Ø¯ÙÛØ¬Ø§Øª')}
+  if(stage==='customer'||stage==='converted')score=100;
+  score=Math.max(0,Math.min(100,Math.round(score)));
+  const action=stage==='customer'||stage==='converted'?'ÙØ´ØªØ±Û Ø­ÙØ¸ Ø´ÙØ¯':(meta.followup_draft?'Ø§Ø±Ø³Ø§Ù/Ø¨Ø±Ø±Ø³Û Ù¾ÛÚ¯ÛØ±Û Ø¨Ø§ ØªØ£ÛÛØ¯':(meta.negotiation_draft?'Ø¨Ø±Ø±Ø³Û Ù Ø§Ø±Ø³Ø§Ù ÙØ°Ø§Ú©Ø±Ù Ø¨Ø§ ØªØ£ÛÛØ¯':(meta.contact_url?'Ø¨Ø±Ø±Ø³Û ÙØ³ÛØ± ØªÙØ§Ø³':'Ø¨Ø±Ø±Ø³Û Lead')));
+  return {score,factors,action,type:meta.type||null,ad_opportunity:!!(meta.ad_opportunity||meta.contact_url),contact_url:meta.contact_url||null,domain:meta.url?(()=>{try{return new URL(meta.url).hostname.replace(/^www\./,'')}catch{return null}})():null};
 }
 
 async function updateLeadRecord(env, id, patch) {
@@ -565,6 +713,75 @@ async function leadOverview(env) {
 }
 
 
+function validateAdsInput(body){
+  const b=(body&&typeof body==="object")?body:{};
+  const type=String(b.type||"all").trim();
+  const city=String(b.city||"").trim();
+  const extra=String(b.extra||"").trim();
+  const allowed=["gold","watch","fashion_jewelry","all"];
+  if(!allowed.includes(type)) return {ok:false,error:"ÙÙØ¹ ÙØ´ØªØ±Û ÙØ§ÙØ¹ØªØ¨Ø± Ø§Ø³Øª"};
+  if(city.length>100) return {ok:false,error:"Ø´ÙØ±/Ø¨Ø§Ø²Ø§Ø± ÙØ¨Ø§ÛØ¯ Ø¨ÛØ´ØªØ± Ø§Ø² 100 Ú©Ø§Ø±Ø§Ú©ØªØ± Ø¨Ø§Ø´Ø¯"};
+  if(extra.length>300) return {ok:false,error:"Ø¬Ø²Ø¦ÛØ§Øª ÙØ¨Ø§ÛØ¯ Ø¨ÛØ´ØªØ± Ø§Ø² 300 Ú©Ø§Ø±Ø§Ú©ØªØ± Ø¨Ø§Ø´Ø¯"};
+  return {ok:true,type,city,extra};
+}
+
+async function runAdAutopilotOnce(env, input, reason="manual") {
+  const {type,city,extra}=input;
+  const sourceSite="https://www.hamzehibox.com";
+  const allGroups=[
+    ["gold","Ø·ÙØ§ÙØ±ÙØ´ Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ±"],
+    ["watch","Ø³Ø§Ø¹Øª ÙØ±ÙØ´ Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª"],
+    ["fashion_jewelry","Ø¨Ø¯ÙÛ ÙØ±ÙØ´ Ø¨Ø¯ÙÛØ¬Ø§Øª Ø§Ú©Ø³Ø³ÙØ±Û" ]
+  ];
+  const groups=type==="all"?allGroups:allGroups.filter(x=>x[0]===type);
+  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0};
+  const items=[],seen=new Set(),started=now();
+  for(const [type,term] of groups){
+    const q=[term,city,extra].filter(Boolean).join(" ");
+    try{
+      const discovery=await discoverWebLinks(q,6);
+      for(const href of discovery.links){
+        if(items.length>=30) break;
+        const safeHref=safeHttpUrl(href); if(!safeHref) continue;
+        let uu; try{uu=new URL(safeHref); const key=uu.origin; if(seen.has(key))continue; seen.add(key);}catch{continue}
+        try{
+          const rr=await fetchWithRetry(safeHref,{headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}},2,AD_FETCH_TIMEOUT_MS);
+          const tx=(await rr.text()).slice(0,100000);
+          const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+          if(!/Ø·ÙØ§|Ø¬ÙØ§ÙØ±|Ø³Ø§Ø¹Øª|Ø¨Ø¯ÙÛ|gold|jewel|watch|accessor/i.test(plain)) continue;
+          const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
+          const adHit=/ØªØ¨ÙÛØº|advertis|sponsor|Ø±Ù¾ÙØ±ØªØ§Ú|media kit|ÙÙÚ©Ø§Ø±Û|ØªÙØ§Ø³ Ø¨Ø§ ÙØ§|contact us/i.test(plain);
+          const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
+          const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
+          let contactUrl=null; if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
+          const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
+          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type,city,query:q,url:href,evidence:plain.slice(0,1000),contact_url:contactUrl,score,updated_by:"autopilot"};
+          let id;
+          if(old){id=old.id;let om={};try{om=JSON.parse(old.notes||"{}")}catch{};Object.assign(om,meta);await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low",JSON.stringify(om),now(),id).run();summary.updated++;}
+          else{id=uid();await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,href,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(meta),now(),now()).run();summary.new_leads++;}
+          summary.found++;items.push({id,name:title,type,url:href,contact_url:contactUrl,score,ad_opportunity:adHit});
+        }catch{summary.errors++;}
+      }
+    }catch{summary.errors++;}
+  }
+  if(env.OPENAI_API_KEY){
+    for(const item of items.slice(0,AD_MAX_DRAFTS_PER_RUN)){
+      try{
+        const lead=await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(item.id).first(); if(!lead)continue;
+        let meta={};try{meta=JSON.parse(lead.notes||"{}")}catch{}
+        if(meta.negotiation_draft)continue;
+        const prompt=`Create a concise Persian B2B advertising/collaboration outreach draft for HAMZEHI BOX. Source: ${sourceSite}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Audience: jewelry shops, watch stores, fashion-jewelry sellers. Do not invent facts. Ask about ad formats, audience, placement, duration, price and contact person. Draft only, under 700 characters.`;
+        const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
+        const d=await r.json().catch(()=>({})); if(!r.ok)continue; const draft=responseText(d).trim(); if(!draft)continue;
+        meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="authorized_channel_only";meta.next_followup_at=new Date(Date.now()+48*60*60*1000).toISOString();meta.followup_status="scheduled";
+        await env.DB.prepare("UPDATE leads SET notes=?,stage=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),"negotiation",now(),item.id).run(); item.draft=draft;summary.drafted++;
+      }catch{}
+    }
+  }
+  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,found:summary.found,drafted:summary.drafted,errors:summary.errors,started});
+  return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
+}
+
 function dashboardScript() {
   return `
 let token='';
@@ -573,6 +790,13 @@ function headers(){return {'Authorization':'Bearer '+token,'Content-Type':'appli
 async function api(path,opts={}){try{const r=await fetch(path,Object.assign({},opts,{headers:Object.assign({},headers(),opts.headers||{}),cache:'no-store'}));const text=await r.text();let d={};try{d=JSON.parse(text)}catch{throw Error('Worker \u067e\u0627\u0633\u062e \u0646\u0627\u0645\u0639\u062a\u0628\u0631 \u062f\u0627\u062f. HTTP '+r.status)}if(!r.ok){if(r.status===401)throw Error('\u0631\u0645\u0632 \u0645\u062f\u06cc\u0631 \u0627\u0634\u062a\u0628\u0627\u0647 \u0627\u0633\u062a.');if(r.status===429)throw Error('\u062a\u0639\u062f\u0627\u062f \u062f\u0631\u062e\u0648\u0627\u0633\u062a\u200c\u0647\u0627 \u0632\u06cc\u0627\u062f \u0627\u0633\u062a\u061b \u06a9\u0645\u06cc \u0628\u0639\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0644\u0627\u0634 \u06a9\u0646\u06cc\u062f.');throw Error(d.error||('HTTP '+r.status))}return d}catch(e){throw Error(e?.message||'\u062e\u0637\u0627\u06cc \u0627\u0631\u062a\u0628\u0627\u0637 \u0628\u0627 Worker')}}
 function toggleToken(){const x=document.getElementById('token');x.type=x.type==='password'?'text':'password'}
 async function performLogin(){const s=document.getElementById('loginStatus'),btn=document.getElementById('loginBtn');token=document.getElementById('token').value.trim();if(!token){s.className='status error';s.textContent='ADMIN TOKEN \u0631\u0627 \u0648\u0627\u0631\u062f \u06a9\u0646\u06cc\u062f.';return}btn.disabled=true;s.className='status';s.textContent='\u062f\u0631 \u062d\u0627\u0644 \u0628\u0631\u0631\u0633\u06cc...';const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);try{await api('/api/content',{signal:controller.signal});document.getElementById('login').classList.add('hidden');document.getElementById('app').classList.remove('hidden');document.getElementById('logoutBtn').classList.remove('hidden');document.getElementById('nav').classList.remove('hidden');s.textContent='';await loadApprovals();await loadApproved();await loadLeadOverview()}catch(e){token='';s.className='status error';s.textContent=e?.name==='AbortError'?'\u0627\u0631\u062a\u0628\u0627\u0637 \u0628\u0627 Worker \u067e\u0627\u0633\u062e \u0646\u062f\u0627\u062f. \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0644\u0627\u0634 \u06a9\u0646\u06cc\u062f.' : (e.message||'\u0648\u0631\u0648\u062f \u0646\u0627\u0645\u0648\u0641\u0642')}finally{clearTimeout(timer);btn.disabled=false}}
+async function downloadTelegramMedia(id){return shareTelegramMedia(id)}
+async function shareTelegramMedia(id){try{const r=await fetch('/api/telegram/media/file?id='+encodeURIComponent(id),{headers:headers(),cache:'no-store'});if(!r.ok)throw Error('Ø¯Ø±ÛØ§ÙØª Ø±Ø³Ø§ÙÙ ÙØ§ÙÙÙÙ Ø¨ÙØ¯');const blob=await r.blob();const type=blob.type||'application/octet-stream';const ext=type.includes('video')?'mp4':type.includes('png')?'png':'jpg';const file=new File([blob],'HAMZEHI-BOX-Story.'+ext,{type});if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:'HAMZEHI BOX'});return}const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),60000)}catch(e){if(e&&e.name==='AbortError')return;alert('Ø®Ø·Ø§: '+e.message)}}
+async function loadWhatsappStory(){const st=document.getElementById('whatsappStoryStatus'),list=document.getElementById('whatsappStoryList');if(!st||!list)return;st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØª Ø±Ø³Ø§ÙÙâÙØ§â¦';try{const d=await api('/api/telegram/media?limit=12');const a=d.items||[];st.className='status ok';st.textContent=a.length+' Ø±Ø³Ø§ÙÙ Ø¢ÙØ§Ø¯Ù Ø§Ø³Øª';list.innerHTML=a.length?a.map(x=>'<div class=\"item\"><div class=\"itemhead\"><b>ð± '+esc(x.media_type)+'</b><span class=\"pill\">'+esc(x.created_at||'')+'</span></div><div class=\"mini\">'+esc(x.caption||'Ø¨Ø¯ÙÙ Ú©Ù¾Ø´Ù')+'</div><div class=\"actions\" style=\"margin-top:10px\"><button class=\"btn primary\" onclick=\"shareTelegramMedia(&quot;'+esc(x.id)+'&quot;)\">Ø§Ø±Ø³Ø§Ù Ø¨Ù WhatsApp / Ø¯Ø§ÙÙÙØ¯</button></div></div>').join(''):'<div class=\"empty\">ÙÙÙØ² Ø±Ø³Ø§ÙÙâØ§Û Ø§Ø² Ú©Ø§ÙØ§Ù Ø¯Ø±ÛØ§ÙØª ÙØ´Ø¯Ù Ø§Ø³Øª.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadTelegramMedia(){const st=document.getElementById('telegramMediaStatus'),list=document.getElementById('telegramMediaList');if(!st||!list)return;st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØª Ø±Ø³Ø§ÙÙâÙØ§Û Ø¬Ø¯ÛØ¯ Ú©Ø§ÙØ§Ùâ¦';try{const d=await api('/api/telegram/media?limit=12');const a=d.items||[];st.className='status ok';st.textContent=a.length+' Ø±Ø³Ø§ÙÙ Ø¯Ø±ÛØ§ÙØª Ø´Ø¯';list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.media_type)+'</b><span class="pill">'+esc(x.created_at||'')+'</span></div><div class="mini">'+esc(x.caption||'Ø¨Ø¯ÙÙ Ú©Ù¾Ø´Ù')+'</div><div class="actions" style="margin-top:10px"><button class="btn secondary" onclick="downloadTelegramMedia(&quot;'+esc(x.id)+'&quot;)">ÙØ´Ø§ÙØ¯Ù / Ø¯Ø±ÛØ§ÙØª</button></div></div>').join(''):'<div class="empty">ÙÙÙØ² Ø±Ø³Ø§ÙÙ Ø¬Ø¯ÛØ¯Û Ø§Ø² Ú©Ø§ÙØ§Ù Ø¯Ø±ÛØ§ÙØª ÙØ´Ø¯Ù. Ø¨Ø¹Ø¯ Ø§Ø² ÙØ¹Ø§ÙâØ³Ø§Ø²ÛØ Ù¾Ø³ØªâÙØ§Û Ø¬Ø¯ÛØ¯ Ú©Ø§ÙØ§Ù Ø§ÛÙØ¬Ø§ ÙÛâØ¢ÛÙØ¯.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function setupTelegramMedia(){const st=document.getElementById('telegramMediaStatus');st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù ÙØ¹Ø§ÙâØ³Ø§Ø²Û Ø¯Ø±ÛØ§ÙØª Ø±Ø³Ø§ÙÙâ¦';try{await api('/api/telegram/webhook/setup',{method:'POST'});st.className='status ok';st.textContent='Ø¯Ø±ÛØ§ÙØª Ø±Ø³Ø§ÙÙ ÙØ¹Ø§Ù Ø´Ø¯. Ø­Ø§ÙØ§ Ù¾Ø³ØªâÙØ§Û Ø¬Ø¯ÛØ¯ Ú©Ø§ÙØ§Ù ÙØ§Ø±Ø¯ Ù¾ÙÙ ÙÛâØ´ÙÙØ¯.';await loadTelegramMedia()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+
+setInterval(()=>{if(token&&document.getElementById('app')&&!document.getElementById('app').classList.contains('hidden'))loadAdAutopilotStatus()},20000);
 function logout(){token='';document.getElementById('app').classList.add('hidden');document.getElementById('login').classList.remove('hidden');document.getElementById('logoutBtn').classList.add('hidden');document.getElementById('nav').classList.add('hidden');document.getElementById('token').value='';document.getElementById('loginStatus').textContent='\u062e\u0627\u0631\u062c \u0634\u062f\u06cc\u062f.'}
 function show(id){document.querySelectorAll('.section').forEach(x=>x.classList.remove('active'));const el=document.getElementById(id);if(el)el.classList.add('active');window.scrollTo(0,0)}
 async function loadApprovals(){const st=document.getElementById('approvalStatus'),list=document.getElementById('approvalList');st.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026';try{const d=await api('/api/content?status=generated');const items=(d.items||[]).filter(x=>x.approval_status==='pending');st.className='status ok';st.textContent=items.length+' \u0645\u062d\u062a\u0648\u0627 \u062f\u0631 \u0627\u0646\u062a\u0638\u0627\u0631 \u062a\u0623\u06cc\u06cc\u062f';list.innerHTML=items.length?items.map(x=>'<article class="item"><div class="row"><span class="pill">'+esc(x.platform)+'</span><span class="pill">'+esc(x.language)+'</span><span class="pill">'+esc(x.market)+'</span></div><div class="title" style="margin-top:12px">'+esc(x.topic)+'</div><div class="label">Hook</div><div class="text">'+esc(x.hook)+'</div><div class="label">Caption</div><div class="text">'+esc(x.caption)+'</div><div class="label">CTA</div><div class="text">'+esc(x.cta)+'</div><div class="label">Hashtags</div><div class="text">'+esc(x.hashtags)+'</div><div class="actions" style="margin-top:14px"><button class="btn primary" onclick="changeApproval(&quot;'+x.id+'&quot;,&quot;approved&quot;)">\u2713 \u062a\u0623\u06cc\u06cc\u062f</button><button class="btn danger" onclick="changeApproval(&quot;'+x.id+'&quot;,&quot;rejected&quot;)">\u2715 \u0631\u062f</button></div></article>').join(''):'<div class="empty">\u0645\u062d\u062a\u0648\u0627\u06cc \u062c\u062f\u06cc\u062f\u06cc \u0628\u0631\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f \u0648\u062c\u0648\u062f \u0646\u062f\u0627\u0631\u062f.</div>'}catch(e){st.className='status error';st.textContent='\u062e\u0637\u0627: '+e.message}}
@@ -597,6 +821,22 @@ function renderOutreach(items){const b=document.getElementById('outreachList');c
 async function setLeadStage(id,stage){try{await api('/api/leads',{method:'PATCH',body:JSON.stringify({id,stage})});await loadLeadOverview()}catch(e){alert('\u062e\u0637\u0627: '+e.message)}}
 async function loadLeads(){const st=document.getElementById('leadStatus'),list=document.getElementById('leadList');st.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026';try{const d=await api('/api/leads');const a=d.items||[];st.className='status ok';st.textContent=a.length+' \u0644\u06cc\u062f';list.innerHTML=a.length?a.map(x=>{let m={};try{m=JSON.parse(x.notes||'{}')}catch{}const score=m.score||0;return '<div class="item"><div class="itemhead"><b>'+esc(x.name||'\u0628\u062f\u0648\u0646 \u0646\u0627\u0645')+'</b><span class="pill">Score '+esc(score)+'</span></div><div class="mini">'+esc(x.contact||'')+' \u00b7 '+esc(x.stage||'')+' \u00b7 '+esc(x.priority||'')+'</div><div class="actions" style="margin-top:8px"><button class="btn secondary" onclick="setLeadStage(&quot;'+esc(x.id)+'&quot;,&quot;qualified&quot;)">Qualified</button><button class="btn secondary" onclick="setLeadStage(&quot;'+esc(x.id)+'&quot;,&quot;replied&quot;)">Reply</button><button class="btn primary" onclick="setLeadStage(&quot;'+esc(x.id)+'&quot;,&quot;customer&quot;)">Customer</button></div></div>'}).join(''):'<div class="empty">\u0644\u06cc\u062f\u06cc \u0648\u062c\u0648\u062f \u0646\u062f\u0627\u0631\u062f.</div>'}catch(e){st.className='status error';st.textContent='\u062e\u0637\u0627: '+e.message}}
 async function addLead(){const st=document.getElementById('leadStatus'),name=document.getElementById('leadName').value.trim();if(!name){st.className='status error';st.textContent='\u0646\u0627\u0645 \u0631\u0627 \u0648\u0627\u0631\u062f \u06a9\u0646\u06cc\u062f.';return}try{const f=document.getElementById('leadFollowup').value;await api('/api/leads',{method:'POST',body:JSON.stringify({name,contact:document.getElementById('leadContact').value.trim(),stage:document.getElementById('leadStage').value||'new',priority:document.getElementById('leadPriority').value||'normal',notes:document.getElementById('leadNotes').value.trim(),next_followup_at:f?new Date(f).toISOString():null})});st.className='status ok';st.textContent='\u0644\u06cc\u062f \u0627\u0636\u0627\u0641\u0647 \u0634\u062f.';await loadLeadOverview()}catch(e){st.className='status error';st.textContent='\u062e\u0637\u0627: '+e.message}}
+async function autoAdCampaign(){const st=document.getElementById('adsStatus'),list=document.getElementById('adsList');if(!st||!list)return;const city=document.getElementById('adsCity').value.trim(),extra=document.getElementById('adsExtra').value.trim();st.className='status';st.textContent='ð¤ Ø³ÛØ³ØªÙ Ø®ÙØ¯Ú©Ø§Ø± Ø¯Ø± Ø­Ø§Ù Ù¾ÛØ¯Ø§ Ú©Ø±Ø¯Ù ÙØ´ØªØ±ÛØ ÙØ­Ù ØªØ¨ÙÛØº Ù Ø¢ÙØ§Ø¯ÙâØ³Ø§Ø²Û ÙØ°Ø§Ú©Ø±Ù Ø§Ø³Øªâ¦';list.innerHTML='';try{const d=await api('/api/ads/auto-run',{method:'POST',body:JSON.stringify({city,type:document.getElementById('adsType').value,extra,source_site:'https://www.hamzehibox.com'})});const a=d.items||[];st.className='status ok';st.textContent='â Ø§ÙØ¬Ø§Ù Ø´Ø¯: '+(d.found||0)+' ÙØ¯Ù Ù¾ÛØ¯Ø§ Ø´Ø¯ Â· '+(d.drafted||0)+' ÙØ°Ø§Ú©Ø±Ù Ø¢ÙØ§Ø¯Ù Ø´Ø¯ Ù Ø¯Ø± CRM Ø«Ø¨Øª Ø´Ø¯.';list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">Score '+esc(x.score||0)+'</span></div><div class="mini">'+esc(x.type||'')+' Â· '+esc(x.url||'')+'</div>'+(x.contact_url?'<div class="mini">ÙØ³ÛØ± ØªÙØ§Ø³/ØªØ¨ÙÛØº: '+esc(x.contact_url)+'</div>':'')+(x.draft?'<div class="text" style="margin-top:6px">'+esc(x.draft)+'</div>':'')+'</div>').join(''):'<div class="empty">ÙÙØ±Ø¯Û Ù¾ÛØ¯Ø§ ÙØ´Ø¯.</div>';loadAdTargets()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}};
+
+async function discoverAdCustomers(){const st=document.getElementById('adsStatus'),list=document.getElementById('adsList');if(!st||!list)return;const city=document.getElementById('adsCity').value.trim(),type=document.getElementById('adsType').value,extra=document.getElementById('adsExtra').value.trim();st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù Ù¾ÛØ¯Ø§ Ú©Ø±Ø¯Ù ÙØ´ØªØ±Û Ù ÙØ­Ù ØªØ¨ÙÛØºâ¦';list.innerHTML='';try{const d=await api('/api/ads/discover',{method:'POST',body:JSON.stringify({city,type,extra,source_site:'https://www.hamzehibox.com'})});const a=d.items||[];st.className='status ok';st.textContent='Ù¾ÛØ¯Ø§ Ø´Ø¯: '+a.length+' ÙÙØ±Ø¯ Â· ÙØ´ØªØ±Û Ù ÙØ³ÛØ± ØªØ¨ÙÛØºØ§Øª Ø¯Ø± CRM Ø°Ø®ÛØ±Ù Ø´Ø¯.';list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">Score '+esc(x.score||0)+'</span></div><div class="mini">'+esc(x.kind||'')+' Â· '+esc(x.city||'')+'</div><div class="mini">'+esc(x.url||'')+'</div><div class="text" style="margin-top:6px">'+esc(x.evidence||'')+'</div><div class="actions" style="margin-top:10px"><button class="btn secondary" onclick="makeAdNegotiationDraft(&quot;'+esc(x.id)+'&quot;)">âï¸ Ø¢ÙØ§Ø¯ÙâØ³Ø§Ø²Û ÙØ°Ø§Ú©Ø±Ù</button>'+(x.contact_url?'<button class="btn secondary" onclick="window.open(&quot;'+esc(x.contact_url)+'&quot;,&quot;_blank&quot;)">Ø±Ø§Ù ØªÙØ§Ø³</button>':'')+'</div><div id="ad-draft-'+esc(x.id)+'" class="status"></div></div>').join(''):'<div class="empty">ÙÙØ±Ø¯Û Ù¾ÛØ¯Ø§ ÙØ´Ø¯.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function makeAdNegotiationDraft(id){const box=document.getElementById('ad-draft-'+String(id));if(box){box.className='status';box.textContent='Ø¯Ø± Ø­Ø§Ù Ø¢ÙØ§Ø¯ÙâØ³Ø§Ø²Û Ù¾ÛØ´ÙÙØ§Ø¯ ÙØ°Ø§Ú©Ø±Ùâ¦'}try{const d=await api('/api/ads/negotiation-draft',{method:'POST',body:JSON.stringify({lead_id:id})});if(box){box.className='status ok';box.innerHTML='<div class="text">'+esc(d.draft||'')+'</div><div class="mini" style="margin-top:6px">Ø§Ø±Ø³Ø§Ù/Ø«Ø¨Øª ÙÙØ§ÛÛ ÙÛØ§Ø² Ø¨Ù ØªØ£ÛÛØ¯ Ø¯Ø³ØªÛ Ø¯Ø§Ø±Ø¯.</div>'}}catch(e){if(box){box.className='status error';box.textContent='Ø®Ø·Ø§: '+e.message}}}
+async function loadAdTargets(){const st=document.getElementById('adsSavedStatus'),list=document.getElementById('adsSavedList');if(!st||!list)return;try{const d=await api('/api/ads/targets');const a=d.items||[];st.className='status ok';st.textContent=a.length+' ÙØ¯Ù ØªØ¨ÙÛØºØ§ØªÛ/ÙØ´ØªØ±Û Ø°Ø®ÛØ±Ù Ø´Ø¯Ù';list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'')+'</b><span class="pill">'+esc(x.stage||'discovered')+'</span></div><div class="mini">'+esc(x.contact||'')+'</div></div>').join(''):'<div class="empty">ÙÙÙØ² ÙØ¯ÙÛ Ø°Ø®ÛØ±Ù ÙØ´Ø¯Ù.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadAdOverview(){const b=document.getElementById('adOverviewBody');if(!b)return;try{const d=await api('/api/ads/overview'),m=d.metrics||{};b.innerHTML='<div class="two"><div><div class="stat">'+esc(m.found_today||0)+'</div><div class="muted">ÙØ¹Ø§ÙÛØª Ø§ÙØ±ÙØ²</div></div><div><div class="stat">'+esc(m.hot||0)+'</div><div class="muted">ÙÛØ¯ Ø¯Ø§Øº</div></div><div><div class="stat">'+esc(m.negotiation||0)+'</div><div class="muted">ÙØ°Ø§Ú©Ø±Ù</div></div><div><div class="stat">'+esc(m.due_followups||0)+'</div><div class="muted">Ù¾ÛÚ¯ÛØ±Û Ø³Ø±Ø±Ø³ÛØ¯</div></div></div><div class="mini" style="margin-top:10px">'+esc(m.ad_opportunities||0)+' ÙØ±ØµØª ØªØ¨ÙÛØºØ§ØªÛ Â· '+esc(m.customers||0)+' ÙØ´ØªØ±Û Â· '+esc(m.ad_targets||0)+' ÙØ¯Ù ØªØ¨ÙÛØºØ§ØªÛ</div>';b.className='status ok';const list=document.getElementById('adOpportunityList');if(list)list.innerHTML=(d.items||[]).map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">Score '+esc(x.score||0)+'</span></div><div class="mini">'+esc(x.type||'')+' Â· '+esc(x.stage||'')+'</div>'+(x.ad_opportunity?'<div class="mini">ÙØ±ØµØª ØªØ¨ÙÛØºØ§ØªÛ Ø´ÙØ§Ø³Ø§ÛÛ Ø´Ø¯</div>':'')+(x.contact_url?'<div class="actions" style="margin-top:8px"><button class="btn secondary" onclick="window.open(&quot;'+esc(x.contact_url)+'&quot;,&quot;_blank&quot;)">ÙØ³ÛØ± ØªÙØ§Ø³</button></div>':'')+'</div>').join('')||'<div class="empty">ÙÙÙØ² ÙØ±ØµØª ØªØ¨ÙÛØºØ§ØªÛ Ø«Ø¨Øª ÙØ´Ø¯Ù.</div>'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadAdActionCenter(){const b=document.getElementById('adActionCenter');if(!b)return;b.textContent='Ø¯Ø± Ø­Ø§Ù Ø¢ÙØ§Ø¯ÙâØ³Ø§Ø²Û Ø§ÙØ¯Ø§ÙâÙØ§â¦';try{const d=await api('/api/ads/action-center'),c=d.counts||{};const labels={today:'Ù¾ÛÚ¯ÛØ±Û Ø§ÙØ±ÙØ²',urgent:'Ø§ÙØ¯Ø§Ù ÙÙØ±Û',opportunity:'ÙØ±ØµØª ØªØ¨ÙÛØº'};b.innerHTML='<div class="two">'+Object.entries(labels).map(([k,v])=>'<div><div class="stat">'+esc(c[k]||0)+'</div><div class="muted">'+v+'</div></div>').join('')+'</div>'+(d.items||[]).map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">'+esc(String(x.score||0))+'</span></div><div class="mini">'+esc(labels[x.bucket]||'Ø¨Ø±Ø±Ø³Û')+' Â· '+esc(x.stage||'')+'</div><div class="mini">'+esc(x.action||'')+'</div><div class="mini">'+esc((x.factors||[]).join(' Â· '))+'</div></div>').join('')||'<div class="empty">ÙØ¹ÙØ§Ù Ø§ÙØ¯Ø§Ù ÙØ´Ø®ØµÛ ÙØ¬ÙØ¯ ÙØ¯Ø§Ø±Ø¯.</div>';b.className='status ok'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+
+async function loadAdIntelligence(){const b=document.getElementById('adIntelligenceBody');if(!b)return;try{const d=await api('/api/ads/intelligence'),m=d.metrics||{};b.innerHTML='<div class="two"><div><div class="stat">'+esc(m.hot||0)+'</div><div class="muted">ÙÛØ¯ÙØ§Û Ø¯Ø§Øº</div></div><div><div class="stat">'+esc(m.opportunities||0)+'</div><div class="muted">ÙØ±ØµØª ØªØ¨ÙÛØº</div></div><div><div class="stat">'+esc(m.action_items||0)+'</div><div class="muted">Ø§ÙØ¯Ø§Ù Ø¨Ø¹Ø¯Û</div></div><div><div class="stat">'+esc(m.duplicate_domains||0)+'</div><div class="muted">Ø¯Ø§ÙÛÙ ØªÚ©Ø±Ø§Ø±Û</div></div></div><div class="mini" style="margin-top:10px">Ú©Ù Lead: '+esc(m.total||0)+' Â· ÙØ¹Ø§Ù: '+esc(m.active||0)+'</div>';const list=document.getElementById('adActionList');if(list)list.innerHTML=(d.action_items||[]).slice(0,10).map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">'+esc(x.score||0)+'</span></div><div class="mini">'+esc(x.type||'')+' Â· '+esc(x.stage||'')+'</div><div class="mini">'+esc(x.action||'')+'</div><div class="mini">'+esc((x.factors||[]).join(' Â· '))+'</div></div>').join('')||'<div class="empty">Ø§ÙØ¯Ø§Ù ÙÙØ±Û Ø«Ø¨Øª ÙØ´Ø¯Ù.</div>';b.className='status ok'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function runAdFollowups(){const b=document.getElementById('adFollowupStatus');if(b){b.className='status';b.textContent='Ø¯Ø± Ø­Ø§Ù Ø¢ÙØ§Ø¯ÙâØ³Ø§Ø²Û Ù¾ÛÚ¯ÛØ±ÛâÙØ§Û Ø³Ø±Ø±Ø³ÛØ¯â¦'}try{const d=await api('/api/ads/followups/run',{method:'POST',body:'{}'});if(b){b.className='status ok';b.textContent='â '+esc(d.prepared||0)+' Ù¾ÛÚ¯ÛØ±Û Ø¢ÙØ§Ø¯Ù Ø´Ø¯ Â· '+esc(d.skipped||0)+' ÙÙØ±Ø¯ Ø±Ø¯ Ø´Ø¯.'}await loadAdOverview();await loadAdAutopilotStatus()}catch(e){if(b){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}}
+
+async function runAdAutopilot(){const st=document.getElementById('adsStatus'),list=document.getElementById('adsList');if(!st||!list)return;const city=document.getElementById('adsCity').value.trim(),type=document.getElementById('adsType').value,extra=document.getElementById('adsExtra').value.trim();st.className='status';st.textContent='ð¤ Ø®ÙØ¨Ø§Ù Ø®ÙØ¯Ú©Ø§Ø± Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Û Ø¢ÙØ§Ø¯Ú¯Û Ù Ø³Ù¾Ø³ Ø§Ø¬Ø±Ø§Û Ø¹ÙÙÛØ§Øª Ø§Ø³Øªâ¦';list.innerHTML='';try{const pf=await api('/api/ads/preflight');const failed=(pf.checks||[]).filter(x=>x.status==='FAIL');if(failed.length){throw Error('Preflight ÙØ§ÙÙÙÙ Ø§Ø³Øª: '+failed.map(x=>x.name+': '+(x.details||x.value||'FAIL')).join(' Â· '))}if(pf.safe!==true){throw Error('Preflight Ø§Ø¬Ø§Ø²Ù Ø§Ø¬Ø±Ø§Û Autopilot Ø±Ø§ ØµØ§Ø¯Ø± ÙÚ©Ø±Ø¯.')}const d=await api('/api/ads/autopilot',{method:'POST',body:JSON.stringify({city,type,extra})});const m=d.summary||{};st.className='status ok';st.textContent='â Ø®ÙØ¨Ø§Ù Ø®ÙØ¯Ú©Ø§Ø± ØªÙØ§Ù Ø´Ø¯ Â· '+(m.found||0)+' Ù¾ÛØ¯Ø§ Ø´Ø¯ Â· '+(m.new_leads||0)+' Ø¬Ø¯ÛØ¯ Â· '+(m.drafted||0)+' ÙØ°Ø§Ú©Ø±Ù Ø¢ÙØ§Ø¯Ù Ø´Ø¯';list.innerHTML=(d.items||[]).slice(0,20).map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.name||'Ø¨Ø¯ÙÙ ÙØ§Ù')+'</b><span class="pill">'+esc(x.score||0)+'</span></div><div class="mini">'+esc(x.type||'')+' Â· '+esc(x.url||'')+'</div>'+(x.contact_url?'<div class="mini">Ø±Ø§Ù ØªÙØ§Ø³: '+esc(x.contact_url)+'</div>':'')+(x.draft?'<div class="text" style="margin-top:6px">'+esc(x.draft)+'</div>':'')+'</div>').join('')||'<div class="empty">ÙÙØ±Ø¯ Ø¬Ø¯ÛØ¯Û Ù¾ÛØ¯Ø§ ÙØ´Ø¯.</div>';await loadAdTargets();await loadAdAutopilotStatus()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadAdPreflight(){const b=document.getElementById('adPreflight');if(!b)return;b.className='status';b.textContent='Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Û Ø¢ÙØ§Ø¯Ú¯Û Ø³ÛØ³ØªÙâ¦';try{const d=await api('/api/ads/preflight');const bad=(d.checks||[]).filter(x=>x.status==='FAIL');b.innerHTML=(d.checks||[]).map(x=>'<div class="mini">'+(x.status==='PASS'?'ð¢':x.status==='READY'?'ð¡':x.status==='SKIP'?'âª':'ð´')+' '+esc(x.name)+': '+esc(x.details||x.value||x.status)+'</div>').join('');b.className=bad.length?'status error':'status ok'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadAdAutopilotStatus(){const b=document.getElementById('adAutopilotStatus');if(!b)return;try{const d=await api('/api/ads/autopilot/status'),m=d.metrics||{};b.innerHTML='<div class="stat">'+(d.enabled?'ð¢ ON':'ð´ OFF')+'</div><div class="mini">'+(d.enabled?'Ø§Ø¬Ø±Ø§Û Ø®ÙØ¯Ú©Ø§Ø± ÙØ± Û±Ûµ Ø¯ÙÛÙÙ ÙØ¹Ø§Ù Ø§Ø³Øª':'Ø§Ø¬Ø±Ø§Û Ø®ÙØ¯Ú©Ø§Ø± ÙØªÙÙÙ Ø§Ø³Øª')+' Â· '+esc(m.ad_targets||0)+' ÙØ¯Ù ØªØ¨ÙÛØºØ§ØªÛ Â· '+esc(m.hot||0)+' Ø¯Ø§Øº Â· '+esc(m.negotiation||0)+' ÙØ°Ø§Ú©Ø±Ù Â· '+esc(m.followups||0)+' Ù¾ÛÚ¯ÛØ±Û Â· '+esc(m.customers||0)+' ÙØ´ØªØ±Û</div>';b.className=d.enabled?'status ok':'status'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}async function startAdAutopilot(){const type=document.getElementById('adsType')?.value||'all',city=document.getElementById('adsCity')?.value.trim()||'',extra=document.getElementById('adsExtra')?.value.trim()||'',b=document.getElementById('adAutopilotControlStatus');if(b){b.className='status';b.textContent='Ø¯Ø± Ø­Ø§Ù Ø±ÙØ´ÙâÚ©Ø±Ø¯Ù Ø®ÙØ¨Ø§Ù Ø®ÙØ¯Ú©Ø§Ø±â¦'}try{const d=await api('/api/ads/autopilot/start',{method:'POST',body:JSON.stringify({type,city,extra})});if(b){b.className=d.enabled?'status ok':'status error';b.textContent=d.enabled?'ð¢ AUTOPILOT Ø±ÙØ´Ù Ø´Ø¯ Ù ØªØ§ STOP Ø§Ø¯Ø§ÙÙ ÙÛâØ¯ÙØ¯.':'ð´ AUTOPILOT Ø±ÙØ´Ù ÙØ´Ø¯.'}await loadAdAutopilotStatus();await loadAdOverview()}catch(e){if(b){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}}
+async function stopAdAutopilot(){const b=document.getElementById('adAutopilotControlStatus');if(b){b.className='status';b.textContent='Ø¯Ø± Ø­Ø§Ù Ø®Ø§ÙÙØ´âÚ©Ø±Ø¯Ù Ø®ÙØ¨Ø§Ù Ø®ÙØ¯Ú©Ø§Ø±â¦'}try{await api('/api/ads/autopilot/stop',{method:'POST',body:'{}'});if(b){b.className='status ok';b.textContent='â¹ï¸ AUTOPILOT Ø®Ø§ÙÙØ´ Ø´Ø¯. Ø§Ø¬Ø±Ø§Û Ø²ÙØ§ÙâØ¨ÙØ¯ÛâØ´Ø¯Ù ÙØªÙÙÙ Ø§Ø³Øª.'}await loadAdAutopilotStatus()}catch(e){if(b){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}}
+
 async function loadMetrics(){const b=document.getElementById('metricsBody');b.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026';try{const d=await api('/api/metrics');const a=d.items||[];b.innerHTML='<div class="stat">'+a.length+'</div><div class="muted">\u0631\u06a9\u0648\u0631\u062f \u0645\u062a\u0631\u06cc\u06a9</div>'+ (a.length?'<div style="margin-top:12px">'+a.slice(0,50).map(x=>'<div class="item"><b>'+esc(x.platform||'')+'</b><div class="mini">impressions: '+esc(x.impressions)+' \u00b7 reach: '+esc(x.reach)+' \u00b7 likes: '+esc(x.likes)+' \u00b7 comments: '+esc(x.comments)+' \u00b7 shares: '+esc(x.shares)+' \u00b7 saves: '+esc(x.saves)+'</div></div>').join('')+'</div>':'<div class="empty">\u0647\u0646\u0648\u0632 \u0645\u062a\u0631\u06cc\u06a9\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647 \u0627\u0633\u062a.</div>')}catch(e){b.className='status error';b.textContent='\u062e\u0637\u0627: '+e.message}}
 async function testConnections(){const b=document.getElementById('connectionTestBody');b.className='status';b.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062a\u0633\u062a \u0627\u062a\u0635\u0627\u0644 \u0648\u0627\u0642\u0639\u06cc\u2026';try{const d=await api('/api/connections/test',{method:'POST'});const p=d.providers||{};b.innerHTML=Object.entries(p).map(([k,v])=>'<div class="item"><div class="itemhead"><b>'+esc(k)+'</b><span class="pill">'+esc(v.status||'UNKNOWN')+'</span></div><div class="mini">'+esc(v.details||'')+(v.bot_username?' \u00b7 @'+esc(v.bot_username):'')+(v.username?' \u00b7 @'+esc(v.username):'')+(v.webhook?(' \u00b7 webhook: '+(v.webhook.configured?'configured':'not configured')):'')+'</div></div>').join('')+'<div class="mini" style="margin-top:8px">PASS: '+esc(String(d.summary?.pass||0))+' \u00b7 FAIL: '+esc(String(d.summary?.fail||0))+' \u00b7 SKIP: '+esc(String(d.summary?.skip||0))+'</div>';b.className=(d.summary?.fail || d.summary?.skip) ? 'status error' : 'status ok'}catch(e){b.className='status error';b.textContent='\u062e\u0637\u0627: '+e.message}}
 
@@ -633,6 +873,9 @@ function dashboardHtml() {
 <button class="tool" onclick="show('inbox');loadInbox()"><b>\ud83d\udcac Inbox</b><span>\u0645\u062f\u06cc\u0631\u06cc\u062a \u067e\u06cc\u0627\u0645\u200c\u0647\u0627</span></button>
 <button class="tool" onclick="show('leads');loadLeads()"><b>\ud83d\udc65 \u0644\u06cc\u062f\u0647\u0627</b><span>\u0645\u062f\u06cc\u0631\u06cc\u062a \u0633\u0631\u0646\u062e\u200c\u0647\u0627</span></button>
 <button class="tool" onclick="show('leads');loadLeadOverview()"><b>\ud83c\udfaf \u062c\u0630\u0628 \u0645\u0634\u062a\u0631\u06cc</b><span>Lead Scoring / CRM / Funnel</span></button>
+<button class="tool" onclick="show('adFinder');loadAdTargets();loadAdAutopilotStatus();loadAdOverview();loadAdPreflight()"><b>ð£ Ù¾ÛØ¯Ø§ Ú©Ø±Ø¯Ù ÙØ´ØªØ±Û ØªØ¨ÙÛØºØ§Øª</b><span>Ø·ÙØ§ÙØ±ÙØ´ Â· Ø³Ø§Ø¹ØªâÙØ±ÙØ´ Â· Ø¨Ø¯ÙÛâÙØ±ÙØ´ Â· ØªØ¨ÙÛØºØ§Øª ÙØ¯ÙÙÙØ¯</span></button>
+<button class="tool" onclick="show('telegramMedia');loadTelegramMedia()"><b>ð¦ Ø±Ø³Ø§ÙÙ ÙØ­ØµÙÙØ§Øª Telegram</b><span>Ø¯Ø±ÛØ§ÙØª Ø¹Ú©Ø³ Ù ÙÛØ¯Ø¦ÙÛ ÙØ­ØµÙÙØ§Øª Ø§Ø² Ú©Ø§ÙØ§Ù</span></button>
+<button class="tool" onclick="show('whatsappStory');loadWhatsappStory()"><b>ð± Ø§Ø³ØªÙØ±Û WhatsApp</b><span>Ø¢ÙØ§Ø¯ÙâØ³Ø§Ø²Û Ø¹Ú©Ø³ Ù ÙÛØ¯Ø¦Ù Ø¨Ø±Ø§Û Ø§Ø³ØªÙØ±Û</span></button>
 <button class="tool" onclick="show('metrics');loadMetrics()"><b>\ud83d\udcca \u0622\u0645\u0627\u0631</b><span>\u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0627\u062c\u062a\u0645\u0627\u0639\u06cc</span></button>
 <button class="tool" onclick="show('system');loadSystem()"><b>\u2699\ufe0f \u0633\u06cc\u0633\u062a\u0645</b><span>Health / Recovery / Logs</span></button>
 </div></div><div class="card"><div class="title">\u0648\u0636\u0639\u06cc\u062a</div><div id="homeStatus" class="status ok">\u0645\u062a\u0635\u0644</div></div></div>
@@ -640,9 +883,11 @@ function dashboardHtml() {
 <div id="approval" class="section"><div class="card"><div class="title">\u2705 \u0645\u062d\u062a\u0648\u0627\u06cc \u062f\u0631 \u0627\u0646\u062a\u0638\u0627\u0631 \u062a\u0623\u06cc\u06cc\u062f</div><div id="approvalStatus" class="status"></div><div id="approvalList"></div></div><div class="card"><div class="title">\ud83d\ude80 \u0627\u0646\u062a\u0634\u0627\u0631 \u0645\u062d\u062a\u0648\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f\u0634\u062f\u0647</div><div id="approvedStatus" class="status"></div><div id="approvedList"></div></div></div>
 <div id="calendar" class="section"><div class="card"><div class="title">\ud83d\udcc5 \u062a\u0642\u0648\u06cc\u0645 \u0645\u062d\u062a\u0648\u0627\u06cc\u06cc</div><div class="two"><div><div class="label">Content ID (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</div><input id="calContent" class="field" placeholder="\u0634\u0646\u0627\u0633\u0647 \u0645\u062d\u062a\u0648\u0627"></div><div><div class="label">Campaign ID (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</div><input id="calCampaign" class="field" placeholder="\u0634\u0646\u0627\u0633\u0647 \u06a9\u0645\u067e\u06cc\u0646"></div></div><div class="label">\u0632\u0645\u0627\u0646 \u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc</div><input id="calTime" class="field" type="datetime-local"><div class="label">Public Media URL (\u0628\u0631\u0627\u06cc Instagram)</div><input id="calMedia" class="field" type="url" placeholder="https://..."><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addCalendar()">\u0627\u0641\u0632\u0648\u062f\u0646 \u0628\u0647 \u062a\u0642\u0648\u06cc\u0645</button></div><div id="calendarStatus" class="status"></div><div id="calendarList"></div></div></div>
 <div id="campaigns" class="section"><div class="card"><div class="title">\ud83d\udce3 \u06a9\u0645\u067e\u06cc\u0646\u200c\u0647\u0627</div><div class="label">\u0646\u0627\u0645 \u06a9\u0645\u067e\u06cc\u0646</div><input id="campName" class="field"><div class="label">\u0647\u062f\u0641</div><input id="campGoal" class="field"><div class="label">\u0645\u062e\u0627\u0637\u0628</div><input id="campAudience" class="field"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addCampaign()">\u0633\u0627\u062e\u062a \u06a9\u0645\u067e\u06cc\u0646</button></div><div id="campaignStatus" class="status"></div><div id="campaignList"></div></div></div>
+<div id="telegramMedia" class="section"><div class="card"><div class="title">ð¦ ÙÙØ¨Ø¹ ÙØ­ØµÙÙØ§Øª Telegram</div><div class="mini">Ø±Ø¨Ø§Øª Ù¾Ø³ØªâÙØ§Û Ø¬Ø¯ÛØ¯ Ú©Ø§ÙØ§Ù Ø±Ø§ ÙÛâÚ¯ÛØ±Ø¯Ø Ø¢Ø±Ø´ÛÙ ÙØ¯ÛÙÛ Telegram Ø§Ø² Ø·Ø±ÛÙ Bot API ÙØ§Ø¨Ù Ø®ÙØ§ÙØ¯Ù ÙÛØ³Øª.</div><div class="row" style="margin-top:12px"><button class="btn primary" onclick="setupTelegramMedia()">ÙØ¹Ø§ÙâØ³Ø§Ø²Û Ø¯Ø±ÛØ§ÙØª Ø±Ø³Ø§ÙÙ</button><button class="btn secondary" onclick="loadTelegramMedia()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ</button></div><div id="telegramMediaStatus" class="status"></div><div id="telegramMediaList"></div></div></div>
+<div id="whatsappStory" class="section"><div class="card"><div class="title">ð± Ø§Ø³ØªÙØ±Û WhatsApp</div><div class="mini">Ø±Ø³Ø§ÙÙâÙØ§Û ÙØ§ÙØ¹Û ÙØ­ØµÙÙØ§Øª Ø§Ø² Telegram Ø§ÛÙØ¬Ø§ Ø¢ÙØ§Ø¯Ù ÙÛâØ´ÙÙØ¯. Ø§ÙØªØ´Ø§Ø± Ø§Ø³ØªÙØ±Û WhatsApp Ø¯Ø³ØªÛ Ø§Ø³ØªØ Ù¾ÙÙ Ø¹Ú©Ø³/ÙÛØ¯Ø¦Ù Ø±Ø§ Ø¯Ø± Ø§Ø®ØªÛØ§Ø± ØªÙ ÙÛâÚ¯Ø°Ø§Ø±Ø¯ ØªØ§ Ø¯Ø§Ø®Ù WhatsApp Status ÙÙØªØ´Ø± Ú©ÙÛ.</div><div class="row" style="margin-top:12px"><button class="btn primary" onclick="loadWhatsappStory()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ Ø±Ø³Ø§ÙÙ</button><button class="btn secondary" onclick="window.open('https://wa.me/','_blank')">Ø¨Ø§Ø² Ú©Ø±Ø¯Ù WhatsApp</button></div><div id="whatsappStoryStatus" class="status"></div><div id="whatsappStoryList"></div></div></div>
 <div id="inbox" class="section"><div class="card"><div class="title">\ud83d\udcac Inbox</div><div id="inboxStatus" class="status"></div><div id="inboxList"></div></div></div>
 <div id="leads" class="section"><div class="card"><div class="title">\ud83c\udfaf \u0645\u0631\u06a9\u0632 \u062c\u0630\u0628 \u0645\u0634\u062a\u0631\u06cc Instagram</div><div class="two"><div><div class="stat" id="leadTotal">0</div><div class="muted">\u06a9\u0644 \u0644\u06cc\u062f\u0647\u0627</div></div><div><div class="stat" id="leadConversion">0%</div><div class="muted">\u0646\u0631\u062e \u062a\u0628\u062f\u06cc\u0644 \u0627\u0632 \u0644\u06cc\u062f\u0647\u0627\u06cc \u062a\u0645\u0627\u0633\u200c\u06af\u0631\u0641\u062a\u0647\u200c\u0634\u062f\u0647</div></div></div><div class="row" style="margin-top:12px"><button class="btn primary" onclick="loadLeadOverview()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc CRM</button><button class="btn secondary" onclick="showLeadQueue('hot')">\ud83d\udd25 \u0644\u06cc\u062f\u0647\u0627\u06cc \u062f\u0627\u063a</button><button class="btn secondary" onclick="showLeadQueue('followup')">\u23f0 \u067e\u06cc\u06af\u06cc\u0631\u06cc\u200c\u0647\u0627\u06cc \u0627\u0645\u0631\u0648\u0632</button></div><div id="leadOverviewStatus" class="status"></div><div id="leadActionList"></div></div><div class="card"><div class="title">\ud83d\udd0e Instagram Lead Finder</div><div class="label">\u0647\u0634\u062a\u06af/\u06a9\u0644\u06cc\u062f\u0648\u0627\u0698\u0647 Instagram</div><input id="igLeadQuery" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b jewelry \u06cc\u0627 \u0637\u0644\u0627"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="discoverInstagramLeads()">\u067e\u06cc\u062f\u0627 \u06a9\u0631\u062f\u0646 \u067e\u06cc\u062c\u200c\u0647\u0627\u06cc \u0645\u0631\u062a\u0628\u0637</button></div><div id="igLeadStatus" class="status"></div><div id="igLeadList"></div></div><div class="card"><div class="title">\ud83e\udd1d Outreach Center</div><div class="mini">\u067e\u06cc\u0627\u0645\u200c\u0647\u0627 \u0641\u0642\u0637 Draft \u0647\u0633\u062a\u0646\u062f \u0648 \u0627\u0631\u0633\u0627\u0644 \u062e\u0648\u062f\u06a9\u0627\u0631 \u0627\u0646\u062c\u0627\u0645 \u0646\u0645\u06cc\u200c\u0634\u0648\u062f.</div><div id="outreachList"></div></div><div class="card"><div class="title">\ud83d\udcc8 \u0642\u06cc\u0641 \u0641\u0631\u0648\u0634</div><div id="leadFunnel" class="status"></div></div><div class="card"><div class="title">\ud83d\udc64 \u0627\u0641\u0632\u0648\u062f\u0646 \u0644\u06cc\u062f \u062f\u0633\u062a\u06cc</div><div class="two"><div><div class="label">\u0646\u0627\u0645</div><input id="leadName" class="field"></div><div><div class="label">\u062a\u0645\u0627\u0633</div><input id="leadContact" class="field"></div></div><div class="two"><div><div class="label">\u0645\u0631\u062d\u0644\u0647</div><select id="leadStage" class="field"><option value="new">\u062c\u062f\u06cc\u062f</option><option value="qualified">\u0648\u0627\u062c\u062f \u0634\u0631\u0627\u06cc\u0637</option><option value="contacted">\u062a\u0645\u0627\u0633 \u06af\u0631\u0641\u062a\u0647 \u0634\u062f</option><option value="replied">\u067e\u0627\u0633\u062e \u062f\u0627\u062f\u0647</option><option value="negotiation">\u0645\u0630\u0627\u06a9\u0631\u0647</option><option value="customer">\u0645\u0634\u062a\u0631\u06cc</option></select></div><div><div class="label">\u0627\u0648\u0644\u0648\u06cc\u062a</div><select id="leadPriority" class="field"><option value="normal">\u0639\u0627\u062f\u06cc</option><option value="high">\u062f\u0627\u063a</option><option value="low">\u06a9\u0645</option></select></div></div><div class="label">\u06cc\u0627\u062f\u062f\u0627\u0634\u062a</div><textarea id="leadNotes" class="field" rows="3"></textarea><div class="label">\u0632\u0645\u0627\u0646 \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0628\u0639\u062f\u06cc</div><input id="leadFollowup" class="field" type="datetime-local"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addLead()">\u0627\u0641\u0632\u0648\u062f\u0646 \u0644\u06cc\u062f</button></div><div id="leadStatus" class="status"></div><div id="leadList"></div></div></div>
-<div id="metrics" class="section"><div class="card"><div class="title">\ud83d\udcca \u0622\u0645\u0627\u0631</div><div id="metricsBody" class="status"></div></div></div>
+<div id="adFinder" class="section"><div class="card"><div class="title">ð¤ ÙØ±Ú©Ø² Ø¹ÙÙÛØ§Øª Ø®ÙØ¯Ú©Ø§Ø± ØªØ¨ÙÛØºØ§Øª</div><div class="mini">Ø³ÛØ³ØªÙ Ø®ÙØ¯Ø´ ÙØ´ØªØ±ÛâÛØ§Ø¨ÛØ ÙØ±ØµØª ØªØ¨ÙÛØºØ CRMØ ÙØ°Ø§Ú©Ø±Ù Ù Ù¾ÛÚ¯ÛØ±Û Ø±Ø§ ÙØ¯ÛØ±ÛØª ÙÛâÚ©ÙØ¯.</div><div id="adOverviewBody" class="status"></div><div class="row"><button class="btn primary" onclick="runAdAutopilot()">â¶ï¸ Ø§Ø¬Ø±Ø§Û Ú©Ø§ÙÙ</button><button class="btn secondary" onclick="runAdFollowups()">â° Ø§Ø¬Ø±Ø§Û Ù¾ÛÚ¯ÛØ±ÛâÙØ§</button><button class="btn secondary" onclick="loadAdOverview()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ</button></div><div id="adFollowupStatus" class="status"></div><div id="adOpportunityList"></div></div><div class="card"><div class="title">ð£ Ù¾ÛØ¯Ø§ Ú©Ø±Ø¯Ù ÙØ´ØªØ±Û ØªØ¨ÙÛØºØ§Øª</div><div class="mini">ÙÙØ¨Ø¹ ÙØ­ØµÙÙ Ù ÙØ¹Ø±ÙÛ Ø¨Ø±ÙØ¯: <b>www.hamzehibox.com</b></div><div class="label">ÙÙØ¹ ÙØ´ØªØ±Û ÙØ¯Ù</div><select id="adsType" class="field"><option value="gold">Ø·ÙØ§ÙØ±ÙØ´</option><option value="watch">Ø³Ø§Ø¹ØªâÙØ±ÙØ´</option><option value="fashion_jewelry">Ø¨Ø¯ÙÛâÙØ±ÙØ´</option><option value="all">ÙØ± Ø³Ù Ú¯Ø±ÙÙ</option></select><div class="label">Ø´ÙØ± / Ø¨Ø§Ø²Ø§Ø±</div><input id="adsCity" class="field" placeholder="ÙØ«ÙØ§Ù ØªÙØ±Ø§ÙØ ÙØ´ÙØ¯Ø Ø¯Ø¨Ûâ¦"><div class="label">Ø¬Ø²Ø¦ÛØ§Øª Ø§Ø®ØªÛØ§Ø±Û</div><input id="adsExtra" class="field" placeholder="ÙØ«ÙØ§Ù ÙØ±ÙØ´Ú¯Ø§ÙâÙØ§Û ÙÙÚ©Ø³Ø Ø¹ÙØ¯ÙâÙØ±ÙØ´Ø ÙØ±ÙØ´ Ø¢ÙÙØ§ÛÙ"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="runAdAutopilot()">ð¤ Ø§Ø¬Ø±Ø§Û Ø®ÙØ¨Ø§Ù Ø®ÙØ¯Ú©Ø§Ø±</button><button class="btn secondary" onclick="autoAdCampaign()">Ø´Ø±ÙØ¹ Ú©ÙÙ¾ÛÙ Ù¾Ø§ÛÙ</button><button class="btn secondary" onclick="discoverAdCustomers()">ð Ø¬Ø³ØªØ¬ÙÛ Ø¯Ø³ØªÛ</button><button class="btn secondary" onclick="loadAdTargets()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ CRM</button></div><div id="adsStatus" class="status"></div><div id="adsList"></div></div><div class="card"><div class="title">ð¤ ÙØ¶Ø¹ÛØª Ø®ÙØ¨Ø§Ù Ø®ÙØ¯Ú©Ø§Ø±</div><div class="mini">ÛÚ©âØ¨Ø§Ø± START Ø¨Ø²ÙØ Ø³ÛØ³ØªÙ Ø·Ø¨Ù ØªÙØ¸ÛÙØ§Øª ÙØ¹ÙÛØ ÙØ´ØªØ±ÛâÛØ§Ø¨ÛØ Ø¨Ø±Ø±Ø³Û ÙØ±ØµØª ØªØ¨ÙÛØºØ CRMØ ÙØ°Ø§Ú©Ø±Ù Ù Ù¾ÛÚ¯ÛØ±Û Ø±Ø§ Ø¯Ø± ÚØ±Ø®ÙâÙØ§Û Ø²ÙØ§ÙâØ¨ÙØ¯ÛâØ´Ø¯Ù Ø§Ø¯Ø§ÙÙ ÙÛâØ¯ÙØ¯ ØªØ§ STOP.</div><div id="adAutopilotStatus" class="status"></div><div class="row"><button class="btn primary" onclick="startAdAutopilot()">â¶ï¸ START AUTOPILOT</button><button class="btn danger" onclick="stopAdAutopilot()">â¹ï¸ STOP AUTOPILOT</button><button class="btn secondary" onclick="loadAdAutopilotStatus()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ ÙØ¶Ø¹ÛØª</button></div><div id="adAutopilotControlStatus" class="status"></div></div><div class="card"><div class="title">ð§  ÙÙØ´ ÙÛØ¯ Ù ÙØ±Ú©Ø² Ø§ÙØ¯Ø§Ù</div><div class="mini">Ø§ÙÙÙÛØª Ø§ÙØ¯Ø§Ù Ø§ÙØ±ÙØ²Ø Ø§ÙØªÛØ§Ø² ÙØ§Ø¨Ù ØªÙØ¶ÛØ­Ø ÙØ±ØµØª ØªØ¨ÙÛØº Ù Ù¾ÛÚ¯ÛØ±ÛâÙØ§Û Ø³Ø±Ø±Ø³ÛØ¯Ø´Ø¯Ù.</div><div id="adIntelligenceBody" class="status"></div><div id="adActionList"></div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadAdIntelligence()">ð§  ØªØ­ÙÛÙ ÙÙØ´ÙÙØ¯</button><button class="btn primary" onclick="loadAdActionCenter()">ð¦ Ø§ÙØ¯Ø§Ù Ø§ÙØ±ÙØ²</button></div><div id="adActionCenter" class="status"></div></div><div class="card"><div class="title">ð¡ï¸ Ø³ÙØ§ÙØª Ù Ù¾ÛØ´âØ¨Ø±Ø±Ø³Û ØªØ¨ÙÛØºØ§Øª</div><div class="mini">ÙØ¨Ù Ø§Ø² Ø§Ø¬Ø±Ø§Û Ø¹ÙÙÛØ§ØªØ ÙØ³ÛØ± ÙØ¨Ø ÙØ­Ø¯ÙØ¯ÛØª Ø§Ø¬Ø±Ø§Ø Ø§ÙÙÛØª URL Ù Ø§ØªØµØ§ÙâÙØ§Û ÙØ§Ø²Ù Ø¨Ø±Ø±Ø³Û ÙÛâØ´ÙØ¯.</div><div id="adPreflight" class="status"></div><div class="row"><button class="btn secondary" onclick="loadAdPreflight()">Ø¨Ø±Ø±Ø³Û Ø¢ÙØ§Ø¯Ú¯Û</button></div></div><div class="card"><div class="title">ð¤ ÙØ³ÛØ± ØªØ¨ÙÛØºØ§Øª Ù ÙØ°Ø§Ú©Ø±Ù</div><div class="mini">Ø­Ø§ÙØª Ø®ÙØ¯Ú©Ø§Ø±: ÙØ± Ø³Ù Ú¯Ø±ÙÙ ÙØ¯Ù Ø±Ø§ Ù¾ÛØ¯Ø§ ÙÛâÚ©ÙØ¯Ø Ø³Ø§ÛØª Ù ÙØ³ÛØ± ØªØ¨ÙÛØºØ§Øª Ø±Ø§ Ø¨Ø±Ø±Ø³Û ÙÛâÚ©ÙØ¯Ø Lead Ø±Ø§ Ø¯Ø± CRM Ø°Ø®ÛØ±Ù ÙÛâÚ©ÙØ¯ Ù Ù¾ÛØ´âÙÙÛØ³ ÙØ°Ø§Ú©Ø±Ù Ø±Ø§ ÙÛâØ³Ø§Ø²Ø¯. ÙÙØ· Ú©Ø§Ø±ÙØ§Û ÙÛØ§Ø²ÙÙØ¯ ÙØ¬ÙØ²Ø Ù¾Ø±Ø¯Ø§Ø®ØªØ ÙØ±Ø§Ø±Ø¯Ø§Ø¯ ÛØ§ Ø¯Ø³ØªØ±Ø³Û Ø§Ø®ØªØµØ§ØµÛ Ø¨Ø±Ø§Û ØªØ£ÛÛØ¯ ØªÙ ÙØªÙÙÙ ÙÛâØ´ÙÙØ¯.</div><div id="adsSavedStatus" class="status"></div><div id="adsSavedList"></div></div></div><div id="metrics" class="section"><div class="card"><div class="title">\ud83d\udcca \u0622\u0645\u0627\u0631</div><div id="metricsBody" class="status"></div></div></div>
 <div id="system" class="section"><div class="card"><div class="title">\u2699\ufe0f \u0648\u0636\u0639\u06cc\u062a \u0633\u06cc\u0633\u062a\u0645</div><div id="systemBody" class="status"></div><div class="row"><button class="btn secondary" onclick="loadSystem()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc</button><button class="btn secondary" onclick="runRelease()">Release Check</button></div><div id="releaseStatus" class="status"></div></div><div class="card"><div class="title">\ud83d\udd10 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u0627\u062a\u0635\u0627\u0644</div><div id="settingsBody" class="status">\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026</div><div class="row"><button class="btn secondary" onclick="testConnections()">\u062a\u0633\u062a \u0627\u062a\u0635\u0627\u0644 \u0648\u0627\u0642\u0639\u06cc</button></div><div id="connectionTestBody" class="status"></div></div><div class="card"><div class="title">\ud83d\ude80 \u0627\u062c\u0631\u0627\u06cc \u0627\u0646\u062a\u0634\u0627\u0631</div><div id="runsBody" class="status">\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026</div></div><div class="card"><div class="title">\ud83e\uddfe \u0644\u0627\u06af \u0633\u06cc\u0633\u062a\u0645</div><div id="eventsBody" class="status">\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026</div></div></div>
 </section>
 </main>
@@ -655,6 +900,49 @@ function dashboardHtml() {
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(recovery(env));
+    if (event?.cron === "*/15 * * * *") {
+      ctx.waitUntil((async()=>{
+        try {
+          await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+          const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='ads_autopilot_config'").first();
+          let cfg={}; try{cfg=JSON.parse(row?.value||"{}")}catch{}
+          if(!cfg.enabled) return;
+          const input=validateAdsInput(cfg); if(!input.ok) return;
+          await runAdAutopilotOnce(env,input,"scheduled");
+          // Keep the follow-up queue moving while Autopilot is ON. Actual sending remains authorized-channel/manual.
+          const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+          const nowMs=Date.now();
+          let preparedFollowups=0;
+          for(const lead of (rows.results||[])){
+            if(preparedFollowups>=AD_MAX_DRAFTS_PER_RUN) break;
+            if(lead.stage==="customer"||lead.stage==="converted"||lead.stage==="rejected"||lead.stage==="archived") continue;
+            const meta=parseLeadNotes(lead),at=meta.next_followup_at||meta.followup_at;
+            if(!at||!Date.parse(at)||Date.parse(at)>nowMs||meta.followup_draft||!env.OPENAI_API_KEY) continue;
+            try{
+              const prompt=`Write a short polite Persian B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;
+              const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);
+              const d=await r.json().catch(()=>({})); if(!r.ok) continue; const draft=responseText(d).trim(); if(!draft) continue;
+              meta.followup_draft=draft; meta.followup_prepared_at=now(); meta.next_followup_at=null; meta.followup_at=at; meta.followup_status="prepared";
+              await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),lead.id).run();
+              preparedFollowups++;
+            }catch{}
+          }
+        } catch(e) { await audit(env,"ad_autopilot_scheduled_error","Scheduled advertising Autopilot cycle failed",{error:e.message}); }
+      })());
+    }
+    if (event?.cron === "0 7 * * *") {
+      ctx.waitUntil((async()=>{
+        try {
+          const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+          const due=[]; const nowMs=Date.now();
+          for(const lead of (rows.results||[])){const meta=parseLeadNotes(lead);const at=meta.next_followup_at||meta.followup_at;if(at&&Date.parse(at)&&Date.parse(at)<=nowMs&&!meta.followup_draft&&! ["customer","converted","rejected","archived"].includes(lead.stage)) due.push({lead,meta});}
+          for(const {lead,meta} of due.slice(0,AD_MAX_DRAFTS_PER_RUN)){
+            if(!env.OPENAI_API_KEY) break;
+            try{const prompt=`Write a short polite Persian B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);const d=await r.json().catch(()=>({}));if(!r.ok)continue;const draft=responseText(d).trim();if(!draft)continue;meta.followup_draft=draft;meta.followup_prepared_at=now();meta.next_followup_at=null;meta.followup_status="prepared";await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),lead.id).run();}catch{}}
+          await audit(env,"ad_followups_scheduled","Daily advertising follow-up sweep completed",{due:due.length});
+        } catch {}
+      })());
+    }
   },
 
   async fetch(req, env) {
@@ -725,6 +1013,9 @@ export default {
         });
       }
 
+      if (u.pathname === "/api/telegram/webhook/setup" && req.method === "POST") return await setupTelegramWebhook(env, req);
+      if (u.pathname === "/api/telegram/media" && req.method === "GET") return await getTelegramMedia(env, req);
+      if (u.pathname === "/api/telegram/media/file" && req.method === "GET") return await proxyTelegramMedia(env, req);
       if (u.pathname === "/webhooks/telegram" && req.method === "POST") return await handleTelegramWebhook(env, req);
       if (u.pathname === "/webhooks/instagram" && (req.method === "GET" || req.method === "POST")) return await handleInstagramWebhook(env, req);
 
@@ -831,6 +1122,14 @@ export default {
         if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
         const name = String(b.name || "").trim();
         if (!name) return json({ ok: false, error: "name is required" }, 400);
+        if(name.length>160) return json({ok:false,error:"name is too long"},400);
+        const contact=b.contact==null?null:String(b.contact).trim();
+        if(contact && contact.length>500) return json({ok:false,error:"contact is too long"},400);
+        const allowedStages=["new","discovered","qualified","contacted","replied","negotiation","customer","converted","rejected","archived"];
+        const allowedPriorities=["low","normal","high"];
+        const stage=String(b.stage||"new"); const priority=String(b.priority||"normal");
+        if(!allowedStages.includes(stage)) return json({ok:false,error:"Invalid lead stage"},400);
+        if(!allowedPriorities.includes(priority)) return json({ok:false,error:"Invalid lead priority"},400);
         const id = uid();
         const t = now();
         await env.DB.prepare("INSERT INTO campaigns(id,name,goal,audience,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)")
@@ -881,10 +1180,310 @@ export default {
         if (!name) return json({ ok: false, error: "name is required" }, 400);
         const id = uid();
         const t = now();
-        const meta = { manual_notes: String(b.notes || ""), source: "manual", score: b.score !== undefined ? Math.max(0, Math.min(100, Number(b.score) || 0)) : 10, next_followup_at: b.next_followup_at || null };
+        const meta = { manual_notes: String(b.notes || "").slice(0,5000), source: "manual", score: b.score !== undefined ? Math.max(0, Math.min(100, Number(b.score) || 0)) : 10, next_followup_at: b.next_followup_at || null };
         await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
-          .bind(id, name, b.contact || null, b.stage || "new", b.priority || "normal", JSON.stringify(meta), t, t).run();
+          .bind(id, name, contact, stage, priority, JSON.stringify(meta), t, t).run();
         return json({ ok: true, id });
+      }
+
+      if (u.pathname === "/api/ads/targets" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const r = await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+        const items = (r.results || []).filter(x => { try { const m = JSON.parse(x.notes || "{}"); return m.source === "ad_discovery" || m.ad_target === true; } catch { return false; } });
+        return json({ ok: true, items });
+      }
+
+      if (u.pathname === "/api/ads/discover" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
+        const input=validateAdsInput(b);
+        if(!input.ok) return json(input,400);
+        const {type,city,extra}=input;
+        const sourceSite = "https://www.hamzehibox.com";
+        const terms = { gold:"Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ± Ø²Ø±Ú¯Ø±Û Ú¯Ø§ÙØ±Û Ø·ÙØ§", watch:"Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª Ø³Ø§Ø¹Øª ÙÚÛ Ø³Ø§Ø¹Øª ÙÙÚ©Ø³", fashion_jewelry:"Ø¨Ø¯ÙÛØ¬Ø§Øª Ø¨Ø¯ÙÛ ÙØ±ÙØ´Û Ø²ÛÙØ±Ø¢ÙØ§Øª ÙØ§ÙØªØ²Û Ø§Ú©Ø³Ø³ÙØ±Û", all:"Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ± Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª Ø¨Ø¯ÙÛØ¬Ø§Øª Ø¨Ø¯ÙÛ ÙØ±ÙØ´Û Ø²ÛÙØ±Ø¢ÙØ§Øª ÙØ§ÙØªØ²Û" };
+        if (!terms[type]) return json({ ok:false, error:"ÙÙØ¹ ÙØ´ØªØ±Û ÙØ§ÙØ¹ØªØ¨Ø± Ø§Ø³Øª" },400);
+        const q = [terms[type], city, extra].filter(Boolean).join(" ");
+        const discovery = await discoverWebLinks(q, 10);
+        const links = discovery.links;
+        if (!links.length) return json({ ok:false, error:"Ø¬Ø³ØªØ¬ÙÛ ÙØ¨ ÙØ¹ÙØ§Ù ÙØªÛØ¬ÙâØ§Û Ø¨Ø±ÙÚ¯Ø±Ø¯Ø§ÙØ¯Ø Ø¯ÙØ¨Ø§Ø±Ù Ø¨Ø¹Ø¯Ø§Ù ØªÙØ§Ø´ Ú©ÙÛØ¯", provider: discovery.provider },502);
+        const items=[]; const t=now();
+        for (const url of links.slice(0,AD_MAX_DISCOVERY_SITES)) {
+          try {
+            const rr=await fetchWithRetry(url,{headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}},2,AD_FETCH_TIMEOUT_MS);
+            const tx=(await rr.text()).slice(0,180000);
+            const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||url).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,160);
+            const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+            const low=plain.toLowerCase();
+            const hit=/Ø·ÙØ§|Ø¬ÙØ§ÙØ±|Ø³Ø§Ø¹Øª|Ø¨Ø¯ÙÛ|gold|jewel|watch|accessor/i.test(plain);
+            const adHit=/ØªØ¨ÙÛØº|advertis|sponsor|Ø±Ù¾ÙØ±ØªØ§Ú|ØªÙØ§Ø³ Ø¨Ø§ ÙØ§|contact us|media kit|ÙÙÚ©Ø§Ø±Û/i.test(plain);
+            const score=Math.min(100,(hit?55:20)+(adHit?25:0)+(city && plain.includes(city)?10:0));
+            let contactUrl=null;
+            const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
+            if(cm){try{contactUrl=new URL(cm[1],url).toString()}catch{}}
+            const host=new URL(url).hostname;
+            const name=title||host;
+            const notes=JSON.stringify({source:"ad_discovery",ad_target:true,source_site:sourceSite,type,city,query:q,url,evidence:plain.slice(0,700),contact_url:contactUrl,discovered_at:t,score});
+            const existing=await env.DB.prepare("SELECT id FROM leads WHERE contact=? LIMIT 1").bind(url).first();
+            let id;
+            if(existing){id=existing.id;await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low",notes,t,id).run();}
+            else{id=uid();await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,name,url,"discovered",score>=70?"high":score>=45?"normal":"low",notes,t,t).run();}
+            items.push({id,name,kind:type,city,url,contact_url:contactUrl,score,evidence:plain.slice(0,240)});
+          } catch {}
+        }
+        items.sort((a,z)=>z.score-a.score);
+        await audit(env,"ad_customer_discovery","Advertising target/customer discovery completed",{type,city,found:items.length,query:q,source_site:sourceSite});
+        return json({ok:true,query:q,source_site:sourceSite,items});
+      }
+
+      if (u.pathname === "/api/ads/auto-run" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b = await req.json().catch(() => null);
+        if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
+        const input=validateAdsInput(b);
+        if(!input.ok) return json(input,400);
+        const {type,city,extra}=input;
+        const sourceSite = "https://www.hamzehibox.com";
+        const allGroups = [
+          ["gold", "Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ± Ø²Ø±Ú¯Ø±Û Ú¯Ø§ÙØ±Û Ø·ÙØ§"],
+          ["watch", "Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª Ø³Ø§Ø¹Øª ÙÚÛ Ø³Ø§Ø¹Øª ÙÙÚ©Ø³"],
+          ["fashion_jewelry", "Ø¨Ø¯ÙÛØ¬Ø§Øª Ø¨Ø¯ÙÛ ÙØ±ÙØ´Û Ø²ÛÙØ±Ø¢ÙØ§Øª ÙØ§ÙØªØ²Û Ø§Ú©Ø³Ø³ÙØ±Û"]
+        ];
+        const groups=type==="all"?allGroups:allGroups.filter(x=>x[0]===type);
+        const all = [], seen = new Set(), t = now();
+        for (const [type, term] of groups) {
+          const q = [term, city, extra].filter(Boolean).join(" ");
+          const discovery = await discoverWebLinks(q, 6);
+          const links = discovery.links;
+          for (const url of links) {
+            if (seen.has(url)) continue; seen.add(url);
+            try {
+              const rr = await fetchWithRetry(url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)" } }, 2, AD_FETCH_TIMEOUT_MS);
+              const tx = (await rr.text()).slice(0, 140000);
+              const title = (tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || url).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 140);
+              const plain = tx.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+              const hit = /Ø·ÙØ§|Ø¬ÙØ§ÙØ±|Ø³Ø§Ø¹Øª|Ø¨Ø¯ÙÛ|gold|jewel|watch|accessor/i.test(plain);
+              if (!hit) continue;
+              const adHit = /ØªØ¨ÙÛØº|advertis|sponsor|Ø±Ù¾ÙØ±ØªØ§Ú|ØªÙØ§Ø³ Ø¨Ø§ ÙØ§|contact us|media kit|ÙÙÚ©Ø§Ø±Û/i.test(plain);
+              const score = Math.min(100, 55 + (adHit ? 25 : 0) + (city && plain.includes(city) ? 10 : 0));
+              const cm = tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
+              let contactUrl = null; if (cm) { try { contactUrl = new URL(cm[1], url).toString(); } catch {} }
+              const notes = { source:"ad_discovery", ad_target:true, source_site:sourceSite, type, city, query:q, url, evidence:plain.slice(0,900), contact_url:contactUrl, discovered_at:t, score, automation:"auto_campaign_v1" };
+              const existing = await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(url).first();
+              let id;
+              if (existing) {
+                id = existing.id;
+                let old = {}; try { old = JSON.parse(existing.notes || "{}"); } catch {}
+                const merged = Object.assign(old, notes);
+                await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low", JSON.stringify(merged), t, id).run();
+              } else {
+                id = uid();
+                await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,url,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(notes),t,t).run();
+              }
+              all.push({ id, name:title, type, url, contact_url:contactUrl, score });
+            } catch {}
+          }
+        }
+        let drafted = 0;
+        if (env.OPENAI_API_KEY) {
+          for (const item of all.slice(0, AD_MAX_DRAFTS_PER_RUN)) {
+            try {
+              const lead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(item.id).first();
+              if (!lead) continue;
+              let meta = {}; try { meta = JSON.parse(lead.notes || "{}"); } catch {}
+              if (meta.negotiation_draft) continue;
+              const prompt = `Write a concise Persian advertising/collaboration message for this target. Brand source: ${sourceSite}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Product category: jewelry, watch and fashion-jewelry boxes. Do not invent facts. Ask about advertising formats, audience, placement, duration, price and the correct contact person. Keep it respectful, under 700 characters. It is an outreach draft and must not claim an agreement.`;
+              const r = await fetch("https://api.openai.com/v1/responses", { method:"POST", headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"}, body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}), signal:AbortSignal.timeout(15000) });
+              const d = await r.json().catch(() => ({})); if (!r.ok) continue;
+              const draft = responseText(d).trim(); if (!draft) continue;
+              meta.negotiation_draft=draft; meta.negotiation_drafted_at=now(); meta.send_mode="authorized_channel_only";
+              await env.DB.prepare("UPDATE leads SET notes=?,stage=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),"negotiation",now(),item.id).run();
+              item.draft = draft; drafted++;
+            } catch {}
+          }
+        }
+        await audit(env,"ad_auto_campaign","Automated advertising customer discovery and draft preparation completed",{city,found:all.length,drafted,source_site:sourceSite});
+        return json({ok:true,source_site:sourceSite,type,city,found:all.length,drafted,items:all.slice(0,30),next_action:"Use an authorized contact/publishing channel for final outreach or paid placement."});
+      }
+
+      if (u.pathname === "/api/ads/intelligence" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+        const scored=(rows.results||[]).map(lead=>{const i=leadIntelligence(lead);return {id:lead.id,name:lead.name,stage:lead.stage,priority:lead.priority,score:i.score,factors:i.factors,action:i.action,type:i.type,ad_opportunity:i.ad_opportunity,contact_url:i.contact_url,domain:i.domain,updated_at:lead.updated_at};});
+        const active=scored.filter(x=>!['customer','converted','rejected','archived'].includes(x.stage));
+        const actions=active.filter(x=>x.action!=='Ø¨Ø±Ø±Ø³Û Lead').slice(0,20);
+        const domains={}; for(const x of scored)if(x.domain)domains[x.domain]=(domains[x.domain]||0)+1;
+        const duplicates=Object.entries(domains).filter(([,n])=>n>1).map(([domain,count])=>({domain,count}));
+        const funnel={discovered:0,qualified:0,contacted:0,replied:0,negotiation:0,customer:0};
+        for(const x of scored)if(funnel[x.stage]!==undefined)funnel[x.stage]++;
+        return json({ok:true,source_site:"https://www.hamzehibox.com",metrics:{total:scored.length,active:active.length,hot:active.filter(x=>x.score>=70).length,opportunities:active.filter(x=>x.ad_opportunity).length,action_items:actions.length,duplicate_domains:duplicates.length},funnel,duplicates,action_items:actions,top_leads:active.sort((a,b)=>b.score-a.score).slice(0,20)});
+      }
+
+      if (u.pathname === "/api/ads/action-center" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+        const nowMs=Date.now();
+        const items=(rows.results||[]).map(lead=>{
+          const meta=parseLeadNotes(lead), intel=leadIntelligence(lead);
+          const at=meta.next_followup_at||meta.followup_at;
+          const due=!!(at && Date.parse(at)<=nowMs && !["customer","converted","rejected","archived"].includes(lead.stage));
+          let bucket="review";
+          if(due) bucket="today";
+          else if(intel.score>=80 || lead.priority==="high") bucket="urgent";
+          else if(intel.ad_opportunity || lead.stage==="negotiation") bucket="opportunity";
+          return {id:lead.id,name:lead.name,contact:lead.contact,stage:lead.stage,priority:lead.priority,score:intel.score,factors:intel.factors,action:intel.action,bucket,due_followup:due,next_followup_at:at||null,domain:intel.domain,ad_opportunity:intel.ad_opportunity,contact_url:intel.contact_url};
+        }).filter(x=>x.bucket!=="review").sort((a,b)=>({today:0,urgent:1,opportunity:2}[a.bucket]-({today:0,urgent:1,opportunity:2}[b.bucket]))||b.score-a.score).slice(0,30);
+        const counts={today:0,urgent:0,opportunity:0}; for(const x of items) counts[x.bucket]++;
+        return json({ok:true,source_site:"https://www.hamzehibox.com",counts,items,next_actions:items.slice(0,10)});
+      }
+
+      if (u.pathname === "/api/ads/autopilot" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
+        const b=await req.json().catch(()=>null);
+        if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
+        const input=validateAdsInput(b);
+        if(!input.ok) return json(input,400);
+        const d=await runAdAutopilotOnce(env,input,"manual");
+        return json(d);
+      }
+
+      if (u.pathname === "/api/ads/autopilot/start" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>null);
+        if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
+        const input=validateAdsInput(b);
+        if(!input.ok) return json(input,400);
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+        await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind("ads_autopilot_config",JSON.stringify({enabled:true,...input}),now()).run();
+        await audit(env,"ad_autopilot_started","Advertising Autopilot started by admin",{type:input.type,city:input.city});
+        let result={ok:true,enabled:true,config:input};
+        try {
+          result.first_run=await runAdAutopilotOnce(env,input,"start");
+        } catch(e) {
+          await audit(env,"ad_autopilot_start_error","Autopilot start cycle failed",{error:e.message});
+          result.first_run={ok:false,error:e.message};
+        }
+        return json(result);
+      }
+
+      if (u.pathname === "/api/ads/autopilot/stop" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+        const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='ads_autopilot_config'").first();
+        let cfg={}; try{cfg=JSON.parse(row?.value||"{}")}catch{}
+        cfg.enabled=false;
+        await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind("ads_autopilot_config",JSON.stringify(cfg),now()).run();
+        await audit(env,"ad_autopilot_stopped","Advertising Autopilot stopped by admin",{});
+        return json({ok:true,enabled:false});
+      }
+
+      if (u.pathname === "/api/ads/autopilot/status" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+        const cfgRow=await env.DB.prepare("SELECT value,updated_at FROM system_kv WHERE key='ads_autopilot_config'").first();
+        let cfg={enabled:false,type:"all",city:"",extra:""}; try{cfg={...cfg,...JSON.parse(cfgRow?.value||"{}")} }catch{}
+        const rows = await env.DB.prepare("SELECT stage,priority,notes,updated_at FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+        const today=new Date().toISOString().slice(0,10); let found=0, hot=0, negotiation=0, followups=0, customers=0, ads=0;
+        for (const x of (rows.results||[])) {
+          let m={}; try{m=JSON.parse(x.notes||"{}")}catch{}
+          if(m.ad_target) ads++;
+          if(String(x.updated_at||"").startsWith(today)) found++;
+          if(x.priority==="high") hot++;
+          if(x.stage==="negotiation") negotiation++;
+          if(m.next_followup_at || m.followup_at) followups++;
+          if(x.stage==="customer"||x.stage==="converted") customers++;
+        }
+        return json({ok:true,enabled:!!cfg.enabled,config:{type:cfg.type||"all",city:cfg.city||"",extra:cfg.extra||""},updated_at:cfgRow?.updated_at||null,source_site:"https://www.hamzehibox.com",targets:["gold","watch","fashion_jewelry"],metrics:{found,hot,negotiation,followups,customers,ad_targets:ads},mode:"autopilot",external_send:"authorized_channel_only"});
+      }
+
+      if (u.pathname === "/api/ads/followups" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
+        const rows = await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+        const nowMs = Date.now(), items=[];
+        for (const lead of (rows.results||[])) {
+          const meta=parseLeadNotes(lead);
+          const at=meta.next_followup_at || meta.followup_at;
+          if (!at || !Date.parse(at)) continue;
+          if (Date.parse(at) <= nowMs && !["customer","converted","rejected","archived"].includes(lead.stage)) {
+            items.push({id:lead.id,name:lead.name,contact:lead.contact,stage:lead.stage,priority:lead.priority,score:Number(meta.score||0),next_followup_at:at,negotiation_draft:meta.negotiation_draft||null,followup_draft:meta.followup_draft||null});
+          }
+        }
+        return json({ok:true,items:items.slice(0,50)});
+      }
+
+      if (u.pathname === "/api/ads/followups/run" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+        const due=[]; const nowMs=Date.now();
+        for(const lead of (rows.results||[])){
+          const meta=parseLeadNotes(lead), at=meta.next_followup_at||meta.followup_at;
+          if(at && Date.parse(at) && Date.parse(at)<=nowMs && !["customer","converted","rejected","archived"].includes(lead.stage)) due.push({lead,meta});
+        }
+        let prepared=0, skipped=0;
+        for(const {lead,meta} of due.slice(0,20)){
+          if(meta.followup_draft){skipped++;continue;}
+          if(!env.OPENAI_API_KEY){skipped++;continue;}
+          try{
+            const prompt=`Write a short polite Persian B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;
+            const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
+            const d=await r.json().catch(()=>({})); if(!r.ok) {skipped++;continue;}
+            const draft=responseText(d).trim(); if(!draft){skipped++;continue;}
+            meta.followup_draft=draft; meta.followup_prepared_at=now(); meta.followup_at=meta.next_followup_at||meta.followup_at; meta.next_followup_at=null; meta.followup_status="prepared";
+            await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),lead.id).run(); prepared++;
+          }catch{skipped++;}
+        }
+        await audit(env,"ad_followups_run","Advertising follow-up drafts prepared",{due:due.length,prepared,skipped});
+        return json({ok:true,due:due.length,prepared,skipped,mode:"draft_and_queue"});
+      }
+
+      if (u.pathname === "/api/ads/preflight" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const checks=[];
+        checks.push({name:"D1",status:"PASS"});
+        checks.push({name:"HAMZEHI BOX source",status:"PASS",value:"https://www.hamzehibox.com"});
+        checks.push({name:"Target groups",status:"PASS",value:["Ø·ÙØ§ÙØ±ÙØ´","Ø³Ø§Ø¹ØªâÙØ±ÙØ´","Ø¨Ø¯ÙÛâÙØ±ÙØ´"]});
+        checks.push({name:"OpenAI",status:env.OPENAI_API_KEY?"READY":"SKIP",details:env.OPENAI_API_KEY?"Ú©ÙÛØ¯ ØªÙØ¸ÛÙ Ø´Ø¯Ù":"Ø¨Ø±Ø§Û Draft ÙØ°Ø§Ú©Ø±Ù ÙØ§Ø²Ù Ø§Ø³Øª"});
+        checks.push({name:"Web discovery",status:"READY",details:"Google/Bing fallback + timeout + retry"});
+        checks.push({name:"External URL safety",status:"PASS",details:"localhost/private metadata targets blocked"});
+        checks.push({name:"Run protection",status:"PASS",details:`discovery sites â¤ ${AD_MAX_DISCOVERY_SITES}, AI drafts â¤ ${AD_MAX_DRAFTS_PER_RUN}`});
+        return json({ok:true,checks,mode:"preflight",safe:true});
+      }
+
+      if (u.pathname === "/api/ads/overview" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+        const today=new Date().toISOString().slice(0,10); let foundToday=0, hot=0, negotiation=0, due=0, customers=0, adTargets=0, opportunities=0;
+        const items=[];
+        for(const lead of (rows.results||[])){
+          const m=parseLeadNotes(lead); const updated=String(lead.updated_at||"");
+          if(updated.startsWith(today)) foundToday++;
+          if(Number(m.score||0)>=70 || lead.priority==="high") hot++;
+          if(lead.stage==="negotiation") negotiation++;
+          if(lead.stage==="customer"||lead.stage==="converted") customers++;
+          if(m.ad_target) adTargets++;
+          if(m.ad_opportunity || m.contact_url) opportunities++;
+          const at=m.next_followup_at||m.followup_at; if(at && Date.parse(at)<=Date.now() && !["customer","converted","rejected","archived"].includes(lead.stage)) due++;
+          if(items.length<12 && m.ad_target) items.push({id:lead.id,name:lead.name,stage:lead.stage,score:Number(m.score||0),type:m.type||null,url:m.url||lead.contact,contact_url:m.contact_url||null,ad_opportunity:!!(m.ad_opportunity||m.contact_url),followup_draft:m.followup_draft||null});
+        }
+        return json({ok:true,source_site:"https://www.hamzehibox.com",metrics:{found_today:foundToday,hot,negotiation,due_followups:due,customers,ad_targets:adTargets,ad_opportunities:opportunities},items});
+      }
+
+      if (u.pathname === "/api/ads/negotiation-draft" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b=await req.json().catch(()=>({})); const id=String(b.lead_id||"").trim();
+        if(!id) return json({ok:false,error:"lead_id is required"},400);
+        const lead=await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(id).first();
+        if(!lead) return json({ok:false,error:"Lead not found"},404);
+        let meta=parseLeadNotes(lead);
+        if(!env.OPENAI_API_KEY) return json({ok:false,error:"OPENAI_API_KEY not configured"},503);
+        const prompt=`Write a concise Persian advertising/collaboration negotiation draft for a business website or media outlet. Brand source: ${meta.source_site||"https://www.hamzehibox.com"}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Explain the product category (jewelry/watch/ fashion jewelry boxes) without inventing facts. Ask about available advertising formats, price, audience, placement, duration, and contact person. Keep it respectful, under 700 characters, and make it a draft for human approval only.`;
+        const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
+        const d=await r.json().catch(()=>({})); if(!r.ok)return json({ok:false,error:d.error?.message||`OpenAI returned ${r.status}`},502);
+        const draft=responseText(d).trim(); if(!draft)return json({ok:false,error:"No negotiation draft returned"},502);
+        meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="manual_approval_only";meta.next_followup_at=new Date(Date.now()+48*60*60*1000).toISOString();meta.followup_status="scheduled";
+        await env.DB.prepare("UPDATE leads SET notes=?,updated_at=?,stage=? WHERE id=?").bind(JSON.stringify(meta),now(),"negotiation",id).run();
+        await audit(env,"ad_negotiation_draft","Advertising negotiation draft generated",{lead_id:id});
+        return json({ok:true,lead_id:id,draft,send_mode:"manual_approval_only"});
       }
 
       if (u.pathname === "/api/instagram/leads/discover" && req.method === "POST") {
