@@ -1,3 +1,4 @@
+import { liveDashboardHtml } from "./live-dashboard-page.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -428,7 +429,6 @@ async function generateContent(env, b) {
   if (!topic) throw Error("topic is required");
 
   const platform = String(b.platform || "instagram");
-  if (platform === "website") throw Error("Website ÙÙØ· ÙØ­Ù ÙÙØ§ÛØ´Ø Ø¬Ø°Ø¨ Ø¨Ø§Ø²Ø¯ÛØ¯ Ù Lead Ø§Ø³Øª Ù Ø¨Ø±Ø§Û Ø¢Ù ÙØ­ØªÙØ§ ØªÙÙÛØ¯ ÙÙÛâØ´ÙØ¯.");
   const language = String(b.language || "fa-IR");
   const market = String(b.market || "Iran");
   const contentType = String(b.content_type || "post");
@@ -521,14 +521,7 @@ async function createGeneratedContent(env, b) {
     g.hashtags, g.visual_prompt, "generated", t, t
   ).run();
 
-  try {
-    const attached = await autoAttachTelegramMedia(env, id);
-    if (attached?.attached) {
-      await autoProcessContentMedia(env, id, attached);
-    }
-  } catch (e) {
-    await audit(env, "content_media_autoattach_failed", "Automatic media attachment/AI processing failed without blocking content generation", { content_id: id, error: e.message });
-  }
+  try { await autoAttachTelegramMedia(env, id); } catch (e) { await audit(env, "content_media_autoattach_failed", "Automatic media attachment failed without blocking content generation", { content_id: id, error: e.message }); }
 
   await env.DB.prepare(
     "INSERT INTO approval_queue VALUES(?,?,?,?,?,?)"
@@ -592,156 +585,6 @@ async function chooseAutoContentTopic(env) {
   return AUTO_CONTENT_TOPICS_FA.find(x => !used.has(x)) || AUTO_CONTENT_TOPICS_FA[Math.floor(Date.now()/3600000) % AUTO_CONTENT_TOPICS_FA.length];
 }
 
-
-const AUTO_PILOT_DEFAULT_CONFIG = {
-  enabled: true,
-  auto_approve: true,
-  require_media: true,
-  max_approvals_per_cycle: 3
-};
-
-async function getAutoPilotConfig(env){
-  await ensureAutoContentStore(env);
-  const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_pilot_config'").first();
-  let cfg={...AUTO_PILOT_DEFAULT_CONFIG};
-  try{if(row?.value)cfg={...cfg,...JSON.parse(row.value)}}catch{}
-  cfg.enabled=cfg.enabled!==false;
-  cfg.auto_approve=cfg.auto_approve!==false;
-  cfg.require_media=cfg.require_media!==false;
-  cfg.max_approvals_per_cycle=Math.min(10,Math.max(1,Number(cfg.max_approvals_per_cycle)||3));
-  return cfg;
-}
-
-async function validateAutoPilotCandidate(env, contentId, requireMedia=true){
-  const c=await env.DB.prepare("SELECT id,topic,hook,body,caption,cta,status,platform FROM contents WHERE id=? LIMIT 1").bind(String(contentId)).first();
-  if(!c) return {ok:false,reason:'content_not_found'};
-  const required=['topic','hook','body','caption','cta'];
-  const missing=required.filter(k=>!String(c[k]||'').trim());
-  if(missing.length) return {ok:false,reason:'missing_fields',missing};
-  if(!['telegram','priority','both'].includes(String(c.platform||''))) return {ok:false,reason:'unsupported_platform'};
-  await ensureContentMediaStore(env);
-  const media=await env.DB.prepare("SELECT id,media_type,status FROM content_media WHERE content_id=? AND status='ready' ORDER BY created_at DESC LIMIT 1").bind(String(contentId)).first();
-  if(requireMedia && !media) return {ok:false,reason:'media_not_ready'};
-  return {ok:true,media:media||null};
-}
-
-
-const LEARNING_DEFAULT_CONFIG = { enabled: true, interval_hours: 6, sample_limit: 200 };
-
-async function ensureLearningStore(env){
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS learning_feedback (id TEXT PRIMARY KEY, content_id TEXT, platform TEXT, metric_date TEXT, score REAL NOT NULL DEFAULT 0, signal TEXT NOT NULL, details_json TEXT, created_at TEXT NOT NULL)`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS learning_reports (id TEXT PRIMARY KEY, report_type TEXT NOT NULL, period_start TEXT, period_end TEXT, summary_json TEXT NOT NULL, created_at TEXT NOT NULL)`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
-}
-
-async function getLearningConfig(env){
-  await ensureLearningStore(env);
-  const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='learning_config'").first();
-  let cfg={...LEARNING_DEFAULT_CONFIG};
-  try{if(row?.value)cfg={...cfg,...JSON.parse(row.value)}}catch{}
-  cfg.enabled=cfg.enabled!==false;
-  cfg.interval_hours=Math.min(24,Math.max(1,Number(cfg.interval_hours)||6));
-  cfg.sample_limit=Math.min(500,Math.max(20,Number(cfg.sample_limit)||200));
-  return cfg;
-}
-
-function metricEngagementScore(r){
-  const reach=Number(r.reach||0), impressions=Number(r.impressions||0);
-  const interactions=Number(r.likes||0)+Number(r.comments||0)+Number(r.shares||0)+Number(r.saves||0)+Number(r.clicks||0);
-  const base=reach||impressions||0;
-  if(!base) return interactions>0 ? Math.min(100,interactions) : 0;
-  return Math.round((interactions/base)*10000)/100;
-}
-
-async function analyzePerformance(env){
-  await ensureLearningStore(env);
-  const rows=await env.DB.prepare("SELECT * FROM social_metrics ORDER BY metric_date DESC, created_at DESC LIMIT 500").all();
-  const items=rows.results||[];
-  const byPlatform={}; const byContent={};
-  for(const r of items){
-    const platform=String(r.platform||'unknown');
-    const score=metricEngagementScore(r);
-    if(!byPlatform[platform])byPlatform[platform]={samples:0,score_sum:0,reach:0,impressions:0,interactions:0};
-    const p=byPlatform[platform]; p.samples++; p.score_sum+=score; p.reach+=Number(r.reach||0); p.impressions+=Number(r.impressions||0); p.interactions+=Number(r.likes||0)+Number(r.comments||0)+Number(r.shares||0)+Number(r.saves||0)+Number(r.clicks||0);
-    const cid=String(r.content_id||'');
-    if(cid){ if(!byContent[cid])byContent[cid]={content_id:cid,samples:0,score_sum:0}; byContent[cid].samples++; byContent[cid].score_sum+=score; }
-  }
-  for(const v of Object.values(byPlatform))v.avg_score=v.samples?Math.round(v.score_sum/v.samples*100)/100:0;
-  const ranked=Object.values(byContent).sort((a,b)=>b.score_sum/b.samples-a.score_sum/a.samples).slice(0,10).map(x=>({...x,avg_score:x.samples?Math.round(x.score_sum/x.samples*100)/100:0}));
-  const periodEnd=now(), periodStart=new Date(Date.now()-7*86400000).toISOString();
-  const summary={period_start:periodStart,period_end:periodEnd,samples:items.length,platforms:byPlatform,top_content:ranked};
-  await env.DB.prepare("INSERT INTO learning_reports VALUES(?,?,?,?,?,?)").bind(uid(),'performance',periodStart,periodEnd,JSON.stringify(summary),periodEnd).run();
-  return summary;
-}
-
-async function optimizeFromPerformance(env, summary){
-  await ensureLearningStore(env);
-  const platforms=summary.platforms||{};
-  const usable=Object.entries(platforms).filter(([,v])=>Number(v.samples||0)>=2);
-  const platformRanking=usable.sort((a,b)=>Number(b[1].avg_score||0)-Number(a[1].avg_score||0)).map(([platform,v])=>({platform,avg_score:v.avg_score,samples:v.samples}));
-  const profile={
-    generated_at:now(),
-    rule:"Use measured recent performance; do not invent missing metrics.",
-    platform_signal:platformRanking,
-    top_content:(summary.top_content||[]).slice(0,5),
-    next_action: platformRanking.length ? `Prioritize content patterns with measured engagement on ${platformRanking[0].platform} while retaining other enabled destinations.` : "Collect more performance data before changing content strategy."
-  };
-  await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind('auto_optimization_profile',JSON.stringify(profile),now()).run();
-  await env.DB.prepare("INSERT INTO learning_reports VALUES(?,?,?,?,?,?)").bind(uid(),'optimization',summary.period_start,summary.period_end,JSON.stringify(profile),now()).run();
-  return profile;
-}
-
-async function runAnalyzeOptimizeCycle(env, source='scheduled'){
-  const cfg=await getLearningConfig(env);
-  if(!cfg.enabled)return {ok:true,skipped:true,reason:'disabled'};
-  const last=await env.DB.prepare("SELECT value FROM system_kv WHERE key='learning_last_run_at'").first();
-  const lastMs=Date.parse(String(last?.value||''))||0;
-  if(lastMs && Date.now()-lastMs < cfg.interval_hours*3600000)return {ok:true,skipped:true,reason:'interval',next_after:new Date(lastMs+cfg.interval_hours*3600000).toISOString()};
-  const claim=now();
-  const lock=await env.DB.prepare("SELECT value FROM system_kv WHERE key='learning_cycle_lock'").first();
-  const lockMs=Date.parse(String(lock?.value||''))||0;
-  if(lock?.value && lockMs && Date.now()-lockMs<30*60*1000)return {ok:true,skipped:true,reason:'locked'};
-  await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind('learning_cycle_lock',claim,claim).run();
-  try{
-    const summary=await analyzePerformance(env);
-    const profile=await optimizeFromPerformance(env,summary);
-    await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind('learning_last_run_at',claim,claim).run();
-    await env.DB.prepare("DELETE FROM system_kv WHERE key='learning_cycle_lock' AND value=?").bind(claim).run();
-    await audit(env,'analyze_optimize_cycle','Performance analyzed and optimization profile updated',{source,samples:summary.samples,platforms:Object.keys(summary.platforms||{}),top_content:(summary.top_content||[]).length});
-    return {ok:true,ran:true,summary,profile};
-  }catch(e){
-    await env.DB.prepare("DELETE FROM system_kv WHERE key='learning_cycle_lock' AND value=?").bind(claim).run();
-    await audit(env,'analyze_optimize_failed','Analyze/Optimize cycle failed',{source,error:e.message});
-    return {ok:false,error:e.message};
-  }
-}
-
-async function getLearningStatus(env){
-  const cfg=await getLearningConfig(env);
-  const last=await env.DB.prepare("SELECT value FROM system_kv WHERE key='learning_last_run_at'").first();
-  const profile=await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_optimization_profile'").first();
-  let parsed=null; try{parsed=profile?.value?JSON.parse(profile.value):null}catch{}
-  return {enabled:cfg.enabled,interval_hours:cfg.interval_hours,last_run_at:last?.value||null,profile:parsed};
-}
-
-async function runAutoPilotCycle(env, source='scheduled'){
-  const cfg=await getAutoPilotConfig(env);
-  if(!cfg.enabled) return {ok:true,skipped:true,reason:'disabled'};
-  const generated=await runAutoContentGeneration(env,source,false);
-  const rows=await env.DB.prepare("SELECT c.id FROM contents c WHERE c.status='generated' AND EXISTS (SELECT 1 FROM approval_queue q WHERE q.content_id=c.id AND q.status='pending') ORDER BY c.created_at ASC LIMIT ?").bind(cfg.max_approvals_per_cycle).all();
-  let approved=0,held=0;
-  if(cfg.auto_approve){
-    for(const r of rows.results||[]){
-      const check=await validateAutoPilotCandidate(env,r.id,cfg.require_media);
-      if(!check.ok){held++;await audit(env,'auto_pilot_hold','Content held for human review because Auto-Pilot validation did not pass',{content_id:r.id,reason:check.reason,missing:check.missing||null});continue;}
-      await setApproval(env,r.id,'approved','Auto-Pilot validation passed; automatically approved');
-      approved++;
-    }
-  }
-  await audit(env,'auto_pilot_cycle','Auto-Pilot cycle completed',{source,generated:!!generated.generated,generated_content_id:generated.content_id||null,approved,held});
-  return {ok:true,generated,approved,held,checked:(rows.results||[]).length};
-}
-
 async function runAutoContentGeneration(env, source = "scheduled", force = false) {
   const cfg = await getAutoContentConfig(env);
   if (!cfg.enabled) return { ok:true, skipped:true, reason:"disabled" };
@@ -767,12 +610,6 @@ async function runAutoContentGeneration(env, source = "scheduled", force = false
 
   try {
     const topic = await chooseAutoContentTopic(env);
-    const optimizationRow = await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_optimization_profile'").first();
-    let optimizationGuidance = "";
-    try {
-      const profile = optimizationRow?.value ? JSON.parse(optimizationRow.value) : null;
-      if (profile) optimizationGuidance = `Measured optimization guidance (use only as a preference; do not invent metrics): ${JSON.stringify(profile).slice(0,3500)}`;
-    } catch {}
     const content = await createGeneratedContent(env, {
       topic,
       platform: cfg.platform,
@@ -781,7 +618,7 @@ async function runAutoContentGeneration(env, source = "scheduled", force = false
       content_type: cfg.content_type,
       objective: cfg.objective,
       tone: cfg.tone,
-      facts: optimizationGuidance
+      facts: ""
     });
     await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)")
       .bind('auto_content_last_generated_at', claim, claim).run();
@@ -842,11 +679,11 @@ async function ensureDistributionStore(env){
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS content_distribution (id TEXT PRIMARY KEY, content_id TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, planned_at TEXT, external_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(content_id,target))`).run();
 }
 
-async function queueContentDistribution(env, contentId, targets = ["telegram","whatsapp"], plannedAt = null){
+async function queueContentDistribution(env, contentId, targets = ["telegram","website","whatsapp"], plannedAt = null){
   await ensureDistributionStore(env);
   const t=now();
   for(const target of targets){
-    if(!["telegram","whatsapp"].includes(String(target))) continue;
+    if(!["telegram","website","whatsapp"].includes(String(target))) continue;
     await env.DB.prepare(`INSERT OR IGNORE INTO content_distribution(id,content_id,target,status,planned_at,external_id,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`)
       .bind(uid(),contentId,String(target),"awaiting_approval",plannedAt,null,null,t,t).run();
   }
@@ -857,7 +694,8 @@ async function activateApprovedDistribution(env, contentId){
   const t=now();
   const exists=await env.DB.prepare("SELECT COUNT(*) n FROM content_distribution WHERE content_id=?").bind(contentId).first();
   if(!Number(exists?.n||0)) await queueContentDistribution(env,contentId);
-  // Telegram and WhatsApp share one publication window. Website is display/traffic-only and is not a content publishing target.
+  // All three priority destinations share one publication window. Nothing is sent immediately on approval.
+  // This prevents WhatsApp from bypassing the Calendar and keeps Website/WhatsApp/Telegram in sync.
   const c=await env.DB.prepare("SELECT id,platform FROM contents WHERE id=?").bind(contentId).first();
   if(c){
     const existing=await env.DB.prepare("SELECT planned_at FROM calendar WHERE content_id=? AND status IN ('planned','publishing','published') ORDER BY created_at DESC LIMIT 1").bind(contentId).first();
@@ -866,7 +704,7 @@ async function activateApprovedDistribution(env, contentId){
       const cid=uid();
       await env.DB.prepare("INSERT INTO calendar(id,campaign_id,content_id,planned_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(cid,null,contentId,at,"planned",t,t).run();
     }
-    await env.DB.prepare("UPDATE content_distribution SET status='queued',planned_at=?,updated_at=? WHERE content_id=? AND target IN ('telegram','whatsapp') AND status='awaiting_approval'").bind(at,t,contentId).run();
+    await env.DB.prepare("UPDATE content_distribution SET status='queued',planned_at=?,updated_at=? WHERE content_id=? AND status='awaiting_approval'").bind(at,t,contentId).run();
   }
 }
 
@@ -903,55 +741,28 @@ async function getDistributionOverview(env){
   return {targets,latest:latest.results||[]};
 }
 
-async function sendTelegramMediaToReady(env, contentId, media, text){
-  const ready=readyChatId(env);
-  if(!ready) return {status:'skipped',reason:'TELEGRAM_MEDIA_READY_CHAT_ID missing'};
-  await ensureMediaVaultStore(env);
-  const src=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=? LIMIT 1").bind(String(media.source_id)).first();
-  const fileId=String(src?.file_id||media.source_id||'');
-  if(!fileId) throw Error('Telegram media file_id missing');
-  const method=media.media_type==='video'?'sendVideo':'sendPhoto';
-  const payload={chat_id:ready,caption:text.slice(0,1024)};
-  payload[media.media_type==='video'?'video':'photo']=fileId;
-  const base=`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
-  let r; try{r=await fetch(`${base}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});}catch(e){throw Error('Telegram Ready request outcome unknown; provider request may have been accepted')}
-  const d=await r.json().catch(()=>({})); if(!r.ok||!d.ok) throw Error(d.description||'Telegram Ready publish failed');
-  const messageId=String(d.result?.message_id||''); const t=now();
-  await env.DB.prepare("INSERT OR REPLACE INTO telegram_media_outputs(id,content_id,media_id,ready_chat_id,ready_message_id,status,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
-    .bind(uid(),String(contentId),String(media.source_id),ready,messageId,'ready',null,t,t).run();
-  await audit(env,'telegram_media_ready','Processed media copied to Telegram Ready channel',{content_id:String(contentId),media_id:String(media.source_id),ready_chat_id:ready,ready_message_id:messageId,media_type:media.media_type});
-  return {status:'ready',external_id:messageId};
-}
-
-async function getReadyMediaStatus(env,req){
-  if(req.method!=='GET')return json({ok:false,error:'Method not allowed'},405); if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);
-  await ensureMediaVaultStore(env); const u=new URL(req.url); const contentId=String(u.searchParams.get('content_id')||'');
-  const q=contentId?"SELECT * FROM telegram_media_outputs WHERE content_id=? ORDER BY created_at DESC":"SELECT * FROM telegram_media_outputs ORDER BY created_at DESC LIMIT 50";
-  const r=contentId?await env.DB.prepare(q).bind(contentId).all():await env.DB.prepare(q).all();
-  return json({ok:true,ready_configured:!!readyChatId(env),items:r.results||[]});
-}
-
 async function sendTelegramDistribution(env, contentId){
-  if(!env.TELEGRAM_BOT_TOKEN||!mainTelegramChatId(env)) throw Error('Telegram credentials missing');
+  if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID) throw Error('Telegram credentials missing');
   const c=await env.DB.prepare("SELECT hook,body,caption,cta FROM contents WHERE id=?").bind(contentId).first();
   if(!c) throw Error('Content not found');
   const text=[c.hook,c.body,c.caption,c.cta].filter(Boolean).join('\n\n').trim();
-  await ensureContentMediaStore(env); await ensureMediaVaultStore(env);
+  await ensureContentMediaStore(env);
   const media=await env.DB.prepare("SELECT * FROM content_media WHERE content_id=? AND status='ready' ORDER BY created_at DESC LIMIT 1").bind(contentId).first();
   const base=`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
-  let endpoint='sendMessage', payload={chat_id:mainTelegramChatId(env),text};
-  if(media?.media_type==='photo'){endpoint='sendPhoto';payload={chat_id:mainTelegramChatId(env),photo:String((await env.DB.prepare("SELECT file_id FROM telegram_media_sources WHERE id=? LIMIT 1").bind(String(media.source_id)).first())?.file_id||media.source_id),caption:text.slice(0,1024)};}
-  else if(media?.media_type==='video'){endpoint='sendVideo';payload={chat_id:mainTelegramChatId(env),video:String((await env.DB.prepare("SELECT file_id FROM telegram_media_sources WHERE id=? LIMIT 1").bind(String(media.source_id)).first())?.file_id||media.source_id),caption:text.slice(0,1024)};}
-  if(media){await sendTelegramMediaToReady(env,contentId,media,text);}
-  let r; try{r=await fetch(`${base}/${endpoint}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});}catch(e){throw Error('Telegram request outcome unknown; provider request may have been accepted');}
-  const d=await r.json().catch(()=>({})); if(!r.ok||!d.ok) throw Error(d.description||'Telegram publish failed');
+  let endpoint='sendMessage', payload={chat_id:env.TELEGRAM_CHAT_ID,text};
+  if(media?.media_type==='photo'){endpoint='sendPhoto';payload={chat_id:env.TELEGRAM_CHAT_ID,photo:String(media.source_id),caption:text.slice(0,1024)};}
+  else if(media?.media_type==='video'){endpoint='sendVideo';payload={chat_id:env.TELEGRAM_CHAT_ID,video:String(media.source_id),caption:text.slice(0,1024)};}
+  let r;
+  try{r=await fetch(`${base}/${endpoint}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});}catch(e){throw Error('Telegram request outcome unknown; provider request may have been accepted');}
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.ok) throw Error(d.description||'Telegram publish failed');
   return {status:'published',external_id:String(d.result?.message_id||'')};
 }
 
 async function processContentDistribution(env){
   await ensureDistributionStore(env);
   await reconcileStaleContentDistributions(env);
-  const rows=await env.DB.prepare("SELECT d.*,c.platform,c.caption,c.body,c.cta FROM content_distribution d JOIN contents c ON c.id=d.content_id WHERE d.target IN ('telegram','whatsapp') AND d.status='queued' AND (d.planned_at IS NULL OR d.planned_at<=?) ORDER BY d.created_at ASC LIMIT 20").bind(now()).all();
+  const rows=await env.DB.prepare("SELECT d.*,c.platform,c.caption,c.body,c.cta FROM content_distribution d JOIN contents c ON c.id=d.content_id WHERE d.status='queued' AND (d.planned_at IS NULL OR d.planned_at<=?) ORDER BY d.created_at ASC LIMIT 20").bind(now()).all();
   for(const candidate of rows.results||[]){
     const claimed=await env.DB.prepare("UPDATE content_distribution SET status='processing',updated_at=? WHERE id=? AND status='queued'").bind(now(),candidate.id).run();
     if(!claimed.meta?.changes) continue;
@@ -961,6 +772,13 @@ async function processContentDistribution(env){
         const result=await sendTelegramDistribution(env,d.content_id);
         await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(result.external_id||null,now(),d.id).run();
         await audit(env,'telegram_content_published','Approved content published through Telegram distribution queue',{content_id:d.content_id,external_id:result.external_id||null});
+        continue;
+      }
+      if(d.target==='website'){
+        const visible=await env.DB.prepare("SELECT c.id FROM contents c JOIN content_distribution cd ON cd.content_id=c.id AND cd.target='website' WHERE c.id=? AND c.status='approved' AND cd.id=?").bind(d.content_id,d.id).first();
+        if(!visible) throw Error('Website content is not visible in the approved feed');
+        await env.DB.prepare("UPDATE content_distribution SET status='published',error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(now(),d.id).run();
+        await audit(env,'website_content_published','Approved content verified and published to the website feed',{content_id:d.content_id});
         continue;
       }
       if(d.target==='whatsapp'){
@@ -1061,8 +879,9 @@ async function getContentPipelineStatus(env){
 }
 
 async function getWebsiteContent(env, limit=20){
+  await ensureDistributionStore(env);
   const n=Math.min(50,Math.max(1,Number(limit)||20));
-  const r=await env.DB.prepare("SELECT c.id,c.topic,c.language,c.market,c.content_type,c.hook,c.body,c.caption,c.cta,c.hashtags,c.visual_prompt,c.created_at,c.updated_at, m.media_url, m.media_type FROM contents c LEFT JOIN content_media m ON m.content_id=c.id AND m.status='ready' WHERE c.status='approved' ORDER BY c.created_at DESC LIMIT ?").bind(n).all();
+  const r=await env.DB.prepare("SELECT c.id,c.topic,c.language,c.market,c.content_type,c.hook,c.body,c.caption,c.cta,c.hashtags,c.visual_prompt,c.created_at,c.updated_at, m.media_url, m.media_type FROM contents c JOIN content_distribution d ON d.content_id=c.id AND d.target='website' LEFT JOIN content_media m ON m.content_id=c.id AND m.status='ready' WHERE c.status='approved' AND d.status IN ('queued','ready','published') ORDER BY c.created_at DESC LIMIT ?").bind(n).all();
   return r.results||[];
 }
 
@@ -1195,129 +1014,8 @@ async function collectInstagramMetrics(env){if(!env.INSTAGRAM_ACCESS_TOKEN)retur
 
 
 async function ensureTelegramMediaTable(env){
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_media_sources (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, chat_username TEXT, message_id TEXT NOT NULL, file_id TEXT NOT NULL, file_unique_id TEXT, media_type TEXT NOT NULL, caption TEXT, source_kind TEXT NOT NULL DEFAULT 'archive', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(chat_id,message_id,file_id))`).run();
-  try{await env.DB.prepare("ALTER TABLE telegram_media_sources ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'archive'").run()}catch{}
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_media_sources (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, chat_username TEXT, message_id TEXT NOT NULL, file_id TEXT NOT NULL, file_unique_id TEXT, media_type TEXT NOT NULL, caption TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(chat_id,message_id,file_id))`).run();
 }
-async function ensureMediaVaultStore(env){
-  await ensureTelegramMediaTable(env);
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS media_vault_items (id TEXT PRIMARY KEY, telegram_media_id TEXT NOT NULL, content_id TEXT, source_type TEXT NOT NULL, ai_status TEXT NOT NULL DEFAULT 'none', ai_prompt TEXT, parent_media_id TEXT, tags TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(telegram_media_id))`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_media_outputs (id TEXT PRIMARY KEY, content_id TEXT NOT NULL, media_id TEXT NOT NULL, ready_chat_id TEXT NOT NULL, ready_message_id TEXT, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(content_id,media_id,ready_chat_id))`).run();
-}
-function vaultChatId(env){return String(env.TELEGRAM_VAULT_CHAT_ID||'').trim()}
-function videoVaultChatId(env){return String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||env.TELEGRAM_VAULT_CHAT_ID||'').trim()}
-function mediaVaultChatId(env,type){return String(type==='video'?videoVaultChatId(env):vaultChatId(env)).trim()}
-function readyChatId(env){return String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'').trim()}
-function mainTelegramChatId(env){return String(env.TELEGRAM_CHAT_ID||'').trim()}
-async function telegramBotCall(env,method,body){
-  if(!env.TELEGRAM_BOT_TOKEN)throw Error('Telegram bot token missing');
-  const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error(d.description||`Telegram ${method} failed`);return d.result;
-}
-async function ingestVaultUpload(env,req){
-  if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);await ensureMediaVaultStore(env);
-  const form=await req.formData().catch(()=>null);if(!form)return json({ok:false,error:'multipart/form-data required'},400);const file=form.get('file');if(!(file instanceof File)||!file.size)return json({ok:false,error:'file is required'},400);
-  const type=String(file.type||'application/octet-stream');if(!/^image\/(jpeg|png|webp)|^video\//i.test(type))return json({ok:false,error:'Only image/video files are supported'},415);
-  const chat=mediaVaultChatId(env,type.startsWith('video/')?'video':'photo');if(!chat)return json({ok:false,error:type.startsWith('video/')?'TELEGRAM_VIDEO_VAULT_CHAT_ID missing':'TELEGRAM_VAULT_CHAT_ID missing'},503);
-  const caption=String(form.get('caption')||'').slice(0,1024);const fd=new FormData();fd.append(type.startsWith('video/')?'video':'photo',file,file.name||'upload');if(caption)fd.append('caption',caption);fd.append('chat_id',chat);
-  const method=type.startsWith('video/')?'sendVideo':'sendPhoto';const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',body:fd});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error(d.description||'Telegram vault upload failed');
-  const m=d.result;const media=type.startsWith('video/')?m.video:m.photo?.at(-1);if(!media?.file_id)throw Error('Telegram did not return media file_id');const t=now(),id=uid(),messageId=String(m.message_id||'');
-  await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(id,chat,'',messageId,String(media.file_id),String(media.file_unique_id||''),type.startsWith('video/')?'video':'photo',caption,'vault',t,t).run();
-  await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),id,null,'user_upload','none',null,null,String(form.get('tags')||'').slice(0,500),t,t).run();
-  await audit(env,'media_vault_uploaded','Media uploaded to Telegram Media Vault',{media_id:id,media_type:type.startsWith('video/')?'video':'photo'});
-  return json({ok:true,media_id:id,message_id:messageId,media_type:type.startsWith('video/')?'video':'photo'});
-}
-async function getMediaVault(env,req){
-  if(req.method!=='GET')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);await ensureMediaVaultStore(env);const u=new URL(req.url);const limit=Math.min(50,Math.max(1,Number(u.searchParams.get('limit')||24)));const r=await env.DB.prepare("SELECT m.*,v.content_id,v.source_type,v.ai_status,v.ai_prompt,v.parent_media_id,v.tags FROM telegram_media_sources m LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id WHERE m.source_kind='vault' ORDER BY m.created_at DESC LIMIT ?").bind(limit).all();return json({ok:true,items:r.results||[],vault_configured:!!vaultChatId(env)});
-}
-async function aiEditVaultImageCore(env, sourceId, prompt, meta = {}){
-  await ensureMediaVaultStore(env);
-  if(!env.OPENAI_API_KEY) throw Error('OPENAI_API_KEY missing');
-  const src=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=? AND source_kind='vault' AND media_type='photo'").bind(String(sourceId)).first();
-  if(!src) throw Error('Vault photo not found');
-  const fr=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(src.file_id)}`);
-  const fd=await fr.json().catch(()=>({}));
-  if(!fr.ok||!fd.ok||!fd.result?.file_path) throw Error('Telegram source image lookup failed');
-  const img=await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fd.result.file_path}`);
-  if(!img.ok) throw Error('Telegram source image download failed');
-  const blob=await img.blob();
-  const form=new FormData();
-  form.append('model',String(env.OPENAI_IMAGE_MODEL||'gpt-image-2'));
-  form.append('prompt',prompt);
-  form.append('image',blob,'source.png');
-  form.append('size',String(env.OPENAI_IMAGE_SIZE||'1024x1024'));
-  const r=await fetch('https://api.openai.com/v1/images/edits',{method:'POST',headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`},body:form});
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok) throw Error(d?.error?.message||`OpenAI image edit failed (HTTP ${r.status})`);
-  const item=d?.data?.[0];
-  let outBlob=null;
-  if(item?.b64_json){
-    const bin=atob(item.b64_json); const bytes=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i); outBlob=new Blob([bytes],{type:'image/png'});
-  } else if(item?.url){ const ur=await fetch(item.url); if(ur.ok) outBlob=await ur.blob(); }
-  if(!outBlob) throw Error('AI did not return an image');
-  const chat=vaultChatId(env); if(!chat) throw Error('TELEGRAM_VAULT_CHAT_ID missing');
-  const upload=new FormData(); upload.append('chat_id',chat); upload.append('photo',outBlob,'ai-edit.png'); upload.append('caption',`AI EDIT | parent:${sourceId}`);
-  const tr=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:'POST',body:upload});
-  const td=await tr.json().catch(()=>({})); if(!tr.ok||!td.ok) throw Error(td.description||'Failed to store AI image in vault');
-  const tm=td.result,photo=tm.photo?.at(-1); if(!photo?.file_id) throw Error('Vault did not return AI file_id');
-  const t=now(),id=uid();
-  await env.DB.prepare("INSERT INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-    .bind(id,chat,'',String(tm.message_id||''),String(photo.file_id),String(photo.file_unique_id||''),'photo',`AI EDIT | parent:${sourceId}`,'vault',t,t).run();
-  await env.DB.prepare("INSERT INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
-    .bind(uid(),id,meta.content_id||null,'ai_edit','ready',prompt,sourceId,String(meta.tags||'').slice(0,500),t,t).run();
-  await audit(env,'media_vault_ai_edit','AI image edit created and stored in Telegram vault',{source_media_id:sourceId,media_id:id,content_id:meta.content_id||null});
-  return {media_id:id,source_media_id:sourceId,ai_status:'ready'};
-}
-
-async function aiEditVaultImage(env,req){
-  if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);
-  if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);
-  const b=await req.json().catch(()=>null); const sourceId=String(b?.media_id||''); const prompt=String(b?.prompt||'').trim();
-  if(!sourceId||!prompt)return json({ok:false,error:'media_id and prompt are required'},400);
-  try { const result=await aiEditVaultImageCore(env,sourceId,prompt,{content_id:b?.content_id||null,tags:b?.tags||''}); return json({ok:true,...result}); }
-  catch(e){ return json({ok:false,error:e.message||'AI edit failed'},500); }
-}
-
-async function autoProcessContentMedia(env, contentId, attached){
-  const enabled=String(env.AUTO_AI_MEDIA_ENABLED||'true').toLowerCase()!=='false';
-  if(!enabled) return {processed:false,reason:'auto_ai_media_disabled'};
-  await ensureMediaVaultStore(env); await ensureContentMediaStore(env);
-  const media=await env.DB.prepare("SELECT * FROM content_media WHERE id=? AND content_id=? LIMIT 1").bind(String(attached.id),String(contentId)).first();
-  if(!media) return {processed:false,reason:'content_media_not_found'};
-  const content=await env.DB.prepare("SELECT topic,visual_prompt,caption,content_type FROM contents WHERE id=? LIMIT 1").bind(String(contentId)).first();
-  if(!content) return {processed:false,reason:'content_not_found'};
-  const vault=await env.DB.prepare("SELECT * FROM media_vault_items WHERE telegram_media_id=? LIMIT 1").bind(String(media.source_id)).first();
-  if(media.media_type==='photo' && env.OPENAI_API_KEY && vault?.ai_status!=='ready'){
-    const prompt=[
-      String(content.visual_prompt||''),
-      'Create a polished luxury commercial image for HAMZEHI BOX.',
-      'Preserve the main product identity, proportions and recognizable details.',
-      'Do not add logos, fake text, fake product specifications, prices or invented claims.',
-      'Use premium cinematic lighting and a clean luxury composition.'
-    ].filter(Boolean).join('\n');
-    await env.DB.prepare("UPDATE media_vault_items SET ai_status='processing',ai_prompt=?,content_id=?,updated_at=? WHERE telegram_media_id=?").bind(prompt,String(contentId),now(),String(media.source_id)).run();
-    try{
-      const result=await aiEditVaultImageCore(env,String(media.source_id),prompt,{content_id:contentId});
-      await env.DB.prepare("UPDATE content_media SET source_id=?,source_type='telegram_ai',media_url=?,status='ready',updated_at=? WHERE id=?").bind(String(result.media_id),mediaProxyUrl(result.media_id),now(),String(media.id)).run();
-      await env.DB.prepare("UPDATE media_vault_items SET ai_status='ready',updated_at=? WHERE telegram_media_id=?").bind(now(),String(media.source_id)).run();
-      return {processed:true,mode:'ai_image_edit',media_id:result.media_id};
-    }catch(e){
-      await env.DB.prepare("UPDATE media_vault_items SET ai_status='failed',ai_prompt=?,updated_at=? WHERE telegram_media_id=?").bind(prompt,now(),String(media.source_id)).run();
-      await audit(env,'media_ai_processing_failed','Automatic AI image processing failed; original media retained',{content_id:contentId,media_id:media.source_id,error:e.message});
-      return {processed:false,mode:'ai_image_edit',fallback:'original',error:e.message};
-    }
-  }
-  if(media.media_type==='video'){
-    const provider=String(env.VIDEO_AI_API_URL||'').trim();
-    if(provider){
-      await audit(env,'media_ai_video_provider_ready','Video AI provider configured; video job can be delegated',{content_id:contentId,media_id:media.source_id,provider});
-      return {processed:false,mode:'video_provider_pending',provider};
-    }
-    await audit(env,'media_video_source_reused','No video AI provider configured; archived video retained as source media',{content_id:contentId,media_id:media.source_id});
-    return {processed:false,mode:'video_archive_reuse'};
-  }
-  return {processed:false,reason:'unsupported_media_type'};
-}
-
 async function telegramWebhookSecret(env){
   if(env.TELEGRAM_WEBHOOK_SECRET_TOKEN)return String(env.TELEGRAM_WEBHOOK_SECRET_TOKEN);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
@@ -1343,11 +1041,10 @@ async function proxyTelegramMedia(env,req){
 async function handleTelegramWebhook(env,req){
   if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(provided!==expected)return json({ok:false,error:'Unauthorized webhook'},401);
   const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
-  const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const isVault=isImageVault||isVideoVault;
-  const isReady=!!readyChatId(env)&& (chatId===readyChatId(env)||username===readyChatId(env).replace(/^@/,'').toLowerCase());
+  const target=String(env.TELEGRAM_CHAT_ID||'').replace(/^@/,'').toLowerCase();const username=String(m.chat.username||'').toLowerCase();if(target&&username&&target!==username&&String(m.chat.id)!==String(env.TELEGRAM_CHAT_ID))return json({ok:true,ignored:true,reason:'chat_mismatch'});
   const externalId=String(m.message_id||body.update_id||uid());const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(!ex){const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.from?.username||m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',t,t).run();}
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
-  if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
+  if(media){const t=now();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   return json({ok:true,media_received:!!media});
 }
 
@@ -1360,9 +1057,7 @@ async function recovery(env){await reconcileStalePublishes(env);await reconcileS
         if(!d||d.status==='published'||d.status==='ready'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue;}
         if(d.status!=='failed')throw Error('Distribution is not retryable');
         if(d.target==='website'){
-          await env.DB.prepare("UPDATE content_distribution SET status='completed',error=NULL,updated_at=? WHERE id=?").bind(now(),d.id).run();
-          await env.DB.prepare("UPDATE retry_queue SET status='completed',last_error=NULL,updated_at=? WHERE id=?").bind(now(),x.id).run();
-          continue;
+          await env.DB.prepare("UPDATE content_distribution SET status='queued',planned_at=?,error=NULL,updated_at=? WHERE id=?").bind(now(),now(),d.id).run();
         } else if(d.target==='whatsapp'){
           const c=await env.DB.prepare("SELECT caption,body,cta FROM contents WHERE id=?").bind(d.content_id).first();
           if(!c)throw Error('Content not found');
@@ -1543,38 +1238,6 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
 
-async function ensureWebsiteGrowthStore(env){
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS website_events (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, campaign TEXT, source TEXT, medium TEXT, page TEXT, created_at TEXT NOT NULL)`).run();
-  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_website_events_created_at ON website_events(created_at)`).run();
-  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_website_events_campaign ON website_events(campaign)`).run();
-}
-function websiteEventValue(v,max=180){return String(v??'').trim().slice(0,max)}
-async function trackWebsiteEvent(env,b){
-  await ensureWebsiteGrowthStore(env);
-  const type=websiteEventValue(b.event_type,40);
-  const allowed=['page_view','session_start','product_view','lead','cta_click'];
-  if(!allowed.includes(type)) throw Error('event_type ÙØ§ÙØ¹ØªØ¨Ø± Ø§Ø³Øª');
-  const campaign=websiteEventValue(b.campaign,80)||null,source=websiteEventValue(b.source,80)||null,medium=websiteEventValue(b.medium,80)||null,page=websiteEventValue(b.page,300)||null,t=now();
-  await env.DB.prepare('INSERT INTO website_events(id,event_type,campaign,source,medium,page,created_at) VALUES(?,?,?,?,?,?,?)').bind(uid(),type,campaign,source,medium,page,t).run();
-  return {ok:true,event_type:type,created_at:t};
-}
-async function getWebsiteGrowthOverview(env){
-  await ensureWebsiteGrowthStore(env);
-  const nowMs=Date.now(),d24=new Date(nowMs-24*60*60*1000).toISOString(),d7=new Date(nowMs-7*24*60*60*1000).toISOString();
-  const q=async(sql,...args)=>{const r=await env.DB.prepare(sql).bind(...args).first();return Number(r?.n||0)};
-  const views24=await q("SELECT COUNT(*) n FROM website_events WHERE event_type='page_view' AND created_at>=?",d24),visits24=await q("SELECT COUNT(*) n FROM website_events WHERE event_type='session_start' AND created_at>=?",d24),leads24=await q("SELECT COUNT(*) n FROM website_events WHERE event_type='lead' AND created_at>=?",d24),views7=await q("SELECT COUNT(*) n FROM website_events WHERE event_type='page_view' AND created_at>=?",d7),visits7=await q("SELECT COUNT(*) n FROM website_events WHERE event_type='session_start' AND created_at>=?",d7),leads7=await q("SELECT COUNT(*) n FROM website_events WHERE event_type='lead' AND created_at>=?",d7);
-  const src=await env.DB.prepare("SELECT COALESCE(source,'direct') source, COUNT(*) n FROM website_events WHERE event_type='page_view' AND created_at>=? GROUP BY COALESCE(source,'direct') ORDER BY n DESC LIMIT 8").bind(d7).all();
-  const campaigns=await env.DB.prepare("SELECT COALESCE(campaign,'Ø¨Ø¯ÙÙ Ú©ÙÙ¾ÛÙ') campaign, COUNT(*) views FROM website_events WHERE event_type='page_view' AND created_at>=? GROUP BY COALESCE(campaign,'Ø¨Ø¯ÙÙ Ú©ÙÙ¾ÛÙ') ORDER BY views DESC LIMIT 8").bind(d7).all();
-  return {window:'7d',views24,visits24,leads24,views7,visits7,leads7,sources:src.results||[],campaigns:campaigns.results||[],tracking_endpoint:'/api/website/track',site_role:'display_only'};
-}
-async function createWebsiteCampaign(env,b){
-  const name=websiteEventValue(b.name,100);if(!name)throw Error('ÙØ§Ù Ú©ÙÙ¾ÛÙ Ø§ÙØ²Ø§ÙÛ Ø§Ø³Øª');
-  const source=websiteEventValue(b.source,80)||'telegram',medium=websiteEventValue(b.medium,80)||'referral',campaign=websiteEventValue(b.campaign,100)||name.toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-|-$/g,'').slice(0,60)||uid().slice(0,8);
-  const base=String(b.destination_url||'https://www.hamzehibox.com').trim();let u;try{u=new URL(base)}catch{throw Error('destination_url ÙØ§ÙØ¹ØªØ¨Ø± Ø§Ø³Øª')}if(u.protocol!=='https:')throw Error('destination_url Ø¨Ø§ÛØ¯ HTTPS Ø¨Ø§Ø´Ø¯');
-  u.searchParams.set('utm_source',source);u.searchParams.set('utm_medium',medium);u.searchParams.set('utm_campaign',campaign);
-  return {ok:true,name,source,medium,campaign,tracking_url:u.toString(),note:'Ø§ÛÙ ÙÛÙÚ© ÙÙØ· Ø¨Ø±Ø§Û Ø§ÙØ¯Ø§Ø²ÙâÚ¯ÛØ±Û ÙØ±ÙØ¯Û Ø§Ø³ØªØ ØªØ¨ÙÛØº Ù¾ÙÙÛ Ø±Ø§ Ø¨Ø¯ÙÙ Ø§ØªØµØ§Ù Ø±Ø³ÙÛ Ù¾ÙØªÙØ±Ù Ø®Ø±ÛØ¯Ø§Ø±Û ÙÙÛâÚ©ÙØ¯.'};
-}
-
 function dashboardScript() {
   return `
 let token='';
@@ -1600,18 +1263,9 @@ function installVisibleTextGuard(){
 function headers(){return {'Authorization':'Bearer '+token,'Content-Type':'application/json'}}
 async function api(path,opts={}){try{const r=await fetch(path,Object.assign({},opts,{headers:Object.assign({},headers(),opts.headers||{}),cache:'no-store'}));const text=await r.text();let d={};try{d=JSON.parse(text)}catch{throw Error('Worker \u067e\u0627\u0633\u062e \u0646\u0627\u0645\u0639\u062a\u0628\u0631 \u062f\u0627\u062f. HTTP '+r.status)}if(!r.ok){if(r.status===401)throw Error('\u0631\u0645\u0632 \u0645\u062f\u06cc\u0631 \u0627\u0634\u062a\u0628\u0627\u0647 \u0627\u0633\u062a.');if(r.status===429)throw Error('\u062a\u0639\u062f\u0627\u062f \u062f\u0631\u062e\u0648\u0627\u0633\u062a\u200c\u0647\u0627 \u0632\u06cc\u0627\u062f \u0627\u0633\u062a\u061b \u06a9\u0645\u06cc \u0628\u0639\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0644\u0627\u0634 \u06a9\u0646\u06cc\u062f.');throw Error(d.error||('HTTP '+r.status))}return d}catch(e){throw Error(e?.message||'\u062e\u0637\u0627\u06cc \u0627\u0631\u062a\u0628\u0627\u0637 \u0628\u0627 Worker')}}
 function toggleToken(){const x=document.getElementById('token');x.type=x.type==='password'?'text':'password'}
-async function performLogin(){const s=document.getElementById('loginStatus'),btn=document.getElementById('loginBtn');token=document.getElementById('token').value.trim();if(!token){s.className='status error';s.textContent='ADMIN TOKEN \u0631\u0627 \u0648\u0627\u0631\u062f \u06a9\u0646\u06cc\u062f.';return}btn.disabled=true;s.className='status';s.textContent='\u062f\u0631 \u062d\u0627\u0644 \u0628\u0631\u0631\u0633\u06cc...';const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);try{await api('/api/content',{signal:controller.signal});document.getElementById('login').classList.add('hidden');document.getElementById('app').classList.remove('hidden');document.getElementById('logoutBtn').classList.remove('hidden');document.getElementById('nav').classList.remove('hidden');s.textContent='';await loadApprovals();await loadApproved();await loadLeadOverview();await loadAutoContentStatus();await loadContentPipeline();await loadDistributionOverview();await loadWebsiteGrowth();await loadTelegramMediaPaths();await loadMediaVault()}catch(e){token='';s.className='status error';s.textContent=e?.name==='AbortError'?'\u0627\u0631\u062a\u0628\u0627\u0637 \u0628\u0627 Worker \u067e\u0627\u0633\u062e \u0646\u062f\u0627\u062f. \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0644\u0627\u0634 \u06a9\u0646\u06cc\u062f.' : (e.message||'\u0648\u0631\u0648\u062f \u0646\u0627\u0645\u0648\u0641\u0642')}finally{clearTimeout(timer);btn.disabled=false}}
+async function performLogin(){const s=document.getElementById('loginStatus'),btn=document.getElementById('loginBtn');token=document.getElementById('token').value.trim();if(!token){s.className='status error';s.textContent='ADMIN TOKEN \u0631\u0627 \u0648\u0627\u0631\u062f \u06a9\u0646\u06cc\u062f.';return}btn.disabled=true;s.className='status';s.textContent='\u062f\u0631 \u062d\u0627\u0644 \u0628\u0631\u0631\u0633\u06cc...';const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);try{await api('/api/content',{signal:controller.signal});document.getElementById('login').classList.add('hidden');document.getElementById('app').classList.remove('hidden');document.getElementById('logoutBtn').classList.remove('hidden');document.getElementById('nav').classList.remove('hidden');s.textContent='';await loadApprovals();await loadApproved();await loadLeadOverview();await loadAutoContentStatus();await loadContentPipeline();await loadDistributionOverview()}catch(e){token='';s.className='status error';s.textContent=e?.name==='AbortError'?'\u0627\u0631\u062a\u0628\u0627\u0637 \u0628\u0627 Worker \u067e\u0627\u0633\u062e \u0646\u062f\u0627\u062f. \u062f\u0648\u0628\u0627\u0631\u0647 \u062a\u0644\u0627\u0634 \u06a9\u0646\u06cc\u062f.' : (e.message||'\u0648\u0631\u0648\u062f \u0646\u0627\u0645\u0648\u0641\u0642')}finally{clearTimeout(timer);btn.disabled=false}}
 async function downloadTelegramMedia(id){return shareTelegramMedia(id)}
 async function shareTelegramMedia(id){try{const r=await fetch('/api/telegram/media/file?id='+encodeURIComponent(id),{headers:headers(),cache:'no-store'});if(!r.ok)throw Error('\u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A} \u{631}\u{633}\u{627}\u{646}\u{647} \u{646}\u{627}\u{645}\u{648}\u{641}\u{642} \u{628}\u{648}\u{62F}');const blob=await r.blob();const type=blob.type||'application/octet-stream';const ext=type.includes('video')?'mp4':type.includes('png')?'png':'jpg';const file=new File([blob],'HAMZEHI-BOX-Story.'+ext,{type});if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:'HAMZEHI BOX'});return}const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),60000)}catch(e){if(e&&e.name==='AbortError')return;alert('\u{62E}\u{637}\u{627}: '+e.message)}}
-async function loadTelegramMediaPaths(){const st=document.getElementById('telegramMediaPathsStatus'),list=document.getElementById('telegramMediaPathsList');if(!st||!list)return;try{const d=await api('/api/telegram/media/paths');const a=d.paths||[];st.className='status '+(a.every(x=>x.configured)?'ok':'error');st.textContent=a.every(x=>x.configured)?'ÙØ± Û´ ÙØ³ÛØ± ØªÙØ¸ÛÙ Ø´Ø¯ÙâØ§ÙØ¯.':'Ø¨Ø¹Ø¶Û ÙØ³ÛØ±ÙØ§ ÙÙÙØ² Chat ID ÙØ¯Ø§Ø±ÙØ¯.';list.innerHTML=a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(x.label)+'</b><span class="pill">'+(x.configured?'ð¢ ØªÙØ¸ÛÙ Ø´Ø¯Ù':'ð´ ØªÙØ¸ÛÙ ÙØ´Ø¯Ù')+'</span></div><div class="mini">Chat ID: '+esc(x.chat_id||'â')+'</div></div>').join('')}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
-async function testTelegramMediaConnections(){const st=document.getElementById('telegramMediaConnectionStatus');if(!st)return;st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù ØªØ³Øª Ø§ØªØµØ§Ù ÙØ§ÙØ¹Û Û´ ÙØ³ÛØ±...';try{const d=await api('/api/telegram/media/connection-test');const a=d.results||[];const ok=a.length===4&&a.every(x=>x.status==='PASS');st.className='status '+(ok?'ok':'error');st.textContent=a.map(x=>x.label+': '+x.status+(x.details?' â '+x.details:'')).join(' | ')}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
-
-async function loadMediaAiStatus(){const b=document.getElementById('mediaAiStatus');if(!b)return;try{const d=await api('/api/telegram/media/ai-status');const e=d.engine||{};b.className='status '+(e.enabled&&e.image?'ok':'error');b.innerHTML='<b>'+ (e.enabled?'ð¢ ÙÙØªÙØ± AI ÙØ¹Ø§Ù':'â¸ï¸ ÙÙØªÙØ± AI Ø®Ø§ÙÙØ´')+'</b><div class="mini" style="margin-top:7px">ØªØµÙÛØ±: '+esc(e.image?('ÙØªØµÙ â '+(e.image_model||'')):'ÙÛØ§Ø² Ø¨Ù OPENAI_API_KEY')+' Â· ÙÛØ¯ÛÙ: '+esc(e.video_provider?'Provider ÙØªØµÙ':'Provider ÙÛØ¯ÛÙ ØªÙØ¸ÛÙ ÙØ´Ø¯ÙØ Ø¢Ø±Ø´ÛÙ Ø­ÙØ¸ ÙÛâØ´ÙØ¯')+'</div>'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
-async function loadMediaVault(){const st=document.getElementById('mediaVaultStatus'),list=document.getElementById('mediaVaultList');if(!st||!list)return;st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù Ø¯Ø±ÛØ§ÙØª Ø¢Ø±Ø´ÛÙ Media Vaultâ¦';try{const d=await api('/api/telegram/vault/media?limit=24');const a=d.items||[];st.className=d.vault_configured?'status ok':'status error';st.textContent=d.vault_configured?(a.length+' ÙØ§ÛÙ Ø¯Ø± Media Vault'):'TELEGRAM_VAULT_CHAT_ID ØªÙØ¸ÛÙ ÙØ´Ø¯Ù Ø§Ø³Øª';list.innerHTML=a.length?a.map(x=>'<div class=\"item\"><div class=\"itemhead\"><b>ð¦ '+esc(sectionFa(x.media_type))+'</b><span class=\"pill\">'+esc(sectionFa(x.source_type||'telegram_vault'))+'</span></div><div class=\"mini\">'+esc(sectionFa(x.caption||'Ø¨Ø¯ÙÙ Ú©Ù¾Ø´Ù'))+'</div><div class=\"actions\" style=\"margin-top:8px\"><button class=\"btn secondary\" onclick=\"downloadTelegramMedia(&quot;'+esc(x.id)+'&quot;)\">ÙØ´Ø§ÙØ¯Ù / Ø¯Ø±ÛØ§ÙØª</button>'+(x.media_type==='photo'?'<button class=\"btn primary\" onclick=\"aiEditVault(&quot;'+esc(x.id)+'&quot;)\">â¨ Ø§Ø¯ÛØª Ø¨Ø§ AI</button>':'')+'</div></div>').join(''):'<div class=\"empty\">ÙÙÙØ² ÙØ§ÛÙÛ Ø¯Ø± Media Vault Ø«Ø¨Øª ÙØ´Ø¯Ù.</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
-async function setupMediaVaultWebhook(){const st=document.getElementById('mediaVaultUploadStatus');if(st){st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù ÙØ¹Ø§ÙâØ³Ø§Ø²Û Ø¯Ø±ÛØ§ÙØª Ø®ÙØ¯Ú©Ø§Ø± Ø§Ø² Telegramâ¦'}try{const d=await api('/api/telegram/webhook/setup',{method:'POST',body:'{}'});if(st){st.className='status ok';st.textContent='Webhook ÙØ¹Ø§Ù Ø´Ø¯Ø Ù¾Ø³ØªâÙØ§Û Ø¬Ø¯ÛØ¯ Ú©Ø§ÙØ§Ù Vault Ø®ÙØ¯Ú©Ø§Ø± Ø«Ø¨Øª ÙÛâØ´ÙÙØ¯.'}}catch(e){if(st){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}}
-async function uploadVaultFile(){const input=document.getElementById('vaultFile'),caption=document.getElementById('vaultCaption'),st=document.getElementById('mediaVaultUploadStatus');if(!input?.files?.[0]){st.className='status error';st.textContent='ÛÚ© Ø¹Ú©Ø³ ÛØ§ ÙÛØ¯ÛÙ Ø§ÙØªØ®Ø§Ø¨ Ú©ÙÛØ¯.';return}const fd=new FormData();fd.append('file',input.files[0]);fd.append('caption',caption?.value||'');st.className='status';st.textContent='Ø¯Ø± Ø­Ø§Ù Ø§Ø±Ø³Ø§Ù Ø¨Ù Telegram Media Vaultâ¦';try{const r=await fetch('/api/telegram/vault/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error(d.error||'Upload failed');st.className='status ok';st.textContent='Ø°Ø®ÛØ±Ù Ø´Ø¯Ø Media ID: '+d.media_id;input.value='';if(caption)caption.value='';await loadMediaVault()}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
-async function aiEditVault(id){const prompt=window.prompt('ØªÙØ¶ÛØ­ Ø§Ø¯ÛØª/ØªØµÙÛØ±Ø³Ø§Ø²Û AI Ø±Ø§ ÙØ§Ø±Ø¯ Ú©ÙÛØ¯:','Ø¹Ú©Ø³ ÙØ­ØµÙÙ Ø±Ø§ ÙÙÚ©Ø³ Ù ØªØ¨ÙÛØºØ§ØªÛ Ú©ÙØ ÙØ­ØµÙÙ Ø§ØµÙÛ Ø­ÙØ¸ Ø´ÙØ¯Ø ÙÙØ±Ù¾Ø±Ø¯Ø§Ø²Û Ø³ÛÙÙØ§ÛÛ Ù Ù¾Ø³âØ²ÙÛÙÙ ÙÛÙÛÙØ§Ù');if(!prompt)return;try{const d=await api('/api/telegram/vault/ai-edit',{method:'POST',body:JSON.stringify({media_id:id,prompt})});if(!d.ok)throw Error(d.error||'AI edit failed');alert('ØªØµÙÛØ± Ø¬Ø¯ÛØ¯ Ø³Ø§Ø®ØªÙ Ù Ø¯Ø± Media Vault Ø°Ø®ÛØ±Ù Ø´Ø¯.');await loadMediaVault()}catch(e){alert('Ø®Ø·Ø§: '+e.message)}}
-
 async function loadWhatsappStory(){const st=document.getElementById('whatsappStoryStatus'),list=document.getElementById('whatsappStoryList');if(!st||!list)return;st.textContent=safeFa('\u{62F}\u{631} \u{62D}\u{627}\u{644} \u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A} \u{631}\u{633}\u{627}\u{646}\u{647}\u{200C}\u{647}\u{627}\u{2026}');try{const d=await api('/api/telegram/media?limit=12');const a=d.items||[];st.className='status ok';st.textContent=sectionFa(a.length+' \u{631}\u{633}\u{627}\u{646}\u{647} \u{622}\u{645}\u{627}\u{62F}\u{647} \u{627}\u{633}\u{62A}');list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>\u{1F4F1} '+esc(sectionFa(x.media_type))+'</b><span class="pill">'+esc(sectionFa(x.created_at||''))+'</span></div><div class="mini">'+esc(sectionFa(x.caption||'\u{628}\u{62F}\u{648}\u{646} \u{6A9}\u{67E}\u{634}\u{646}'))+'</div><div class="actions" style="margin-top:10px"><button class="btn primary" onclick="shareTelegramMedia(&quot;'+esc(x.id)+'&quot;)">\u{627}\u{631}\u{633}\u{627}\u{644} \u{628}\u{647} WhatsApp / \u{62F}\u{627}\u{646}\u{644}\u{648}\u{62F}</button></div></div>').join(''):'<div class="empty">'+sectionFa('\u{647}\u{646}\u{648}\u{632} \u{631}\u{633}\u{627}\u{646}\u{647}\u{200C}\u{627}\u{6CC} \u{627}\u{632} \u{6A9}\u{627}\u{646}\u{627}\u{644} \u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A} \u{646}\u{634}\u{62F}\u{647} \u{627}\u{633}\u{62A}.')+'</div>'}catch(e){st.className='status error';st.textContent=sectionFa('\u{62E}\u{637}\u{627}: '+e.message)}}
 async function loadTelegramMedia(){const st=document.getElementById('telegramMediaStatus'),list=document.getElementById('telegramMediaList');if(!st||!list)return;st.textContent=safeFa('\u{62F}\u{631} \u{62D}\u{627}\u{644} \u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A} \u{631}\u{633}\u{627}\u{646}\u{647}\u{200C}\u{647}\u{627}\u{6CC} \u{62C}\u{62F}\u{6CC}\u{62F} \u{6A9}\u{627}\u{646}\u{627}\u{644}\u{2026}');try{const d=await api('/api/telegram/media?limit=12');const a=d.items||[];st.className='status ok';st.textContent=sectionFa(a.length+' \u{631}\u{633}\u{627}\u{646}\u{647} \u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A} \u{634}\u{62F}');list.innerHTML=a.length?a.map(x=>'<div class="item"><div class="itemhead"><b>'+esc(sectionFa(x.media_type))+'</b><span class="pill">'+esc(sectionFa(x.created_at||''))+'</span></div><div class="mini">'+esc(sectionFa(x.caption||'\u{628}\u{62F}\u{648}\u{646} \u{6A9}\u{67E}\u{634}\u{646}'))+'</div><div class="actions" style="margin-top:10px"><button class="btn secondary" onclick="downloadTelegramMedia(&quot;'+esc(x.id)+'&quot;)">\u{645}\u{634}\u{627}\u{647}\u{62F}\u{647} / \u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A}</button></div></div>').join(''):'<div class="empty">'+sectionFa('\u{647}\u{646}\u{648}\u{632} \u{631}\u{633}\u{627}\u{646}\u{647} \u{62C}\u{62F}\u{6CC}\u{62F}\u{6CC} \u{627}\u{632} \u{6A9}\u{627}\u{646}\u{627}\u{644} \u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A} \u{646}\u{634}\u{62F}\u{647}. \u{628}\u{639}\u{62F} \u{627}\u{632} \u{641}\u{639}\u{627}\u{644}\u{200C}\u{633}\u{627}\u{632}\u{6CC}\u{60C} \u{67E}\u{633}\u{62A}\u{200C}\u{647}\u{627}\u{6CC} \u{62C}\u{62F}\u{6CC}\u{62F} \u{6A9}\u{627}\u{646}\u{627}\u{644} \u{627}\u{6CC}\u{646}\u{62C}\u{627} \u{645}\u{6CC}\u{200C}\u{622}\u{6CC}\u{646}\u{62F}.')+'</div>'}catch(e){st.className='status error';st.textContent=sectionFa('\u{62E}\u{637}\u{627}: '+e.message)}}
 async function setupTelegramMedia(){const st=document.getElementById('telegramMediaStatus');st.className='status';st.textContent=sectionFa('\u{62F}\u{631} \u{62D}\u{627}\u{644} \u{641}\u{639}\u{627}\u{644}\u{200C}\u{633}\u{627}\u{632}\u{6CC} \u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A} \u{631}\u{633}\u{627}\u{646}\u{647}\u{2026}');try{await api('/api/telegram/webhook/setup',{method:'POST'});st.className='status ok';st.textContent=sectionFa('\u{62F}\u{631}\u{6CC}\u{627}\u{641}\u{62A} \u{631}\u{633}\u{627}\u{646}\u{647} \u{641}\u{639}\u{627}\u{644} \u{634}\u{62F}. \u{62D}\u{627}\u{644}\u{627} \u{67E}\u{633}\u{62A}\u{200C}\u{647}\u{627}\u{6CC} \u{62C}\u{62F}\u{6CC}\u{62F} \u{6A9}\u{627}\u{646}\u{627}\u{644} \u{648}\u{627}\u{631}\u{62F} \u{67E}\u{646}\u{644} \u{645}\u{6CC}\u{200C}\u{634}\u{648}\u{646}\u{62F}.');await loadTelegramMedia()}catch(e){st.className='status error';st.textContent='\u{62E}\u{637}\u{627}: '+e.message}}
@@ -1619,12 +1273,11 @@ async function setupTelegramMedia(){const st=document.getElementById('telegramMe
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',installVisibleTextGuard,{once:true});else installVisibleTextGuard();
 setInterval(()=>{if(token&&document.getElementById('app')&&!document.getElementById('app').classList.contains('hidden'))loadAdAutopilotStatus()},20000);
 function logout(){token='';document.getElementById('app').classList.add('hidden');document.getElementById('login').classList.remove('hidden');document.getElementById('logoutBtn').classList.add('hidden');document.getElementById('nav').classList.add('hidden');document.getElementById('token').value='';document.getElementById('loginStatus').textContent='\u062e\u0627\u0631\u062c \u0634\u062f\u06cc\u062f.'}
-async function loadWebsiteGrowth(){const b=document.getElementById('websiteGrowthBody');if(!b)return;try{const d=await api('/api/website/growth');const ss=d.sources||[],cc=d.campaigns||[];b.className='status ok';b.innerHTML='<div class="two"><div><b>Ø¨Ø§Ø²Ø¯ÛØ¯ Û²Û´ Ø³Ø§Ø¹Øª</b><div class="stat">'+esc(d.views24||0)+'</div></div><div><b>ÙØ±ÙØ¯Û Û²Û´ Ø³Ø§Ø¹Øª</b><div class="stat">'+esc(d.visits24||0)+'</div></div><div><b>Lead Û²Û´ Ø³Ø§Ø¹Øª</b><div class="stat">'+esc(d.leads24||0)+'</div></div><div><b>Lead ÙÙØª Ø±ÙØ²</b><div class="stat">'+esc(d.leads7||0)+'</div></div></div><div class="mini" style="margin-top:10px">Ø¨Ø§Ø²Ø¯ÛØ¯ Û· Ø±ÙØ²: '+esc(d.views7||0)+' Â· ÙØ±ÙØ¯Û Û· Ø±ÙØ²: '+esc(d.visits7||0)+'</div><div class="mini" style="margin-top:8px"><b>ÙÙØ§Ø¨Ø¹ ÙØ±ÙØ¯Û:</b> '+esc(ss.map(x=>(x.source||'direct')+' ('+x.n+')').join(' Â· ')||'ÙÙÙØ² Ø¯Ø§Ø¯ÙâØ§Û Ø«Ø¨Øª ÙØ´Ø¯Ù')+'</div><div class="mini" style="margin-top:8px"><b>Ú©ÙÙ¾ÛÙâÙØ§:</b> '+esc(cc.map(x=>(x.campaign||'Ø¨Ø¯ÙÙ Ú©ÙÙ¾ÛÙ')+' ('+x.views+')').join(' Â· ')||'ÙÙÙØ² Ø¯Ø§Ø¯ÙâØ§Û Ø«Ø¨Øª ÙØ´Ø¯Ù')+'</div><div class="mini" style="margin-top:8px">Website = ÙÙØ§ÛØ´ ÙØ­ØµÙÙ/ÙÙØ¯ÛÙÚ¯ + Ø¬Ø°Ø¨ View + LeadØ ØªÙÙÛØ¯ ÙØ­ØªÙØ§Û Ø®ÙØ¯Ú©Ø§Ø± Ø¨Ø±Ø§Û Website ØºÛØ±ÙØ¹Ø§Ù Ø§Ø³Øª.</div>'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
-async function createWebsiteCampaign(){const st=document.getElementById('websiteCampaignStatus');try{const d=await api('/api/website/campaign',{method:'POST',body:JSON.stringify({name:document.getElementById('websiteCampaignName').value.trim(),source:document.getElementById('websiteCampaignSource').value,medium:document.getElementById('websiteCampaignMedium').value,campaign:document.getElementById('websiteCampaignKey').value.trim(),destination_url:document.getElementById('websiteCampaignUrl').value.trim()||'https://www.hamzehibox.com'})});st.className='status ok';st.innerHTML='<div class="text">ÙÛÙÚ© Ø±ÙÚ¯ÛØ±Û Ø¢ÙØ§Ø¯Ù Ø´Ø¯:</div><div class="mini" style="margin-top:6px;overflow-wrap:anywhere">'+esc(d.tracking_url)+'</div>'}catch(e){st.className='status error';st.textContent='Ø®Ø·Ø§: '+e.message}}
 function show(id){document.querySelectorAll('.section').forEach(x=>x.classList.remove('active'));const el=document.getElementById(id);if(el)el.classList.add('active');window.scrollTo(0,0)}
 async function loadContentPipeline(){const b=document.getElementById('contentPipelineStatus');if(!b)return;try{const d=await api('/api/content/pipeline'),c=d.pipeline?.counts||{};b.className='status ok';b.innerHTML='<div class="two"><div><b>\u{62A}\u{648}\u{644}\u{6CC}\u{62F}</b><div class="stat">'+esc(String(c.generated||0))+'</div></div><div><b>\u{62A}\u{623}\u{6CC}\u{6CC}\u{62F}</b><div class="stat">'+esc(String(c.pending_approval||0))+'</div></div><div><b>\u{632}\u{645}\u{627}\u{646}\u{200C}\u{628}\u{646}\u{62F}\u{6CC}</b><div class="stat">'+esc(String(c.scheduled||0))+'</div></div><div><b>\u{645}\u{646}\u{62A}\u{634}\u{631}\u{634}\u{62F}\u{647}</b><div class="stat">'+esc(String(c.published||0))+'</div></div></div><div class="mini" style="margin-top:8px">\u{62E}\u{637}\u{627}: '+esc(String(c.failed||0))+' \u{B7} \u{627}\u{642}\u{62F}\u{627}\u{645} \u{62F}\u{633}\u{62A}\u{6CC}: '+esc(String(c.manual_required||0))+'</div><div class="mini" style="margin-top:5px">\u{622}\u{62E}\u{631}\u{6CC}\u{646} \u{62A}\u{648}\u{644}\u{6CC}\u{62F} \u{62E}\u{648}\u{62F}\u{6A9}\u{627}\u{631}: '+esc(d.pipeline?.last_generated_at||'\u{647}\u{646}\u{648}\u{632} \u{627}\u{646}\u{62C}\u{627}\u{645} \u{646}\u{634}\u{62F}\u{647}')+'</div>'}catch(e){b.className='status error';b.textContent='\u{62E}\u{637}\u{627}: '+e.message}}
 
-async function loadDistributionOverview(){const b=document.getElementById('distributionOverview');if(!b)return;try{const d=await api('/api/distribution/overview'),t=d.overview?.targets||{};const label=x=>'ÙÙØªØ´Ø±: '+(x.published||0)+' Â· ØµÙ: '+((x.queued||0)+(x.awaiting_approval||0))+' Â· Ø®Ø·Ø§: '+(x.failed||0)+' Â· Ø¯Ø³ØªÛ: '+(x.manual_required||0);b.className='status ok';b.innerHTML='<div class="two"><div><b>Telegram</b><div class="mini">'+esc(label(t.telegram||{}))+'</div></div><div><b>WhatsApp</b><div class="mini">'+esc(label(t.whatsapp||{}))+'</div></div></div><div class="mini" style="margin-top:8px">Website: ÙÙØ· ÙÙØ§ÛØ´ ÙØ­ØµÙÙ/ÙÙØ¯ÛÙÚ¯ Ù Ø±ÙÚ¯ÛØ±Û Ø¨Ø§Ø²Ø¯ÛØ¯Ø ÙØ­ØªÙØ§Û AI Ø¯Ø± Ø¢Ù ÙÙØªØ´Ø± ÙÙÛâØ´ÙØ¯.</div>'}catch(e){b.className='status error';b.textContent='Ø®Ø·Ø§: '+e.message}}
+async function loadDistributionOverview(){const b=document.getElementById('distributionOverview');if(!b)return;try{const d=await api('/api/distribution/overview'),t=d.overview?.targets||{};const label=x=>'\u0645\u0646\u062a\u0634\u0631: '+(x.published||0)+' \u00b7 \u0635\u0641: '+((x.queued||0)+(x.awaiting_approval||0))+' \u00b7 \u062e\u0637\u0627: '+(x.failed||0)+' \u00b7 \u062f\u0633\u062a\u06cc: '+(x.manual_required||0);b.className='status ok';b.innerHTML='<div class="two"><div><b>Telegram</b><div class="mini">'+esc(label(t.telegram||{}))+'</div></div><div><b>Website</b><div class="mini">'+esc(label(t.website||{}))+'</div></div><div><b>WhatsApp</b><div class="mini">'+esc(label(t.whatsapp||{}))+'</div></div></div>'}catch(e){b.className='status error';b.textContent='\u062e\u0637\u0627: '+e.message}}
+
 async function loadAutoContentStatus(){const b=document.getElementById('autoContentStatus');if(!b)return;try{const d=await api('/api/content/automation');const a=d.automation||{};b.className='status '+(a.enabled?'ok':'');b.innerHTML='<b>'+ (a.enabled?'\u{1F7E2} \u{645}\u{648}\u{62A}\u{648}\u{631} \u{62E}\u{648}\u{62F}\u{6A9}\u{627}\u{631} \u{631}\u{648}\u{634}\u{646} \u{627}\u{633}\u{62A}':'\u{23F8} \u{645}\u{648}\u{62A}\u{648}\u{631} \u{62E}\u{648}\u{62F}\u{6A9}\u{627}\u{631} \u{62E}\u{627}\u{645}\u{648}\u{634} \u{627}\u{633}\u{62A}')+'</b><div class="mini" style="margin-top:7px">\u{641}\u{627}\u{635}\u{644}\u{647} \u{62A}\u{648}\u{644}\u{6CC}\u{62F}: '+esc(String(a.interval_hours||12))+' \u{633}\u{627}\u{639}\u{62A} \u{B7} \u{62A}\u{648}\u{644}\u{6CC}\u{62F} \u{6F2}\u{6F4} \u{633}\u{627}\u{639}\u{62A} \u{627}\u{62E}\u{6CC}\u{631}: '+esc(String(a.generated_last_24h||0))+' \u{B7} \u{62F}\u{631} \u{627}\u{646}\u{62A}\u{638}\u{627}\u{631} \u{62A}\u{623}\u{6CC}\u{6CC}\u{62F}: '+esc(String(a.pending_approval||0))+'</div><div class="mini" style="margin-top:5px">\u{622}\u{62E}\u{631}\u{6CC}\u{646} \u{62A}\u{648}\u{644}\u{6CC}\u{62F}: '+esc(a.last_generated_at||'\u{647}\u{646}\u{648}\u{632} \u{627}\u{646}\u{62C}\u{627}\u{645} \u{646}\u{634}\u{62F}\u{647}')+'</div><div class="mini" style="margin-top:5px">\u{62A}\u{648}\u{644}\u{6CC}\u{62F} \u{628}\u{639}\u{62F}\u{6CC}: '+esc(a.next_generation_at||'\u{67E}\u{633} \u{627}\u{632} \u{627}\u{62C}\u{631}\u{627}\u{6CC} Scheduler')+'</div>'}catch(e){b.className='status error';b.textContent='\u{62E}\u{637}\u{627}: '+e.message}}
 async function toggleAutoContent(){const b=document.getElementById('autoContentToggle');if(!b)return;try{const d=await api('/api/content/automation');const enabled=!!d.automation?.enabled;await api('/api/content/automation',{method:'POST',body:JSON.stringify({enabled:!enabled})});await loadAutoContentStatus()}catch(e){alert('\u{62E}\u{637}\u{627}: '+e.message)}}
 async function runAutoContentNow(){const b=document.getElementById('autoContentStatus');if(b){b.className='status';b.textContent='\u{62F}\u{631} \u{62D}\u{627}\u{644} \u{62A}\u{648}\u{644}\u{6CC}\u{62F} \u{62E}\u{648}\u{62F}\u{6A9}\u{627}\u{631} \u{645}\u{62D}\u{62A}\u{648}\u{627}\u{2026}'}try{const d=await api('/api/content/automation/run',{method:'POST'});if(b){b.className=d.ok?'status ok':'status error';b.textContent=d.generated?'\u{645}\u{62D}\u{62A}\u{648}\u{627} \u{633}\u{627}\u{62E}\u{62A}\u{647} \u{634}\u{62F} \u{648} \u{648}\u{627}\u{631}\u{62F} \u{635}\u{641} \u{62A}\u{623}\u{6CC}\u{6CC}\u{62F} \u{634}\u{62F}: '+d.topic:(d.skipped?'\u{641}\u{639}\u{644}\u{627}\u{64B} \u{646}\u{648}\u{628}\u{62A} \u{62A}\u{648}\u{644}\u{6CC}\u{62F} \u{646}\u{631}\u{633}\u{6CC}\u{62F}\u{647} \u{627}\u{633}\u{62A}.':('\u{62E}\u{637}\u{627}: '+(d.error||'\u{646}\u{627}\u{645}\u{634}\u{62E}\u{635}')))}await loadApprovals();await loadAutoContentStatus()}catch(e){if(b){b.className='status error';b.textContent='\u{62E}\u{637}\u{627}: '+e.message}}}
@@ -1701,7 +1354,6 @@ function dashboardHtml() {
 <button class="tool" onclick="show('approval');loadApprovals()"><b>\u2705 \u062a\u0623\u06cc\u06cc\u062f \u0645\u062d\u062a\u0648\u0627</b><span>\u0628\u0631\u0631\u0633\u06cc \u0648 \u062a\u0623\u06cc\u06cc\u062f/\u0631\u062f</span></button>
 <button class="tool" onclick="show('calendar');loadCalendar()"><b>\ud83d\udcc5 \u062a\u0642\u0648\u06cc\u0645</b><span>\u0627\u0641\u0632\u0648\u062f\u0646 \u0648 \u0645\u062f\u06cc\u0631\u06cc\u062a \u0628\u0631\u0646\u0627\u0645\u0647</span></button>
 <button class="tool" onclick="show('campaigns');loadCampaigns()"><b>\ud83d\udce3 \u06a9\u0645\u067e\u06cc\u0646\u200c\u0647\u0627</b><span>\u0633\u0627\u062e\u062a \u0648 \u0645\u062f\u06cc\u0631\u06cc\u062a \u06a9\u0645\u067e\u06cc\u0646</span></button>
-<button class="tool" onclick="show('websiteGrowth');loadWebsiteGrowth()"><b>\ud83c\udf10 \u0631\u0634\u062f \u0648\u0628\u0633\u0627\u06cc\u062a</b><span>View \u00b7 Visitor \u00b7 Lead \u00b7 Campaign Tracking</span></button>
 <button class="tool" onclick="show('inbox');loadInbox()"><b>\ud83d\udcac Inbox</b><span>\u0645\u062f\u06cc\u0631\u06cc\u062a \u067e\u06cc\u0627\u0645\u200c\u0647\u0627</span></button>
 <button class="tool" onclick="show('leads');loadLeads()"><b>\ud83d\udc65 \u0644\u06cc\u062f\u0647\u0627</b><span>\u0645\u062f\u06cc\u0631\u06cc\u062a \u0633\u0631\u0646\u062e\u200c\u0647\u0627</span></button>
 <button class="tool" onclick="show('leads');loadLeadOverview()"><b>\ud83c\udfaf \u062c\u0630\u0628 \u0645\u0634\u062a\u0631\u06cc</b><span>Lead Scoring / CRM / Funnel</span></button>
@@ -1711,7 +1363,7 @@ function dashboardHtml() {
 <button class="tool" onclick="show('metrics');loadMetrics()"><b>\ud83d\udcca \u0622\u0645\u0627\u0631</b><span>\u062f\u0627\u062f\u0647\u200c\u0647\u0627\u06cc \u0627\u062c\u062a\u0645\u0627\u0639\u06cc</span></button>
 <button class="tool" onclick="show('system');loadSystem()"><b>\u2699\ufe0f \u0633\u06cc\u0633\u062a\u0645</b><span>Health / Recovery / Logs</span></button>
 </div></div><div class="card"><div class="title">\u0648\u0636\u0639\u06cc\u062a</div><div id="homeStatus" class="status ok">\u0645\u062a\u0635\u0644</div></div><div class="card"><div class="title">ð ÙØ¶Ø¹ÛØª Pipeline ÙØ­ØªÙØ§</div><div class="mini">ÙØ¶Ø¹ÛØª ÙØ§ÙØ¹Û ÙØ­ØªÙØ§ Ø§Ø² ØªÙÙÛØ¯ ØªØ§ Ø§ÙØªØ´Ø§Ø±.</div><div id="contentPipelineStatus" class="status">Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Ûâ¦</div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadContentPipeline()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ ÙØ¶Ø¹ÛØª</button></div></div><div class="card"><div class="title">\ud83d\udce1 \u0648\u0636\u0639\u06cc\u062a \u0627\u0646\u062a\u0634\u0627\u0631 \u0633\u0647-\u0645\u0642\u0635\u062f\u06cc</div><div class="mini">\u0648\u0636\u0639\u06cc\u062a \u0648\u0627\u0642\u0639\u06cc Telegram\u060c Website \u0648 WhatsApp \u0627\u0632 \u0635\u0641 \u062a\u0648\u0632\u06cc\u0639.</div><div id="distributionOverview" class="status">\u062f\u0631 \u062d\u0627\u0644 \u0628\u0631\u0631\u0633\u06cc\u2026</div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadDistributionOverview()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u0648\u0636\u0639\u06cc\u062a</button></div></div><div class="card"><div class="title">\ud83e\udde0 ÙÙØªÙØ± ØªÙÙÛØ¯ ÙØ­ØªÙØ§Û Ø®ÙØ¯Ú©Ø§Ø±</div><div class="mini">Ø³ÛØ³ØªÙ Ø¨Ø¯ÙÙ ÙÛØ§Ø² Ø¨Ù ÙØ±ÙØ¯ Ø±ÙØ²Ø§ÙÙØ Ø·Ø¨Ù ÙØ§ØµÙÙ Ø²ÙØ§ÙÛ ØªÙØ¸ÛÙâØ´Ø¯Ù ÙØ­ØªÙØ§ ÙÛâØ³Ø§Ø²Ø¯ Ù Ø¢Ù Ø±Ø§ Ø¯Ø± ØµÙ ØªØ£ÛÛØ¯ ÙØ±Ø§Ø± ÙÛâØ¯ÙØ¯.</div><div id="autoContentStatus" class="status">Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Ûâ¦</div><div class="row" style="margin-top:10px"><button id="autoContentToggle" class="btn secondary" onclick="toggleAutoContent()">Ø±ÙØ´Ù/Ø®Ø§ÙÙØ´</button><button class="btn primary" onclick="runAutoContentNow()">ØªÙÙÛØ¯ ÙÙÛÙ Ø­Ø§ÙØ§</button><button class="btn secondary" onclick="show('approval');loadApprovals()">ÙØ´Ø§ÙØ¯Ù ØµÙ ØªØ£ÛÛØ¯</button></div></div></div>
-<div id="generate" class="section"><div class="card"><div class="title">\u270d\ufe0f \u062a\u0648\u0644\u06cc\u062f \u0645\u062d\u062a\u0648\u0627</div><div class="label">\u0645\u0648\u0636\u0648\u0639</div><input id="gTopic" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b \u062c\u0639\u0628\u0647 \u0644\u0648\u06a9\u0633 \u0637\u0644\u0627 \u0648 \u062c\u0648\u0627\u0647\u0631"><div class="label">\u067e\u0644\u062a\u0641\u0631\u0645</div><select id="gPlatform" class="field"><option value="instagram">Instagram</option><option value="telegram">Telegram</option><option value="website">Website (ÙÙØ§ÛØ´/ÙÙØ¯ÛÙÚ¯Ø Ø¨Ø¯ÙÙ ØªÙÙÛØ¯ ÙØ­ØªÙØ§)</option><option value="whatsapp">WhatsApp</option><option value="both">Instagram + Telegram</option><option value="priority">Telegram + WhatsApp</option></select><div class="label">\u0632\u0628\u0627\u0646</div><select id="gLanguage" class="field"><option value="fa-IR">\u0641\u0627\u0631\u0633\u06cc</option><option value="ar-IQ">\u0639\u0631\u0628\u06cc \u0639\u0631\u0627\u0642\u06cc</option></select><div class="label">\u0628\u0627\u0632\u0627\u0631</div><select id="gMarket" class="field"><option value="Iran">Iran</option><option value="Iraq">Iraq</option></select><div class="label">\u0627\u0637\u0644\u0627\u0639\u0627\u062a \u0648\u0627\u0642\u0639\u06cc \u0645\u062c\u0627\u0632 \u0628\u0631\u0627\u06cc \u0627\u0633\u062a\u0641\u0627\u062f\u0647</div><textarea id="gFacts" class="field" rows="5" placeholder="\u0641\u0642\u0637 \u0648\u0627\u0642\u0639\u06cc\u062a\u200c\u0647\u0627\u06cc\u06cc \u06a9\u0647 \u062e\u0648\u062f\u062a \u062a\u0623\u06cc\u06cc\u062f \u06a9\u0631\u062f\u0647\u200c\u0627\u06cc"></textarea><div class="row" style="margin-top:10px"><button id="generateBtn" class="btn primary" onclick="generate()">\u0633\u0627\u062e\u062a \u0645\u062d\u062a\u0648\u0627</button></div><div id="generateStatus" class="status"></div></div><div id="generatedResult"></div></div>
+<div id="generate" class="section"><div class="card"><div class="title">\u270d\ufe0f \u062a\u0648\u0644\u06cc\u062f \u0645\u062d\u062a\u0648\u0627</div><div class="label">\u0645\u0648\u0636\u0648\u0639</div><input id="gTopic" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b \u062c\u0639\u0628\u0647 \u0644\u0648\u06a9\u0633 \u0637\u0644\u0627 \u0648 \u062c\u0648\u0627\u0647\u0631"><div class="label">\u067e\u0644\u062a\u0641\u0631\u0645</div><select id="gPlatform" class="field"><option value="instagram">Instagram</option><option value="telegram">Telegram</option><option value="website">Website</option><option value="whatsapp">WhatsApp</option><option value="both">Instagram + Telegram</option><option value="priority">Telegram + Website + WhatsApp</option></select><div class="label">\u0632\u0628\u0627\u0646</div><select id="gLanguage" class="field"><option value="fa-IR">\u0641\u0627\u0631\u0633\u06cc</option><option value="ar-IQ">\u0639\u0631\u0628\u06cc \u0639\u0631\u0627\u0642\u06cc</option></select><div class="label">\u0628\u0627\u0632\u0627\u0631</div><select id="gMarket" class="field"><option value="Iran">Iran</option><option value="Iraq">Iraq</option></select><div class="label">\u0627\u0637\u0644\u0627\u0639\u0627\u062a \u0648\u0627\u0642\u0639\u06cc \u0645\u062c\u0627\u0632 \u0628\u0631\u0627\u06cc \u0627\u0633\u062a\u0641\u0627\u062f\u0647</div><textarea id="gFacts" class="field" rows="5" placeholder="\u0641\u0642\u0637 \u0648\u0627\u0642\u0639\u06cc\u062a\u200c\u0647\u0627\u06cc\u06cc \u06a9\u0647 \u062e\u0648\u062f\u062a \u062a\u0623\u06cc\u06cc\u062f \u06a9\u0631\u062f\u0647\u200c\u0627\u06cc"></textarea><div class="row" style="margin-top:10px"><button id="generateBtn" class="btn primary" onclick="generate()">\u0633\u0627\u062e\u062a \u0645\u062d\u062a\u0648\u0627</button></div><div id="generateStatus" class="status"></div></div><div id="generatedResult"></div></div>
 <div id="approval" class="section"><div class="card"><div class="title">\u2705 \u0645\u062d\u062a\u0648\u0627\u06cc \u062f\u0631 \u0627\u0646\u062a\u0638\u0627\u0631 \u062a\u0623\u06cc\u06cc\u062f</div><div id="approvalStatus" class="status"></div><div id="approvalList"></div></div><div class="card"><div class="title">\ud83d\ude80 \u0627\u0646\u062a\u0634\u0627\u0631 \u0645\u062d\u062a\u0648\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f\u0634\u062f\u0647</div><div id="approvedStatus" class="status"></div><div id="approvedList"></div></div></div>
 <div id="calendar" class="section"><div class="card"><div class="title">\ud83d\udcc5 \u062a\u0642\u0648\u06cc\u0645 \u0645\u062d\u062a\u0648\u0627\u06cc\u06cc</div><div class="two"><div><div class="label">Content ID (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</div><input id="calContent" class="field" placeholder="\u0634\u0646\u0627\u0633\u0647 \u0645\u062d\u062a\u0648\u0627"></div><div><div class="label">Campaign ID (\u0627\u062e\u062a\u06cc\u0627\u0631\u06cc)</div><input id="calCampaign" class="field" placeholder="\u0634\u0646\u0627\u0633\u0647 \u06a9\u0645\u067e\u06cc\u0646"></div></div><div class="label">\u0632\u0645\u0627\u0646 \u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0631\u06cc\u0632\u06cc</div><input id="calTime" class="field" type="datetime-local"><div class="label">Public Media URL (\u0628\u0631\u0627\u06cc Instagram)</div><input id="calMedia" class="field" type="url" placeholder="https://..."><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addCalendar()">\u0627\u0641\u0632\u0648\u062f\u0646 \u0628\u0647 \u062a\u0642\u0648\u06cc\u0645</button></div><div id="calendarStatus" class="status"></div><div id="calendarList"></div></div></div>
 <div id="campaigns" class="section"><div class="card"><div class="title">\ud83d\udce3 \u06a9\u0645\u067e\u06cc\u0646\u200c\u0647\u0627</div><div class="label">\u0646\u0627\u0645 \u06a9\u0645\u067e\u06cc\u0646</div><input id="campName" class="field"><div class="label">\u0647\u062f\u0641</div><input id="campGoal" class="field"><div class="label">\u0645\u062e\u0627\u0637\u0628</div><input id="campAudience" class="field"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addCampaign()">\u0633\u0627\u062e\u062a \u06a9\u0645\u067e\u06cc\u0646</button></div><div id="campaignStatus" class="status"></div><div id="campaignList"></div></div></div>
@@ -1719,7 +1371,7 @@ function dashboardHtml() {
 <div id="whatsappStory" class="section"><div class="card"><div class="title">\ud83d\udcf1 \u0627\u0633\u062a\u0648\u0631\u06cc WhatsApp</div><div class="mini">\u0631\u0633\u0627\u0646\u0647\u200c\u0647\u0627\u06cc \u0648\u0627\u0642\u0639\u06cc \u0645\u062d\u0635\u0648\u0644\u0627\u062a \u0627\u0632 Telegram \u0627\u06cc\u0646\u062c\u0627 \u0622\u0645\u0627\u062f\u0647 \u0645\u06cc\u200c\u0634\u0648\u0646\u062f. \u0627\u0646\u062a\u0634\u0627\u0631 \u0627\u0633\u062a\u0648\u0631\u06cc WhatsApp \u062f\u0633\u062a\u06cc \u0627\u0633\u062a\u061b \u067e\u0646\u0644 \u0639\u06a9\u0633/\u0648\u06cc\u062f\u0626\u0648 \u0631\u0627 \u062f\u0631 \u0627\u062e\u062a\u06cc\u0627\u0631 \u062a\u0648 \u0645\u06cc\u200c\u06af\u0630\u0627\u0631\u062f \u062a\u0627 \u062f\u0627\u062e\u0644 WhatsApp Status \u0645\u0646\u062a\u0634\u0631 \u06a9\u0646\u06cc.</div><div class="row" style="margin-top:12px"><button class="btn primary" onclick="loadWhatsappStory()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u0631\u0633\u0627\u0646\u0647</button><button class="btn secondary" onclick="window.open('https://wa.me/','_blank')">\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 WhatsApp</button></div><div id="whatsappStoryStatus" class="status"></div><div id="whatsappStoryList"></div></div></div>
 <div id="inbox" class="section"><div class="card"><div class="title">\ud83d\udcac Inbox</div><div id="inboxStatus" class="status"></div><div id="inboxList"></div></div></div>
 <div id="leads" class="section"><div class="card"><div class="title">\ud83c\udfaf \u0645\u0631\u06a9\u0632 \u062c\u0630\u0628 \u0645\u0634\u062a\u0631\u06cc Instagram</div><div class="two"><div><div class="stat" id="leadTotal">0</div><div class="muted">\u06a9\u0644 \u0644\u06cc\u062f\u0647\u0627</div></div><div><div class="stat" id="leadConversion">0%</div><div class="muted">\u0646\u0631\u062e \u062a\u0628\u062f\u06cc\u0644 \u0627\u0632 \u0644\u06cc\u062f\u0647\u0627\u06cc \u062a\u0645\u0627\u0633\u200c\u06af\u0631\u0641\u062a\u0647\u200c\u0634\u062f\u0647</div></div></div><div class="row" style="margin-top:12px"><button class="btn primary" onclick="loadLeadOverview()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc CRM</button><button class="btn secondary" onclick="showLeadQueue('hot')">\ud83d\udd25 \u0644\u06cc\u062f\u0647\u0627\u06cc \u062f\u0627\u063a</button><button class="btn secondary" onclick="showLeadQueue('followup')">\u23f0 \u067e\u06cc\u06af\u06cc\u0631\u06cc\u200c\u0647\u0627\u06cc \u0627\u0645\u0631\u0648\u0632</button></div><div id="leadOverviewStatus" class="status"></div><div id="leadActionList"></div></div><div class="card"><div class="title">\ud83d\udd0e Instagram Lead Finder</div><div class="label">\u0647\u0634\u062a\u06af/\u06a9\u0644\u06cc\u062f\u0648\u0627\u0698\u0647 Instagram</div><input id="igLeadQuery" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b jewelry \u06cc\u0627 \u0637\u0644\u0627"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="discoverInstagramLeads()">\u067e\u06cc\u062f\u0627 \u06a9\u0631\u062f\u0646 \u067e\u06cc\u062c\u200c\u0647\u0627\u06cc \u0645\u0631\u062a\u0628\u0637</button></div><div id="igLeadStatus" class="status"></div><div id="igLeadList"></div></div><div class="card"><div class="title">\ud83e\udd1d Outreach Center</div><div class="mini">\u067e\u06cc\u0627\u0645\u200c\u0647\u0627 \u0641\u0642\u0637 Draft \u0647\u0633\u062a\u0646\u062f \u0648 \u0627\u0631\u0633\u0627\u0644 \u062e\u0648\u062f\u06a9\u0627\u0631 \u0627\u0646\u062c\u0627\u0645 \u0646\u0645\u06cc\u200c\u0634\u0648\u062f.</div><div id="outreachList"></div></div><div class="card"><div class="title">\ud83d\udcc8 \u0642\u06cc\u0641 \u0641\u0631\u0648\u0634</div><div id="leadFunnel" class="status"></div></div><div class="card"><div class="title">\ud83d\udc64 \u0627\u0641\u0632\u0648\u062f\u0646 \u0644\u06cc\u062f \u062f\u0633\u062a\u06cc</div><div class="two"><div><div class="label">\u0646\u0627\u0645</div><input id="leadName" class="field"></div><div><div class="label">\u062a\u0645\u0627\u0633</div><input id="leadContact" class="field"></div></div><div class="two"><div><div class="label">\u0645\u0631\u062d\u0644\u0647</div><select id="leadStage" class="field"><option value="new">\u062c\u062f\u06cc\u062f</option><option value="qualified">\u0648\u0627\u062c\u062f \u0634\u0631\u0627\u06cc\u0637</option><option value="contacted">\u062a\u0645\u0627\u0633 \u06af\u0631\u0641\u062a\u0647 \u0634\u062f</option><option value="replied">\u067e\u0627\u0633\u062e \u062f\u0627\u062f\u0647</option><option value="negotiation">\u0645\u0630\u0627\u06a9\u0631\u0647</option><option value="customer">\u0645\u0634\u062a\u0631\u06cc</option></select></div><div><div class="label">\u0627\u0648\u0644\u0648\u06cc\u062a</div><select id="leadPriority" class="field"><option value="normal">\u0639\u0627\u062f\u06cc</option><option value="high">\u062f\u0627\u063a</option><option value="low">\u06a9\u0645</option></select></div></div><div class="label">\u06cc\u0627\u062f\u062f\u0627\u0634\u062a</div><textarea id="leadNotes" class="field" rows="3"></textarea><div class="label">\u0632\u0645\u0627\u0646 \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0628\u0639\u062f\u06cc</div><input id="leadFollowup" class="field" type="datetime-local"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="addLead()">\u0627\u0641\u0632\u0648\u062f\u0646 \u0644\u06cc\u062f</button></div><div id="leadStatus" class="status"></div><div id="leadList"></div></div></div>
-<div id="adFinder" class="section"><div class="card"><div class="title">\ud83e\udd16 \u0645\u0631\u06a9\u0632 \u0639\u0645\u0644\u06cc\u0627\u062a \u062e\u0648\u062f\u06a9\u0627\u0631 \u062a\u0628\u0644\u06cc\u063a\u0627\u062a</div><div class="mini">\u0633\u06cc\u0633\u062a\u0645 \u062e\u0648\u062f\u0634 \u0645\u0634\u062a\u0631\u06cc\u200c\u06cc\u0627\u0628\u06cc\u060c \u0641\u0631\u0635\u062a \u062a\u0628\u0644\u06cc\u063a\u060c CRM\u060c \u0645\u0630\u0627\u06a9\u0631\u0647 \u0648 \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0631\u0627 \u0645\u062f\u06cc\u0631\u06cc\u062a \u0645\u06cc\u200c\u06a9\u0646\u062f.</div><div id="adOverviewBody" class="status"></div><div class="row"><button class="btn primary" onclick="runAdAutopilot()">\u25b6\ufe0f \u0627\u062c\u0631\u0627\u06cc \u06a9\u0627\u0645\u0644</button><button class="btn secondary" onclick="runAdFollowups()">\u23f0 \u0627\u062c\u0631\u0627\u06cc \u067e\u06cc\u06af\u06cc\u0631\u06cc\u200c\u0647\u0627</button><button class="btn secondary" onclick="loadAdOverview()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc</button></div><div id="adFollowupStatus" class="status"></div><div id="adOpportunityList"></div></div><div class="card"><div class="title">\ud83d\udce3 \u067e\u06cc\u062f\u0627 \u06a9\u0631\u062f\u0646 \u0645\u0634\u062a\u0631\u06cc \u062a\u0628\u0644\u06cc\u063a\u0627\u062a</div><div class="mini">\u0645\u0646\u0628\u0639 \u0645\u062d\u0635\u0648\u0644 \u0648 \u0645\u0639\u0631\u0641\u06cc \u0628\u0631\u0646\u062f: <b>www.hamzehibox.com</b></div><div class="label">\u0646\u0648\u0639 \u0645\u0634\u062a\u0631\u06cc \u0647\u062f\u0641</div><select id="adsType" class="field"><option value="gold">\u0637\u0644\u0627\u0641\u0631\u0648\u0634</option><option value="watch">\u0633\u0627\u0639\u062a\u200c\u0641\u0631\u0648\u0634</option><option value="fashion_jewelry">\u0628\u062f\u0644\u06cc\u200c\u0641\u0631\u0648\u0634</option><option value="all">\u0647\u0631 \u0633\u0647 \u06af\u0631\u0648\u0647</option></select><div class="label">\u0634\u0647\u0631 / \u0628\u0627\u0632\u0627\u0631</div><input id="adsCity" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b \u062a\u0647\u0631\u0627\u0646\u060c \u0645\u0634\u0647\u062f\u060c \u062f\u0628\u06cc\u2026"><div class="label">\u062c\u0632\u0626\u06cc\u0627\u062a \u0627\u062e\u062a\u06cc\u0627\u0631\u06cc</div><input id="adsExtra" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b \u0641\u0631\u0648\u0634\u06af\u0627\u0647\u200c\u0647\u0627\u06cc \u0644\u0648\u06a9\u0633\u060c \u0639\u0645\u062f\u0647\u200c\u0641\u0631\u0648\u0634\u060c \u0641\u0631\u0648\u0634 \u0622\u0646\u0644\u0627\u06cc\u0646"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="runAdAutopilot()">\ud83e\udd16 \u0627\u062c\u0631\u0627\u06cc \u062e\u0644\u0628\u0627\u0646 \u062e\u0648\u062f\u06a9\u0627\u0631</button><button class="btn secondary" onclick="autoAdCampaign()">\u0634\u0631\u0648\u0639 \u06a9\u0645\u067e\u06cc\u0646 \u067e\u0627\u06cc\u0647</button><button class="btn secondary" onclick="discoverAdCustomers()">\ud83d\udd0e \u062c\u0633\u062a\u062c\u0648\u06cc \u062f\u0633\u062a\u06cc</button><button class="btn secondary" onclick="loadAdTargets()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc CRM</button></div><div id="adsStatus" class="status"></div><div id="adsList"></div></div><div class="card"><div class="title">\ud83e\udd16 \u0648\u0636\u0639\u06cc\u062a \u062e\u0644\u0628\u0627\u0646 \u062e\u0648\u062f\u06a9\u0627\u0631</div><div class="mini">\u06cc\u06a9\u200c\u0628\u0627\u0631 START \u0628\u0632\u0646\u061b \u0633\u06cc\u0633\u062a\u0645 \u0637\u0628\u0642 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u0641\u0639\u0644\u06cc\u060c \u0645\u0634\u062a\u0631\u06cc\u200c\u06cc\u0627\u0628\u06cc\u060c \u0628\u0631\u0631\u0633\u06cc \u0641\u0631\u0635\u062a \u062a\u0628\u0644\u06cc\u063a\u060c CRM\u060c \u0645\u0630\u0627\u06a9\u0631\u0647 \u0648 \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0631\u0627 \u062f\u0631 \u0686\u0631\u062e\u0647\u200c\u0647\u0627\u06cc \u0632\u0645\u0627\u0646\u200c\u0628\u0646\u062f\u06cc\u200c\u0634\u062f\u0647 \u0627\u062f\u0627\u0645\u0647 \u0645\u06cc\u200c\u062f\u0647\u062f \u062a\u0627 STOP.</div><div id="adAutopilotStatus" class="status"></div><div class="row"><button class="btn primary" onclick="startAdAutopilot()">\u25b6\ufe0f START AUTOPILOT</button><button class="btn danger" onclick="stopAdAutopilot()">\u23f9\ufe0f STOP AUTOPILOT</button><button class="btn secondary" onclick="loadAdAutopilotStatus()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u0648\u0636\u0639\u06cc\u062a</button></div><div id="adAutopilotControlStatus" class="status"></div></div><div class="card"><div class="title">\ud83e\udde0 \u0647\u0648\u0634 \u0644\u06cc\u062f \u0648 \u0645\u0631\u06a9\u0632 \u0627\u0642\u062f\u0627\u0645</div><div class="mini">\u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0642\u062f\u0627\u0645 \u0627\u0645\u0631\u0648\u0632\u060c \u0627\u0645\u062a\u06cc\u0627\u0632 \u0642\u0627\u0628\u0644 \u062a\u0648\u0636\u06cc\u062d\u060c \u0641\u0631\u0635\u062a \u062a\u0628\u0644\u06cc\u063a \u0648 \u067e\u06cc\u06af\u06cc\u0631\u06cc\u200c\u0647\u0627\u06cc \u0633\u0631\u0631\u0633\u06cc\u062f\u0634\u062f\u0647.</div><div id="adIntelligenceBody" class="status"></div><div id="adActionList"></div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadAdIntelligence()">\ud83e\udde0 \u062a\u062d\u0644\u06cc\u0644 \u0647\u0648\u0634\u0645\u0646\u062f</button><button class="btn primary" onclick="loadAdActionCenter()">\ud83d\udea6 \u0627\u0642\u062f\u0627\u0645 \u0627\u0645\u0631\u0648\u0632</button></div><div id="adActionCenter" class="status"></div></div><div class="card"><div class="title">\ud83d\udee1\ufe0f \u0633\u0644\u0627\u0645\u062a \u0648 \u067e\u06cc\u0634\u200c\u0628\u0631\u0631\u0633\u06cc \u062a\u0628\u0644\u06cc\u063a\u0627\u062a</div><div class="mini">\u0642\u0628\u0644 \u0627\u0632 \u0627\u062c\u0631\u0627\u06cc \u0639\u0645\u0644\u06cc\u0627\u062a\u060c \u0645\u0633\u06cc\u0631 \u0648\u0628\u060c \u0645\u062d\u062f\u0648\u062f\u06cc\u062a \u0627\u062c\u0631\u0627\u060c \u0627\u0645\u0646\u06cc\u062a URL \u0648 \u0627\u062a\u0635\u0627\u0644\u200c\u0647\u0627\u06cc \u0644\u0627\u0632\u0645 \u0628\u0631\u0631\u0633\u06cc \u0645\u06cc\u200c\u0634\u0648\u062f.</div><div id="adPreflight" class="status"></div><div class="row"><button class="btn secondary" onclick="loadAdPreflight()">\u0628\u0631\u0631\u0633\u06cc \u0622\u0645\u0627\u062f\u06af\u06cc</button></div></div><div class="card"><div class="title">\ud83e\udd1d \u0645\u0633\u06cc\u0631 \u062a\u0628\u0644\u06cc\u063a\u0627\u062a \u0648 \u0645\u0630\u0627\u06a9\u0631\u0647</div><div class="mini">\u062d\u0627\u0644\u062a \u062e\u0648\u062f\u06a9\u0627\u0631: \u0647\u0631 \u0633\u0647 \u06af\u0631\u0648\u0647 \u0647\u062f\u0641 \u0631\u0627 \u067e\u06cc\u062f\u0627 \u0645\u06cc\u200c\u06a9\u0646\u062f\u060c \u0633\u0627\u06cc\u062a \u0648 \u0645\u0633\u06cc\u0631 \u062a\u0628\u0644\u06cc\u063a\u0627\u062a \u0631\u0627 \u0628\u0631\u0631\u0633\u06cc \u0645\u06cc\u200c\u06a9\u0646\u062f\u060c Lead \u0631\u0627 \u062f\u0631 CRM \u0630\u062e\u06cc\u0631\u0647 \u0645\u06cc\u200c\u06a9\u0646\u062f \u0648 \u067e\u06cc\u0634\u200c\u0646\u0648\u06cc\u0633 \u0645\u0630\u0627\u06a9\u0631\u0647 \u0631\u0627 \u0645\u06cc\u200c\u0633\u0627\u0632\u062f. \u0641\u0642\u0637 \u06a9\u0627\u0631\u0647\u0627\u06cc \u0646\u06cc\u0627\u0632\u0645\u0646\u062f \u0645\u062c\u0648\u0632\u060c \u067e\u0631\u062f\u0627\u062e\u062a\u060c \u0642\u0631\u0627\u0631\u062f\u0627\u062f \u06cc\u0627 \u062f\u0633\u062a\u0631\u0633\u06cc \u0627\u062e\u062a\u0635\u0627\u0635\u06cc \u0628\u0631\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f \u062a\u0648 \u0645\u062a\u0648\u0642\u0641 \u0645\u06cc\u200c\u0634\u0648\u0646\u062f.</div><div id="adsSavedStatus" class="status"></div><div id="adsSavedList"></div></div></div><div id="mediaVault" class="section"><div class="card"><div class="title">ð¡ ÙØ³ÛØ±ÙØ§Û ØªÙÚ¯Ø±Ø§Ù â Media Flow</div><div class="mini">ÙØ³ÛØ±ÙØ§ ÙÙØ· Ø§Ø² ØªÙØ¸ÛÙØ§Øª ÙØ§ÙØ¹Û Worker Ø®ÙØ§ÙØ¯Ù ÙÛâØ´ÙÙØ¯Ø Ø§ÛÙ Ø¨Ø®Ø´ ÙÛÚ ÙØ³ÛØ± Ø¯ÛÚ¯Ø±Û Ø±Ø§ ØªØºÛÛØ± ÙÙÛâØ¯ÙØ¯.</div><div id="telegramMediaPathsStatus" class="status">Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Û ÙØ³ÛØ±ÙØ§â¦</div><div id="telegramMediaPathsList"></div><div class="mini" style="margin-top:10px">ð¼ï¸ Image Archive + ð¬ Video Archive â ð¤ AI Processing â ð¤ Ready â ð Scheduler â ð¢ Main Telegram Channel</div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadTelegramMediaPaths()">ð Ø¨Ø±Ø±Ø³Û ÙØ³ÛØ±ÙØ§</button><button class="btn primary" onclick="testTelegramMediaConnections()">ð§ª ØªØ³Øª Ø§ØªØµØ§Ù ÙØ§ÙØ¹Û Û´ ÙØ³ÛØ±</button></div><div id="telegramMediaConnectionStatus" class="status"></div></div><div class="card"><div class="title">ð¤ ÙÙØªÙØ± AI Media â Ø®ÙØ¯Ú©Ø§Ø±</div><div class="mini">Ø¨Ø¹Ø¯ Ø§Ø² Ø§ØªØµØ§Ù Media Ø¨Ù ÙØ­ØªÙØ§Ø Ø³ÛØ³ØªÙ Ø¨ÙâØµÙØ±Øª Ø®ÙØ¯Ú©Ø§Ø± ØªØµÙÛØ± Ø±Ø§ Ø¨Ø§ AI Ù¾Ø±Ø¯Ø§Ø²Ø´ ÙÛâÚ©ÙØ¯Ø ÙÛØ¯ÛÙ Ø¯Ø± ØµÙØ±Øª ÙØ¬ÙØ¯ Video AI Provider ÙØ§Ø±Ø¯ ØµÙ Ù¾Ø±Ø¯Ø§Ø²Ø´ ÙÛâØ´ÙØ¯Ø ÙÚ¯Ø±ÙÙ ÙØ³Ø®Ù Ø¢Ø±Ø´ÛÙÛ Ø­ÙØ¸ ÙÛâØ´ÙØ¯.</div><div id="mediaAiStatus" class="status">Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Û ÙÙØªÙØ± AIâ¦</div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadMediaAiStatus()">ð Ø¨Ø±Ø±Ø³Û ÙÙØªÙØ± AI</button></div></div><div class="card"><div class="title">ð¦ Media Vault â Ø¢Ø±Ø´ÛÙ ÙØ±Ú©Ø²Û ØªÙÚ¯Ø±Ø§Ù</div><div class="mini">Ø¹Ú©Ø³ Ù ÙÛØ¯ÛÙ Ø±Ø§ Ø¯Ø± Ú©Ø§ÙØ§Ù Ø®ØµÙØµÛ Media Vault Ø°Ø®ÛØ±Ù Ú©Ù. D1 ÙÙØ· Ø§Ø·ÙØ§Ø¹Ø§Øª Ù Ø§Ø±ØªØ¨Ø§Ø· ÙØ§ÛÙ Ø±Ø§ ÙÚ¯Ù ÙÛâØ¯Ø§Ø±Ø¯Ø ÙØ§ÛÙ Ø§ØµÙÛ Ø¯Ø§Ø®Ù ØªÙÚ¯Ø±Ø§Ù ÙÛâÙØ§ÙØ¯.</div><div class="label">ÙØ§ÛÙ Ø¹Ú©Ø³/ÙÛØ¯ÛÙ</div><input id="vaultFile" class="field" type="file" accept="image/jpeg,image/png,image/webp,video/*"><div class="label">Ú©Ù¾Ø´Ù Ø§Ø®ØªÛØ§Ø±Û</div><input id="vaultCaption" class="field" placeholder="ÙØ«ÙØ§Ù Ø¯Ø³ØªØ¨ÙØ¯ Ø§ÙÙØ§Ø³ â ÙØ³Ø®Ù Ø§ØµÙÛ"><div class="mini" style="margin-top:8px">ð¼ï¸ ð¼ï¸ Ø¹Ú©Ø³âÙØ§ Ø¨Ù Image Archive Ù ð¬ ÙÛÙÙâÙØ§ Ø¨Ù Video Archive ÙØ§ÙØ¹Û Ø§Ø±Ø³Ø§Ù ÙÛâØ´ÙÙØ¯Ø Ø§Ú¯Ø± Video Archive Ø¬Ø¯Ø§ ØªØ¹Ø±ÛÙ ÙØ´Ø¯Ù Ø¨Ø§Ø´Ø¯Ø Ø§Ø² Vault ÙØ´ØªØ±Ú© Ø§Ø³ØªÙØ§Ø¯Ù ÙÛâØ´ÙØ¯.</div><div class="row" style="margin-top:10px"><button class="btn primary" onclick="uploadVaultFile()">ð¤ Ø°Ø®ÛØ±Ù Ø¯Ø± Media Vault</button><button class="btn secondary" onclick="setupMediaVaultWebhook()">ð ÙØ¹Ø§ÙâØ³Ø§Ø²Û Ø¯Ø±ÛØ§ÙØª Ø®ÙØ¯Ú©Ø§Ø±</button><button class="btn secondary" onclick="loadMediaVault()">ð Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ Ø¢Ø±Ø´ÛÙ</button></div><div id="mediaVaultUploadStatus" class="status"></div></div><div class="card"><div class="title">ðï¸ Ú©ØªØ§Ø¨Ø®Ø§ÙÙ Media</div><div id="mediaVaultStatus" class="status">Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Ûâ¦</div><div id="mediaVaultList"></div></div></div><div id="websiteGrowth" class="section"><div class="card"><div class="title">ð ÙØ±Ú©Ø² Ø±Ø´Ø¯ ÙØ¨Ø³Ø§ÛØª</div><div class="mini">ÙØ¨Ø³Ø§ÛØª ÙÙØ· ÙØ­Ù ÙÙØ§ÛØ´ ÙØ­ØµÙÙ/ÙÙØ¯ÛÙÚ¯ Ù ØªØ¨Ø¯ÛÙ Ø¨Ø§Ø²Ø¯ÛØ¯Ú©ÙÙØ¯Ù Ø¨Ù Lead Ø§Ø³ØªØ Ø§ÛÙ Ø³ÛØ³ØªÙ Ø¨Ø±Ø§Û Website ÙØ­ØªÙØ§Û Ø®ÙØ¯Ú©Ø§Ø± ØªÙÙÛØ¯ ÙÙÛâÚ©ÙØ¯.</div><div id="websiteGrowthBody" class="status">Ø¯Ø± Ø­Ø§Ù Ø¨Ø±Ø±Ø³Ûâ¦</div><div class="row"><button class="btn secondary" onclick="loadWebsiteGrowth()">Ø¨Ø±ÙØ²Ø±Ø³Ø§ÙÛ Ø¢ÙØ§Ø±</button></div></div><div class="card"><div class="title">ð¯ ÙÛÙÚ© Ú©ÙÙ¾ÛÙ Ù Ø¬Ø°Ø¨ Ø¨Ø§Ø²Ø¯ÛØ¯</div><div class="mini">Ø¨Ø±Ø§Û TelegramØ ØªØ¨ÙÛØºØ§Øª ÛØ§ ÙÙØ§Ø¨Ø¹ Ø®Ø§Ø±Ø¬Û ÙÛÙÚ© Ø±ÙÚ¯ÛØ±Û Ø¨Ø³Ø§Ø² ØªØ§ ÙÙØ¨Ø¹ Ø¨Ø§Ø²Ø¯ÛØ¯ Ù Ú©ÙÙ¾ÛÙ Ø¯Ø± Ø¯Ø§Ø´Ø¨ÙØ±Ø¯ ÙØ§Ø¨Ù Ø§ÙØ¯Ø§Ø²ÙâÚ¯ÛØ±Û Ø¨Ø§Ø´Ø¯.</div><div class="label">ÙØ§Ù Ú©ÙÙ¾ÛÙ</div><input id="websiteCampaignName" class="field" placeholder="ÙØ«ÙØ§Ù Ú©ÙÙ¾ÛÙ ÙØ¹Ø±ÙÛ Ø¬Ø¹Ø¨Ù ÙÙÚ©Ø³"><div class="label">Ú©ÙÛØ¯ Ú©ÙÙ¾ÛÙ (Ø§Ø®ØªÛØ§Ø±Û)</div><input id="websiteCampaignKey" class="field" placeholder="luxury-box-sep"><div class="label">ÙÙØ¨Ø¹</div><select id="websiteCampaignSource" class="field"><option value="telegram">Telegram</option><option value="google">Google</option><option value="instagram">Instagram</option><option value="whatsapp">WhatsApp</option><option value="external">External</option></select><div class="label">ÙÙØ¹ ØªØ±Ø§ÙÛÚ©</div><select id="websiteCampaignMedium" class="field"><option value="referral">Referral</option><option value="social">Social</option><option value="paid">Paid</option><option value="organic">Organic</option></select><div class="label">Ø¢Ø¯Ø±Ø³ ÙÙØµØ¯</div><input id="websiteCampaignUrl" class="field" inputmode="url" placeholder="https://www.hamzehibox.com"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="createWebsiteCampaign()">Ø³Ø§Ø®Øª ÙÛÙÚ© Ø±ÙÚ¯ÛØ±Û</button></div><div id="websiteCampaignStatus" class="status"></div></div><div class="card"><div class="title">ð¤ ÙÙØ´ Ø®ÙØ¯Ú©Ø§Ø± Ø³ÛØ³ØªÙ</div><div class="mini">Ù¾ÛØ¯Ø§ Ú©Ø±Ø¯Ù ÙØ±ØµØª ØªØ¨ÙÛØº â Ø«Ø¨Øª Lead Ø¯Ø± CRM â Ø¢ÙØ§Ø¯ÙâØ³Ø§Ø²Û ÙØ°Ø§Ú©Ø±Ù/Ù¾ÛÚ¯ÛØ±Û â Ø³Ø§Ø®Øª ÙÛÙÚ© Ø±ÙÚ¯ÛØ±Û â Ø§ÙØ¯Ø§Ø²ÙâÚ¯ÛØ±Û View/Visitor/Lead â Ø¨ÙÛÙÙâØ³Ø§Ø²Û. Ø®Ø±ÛØ¯ Ù Ø§ÙØªØ´Ø§Ø± ØªØ¨ÙÛØº Ù¾ÙÙÛ ÙÙØ· Ø¨Ø¹Ø¯ Ø§Ø² Ø§ØªØµØ§Ù Ø±Ø³ÙÛ Ù¾ÙØªÙØ±Ù ØªØ¨ÙÛØºØ§ØªÛ Ù ÙØ¬ÙØ² Ø¢Ù Ø§ÙØ¬Ø§Ù ÙÛâØ´ÙØ¯.</div></div></div><div id="metrics" class="section"><div class="card"><div class="title">\ud83d\udcca \u0622\u0645\u0627\u0631</div><div id="metricsBody" class="status"></div></div></div>
+<div id="adFinder" class="section"><div class="card"><div class="title">\ud83e\udd16 \u0645\u0631\u06a9\u0632 \u0639\u0645\u0644\u06cc\u0627\u062a \u062e\u0648\u062f\u06a9\u0627\u0631 \u062a\u0628\u0644\u06cc\u063a\u0627\u062a</div><div class="mini">\u0633\u06cc\u0633\u062a\u0645 \u062e\u0648\u062f\u0634 \u0645\u0634\u062a\u0631\u06cc\u200c\u06cc\u0627\u0628\u06cc\u060c \u0641\u0631\u0635\u062a \u062a\u0628\u0644\u06cc\u063a\u060c CRM\u060c \u0645\u0630\u0627\u06a9\u0631\u0647 \u0648 \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0631\u0627 \u0645\u062f\u06cc\u0631\u06cc\u062a \u0645\u06cc\u200c\u06a9\u0646\u062f.</div><div id="adOverviewBody" class="status"></div><div class="row"><button class="btn primary" onclick="runAdAutopilot()">\u25b6\ufe0f \u0627\u062c\u0631\u0627\u06cc \u06a9\u0627\u0645\u0644</button><button class="btn secondary" onclick="runAdFollowups()">\u23f0 \u0627\u062c\u0631\u0627\u06cc \u067e\u06cc\u06af\u06cc\u0631\u06cc\u200c\u0647\u0627</button><button class="btn secondary" onclick="loadAdOverview()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc</button></div><div id="adFollowupStatus" class="status"></div><div id="adOpportunityList"></div></div><div class="card"><div class="title">\ud83d\udce3 \u067e\u06cc\u062f\u0627 \u06a9\u0631\u062f\u0646 \u0645\u0634\u062a\u0631\u06cc \u062a\u0628\u0644\u06cc\u063a\u0627\u062a</div><div class="mini">\u0645\u0646\u0628\u0639 \u0645\u062d\u0635\u0648\u0644 \u0648 \u0645\u0639\u0631\u0641\u06cc \u0628\u0631\u0646\u062f: <b>www.hamzehibox.com</b></div><div class="label">\u0646\u0648\u0639 \u0645\u0634\u062a\u0631\u06cc \u0647\u062f\u0641</div><select id="adsType" class="field"><option value="gold">\u0637\u0644\u0627\u0641\u0631\u0648\u0634</option><option value="watch">\u0633\u0627\u0639\u062a\u200c\u0641\u0631\u0648\u0634</option><option value="fashion_jewelry">\u0628\u062f\u0644\u06cc\u200c\u0641\u0631\u0648\u0634</option><option value="all">\u0647\u0631 \u0633\u0647 \u06af\u0631\u0648\u0647</option></select><div class="label">\u0634\u0647\u0631 / \u0628\u0627\u0632\u0627\u0631</div><input id="adsCity" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b \u062a\u0647\u0631\u0627\u0646\u060c \u0645\u0634\u0647\u062f\u060c \u062f\u0628\u06cc\u2026"><div class="label">\u062c\u0632\u0626\u06cc\u0627\u062a \u0627\u062e\u062a\u06cc\u0627\u0631\u06cc</div><input id="adsExtra" class="field" placeholder="\u0645\u062b\u0644\u0627\u064b \u0641\u0631\u0648\u0634\u06af\u0627\u0647\u200c\u0647\u0627\u06cc \u0644\u0648\u06a9\u0633\u060c \u0639\u0645\u062f\u0647\u200c\u0641\u0631\u0648\u0634\u060c \u0641\u0631\u0648\u0634 \u0622\u0646\u0644\u0627\u06cc\u0646"><div class="row" style="margin-top:10px"><button class="btn primary" onclick="runAdAutopilot()">\ud83e\udd16 \u0627\u062c\u0631\u0627\u06cc \u062e\u0644\u0628\u0627\u0646 \u062e\u0648\u062f\u06a9\u0627\u0631</button><button class="btn secondary" onclick="autoAdCampaign()">\u0634\u0631\u0648\u0639 \u06a9\u0645\u067e\u06cc\u0646 \u067e\u0627\u06cc\u0647</button><button class="btn secondary" onclick="discoverAdCustomers()">\ud83d\udd0e \u062c\u0633\u062a\u062c\u0648\u06cc \u062f\u0633\u062a\u06cc</button><button class="btn secondary" onclick="loadAdTargets()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc CRM</button></div><div id="adsStatus" class="status"></div><div id="adsList"></div></div><div class="card"><div class="title">\ud83e\udd16 \u0648\u0636\u0639\u06cc\u062a \u062e\u0644\u0628\u0627\u0646 \u062e\u0648\u062f\u06a9\u0627\u0631</div><div class="mini">\u06cc\u06a9\u200c\u0628\u0627\u0631 START \u0628\u0632\u0646\u061b \u0633\u06cc\u0633\u062a\u0645 \u0637\u0628\u0642 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u0641\u0639\u0644\u06cc\u060c \u0645\u0634\u062a\u0631\u06cc\u200c\u06cc\u0627\u0628\u06cc\u060c \u0628\u0631\u0631\u0633\u06cc \u0641\u0631\u0635\u062a \u062a\u0628\u0644\u06cc\u063a\u060c CRM\u060c \u0645\u0630\u0627\u06a9\u0631\u0647 \u0648 \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0631\u0627 \u062f\u0631 \u0686\u0631\u062e\u0647\u200c\u0647\u0627\u06cc \u0632\u0645\u0627\u0646\u200c\u0628\u0646\u062f\u06cc\u200c\u0634\u062f\u0647 \u0627\u062f\u0627\u0645\u0647 \u0645\u06cc\u200c\u062f\u0647\u062f \u062a\u0627 STOP.</div><div id="adAutopilotStatus" class="status"></div><div class="row"><button class="btn primary" onclick="startAdAutopilot()">\u25b6\ufe0f START AUTOPILOT</button><button class="btn danger" onclick="stopAdAutopilot()">\u23f9\ufe0f STOP AUTOPILOT</button><button class="btn secondary" onclick="loadAdAutopilotStatus()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u0648\u0636\u0639\u06cc\u062a</button></div><div id="adAutopilotControlStatus" class="status"></div></div><div class="card"><div class="title">\ud83e\udde0 \u0647\u0648\u0634 \u0644\u06cc\u062f \u0648 \u0645\u0631\u06a9\u0632 \u0627\u0642\u062f\u0627\u0645</div><div class="mini">\u0627\u0648\u0644\u0648\u06cc\u062a \u0627\u0642\u062f\u0627\u0645 \u0627\u0645\u0631\u0648\u0632\u060c \u0627\u0645\u062a\u06cc\u0627\u0632 \u0642\u0627\u0628\u0644 \u062a\u0648\u0636\u06cc\u062d\u060c \u0641\u0631\u0635\u062a \u062a\u0628\u0644\u06cc\u063a \u0648 \u067e\u06cc\u06af\u06cc\u0631\u06cc\u200c\u0647\u0627\u06cc \u0633\u0631\u0631\u0633\u06cc\u062f\u0634\u062f\u0647.</div><div id="adIntelligenceBody" class="status"></div><div id="adActionList"></div><div class="row" style="margin-top:10px"><button class="btn secondary" onclick="loadAdIntelligence()">\ud83e\udde0 \u062a\u062d\u0644\u06cc\u0644 \u0647\u0648\u0634\u0645\u0646\u062f</button><button class="btn primary" onclick="loadAdActionCenter()">\ud83d\udea6 \u0627\u0642\u062f\u0627\u0645 \u0627\u0645\u0631\u0648\u0632</button></div><div id="adActionCenter" class="status"></div></div><div class="card"><div class="title">\ud83d\udee1\ufe0f \u0633\u0644\u0627\u0645\u062a \u0648 \u067e\u06cc\u0634\u200c\u0628\u0631\u0631\u0633\u06cc \u062a\u0628\u0644\u06cc\u063a\u0627\u062a</div><div class="mini">\u0642\u0628\u0644 \u0627\u0632 \u0627\u062c\u0631\u0627\u06cc \u0639\u0645\u0644\u06cc\u0627\u062a\u060c \u0645\u0633\u06cc\u0631 \u0648\u0628\u060c \u0645\u062d\u062f\u0648\u062f\u06cc\u062a \u0627\u062c\u0631\u0627\u060c \u0627\u0645\u0646\u06cc\u062a URL \u0648 \u0627\u062a\u0635\u0627\u0644\u200c\u0647\u0627\u06cc \u0644\u0627\u0632\u0645 \u0628\u0631\u0631\u0633\u06cc \u0645\u06cc\u200c\u0634\u0648\u062f.</div><div id="adPreflight" class="status"></div><div class="row"><button class="btn secondary" onclick="loadAdPreflight()">\u0628\u0631\u0631\u0633\u06cc \u0622\u0645\u0627\u062f\u06af\u06cc</button></div></div><div class="card"><div class="title">\ud83e\udd1d \u0645\u0633\u06cc\u0631 \u062a\u0628\u0644\u06cc\u063a\u0627\u062a \u0648 \u0645\u0630\u0627\u06a9\u0631\u0647</div><div class="mini">\u062d\u0627\u0644\u062a \u062e\u0648\u062f\u06a9\u0627\u0631: \u0647\u0631 \u0633\u0647 \u06af\u0631\u0648\u0647 \u0647\u062f\u0641 \u0631\u0627 \u067e\u06cc\u062f\u0627 \u0645\u06cc\u200c\u06a9\u0646\u062f\u060c \u0633\u0627\u06cc\u062a \u0648 \u0645\u0633\u06cc\u0631 \u062a\u0628\u0644\u06cc\u063a\u0627\u062a \u0631\u0627 \u0628\u0631\u0631\u0633\u06cc \u0645\u06cc\u200c\u06a9\u0646\u062f\u060c Lead \u0631\u0627 \u062f\u0631 CRM \u0630\u062e\u06cc\u0631\u0647 \u0645\u06cc\u200c\u06a9\u0646\u062f \u0648 \u067e\u06cc\u0634\u200c\u0646\u0648\u06cc\u0633 \u0645\u0630\u0627\u06a9\u0631\u0647 \u0631\u0627 \u0645\u06cc\u200c\u0633\u0627\u0632\u062f. \u0641\u0642\u0637 \u06a9\u0627\u0631\u0647\u0627\u06cc \u0646\u06cc\u0627\u0632\u0645\u0646\u062f \u0645\u062c\u0648\u0632\u060c \u067e\u0631\u062f\u0627\u062e\u062a\u060c \u0642\u0631\u0627\u0631\u062f\u0627\u062f \u06cc\u0627 \u062f\u0633\u062a\u0631\u0633\u06cc \u0627\u062e\u062a\u0635\u0627\u0635\u06cc \u0628\u0631\u0627\u06cc \u062a\u0623\u06cc\u06cc\u062f \u062a\u0648 \u0645\u062a\u0648\u0642\u0641 \u0645\u06cc\u200c\u0634\u0648\u0646\u062f.</div><div id="adsSavedStatus" class="status"></div><div id="adsSavedList"></div></div></div><div id="metrics" class="section"><div class="card"><div class="title">\ud83d\udcca \u0622\u0645\u0627\u0631</div><div id="metricsBody" class="status"></div></div></div>
 <div id="system" class="section"><div class="card"><div class="title">\u2699\ufe0f \u0648\u0636\u0639\u06cc\u062a \u0633\u06cc\u0633\u062a\u0645</div><div id="systemBody" class="status"></div><div class="row"><button class="btn secondary" onclick="loadSystem()">\u0628\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc</button><button class="btn secondary" onclick="runRelease()">Release Check</button></div><div id="releaseStatus" class="status"></div></div><div class="card"><div class="title">\ud83d\udd10 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u0627\u062a\u0635\u0627\u0644</div><div id="settingsBody" class="status">\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026</div><div class="row"><button class="btn secondary" onclick="testConnections()">\u062a\u0633\u062a \u0627\u062a\u0635\u0627\u0644 \u0648\u0627\u0642\u0639\u06cc</button></div><div id="connectionTestBody" class="status"></div></div><div class="card"><div class="title">\ud83d\ude80 \u0627\u062c\u0631\u0627\u06cc \u0627\u0646\u062a\u0634\u0627\u0631</div><div id="runsBody" class="status">\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026</div></div><div class="card"><div class="title">\ud83e\uddfe \u0644\u0627\u06af \u0633\u06cc\u0633\u062a\u0645</div><div id="eventsBody" class="status">\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026</div></div></div>
 </section>
 </main>
@@ -1733,9 +1385,7 @@ export default {
   async scheduled(event, env, ctx) {
     if (event?.cron === "*/15 * * * *") {
       ctx.waitUntil((async()=>{
-        await ensureWebsiteGrowthStore(env);
-        await runAutoPilotCycle(env,"scheduled");
-        await runAnalyzeOptimizeCycle(env,"scheduled");
+        await runAutoContentGeneration(env,"scheduled");
         await recovery(env);
       })());
       ctx.waitUntil((async()=>{
@@ -1787,7 +1437,7 @@ export default {
 
     try {
       if (req.method === "GET" && u.pathname === "/dashboard") {
-        return new Response(dashboardHtml(), {
+        return new Response(liveDashboardHtml(), {
           status: 200,
           headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
         });
@@ -1827,9 +1477,6 @@ export default {
           approval_required: true,
           auto_publish: true,
           r2: false,
-          telegram_media_vault: !!env.TELEGRAM_VAULT_CHAT_ID,
-          telegram_video_vault: !!videoVaultChatId(env),
-          telegram_media_ready: !!env.TELEGRAM_MEDIA_READY_CHAT_ID,
           website_integration: true,
           website_feed: "/api/site/content"
         });
@@ -1857,45 +1504,6 @@ export default {
       if (u.pathname === "/api/telegram/webhook/setup" && req.method === "POST") return await setupTelegramWebhook(env, req);
       if (u.pathname === "/api/telegram/media" && req.method === "GET") return await getTelegramMedia(env, req);
       if (u.pathname === "/api/telegram/media/file" && req.method === "GET") return await proxyTelegramMedia(env, req);
-      if (u.pathname === "/api/telegram/media/ai-status" && req.method === "GET") {
-        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        return json({ ok: true, engine: { enabled: String(env.AUTO_AI_MEDIA_ENABLED || 'true').toLowerCase() !== 'false', image: !!env.OPENAI_API_KEY, image_model: env.OPENAI_IMAGE_MODEL || 'gpt-image-2', video_provider: !!env.VIDEO_AI_API_URL, video_provider_url: env.VIDEO_AI_API_URL ? 'configured' : null }, flow: 'Archive â AI Media Processing â Ready â Scheduler â Main Telegram' });
-      }
-      if (u.pathname === "/api/telegram/media/paths" && req.method === "GET") {
-        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        const paths = [
-          { key: "image_vault", label: "Image Archive / Vault", chat_id: vaultChatId(env), configured: !!vaultChatId(env), role: "image_media_source" },
-          { key: "video_vault", label: "Video Archive / Vault", chat_id: videoVaultChatId(env), configured: !!videoVaultChatId(env), role: "video_media_source" },
-          { key: "ready", label: "Ready / Output", chat_id: readyChatId(env), configured: !!readyChatId(env), role: "processed_media" },
-          { key: "publish", label: "Main Publish Channel", chat_id: mainTelegramChatId(env), configured: !!mainTelegramChatId(env), role: "final_publish" }
-        ];
-        return json({ ok: true, paths, flow: "Image/Video Archive â AI Processing â Ready â Scheduler â Main Telegram Channel" });
-      }
-      if (u.pathname === "/api/telegram/media/connection-test" && req.method === "GET") {
-        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        if (!env.TELEGRAM_BOT_TOKEN) return json({ ok: false, error: "TELEGRAM_BOT_TOKEN missing" }, 503);
-        const paths = [
-          { key: "image_vault", label: "Image Archive / Vault", chat_id: vaultChatId(env) },
-          { key: "video_vault", label: "Video Archive / Vault", chat_id: videoVaultChatId(env) },
-          { key: "ready", label: "Ready / Output", chat_id: readyChatId(env) },
-          { key: "publish", label: "Main Publish Channel", chat_id: mainTelegramChatId(env) }
-        ];
-        const results = [];
-        for (const p of paths) {
-          if (!p.chat_id) { results.push({ ...p, status: "SKIP", details: "Chat ID missing" }); continue; }
-          try {
-            const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChat?chat_id=${encodeURIComponent(p.chat_id)}`, { signal: AbortSignal.timeout(8000) });
-            const d = await r.json().catch(() => ({}));
-            results.push({ ...p, status: r.ok && d.ok ? "PASS" : "FAIL", title: d.result?.title || null, username: d.result?.username || null, details: r.ok && d.ok ? "Telegram chat reachable" : (d.description || "Telegram getChat failed") });
-          } catch (e) { results.push({ ...p, status: "FAIL", details: e.message || "Telegram connection failed" }); }
-        }
-        return json({ ok: results.every(x => x.status === "PASS"), results });
-      }
-
-      if (u.pathname === "/api/telegram/vault/upload" && req.method === "POST") return await ingestVaultUpload(env, req);
-      if (u.pathname === "/api/telegram/vault/media" && req.method === "GET") return await getMediaVault(env, req);
-      if (u.pathname === "/api/telegram/vault/ai-edit" && req.method === "POST") return await aiEditVaultImage(env, req);
-      if (u.pathname === "/api/telegram/media/ready" && req.method === "GET") return await getReadyMediaStatus(env, req);
       if (u.pathname === "/webhooks/telegram" && req.method === "POST") return await handleTelegramWebhook(env, req);
       if (u.pathname === "/webhooks/instagram" && (req.method === "GET" || req.method === "POST")) return await handleInstagramWebhook(env, req);
 
@@ -1912,27 +1520,6 @@ export default {
           "SELECT * FROM release_checks ORDER BY checked_at DESC LIMIT 100"
         ).all();
         return json({ items: r.results || [] });
-      }
-
-      if (u.pathname === "/api/content/autopilot" && req.method === "GET") {
-        if(!auth(req,env)) return json({ok:false,error:"Unauthorized"},401);
-        return json({ok:true,autopilot:await getAutoPilotConfig(env)});
-      }
-      if (u.pathname === "/api/content/autopilot" && req.method === "POST") {
-        if(!auth(req,env)) return json({ok:false,error:"Unauthorized"},401);
-        const b=await req.json().catch(()=>({})); const cfg=await getAutoPilotConfig(env);
-        if(b.enabled!==undefined)cfg.enabled=!!b.enabled;
-        if(b.auto_approve!==undefined)cfg.auto_approve=!!b.auto_approve;
-        if(b.require_media!==undefined)cfg.require_media=!!b.require_media;
-        if(b.max_approvals_per_cycle!==undefined)cfg.max_approvals_per_cycle=Math.min(10,Math.max(1,Number(b.max_approvals_per_cycle)||3));
-        const t=now(); await ensureAutoContentStore(env);
-        await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind('auto_pilot_config',JSON.stringify(cfg),t).run();
-        await audit(env,'auto_pilot_config_updated','Auto-Pilot configuration updated',{config:cfg});
-        return json({ok:true,autopilot:cfg});
-      }
-      if (u.pathname === "/api/content/autopilot/run" && req.method === "POST") {
-        if(!auth(req,env)) return json({ok:false,error:"Unauthorized"},401);
-        return json(await runAutoPilotCycle(env,"manual"));
       }
 
       if (u.pathname === "/api/content/automation" && req.method === "GET") {
@@ -1982,22 +1569,8 @@ export default {
       }
       if (u.pathname === "/media/telegram" && req.method === "GET") return await publicTelegramMediaProxy(env,req);
 
-      if (u.pathname === "/api/website/track" && req.method === "POST") {
-        const len=Number(req.headers.get("content-length")||0);if(len>3000)return json({ok:false,error:"Payload too large"},413);
-        const b=await req.json().catch(()=>null);if(!b||typeof b!=="object")return json({ok:false,error:"Invalid JSON body"},400);
-        try{return json(await trackWebsiteEvent(env,b),201)}catch(e){return json({ok:false,error:e.message},400)}
-      }
-      if (u.pathname === "/api/website/growth" && req.method === "GET") {
-        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
-        return json(await getWebsiteGrowthOverview(env));
-      }
-      if (u.pathname === "/api/website/campaign" && req.method === "POST") {
-        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
-        try{return json(await createWebsiteCampaign(env,await req.json().catch(()=>({}))),201)}catch(e){return json({ok:false,error:e.message},400)}
-      }
-
       if (u.pathname === "/api/site/content" && req.method === "GET") {
-        return new Response(JSON.stringify({ok:true,items:[],site_role:"display_only",content_generation:false,traffic_tracking:"/api/website/track"}),{status:200,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"public, max-age=60","Access-Control-Allow-Origin":"*"}});
+        return new Response(JSON.stringify({ok:true,items:await getWebsiteContent(env,u.searchParams.get("limit")||20)}),{status:200,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"public, max-age=60","Access-Control-Allow-Origin":"*"}});
       }
 
       if (u.pathname === "/api/content/distribution" && req.method === "GET") {
@@ -2589,16 +2162,6 @@ export default {
         await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta), now(), leadId).run();
         await audit(env, "instagram_outreach_draft", "Human-review outreach draft generated", { lead_id: leadId, mode });
         return json({ ok: true, lead_id: leadId, draft: text, mode, send_mode: "manual_approval_only" });
-      }
-
-      if (u.pathname === "/api/learning/status" && req.method === "GET") {
-        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        return json({ ok:true, ...(await getLearningStatus(env)) });
-      }
-
-      if (u.pathname === "/api/learning/run" && req.method === "POST") {
-        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        return json(await runAnalyzeOptimizeCycle(env,"manual"));
       }
 
       if (u.pathname === "/api/metrics" && req.method === "GET") {
