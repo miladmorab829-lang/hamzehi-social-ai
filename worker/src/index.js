@@ -1,4 +1,5 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
+import { handleAutonomy, runAutonomyScheduled } from "./autonomy-engine.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -1784,7 +1785,10 @@ export default {
   },
 
   async fetch(req, env) {
-    const u = new URL(req.url);
+  const u = new URL(req.url);
+  if (u.pathname.startsWith("/api/autonomy/")) return await handleAutonomy(env, req);
+
+  try {
 
     try {
       if (req.method === "GET" && u.pathname === "/dashboard") {
