@@ -3,7 +3,8 @@ name: Extract V6.1-fixed3
 on:
   push:
     branches: [main]
-
+    paths:
+      - 'hamzehi-social-ai-v6.1-fixed3.zip'
 permissions:
   contents: write
 
