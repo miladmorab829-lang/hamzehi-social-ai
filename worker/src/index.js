@@ -1800,8 +1800,6 @@ export default {
   const u = new URL(req.url);
   if (u.pathname.startsWith("/api/autonomy/")) return await handleAutonomy(env, req);
 
-  try {
-
     try {
       if (req.method === "GET" && u.pathname === "/dashboard") {
         return new Response(liveDashboardHtml(), {
