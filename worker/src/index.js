@@ -1788,7 +1788,7 @@ export default {
 
     try {
       if (req.method === "GET" && u.pathname === "/dashboard") {
-        return new Response(dashboardHtml(), {
+        return new Response(liveDashboardHtml(), {
           status: 200,
           headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
         });
