@@ -1,5 +1,5 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
-import { handleAutonomy, runAutonomyScheduled } from "./autonomy-engine.js";
+import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate } from "./autonomy-engine.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
