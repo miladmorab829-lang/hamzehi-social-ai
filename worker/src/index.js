@@ -1740,6 +1740,18 @@ export default {
         await runAnalyzeOptimizeCycle(env,"scheduled");
         await recovery(env);
       })());
+      ctx.waitUntil((async()=>{ 
+  try { 
+    await runAutonomyScheduled(
+      env,
+      new Request("https://internal.local/api/autonomy/tasks/run", {
+        method:"POST",
+        headers:{Authorization:`Bearer ${env.ADMIN_TOKEN}`},
+        body:"{}"
+      })
+    ); 
+  } catch(e) {} 
+})());
       ctx.waitUntil((async()=>{
         try {
           await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
