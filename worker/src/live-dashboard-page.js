@@ -1,28 +1,146 @@
-export function liveDashboardHtml(){return `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HAMZEHI SOCIAL AI · Autonomous Business OS</title><style>
-:root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#07090d;color:#f4f5f7}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% -10%,#18223a 0,#07090d 45%);min-height:100vh}.wrap{max-width:1450px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.ey{font-size:11px;letter-spacing:.18em;color:#9ca7ba}.brand{font-size:28px;font-weight:800;margin:7px 0}.sub{color:#9aa4b4;font-size:13px}.pill{border:1px solid #263042;border-radius:999px;padding:8px 12px;background:#0c111a}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:18px}.card{background:rgba(14,18,26,.9);border:1px solid #202938;border-radius:18px;padding:16px;box-shadow:0 12px 40px rgba(0,0,0,.18)}.hero{grid-column:span 2}.k{font-size:11px;color:#8792a4}.v{font-size:27px;font-weight:800;margin-top:5px}.ok{color:#79e2ad}.warn{color:#ffd37a}.bad{color:#ff8e9b}.bar{height:8px;background:#202735;border-radius:20px;overflow:hidden;margin-top:10px}.bar i{display:block;height:100%;background:#d7e0f0}.section{margin-top:16px}.section h2{font-size:17px;margin:0 0 12px}.controls{display:flex;flex-wrap:wrap;gap:8px}.btn{border:1px solid #2a3547;background:#111722;color:#e9edf4;border-radius:10px;padding:9px 12px;cursor:pointer}.btn:hover{border-color:#60708c}.primary{background:#e9edf4;color:#090b10}.danger{border-color:#74313b}.input{width:100%;background:#0a0e15;color:#fff;border:1px solid #293346;border-radius:12px;padding:12px;outline:none}.command{display:grid;grid-template-columns:1fr auto;gap:8px}.modules{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}.module{min-height:118px}.module strong{display:block;font-size:14px;margin-bottom:8px}.switch{display:flex;justify-content:space-between;align-items:center}.switch input{accent-color:#dce5f2}.rows{display:grid;gap:8px}.row{border:1px solid #222c3a;border-radius:12px;padding:10px;background:#0b1018}.row small{color:#7f8a9d}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;direction:ltr;text-align:left;white-space:pre-wrap}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.three{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.tag{display:inline-block;border:1px solid #293447;border-radius:999px;padding:4px 8px;margin:2px;font-size:11px;color:#b8c2d3}.footer{padding:30px 0;color:#687387;font-size:11px;text-align:center}@media(max-width:900px){.grid,.modules{grid-template-columns:repeat(2,1fr)}.hero{grid-column:span 2}.two,.three{grid-template-columns:1fr}}@media(max-width:560px){.wrap{padding:12px}.grid,.modules{grid-template-columns:1fr}.hero{grid-column:span 1}.top{flex-direction:column}.command{grid-template-columns:1fr}}
+export function liveDashboardHtml(){
+return `<!doctype html><html lang="fa" dir="rtl"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HAMZEHI SOCIAL AI · Command Center</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#06080d;color:#eef2f7}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% -10%,#1c2943 0,#090d15 42%,#06080d 100%);min-height:100vh}
+.wrap{max-width:1500px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}
+.ey{font-size:10px;letter-spacing:.22em;color:#8793a7}.brand{font-size:30px;font-weight:900;margin:6px 0}.sub{font-size:12px;color:#9ba7ba;line-height:1.9}.pill{border:1px solid #2b374b;background:#0b111a;border-radius:999px;padding:8px 12px;white-space:nowrap}
+.ok{color:#7ae1ad}.warn{color:#ffd278}.bad{color:#ff8796}.muted{color:#7f8b9f}.section{margin-top:13px}.card{background:rgba(11,16,24,.94);border:1px solid #202b3b;border-radius:17px;padding:15px;box-shadow:0 16px 50px rgba(0,0,0,.2)}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.grid2{display:grid;grid-template-columns:1.25fr .75fr;gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.k{font-size:10px;letter-spacing:.08em;color:#8793a6}.num{font-size:27px;font-weight:900;margin-top:5px}.title{display:flex;justify-content:space-between;gap:12px;align-items:center}.title h2{font-size:16px;margin:0}.hint{font-size:11px;color:#8793a6;line-height:1.8}
+.tools{display:flex;flex-wrap:wrap;gap:7px}.btn{border:1px solid #2a3648;background:#111823;color:#eef2f6;border-radius:10px;padding:9px 12px;cursor:pointer;font-weight:700}.btn:hover{border-color:#68768d}.primary{background:#e9edf4;color:#070a0f}.danger{border-color:#713342}.input{width:100%;background:#080d15;color:#fff;border:1px solid #2b3749;border-radius:11px;padding:12px;outline:none}
+.command{display:grid;grid-template-columns:1fr auto;gap:8px}.examples{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:9px}.example{border:1px solid #202c3c;border-radius:10px;padding:9px;background:#0a0f17;cursor:pointer}.example b{font-size:11px;display:block}.example span{font-size:10px;color:#7f8b9f}
+.channels{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.channel{min-height:165px;position:relative}.channel .head{display:flex;justify-content:space-between;align-items:center}.channel .state{font-size:10px;border:1px solid #293548;border-radius:999px;padding:4px 7px}.channel h3{margin:9px 0 4px;font-size:15px}.channel p{margin:0;font-size:10px;color:#7f8b9f;line-height:1.7}.channel .actions{display:flex;gap:6px;margin-top:12px}.mini{font-size:10px;color:#8b97a9}.switch{accent-color:#dce5f2}
+.rows{display:grid;gap:6px;margin-top:9px}.row{border:1px solid #202b3b;border-radius:10px;padding:8px;background:#090e16;font-size:11px;line-height:1.7}.row small{display:block;color:#69758a;font-size:9px}.tag{display:inline-block;border:1px solid #293548;border-radius:999px;padding:3px 7px;font-size:9px;margin:2px}
+.progress{height:7px;background:#1b2432;border-radius:99px;overflow:hidden;margin-top:8px}.progress i{display:block;height:100%;background:#d7e0ef;width:0}
+.timeline{max-height:360px;overflow:auto}.dangerbox{border-color:#5d2b36}.footer{text-align:center;padding:24px 0;color:#667287;font-size:10px}
+@media(max-width:1050px){.channels{grid-template-columns:repeat(2,1fr)}.grid4{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}.examples{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.wrap{padding:10px}.top{flex-direction:column}.brand{font-size:24px}.channels,.grid4,.examples{grid-template-columns:1fr}.command{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
-<header class="top"><div><div class="ey">HAMZEHI SOCIAL AI · OPERATION CENTER</div><div class="brand">AUTONOMOUS BUSINESS OS</div><div class="sub">مغز متفکر، فرمان، اجرا، راستی‌آزمایی، یادگیری و بهینه‌سازی — با حداقل دخالت انسانی</div></div><div class="pill" id="masterState">در حال بررسی…</div></header>
-<section class="grid"><div class="card hero"><div class="k">BUSINESS BRAIN</div><div class="v" id="brainMission">در حال تحلیل…</div><div class="sub" id="brainSummary"></div></div><div class="card"><div class="k">AUTONOMY</div><div class="v" id="autoRate">—</div><div class="sub">هدف معماری: ۹۸٪ · نرخ واقعی از Taskها محاسبه می‌شود</div><div class="bar"><i id="autoBar" style="width:0%"></i></div></div><div class="card"><div class="k">REVENUE OPPORTUNITIES</div><div class="v" id="opp">—</div><div class="sub">فرصت‌های واقعی ثبت‌شده در CRM</div></div><div class="card"><div class="k">CONVERSIONS</div><div class="v" id="conv">—</div><div class="sub">Customer / Converted</div></div></section>
-<section class="section card"><h2>🎛️ MASTER CONTROL</h2><div class="controls"><button class="btn primary" onclick="master('on')">START ALL</button><button class="btn" onclick="master('pause')">PAUSE ALL</button><button class="btn danger" onclick="master('stop')">STOP ALL</button><button class="btn danger" onclick="master('emergency_stop')">EMERGENCY STOP</button><button class="btn" onclick="runTasks()">RUN DUE TASKS</button><button class="btn" onclick="refreshAll()">REFRESH</button></div><div class="sub" style="margin-top:10px">توقف اضطراری، اجرای Taskهای خودکار را متوقف می‌کند؛ Health و Recovery سیستم همچنان قابل بررسی می‌مانند.</div></section>
-<section class="section card"><h2>💬 COMMAND CENTER</h2><div class="command"><input id="command" class="input" placeholder="مثلاً: امروز تلگرام را بررسی کن، مشتری‌ها را تحلیل کن، فرصت تبلیغاتی پیدا کن و گزارش بده"><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button></div><div id="commandResult" class="sub" style="margin-top:10px"></div></section>
-<section class="section"><h2>⚙️ PROFESSIONAL CONTROL CENTERS</h2><div class="modules" id="modules"></div></section>
-<section class="section two"><div class="card"><h2>🧠 BRAIN TIMELINE</h2><div id="timeline" class="rows">—</div></div><div class="card"><h2>📋 AUTONOMOUS TASK MANAGER</h2><div id="tasks" class="rows">—</div></div></section>
-<section class="section three"><div class="card"><h2>💰 REVENUE ENGINE</h2><div id="revenue" class="rows">—</div></div><div class="card"><h2>🎯 OPPORTUNITY RADAR</h2><div id="opportunities" class="rows">—</div></div><div class="card"><h2>🚨 ERROR & RECOVERY</h2><div id="errors" class="rows">—</div></div></section>
-<section class="section card"><h2>🔐 APPROVAL & SAFETY GATE</h2><div class="sub">عملیات حساس بیرونی، پرداخت، قرارداد و اقداماتی که نیازمند مجوز هستند نباید به‌صورت ساختگی «خودکار» اعلام شوند. وضعیت واقعی از Backend نمایش داده می‌شود.</div><div id="safety" class="rows" style="margin-top:10px"></div></section>
-<section class="section card"><h2>📡 PROVIDER HEALTH</h2><div id="providers" class="rows">—</div></section>
-<div class="footer">HAMZEHI SOCIAL AI · Autonomous Business OS · No fake metrics · No fake actions · Existing Worker APIs remain the execution source.</div></div>
+
+<header class="top">
+<div><div class="ey">HAMZEHI SOCIAL AI · OPERATION CENTER</div><div class="brand">AUTONOMOUS BUSINESS OS</div>
+<div class="sub">مرکز فرمان و نظارت؛ دستور می‌دهی، سیستم Plan می‌سازد، Task ایجاد می‌کند، اجرا را ثبت می‌کند و وضعیت هر بخش را نشان می‌دهد.</div></div>
+<div class="pill" id="masterState">CONNECTING…</div>
+</header>
+
+<section class="grid4 section">
+<div class="card"><div class="k">MASTER</div><div class="num" id="masterValue">—</div><div class="hint">وضعیت کنترل مرکزی</div></div>
+<div class="card"><div class="k">AUTONOMY</div><div class="num" id="autoRate">—</div><div class="hint">نرخ واقعی از Taskهای ثبت‌شده</div><div class="progress"><i id="autoBar"></i></div></div>
+<div class="card"><div class="k">OPEN OPPORTUNITIES</div><div class="num" id="opp">—</div><div class="hint">فرصت‌های واقعی CRM</div></div>
+<div class="card"><div class="k">CONVERSIONS</div><div class="num" id="conv">—</div><div class="hint">Customer / Converted</div></div>
+</section>
+
+<section class="card section">
+<div class="title"><div><h2>🤖 AI COMMAND CENTER</h2><div class="hint">فرمان طبیعی بنویس. نمونه: «تلگرام را بررسی کن، ولی اینستاگرام را فعلاً متوقف کن و فرصت‌های تبلیغاتی را پیدا کن.»</div></div><span class="tag">ADMIN CONTROLLED</span></div>
+<div class="command" style="margin-top:11px"><input id="command" class="input" placeholder="دستور عملیاتی خودت را اینجا بنویس…"><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button></div>
+<div class="examples">
+<div class="example" onclick="setCmd('تلگرام را بررسی کن و مشتری‌های جدید را تحلیل کن')"><b>📥 Telegram + CRM</b><span>بررسی پیام و تحلیل مشتری</span></div>
+<div class="example" onclick="setCmd('واتساپ را بررسی کن ولی فعلاً هیچ اقدامی انجام نده')"><b>🛑 WhatsApp observe</b><span>فقط مشاهده و عدم اقدام</span></div>
+<div class="example" onclick="setCmd('اینستاگرام را متوقف کن و تبلیغات را بررسی کن')"><b>⛔ Instagram + Ads</b><span>کنترل ماژول و کشف فرصت</span></div>
+<div class="example" onclick="setCmd('سایت و مشتری‌ها را بررسی کن و گزارش بده')"><b>🌐 Website + CRM</b><span>رصد رشد و مشتری</span></div>
+</div>
+<div id="commandStatus" class="hint" style="margin-top:10px">آماده دریافت دستور.</div>
+</section>
+
+<section class="card section" id="authPanel">
+<div class="title"><div><h2>🔐 ADMIN TOKEN</h2><div class="hint">اتصال امن پنل به Worker</div></div><span id="tokenState" class="tag">NOT SET</span></div>
+<div class="hint" style="margin-top:8px">توکن فقط روی همین مرورگر در localStorage ذخیره می‌شود و در صفحه به‌صورت مخفی نگه داشته می‌شود.</div>
+<div class="command" style="margin-top:10px">
+<input id="adminTokenInput" class="input" type="password" autocomplete="off" placeholder="Admin Token را اینجا وارد کن">
+<div class="tools"><button class="btn primary" onclick="saveToken()">SAVE TOKEN</button><button class="btn danger" onclick="clearToken()">CLEAR</button></div>
+</div>
+<div id="tokenStatus" class="hint" style="margin-top:8px">وضعیت: توکن وارد نشده است.</div>
+</section>
+
+<section class="card section">
+<div class="title"><div><h2>🎛️ MASTER CONTROL</h2><div class="hint">کنترل فوری کل صف Autonomous. توقف، اجرای Taskهای آماده را کنترل می‌کند.</div></div><button class="btn" onclick="refreshAll()">↻ REFRESH</button></div>
+<div class="tools" style="margin-top:10px">
+<button class="btn primary" onclick="masterAction('on')">▶ START ALL</button>
+<button class="btn" onclick="masterAction('pause')">Ⅱ PAUSE ALL</button>
+<button class="btn danger" onclick="masterAction('stop')">■ STOP ALL</button>
+<button class="btn danger" onclick="masterAction('emergency_stop')">🚨 EMERGENCY STOP</button>
+<button class="btn" onclick="runTasks()">⚙ RUN DUE TASKS</button>
+</div>
+<div id="masterHelp" class="hint" style="margin-top:9px">START = روشن · PAUSE = توقف موقت صف · STOP/EMERGENCY = خاموشی صف Autonomous. وضعیت واقعی بعد از پاسخ API نمایش داده می‌شود.</div>
+</section>
+
+<section class="section">
+<div class="title"><div><h2>📡 CHANNEL CONTROL · کنترل مستقل کانال‌ها</h2><div class="hint">هر کانال جداگانه قابل روشن/خاموش‌کردن است. OFF یعنی Taskهای آن ماژول در Executor جدید مسدود می‌شوند.</div></div></div>
+<div class="channels" style="margin-top:9px">
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="telegramState" class="state">—</span></div><h3>✈️ Telegram</h3><p>Inbox، پاسخ/پیش‌نویس و مسیر محتوای Telegram.</p><div class="actions"><button class="btn" onclick="moduleToggle('telegram',true)">ON</button><button class="btn danger" onclick="moduleToggle('telegram',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="whatsappState" class="state">—</span></div><h3>🟢 WhatsApp</h3><p>رصد Inbox و عملیات ماژول WhatsApp از مسیر Worker.</p><div class="actions"><button class="btn" onclick="moduleToggle('whatsapp',true)">ON</button><button class="btn danger" onclick="moduleToggle('whatsapp',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="instagramState" class="state">—</span></div><h3>◎ Instagram</h3><p>Health و Lead intelligence؛ وضعیت Provider جداگانه قابل مشاهده است.</p><div class="actions"><button class="btn" onclick="moduleToggle('instagram',true)">ON</button><button class="btn danger" onclick="moduleToggle('instagram',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="websiteState" class="state">—</span></div><h3>🌐 Website</h3><p>Growth scan و پایش رشد وب‌سایت از API موجود.</p><div class="actions"><button class="btn" onclick="moduleToggle('website',true)">ON</button><button class="btn danger" onclick="moduleToggle('website',false)">OFF / BLOCK</button></div></div>
+</div>
+</section>
+
+<section class="grid2 section">
+<div class="card"><div class="title"><h2>📋 LIVE TASK MANAGER</h2><span id="taskCount" class="tag">—</span></div><div id="tasks" class="rows">—</div></div>
+<div class="card"><div class="title"><h2>🧠 BUSINESS BRAIN</h2><button class="btn" onclick="loadBrain()">↻</button></div><div id="brain" class="row" style="margin-top:9px">در انتظار داده…</div><div class="title" style="margin-top:14px"><h2>🕒 LIVE ACTIVITY</h2><span class="tag">RECENT</span></div><div id="timeline" class="rows timeline">—</div></div>
+</section>
+
+<section class="grid3 section">
+<div class="card"><div class="title"><h2>💰 REVENUE</h2><span class="tag">REAL CRM</span></div><div id="revenue" class="rows">—</div></div>
+<div class="card"><div class="title"><h2>🎯 OPPORTUNITIES</h2><span class="tag">LEADS</span></div><div id="opportunities" class="rows">—</div></div>
+<div class="card dangerbox"><div class="title"><h2>🚨 ERRORS & RECOVERY</h2><button class="btn" onclick="loadErrors()">↻</button></div><div id="errors" class="rows">—</div></div>
+</section>
+
+<section class="card section">
+<div class="title"><h2>🛡️ SAFETY GATE</h2><span class="tag ok">ACTIVE</span></div>
+<div class="hint" style="margin-top:8px">این پنل وضعیت و کنترل‌های واقعی V10 را نمایش می‌دهد. پرداخت، قرارداد، Secret، DNS، R2 و Deploy از این UI قابل دستکاری نیستند. عملیات بیرونی نیازمند مجوز باید همچنان Gate داشته باشند.</div>
+<div id="safety" class="row" style="margin-top:9px">در انتظار پاسخ Worker…</div>
+</section>
+
+<div class="footer">HAMZEHI SOCIAL AI · V10 Professional Operation Center · Real backend state · No fake metrics · No external libraries</div>
+
 <script>
-const A='/api/autonomy', $=id=>document.getElementById(id); const token=()=>localStorage.getItem('hamzehi_admin_token')||'';
-function h(){return token()?{Authorization:'Bearer '+token()}:{}} async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...h(),...(opt.headers||{}),...(opt.body?{'Content-Type':'application/json'}:{})}});const d=await r.json().catch(()=>({ok:false,error:'Invalid JSON'}));if(r.status===401) $('commandResult').textContent='توکن Admin وارد نشده یا معتبر نیست.';return d}
-function fmt(x){return JSON.stringify(x,null,2)}
-const names={telegram:'Telegram',whatsapp:'WhatsApp',instagram:'Instagram',website:'Website Growth',crm:'CRM / Leads',ads:'Ads & Sponsors',content:'Content Engine',media:'Media Engine',learning:'Learning Engine',revenue:'Revenue Engine'};
-async function loadStatus(){const d=await api(A+'/status');if(!d.ok)return;const c=d.controls||{};$('masterState').textContent='MASTER: '+String(c.master||'—').toUpperCase();$('masterState').className='pill '+(c.master==='on'?'ok':c.master==='paused'?'warn':'bad');const r=d.revenue||{};$('opp').textContent=r.opportunities??0;$('conv').textContent=r.conversions??0;const m=await api(A+'/metrics');if(m.ok){$('autoRate').textContent=(m.autonomous_rate??0)+'%';$('autoBar').style.width=Math.min(100,m.autonomous_rate||0)+'%'}renderModules(c.modules||{});}
-function renderModules(mods){$('modules').innerHTML=Object.keys(names).map(k=>'<div class="card module"><strong>'+names[k]+'</strong><div class="switch"><span class="tag">'+(mods[k]===false?'OFF':'ON')+'</span><input type="checkbox" '+(mods[k]!==false?'checked':'')+' onchange="moduleToggle(\''+k+'\',this.checked)"></div><div class="sub" style="margin-top:10px">کنترل مستقل ماژول</div></div>').join('')}
-async function master(action){const d=await api(A+'/master',{method:'POST',body:JSON.stringify({action})});$('commandResult').textContent=d.ok?'MASTER → '+action:'خطا: '+(d.error||'unknown');await refreshAll()}
-async function moduleToggle(module,enabled){const d=await api(A+'/module',{method:'POST',body:JSON.stringify({module,enabled})});if(!d.ok)alert(d.error||'خطا');await loadStatus()}
-async function sendCommand(){const raw=$('command').value.trim();if(!raw)return;const d=await api(A+'/command',{method:'POST',body:JSON.stringify({command:raw})});$('commandResult').textContent=d.ok?'Command '+d.command_id+' queued. Tasks: '+(d.plan?.tasks?.length||0):'خطا: '+(d.error||'unknown');if(d.ok)await runTasks()}
-async function runTasks(){const d=await api(A+'/tasks/run',{method:'POST',body:'{}'});$('commandResult').textContent=d.ok?'Executed: '+d.executed+' · Failed: '+d.failed+(d.paused?' · PAUSED':''):('خطا: '+(d.error||'unknown'));await refreshAll()}
-async function refreshAll(){await loadStatus();const [b,t,r,o,e,s]=await Promise.all([api(A+'/brain'),api(A+'/tasks'),api(A+'/revenue'),api(A+'/opportunities'),api(A+'/errors'),api('/api/settings')]);if(b.ok){$('brainMission').textContent=b.brain?.mission||'—';$('brainSummary').textContent='Master: '+(b.brain?.controls?.master||'—')+' · فعال بودن ماژول‌ها: '+Object.values(b.brain?.controls?.modules||{}).filter(Boolean).length+'/'+Object.keys(b.brain?.controls?.modules||{}).length;renderRows('timeline',b.brain?.timeline||[],x=>x.type+' · '+x.message+'<small>'+x.created_at+'</small>')};if(t.ok)renderRows('tasks',t.items||[],x=>x.module+' / '+x.action+' · '+x.status+(x.error?' · '+x.error:'')+'<small>'+x.updated_at+'</small>');if(r.ok)renderRows('revenue',Object.entries(r.funnel||{}).map(([k,v])=>({k,v})),x=>x.k+' · '+x.v);if(o.ok)renderRows('opportunities',o.items||[],x=>(x.name||x.contact||x.id)+' · '+(x.stage||'new')+' · '+(x.priority||'normal'));if(e.ok)renderRows('errors',[...(e.tasks||[]),...(e.retries||[])].slice(0,20),x=>(x.error||x.last_error||x.operation||'—')+'<small>'+ (x.updated_at||'')+'</small>');if(s.ok){$('providers').innerHTML='<div class="row">Settings API پاسخ داد. وضعیت Providerها از Worker واقعی خوانده می‌شود.</div>';$('safety').innerHTML='<div class="row">Approval Gate: فعال · انتشار محتوا از مسیرهای موجود Worker انجام می‌شود.</div>'}}
-function renderRows(id,arr,fn){$(id).innerHTML=arr.length?arr.slice(0,15).map(x=>'<div class="row">'+fn(x)+'</div>').join(''):'<div class="sub">داده‌ای وجود ندارد.</div>'}
-if(!token()){const t=prompt('Admin Token را وارد کنید:');if(t)localStorage.setItem('hamzehi_admin_token',t)}refreshAll();setInterval(refreshAll,30000);
-</script></body></html>`}
+const A="/api/autonomy",KEY="hamzehi_admin_token",$=id=>document.getElementById(id);
+function esc(x){return String(x??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+function token(){return localStorage.getItem(KEY)||""}
+function hdr(){const t=token();return t?{"Authorization":"Bearer "+t}:{}}
+function updateTokenUI(){
+ const t=token(), state=$("tokenState"), status=$("tokenStatus");
+ if(t){state.textContent="SET";state.className="tag ok";status.innerHTML="<span class='ok'>✓ توکن ذخیره شده و آماده اتصال به Worker است.</span>";}
+ else{state.textContent="NOT SET";state.className="tag";status.textContent="وضعیت: توکن وارد نشده است.";}
+}
+function saveToken(){
+ const v=$("adminTokenInput").value.trim();
+ if(!v){$("tokenStatus").innerHTML="<span class='bad'>✕ توکن خالی است.</span>";return;}
+ localStorage.setItem(KEY,v);
+ $("adminTokenInput").value="";
+ updateTokenUI();
+ refreshAll();
+}
+function clearToken(){
+ localStorage.removeItem(KEY);
+ $("adminTokenInput").value="";
+ updateTokenUI();
+ $("commandStatus").innerHTML="<span class='warn'>توکن پاک شد. برای اتصال دوباره، Admin Token را وارد کن.</span>";
+}
+async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});return await r.json().catch(()=>({ok:false,error:"Invalid JSON"}))}
+function setCmd(x){$("command").value=x}
+function rows(a,fn){return (a||[]).slice(0,15).map(x=>"<div class='row'>"+fn(x)+"</div>").join("")||"<div class='hint'>داده‌ای وجود ندارد.</div>"}
+async function loadStatus(){
+ const d=await api(A+"/status");if(!d.ok){$("masterState").textContent="AUTH / API ERROR";$("masterState").className="pill bad";return}
+ const c=d.controls||{},m=c.master||"—";$("masterState").textContent="MASTER: "+m.toUpperCase();$("masterState").className="pill "+(m==="on"?"ok":m==="paused"?"warn":"bad");$("masterValue").textContent=m.toUpperCase();
+ $("opp").textContent=d.revenue?.opportunities??0;$("conv").textContent=d.revenue?.conversions??0;
+ const mt=await api(A+"/metrics");if(mt.ok){$("autoRate").textContent=(mt.autonomous_rate??0)+"%";$("autoBar").style.width=Math.min(100,mt.autonomous_rate||0)+"%"}
+ const mods=c.modules||{};for(const k of ["telegram","whatsapp","instagram","website"]){const e=$(k+"State"),on=mods[k]!==false;e.textContent=on?"ON":"OFF / BLOCK";e.className="state "+(on?"ok":"bad")}
+}
+async function masterAction(action){$("masterHelp").textContent="در حال اجرای "+action+"…";const d=await api(A+"/master",{method:"POST",body:JSON.stringify({action})});$("masterHelp").innerHTML=d.ok?"<span class='ok'>✓ MASTER → "+esc(action)+" · وضعیت ثبت شد.</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}
+async function moduleToggle(module,enabled){const d=await api(A+"/module",{method:"POST",body:JSON.stringify({module,enabled}));if(!d.ok)alert(d.error||"خطا");await loadStatus()}
+async function sendCommand(){const raw=$("command").value.trim();if(!raw)return;$("commandStatus").textContent="در حال ساخت Plan و Task…";const d=await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw})});$("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ فرمان ثبت شد · "+esc(d.command_id)+" · "+(d.plan?.tasks?.length||0)+" Task ساخته شد.</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";if(d.ok){await runTasks()}}
+async function runTasks(){$("commandStatus").textContent="در حال اجرای Taskهای آماده…";const d=await api(A+"/tasks/run",{method:"POST",body:"{}"});$("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ اجرا: "+d.executed+" · خطا: "+d.failed+(d.paused?" · PAUSED":"")+"</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}
+async function loadTasks(){const d=await api(A+"/tasks");if(d.ok){$("taskCount").textContent=(d.items||[]).length+" recent";$("tasks").innerHTML=rows(d.items,x=>esc(x.module+" / "+x.action)+" · "+esc(x.status)+(x.error?"<br><span class='bad'>"+esc(x.error)+"</span>":"")+"<small>"+esc(x.updated_at)+"</small>")}}
+async function loadBrain(){const d=await api(A+"/brain");if(!d.ok)return;$("brain").textContent=d.brain?.mission||"—";$("timeline").innerHTML=rows(d.brain?.timeline,x=>esc((x.type||"event")+" · "+(x.message||""))+"<small>"+esc(x.created_at)+"</small>")}
+async function loadRevenue(){const d=await api(A+"/revenue");$("revenue").innerHTML=d.ok?rows(Object.entries(d.funnel||{}).map(([k,v])=>({k,v})),x=>esc(x.k)+" · "+esc(x.v)):"—"}
+async function loadOpp(){const d=await api(A+"/opportunities");$("opportunities").innerHTML=d.ok?rows(d.items,x=>esc(x.name||x.contact||x.id)+" · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal")):"—"}
+async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
+async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
+async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety()])}
+updateTokenUI();refreshAll();setInterval(refreshAll,15000);
+</script></body></html>`;
+}
