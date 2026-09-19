@@ -439,12 +439,24 @@ async function generateContent(env, b) {
   const facts = String(b.facts || "").trim();
 
   const system = `
-You are HAMZEHI SOCIAL AI, a controlled social-content generator.
+You are HAMZEHI SOCIAL AI, the autonomous content engine for HAMZEHI BOX.
+
+Create content specifically around HAMZEHI BOX and its real product category:
+jewelry boxes, hard boxes, jewelry presentation, premium packaging,
+gift presentation, unboxing, product display, box design, and luxury presentation.
+
 Generate content ONLY from the supplied topic and facts.
-NEVER invent or imply business facts: price, inventory, availability,
-delivery time, guarantee, certification, material/specification, address,
-phone number, website, customer claim, partnership, discount, or result.
+NEVER invent business facts: price, inventory, availability, delivery time,
+guarantee, certification, material/specification, address, phone number,
+website, customer claim, partnership, discount, or result.
 If a fact is not supplied, do not state it as fact.
+
+Every visual_prompt must describe a concrete premium commercial scene
+centered on a jewelry box or jewelry presentation.
+Vary the visual scene, camera angle, composition, lighting, background,
+and presentation concept between outputs.
+Do not invent logos, labels, prices, specifications, or claims.
+
 Write natural Persian or Iraqi Arabic according to the requested language.
 Return JSON only with keys:
 hook, body, caption, cta, hashtags, visual_prompt.
@@ -999,19 +1011,89 @@ function mediaMatchScore(topic, caption){
 
 async function autoAttachTelegramMedia(env, contentId){
   await ensureContentMediaStore(env);
-  const c=await env.DB.prepare("SELECT id,topic,caption FROM contents WHERE id=?").bind(contentId).first();
+  await ensureMediaVaultStore(env);
+
+  const c = await env.DB.prepare(
+    "SELECT id,topic,caption FROM contents WHERE id=?"
+  ).bind(contentId).first();
+
   if(!c) return {attached:false,reason:'content_not_found'};
-  const existing=await env.DB.prepare("SELECT id FROM content_media WHERE content_id=? LIMIT 1").bind(contentId).first();
+
+  const existing = await env.DB.prepare(
+    "SELECT id FROM content_media WHERE content_id=? LIMIT 1"
+  ).bind(contentId).first();
+
   if(existing) return {attached:true,existing:true,id:existing.id};
-  const rows=await env.DB.prepare("SELECT * FROM telegram_media_sources ORDER BY created_at DESC LIMIT 20").all();
-  let best=null,bestScore=0;
-  for(const r of rows.results||[]){ const score=mediaMatchScore(c.topic,r.caption); if(score>bestScore){best=r;bestScore=score;} }
-  if(!best || bestScore<1) return {attached:false,reason:'no_confident_match'};
+
+  const recent = await env.DB.prepare(
+    "SELECT source_id FROM content_media " +
+    "WHERE source_type IN ('telegram','telegram_ai') " +
+    "ORDER BY created_at DESC LIMIT 24"
+  ).all();
+
+  const used = new Set((recent.results||[]).map(x=>String(x.source_id)));
+
+  const rows = await env.DB.prepare(
+    "SELECT * FROM telegram_media_sources " +
+    "WHERE source_kind='vault' " +
+    "ORDER BY created_at DESC LIMIT 100"
+  ).all();
+
+  let best=null,bestScore=-1;
+
+  for(const r of rows.results||[]){
+    if(used.has(String(r.id))) continue;
+
+    let score=mediaMatchScore(c.topic,r.caption);
+
+    if(String(r.media_type||'').toLowerCase()==='photo') score+=0.25;
+
+    if(score>bestScore){
+      best=r;
+      bestScore=score;
+    }
+  }
+
+  if(!best) return {attached:false,reason:'no_fresh_vault_media'};
+
   const t=now(), id=uid();
-  await env.DB.prepare("INSERT OR IGNORE INTO content_media(id,content_id,source_type,source_id,media_type,media_url,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
-    .bind(id,contentId,'telegram',best.id,best.media_type,mediaProxyUrl(best.id),'ready',t,t).run();
-  await audit(env,'content_media_attached','Telegram media attached to content',{content_id:contentId,media_id:best.id,media_type:best.media_type,match_score:bestScore});
-  return {attached:true,id,source_id:best.id,media_type:best.media_type,media_url:mediaProxyUrl(best.id),match_score:bestScore};
+
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO content_media " +
+    "(id,content_id,source_type,source_id,media_type,media_url,status,created_at,updated_at) " +
+    "VALUES(?,?,?,?,?,?,?,?,?)"
+  ).bind(
+    id,
+    contentId,
+    'telegram',
+    best.id,
+    best.media_type,
+    mediaProxyUrl(best.id),
+    'ready',
+    t,
+    t
+  ).run();
+
+  await audit(
+    env,
+    'content_media_attached',
+    'Fresh Telegram vault media attached to content',
+    {
+      content_id:contentId,
+      media_id:best.id,
+      media_type:best.media_type,
+      match_score:bestScore
+    }
+  );
+
+  return {
+    attached:true,
+    id,
+    source_id:best.id,
+    media_type:best.media_type,
+    media_url:mediaProxyUrl(best.id),
+    match_score:bestScore
+  };
 }
 
 async function getContentMedia(env, contentId){
@@ -1309,14 +1391,42 @@ async function autoProcessContentMedia(env, contentId, attached){
     }
   }
   if(media.media_type==='video'){
-    const provider=String(env.VIDEO_AI_API_URL||'').trim();
-    if(provider){
-      await audit(env,'media_ai_video_provider_ready','Video AI provider configured; video job can be delegated',{content_id:contentId,media_id:media.source_id,provider});
-      return {processed:false,mode:'video_provider_pending',provider};
-    }
-    await audit(env,'media_video_source_reused','No video AI provider configured; archived video retained as source media',{content_id:contentId,media_id:media.source_id});
-    return {processed:false,mode:'video_archive_reuse'};
+  const provider=String(env.VIDEO_AI_API_URL||'').trim();
+
+  if(provider){
+    await audit(
+      env,
+      'media_ai_video_provider_ready',
+      'Video AI provider configured; video generation is ready for provider execution',
+      {
+        content_id:contentId,
+        media_id:media.source_id
+      }
+    );
+
+    return {
+      processed:false,
+      mode:'video_provider_ready',
+      provider_configured:true
+    };
   }
+
+  await audit(
+    env,
+    'media_video_provider_missing',
+    'Video generation skipped because no real VIDEO_AI_API_URL provider is configured',
+    {
+      content_id:contentId,
+      media_id:media.source_id
+    }
+  );
+
+  return {
+    processed:false,
+    mode:'video_provider_missing',
+    provider_configured:false
+  };
+}
   return {processed:false,reason:'unsupported_media_type'};
 }
 
