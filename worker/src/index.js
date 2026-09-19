@@ -564,8 +564,7 @@ try {
   });
 
   return { id, ...g, status: "generated", approval_status: "pending", media_processing };
-
-
+}
 const AUTO_CONTENT_DEFAULT_CONFIG = {
   enabled: true,
   interval_hours: 12,
