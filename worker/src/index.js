@@ -535,14 +535,18 @@ async function createGeneratedContent(env, b) {
     g.hashtags, g.visual_prompt, "generated", t, t
   ).run();
 
-  try {
-    const attached = await autoAttachTelegramMedia(env, id);
-    if (attached?.attached) {
-      await autoProcessContentMedia(env, id, attached);
-    }
-  } catch (e) {
-    await audit(env, "content_media_autoattach_failed", "Automatic media attachment/AI processing failed without blocking content generation", { content_id: id, error: e.message });
+  let media_processing = { processed: false, reason: "no_media_attached" };
+try {
+  const attached = await autoAttachTelegramMedia(env, id);
+  if (attached?.attached) {
+    media_processing = await autoProcessContentMedia(env, id, attached);
+  } else {
+    media_processing = attached || media_processing;
   }
+} catch (e) {
+  media_processing = { processed: false, error: e.message };
+  await audit(env, "content_media_autoattach_failed", "Automatic media attachment/AI processing failed without blocking content generation", { content_id: id, error: e.message });
+}
 
   await env.DB.prepare(
     "INSERT INTO approval_queue VALUES(?,?,?,?,?,?)"
@@ -559,10 +563,8 @@ async function createGeneratedContent(env, b) {
     market: g.market
   });
 
-  return { id, ...g, status: "generated", approval_status: "pending" };
+  return { id, ...g, status: "generated", approval_status: "pending", media_processing };
 }
-
-
 const AUTO_CONTENT_DEFAULT_CONFIG = {
   enabled: true,
   interval_hours: 12,
