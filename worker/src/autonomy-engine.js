@@ -198,4 +198,118 @@ export async function handleAutonomy(env,req){
  }
  return Response.json({ok:false,error:"Not found"},{status:404});
 }
-export async function runAutonomyScheduled(env,req){try{if(!(await autonomyMasterGate(env)))return {ok:true,paused:true,executed:0,reason:"MASTER_OFF"};await ensure(env);return await runTasks(env,req,20)}catch(e){return {ok:false,error:String(e.message||e)}}}
+export async function runAutonomyScheduled(env,req){
+ try{
+  if(!(await autonomyMasterGate(env)))
+   return {ok:true,paused:true,executed:0,planned:0,reason:"MASTER_OFF"};
+
+  await ensure(env);
+
+  const c=await controls(env);
+
+  const queued=await env.DB
+   .prepare("SELECT COUNT(*) n FROM autonomy_tasks WHERE status='queued' AND (scheduled_at IS NULL OR scheduled_at<=?)")
+   .bind(now())
+   .first();
+
+  let planned=0;
+
+  if(Number(queued?.n||0)===0){
+
+   const cid=uid();
+   const t=now();
+
+   const plan={
+    goal:"Run a safe scheduled autonomy check using only enabled modules",
+    mode:"observe",
+    source:"scheduled",
+    tasks:[]
+   };
+
+   const add=(module,action,priority)=>{
+    plan.tasks.push({
+     module,
+     action,
+     payload:{},
+     priority
+    });
+   };
+
+   if(
+    c.modules.revenue!==false &&
+    await actionEnabled(env,"revenue","funnel_snapshot")
+   ){
+    add("revenue","funnel_snapshot",90);
+   }
+
+   for(const m of MODULES){
+
+    if(m==="revenue" || c.modules[m]===false)
+     continue;
+
+    if(await actionEnabled(env,m,"status"))
+     add(m,"status",40);
+   }
+
+   if(plan.tasks.length){
+
+    await env.DB
+     .prepare("INSERT INTO autonomy_commands VALUES(?,?,?,?,?,?)")
+     .bind(
+      cid,
+      "Scheduled autonomy cycle",
+      JSON.stringify(plan),
+      "queued",
+      t,
+      t
+     )
+     .run();
+
+    for(const x of plan.tasks){
+
+     await env.DB
+      .prepare("INSERT INTO autonomy_tasks(id,command_id,module,action,status,priority,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+      .bind(
+       uid(),
+       cid,
+       x.module,
+       x.action,
+       "queued",
+       x.priority,
+       "{}",
+       t,
+       t
+      )
+      .run();
+    }
+
+    await event(
+     env,
+     "command_planned",
+     null,
+     "Scheduled autonomy cycle",
+     {
+      command_id:cid,
+      source:"scheduled",
+      task_count:plan.tasks.length
+     }
+    );
+
+    planned=plan.tasks.length;
+   }
+  }
+
+  const result=await runTasks(env,req,20);
+
+  return {
+   ...result,
+   planned
+  };
+
+ }catch(e){
+  return {
+   ok:false,
+   error:String(e.message||e)
+  };
+ }
+}
