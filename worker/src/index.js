@@ -1734,7 +1734,8 @@ function dashboardHtml() {
 export default {
   async scheduled(event, env, ctx) {
     if (event?.cron === "*/15 * * * *") {
-      ctx.waitUntil((async()=>{
+    if (!(await autonomyMasterGate(env))) return;
+    ctx.waitUntil((async()=>{
         await ensureWebsiteGrowthStore(env);
         await runAutoPilotCycle(env,"scheduled");
         await runAnalyzeOptimizeCycle(env,"scheduled");
@@ -1782,7 +1783,8 @@ export default {
       })());
     }
     if (event?.cron === "0 7 * * *") {
-      ctx.waitUntil((async()=>{
+    if (!(await autonomyMasterGate(env))) return;
+    ctx.waitUntil((async()=>{
         try {
           const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
           const due=[]; const nowMs=Date.now();
