@@ -134,7 +134,27 @@ async function masterAction(action){$("masterHelp").textContent="در حال ا�
 async function moduleToggle(module,enabled){const d=await api(A+"/module",{method:"POST",body:JSON.stringify({module,enabled})});if(!d.ok)alert(d.error||"خطا");await loadStatus()}
 async function sendCommand(){const raw=$("command").value.trim();if(!raw)return;$("commandStatus").textContent="در حال ساخت Plan و Task…";const d=await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw})});$("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ فرمان ثبت شد · "+esc(d.command_id)+" · "+(d.plan?.tasks?.length||0)+" Task ساخته شد.</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";if(d.ok){await runTasks()}}
 async function runTasks(){$("commandStatus").textContent="در حال اجرای Taskهای آماده…";const d=await api(A+"/tasks/run",{method:"POST",body:"{}"});$("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ اجرا: "+d.executed+" · خطا: "+d.failed+(d.paused?" · PAUSED":"")+"</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}
-async function loadTasks(){const d=await api(A+"/tasks");if(d.ok){$("taskCount").textContent=(d.items||[]).length+" recent";$("tasks").innerHTML=rows(d.items,x=>esc(x.module+" / "+x.action)+" · "+esc(x.status)+(x.error?"<br><span class='bad'>"+esc(x.error)+"</span>":"")+"<small>"+esc(x.updated_at)+"</small>")}}
+async function loadTasks(){
+ const d=await api(A+"/tasks");
+ if(d.ok){
+  $("taskCount").textContent=(d.items||[]).length+" recent";
+  $("tasks").innerHTML=rows(d.items,x=>{
+   let result="";
+   if(x.result_json){
+    try{
+     const r=JSON.parse(x.result_json);
+     result="<br><span class='muted'>RESULT: "+esc(JSON.stringify(r))+"</span>";
+    }catch{
+     result="<br><span class='muted'>RESULT: "+esc(x.result_json)+"</span>";
+    }
+   }
+   return esc(x.module+" / "+x.action)+" · "+esc(x.status)
+    +(x.error?"<br><span class='bad'>"+esc(x.error)+"</span>":"")
+    +result
+    +"<small>"+esc(x.updated_at)+"</small>";
+  })
+ }
+}
 async function loadBrain(){const d=await api(A+"/brain");if(!d.ok)return;$("brain").textContent=d.brain?.mission||"—";$("timeline").innerHTML=rows(d.brain?.timeline,x=>esc((x.type||"event")+" · "+(x.message||""))+"<small>"+esc(x.created_at)+"</small>")}
 async function loadRevenue(){const d=await api(A+"/revenue");$("revenue").innerHTML=d.ok?rows(Object.entries(d.funnel||{}).map(([k,v])=>({k,v})),x=>esc(x.k)+" · "+esc(x.v)):"—"}
 async function loadOpp(){const d=await api(A+"/opportunities");$("opportunities").innerHTML=d.ok?rows(d.items,x=>esc(x.name||x.contact||x.id)+" · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal")):"—"}
