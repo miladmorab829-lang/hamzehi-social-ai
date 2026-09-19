@@ -1383,7 +1383,9 @@ async function autoProcessContentMedia(env, contentId, attached){
       const result=await aiEditVaultImageCore(env,String(media.source_id),prompt,{content_id:contentId});
       await env.DB.prepare("UPDATE content_media SET source_id=?,source_type='telegram_ai',media_url=?,status='ready',updated_at=? WHERE id=?").bind(String(result.media_id),mediaProxyUrl(result.media_id),now(),String(media.id)).run();
       await env.DB.prepare("UPDATE media_vault_items SET ai_status='ready',updated_at=? WHERE telegram_media_id=?").bind(now(),String(media.source_id)).run();
-      return {processed:true,mode:'ai_image_edit',media_id:result.media_id};
+      media.source_id=String(result.media_id);
+media.media_url=mediaProxyUrl(result.media_id);
+media.media_type='photo';;
     }catch(e){
       await env.DB.prepare("UPDATE media_vault_items SET ai_status='failed',ai_prompt=?,updated_at=? WHERE telegram_media_id=?").bind(prompt,now(),String(media.source_id)).run();
       await audit(env,'media_ai_processing_failed','Automatic AI image processing failed; original media retained',{content_id:contentId,media_id:media.source_id,error:e.message});
