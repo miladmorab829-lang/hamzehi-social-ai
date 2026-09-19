@@ -1,4 +1,5 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
+import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate } from "./autonomy-engine.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -1733,12 +1734,25 @@ function dashboardHtml() {
 export default {
   async scheduled(event, env, ctx) {
     if (event?.cron === "*/15 * * * *") {
-      ctx.waitUntil((async()=>{
+    if (!(await autonomyMasterGate(env))) return;
+    ctx.waitUntil((async()=>{
         await ensureWebsiteGrowthStore(env);
         await runAutoPilotCycle(env,"scheduled");
         await runAnalyzeOptimizeCycle(env,"scheduled");
         await recovery(env);
       })());
+      ctx.waitUntil((async()=>{ 
+  try { 
+    await runAutonomyScheduled(
+      env,
+      new Request("https://internal.local/api/autonomy/tasks/run", {
+        method:"POST",
+        headers:{Authorization:`Bearer ${env.ADMIN_TOKEN}`},
+        body:"{}"
+      })
+    ); 
+  } catch(e) {} 
+})());
       ctx.waitUntil((async()=>{
         try {
           await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
@@ -1769,7 +1783,8 @@ export default {
       })());
     }
     if (event?.cron === "0 7 * * *") {
-      ctx.waitUntil((async()=>{
+    if (!(await autonomyMasterGate(env))) return;
+    ctx.waitUntil((async()=>{
         try {
           const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
           const due=[]; const nowMs=Date.now();
@@ -1784,7 +1799,8 @@ export default {
   },
 
   async fetch(req, env) {
-    const u = new URL(req.url);
+  const u = new URL(req.url);
+  if (u.pathname.startsWith("/api/autonomy/")) return await handleAutonomy(env, req);
 
     try {
       if (req.method === "GET" && u.pathname === "/dashboard") {

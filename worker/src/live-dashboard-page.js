@@ -1,215 +1,146 @@
-/**
- * HAMZEHI SOCIAL AI — V9.4 Professional Persian Operations Dashboard
- * Presentation layer only. Uses existing Worker API routes.
- * No Worker/route/secret/DNS/R2 changes.
- */
-export function liveDashboardHtml() {
-return `<!doctype html>
-<html lang="fa" dir="rtl">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#080b10">
-<title>HAMZEHI SOCIAL AI — مرکز فرمان</title>
+export function liveDashboardHtml(){
+return `<!doctype html><html lang="fa" dir="rtl"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HAMZEHI SOCIAL AI · Command Center</title>
 <style>
-:root{color-scheme:dark;--bg:#080b10;--panel:#10151d;--panel2:#151b24;--line:#27313d;--text:#eef3f8;--muted:#8e9aa8;--ok:#62e6a0;--warn:#ffd166;--bad:#ff7d88;--accent:#8fb8ff;--shadow:0 14px 40px #0007}
-*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(1000px 500px at 80% -10%,#1a2940 0,#080b10 55%);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Tahoma,Arial,sans-serif}
-button,input,select{font:inherit}.app{display:flex;min-height:100vh}.side{position:sticky;top:0;height:100vh;width:250px;padding:20px 14px;background:#0c1118eF;border-left:1px solid var(--line);backdrop-filter:blur(18px);z-index:5}.brand{padding:10px 10px 18px;border-bottom:1px solid var(--line);margin-bottom:12px}.brand b{display:block;font-size:18px}.brand span{display:block;color:var(--muted);font-size:11px;margin-top:5px}.nav button{width:100%;text-align:right;border:1px solid transparent;background:transparent;color:#cbd3dd;border-radius:11px;padding:10px 12px;margin:3px 0;cursor:pointer}.nav button:hover,.nav button.active{background:var(--panel2);border-color:var(--line);color:#fff}.main{flex:1;min-width:0;padding:22px;max-width:1700px;margin:auto}.top{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap}.eyebrow{font-size:10px;letter-spacing:1.5px;color:#8fb8ff;font-weight:800;margin-bottom:5px}.command-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}.command-card{background:linear-gradient(180deg,#151d29,#10151c);border:1px solid #2a3746;border-radius:14px;padding:12px}.command-card span{display:block;color:#8794a3;font-size:11px}.command-card b{display:block;font-size:18px;margin-top:4px}.command-card small{display:block;color:#667281;font-size:10px;margin-top:3px}.pipeline-card{overflow:hidden}.pipeline{display:flex;align-items:stretch;gap:7px;overflow:auto;padding:3px 2px 8px}.pipeline>div{min-width:118px;border:1px solid #2a3541;background:#0d131a;border-radius:12px;padding:10px}.pipeline b{display:inline-flex;width:24px;height:24px;align-items:center;justify-content:center;border-radius:8px;background:#172334;color:#9fc2ff;font-size:11px}.pipeline span{display:block;font-weight:750;font-size:12px;margin-top:7px}.pipeline small{display:block;color:#778391;font-size:10px;margin-top:3px}.pipeline i{align-self:center;color:#536172;font-style:normal}.title h1{font-size:25px;margin:0 0 5px}.title p{margin:0;color:var(--muted);font-size:13px}.tools{display:flex;gap:8px;flex-wrap:wrap}.input,.btn{background:var(--panel);border:1px solid var(--line);color:#fff;border-radius:10px;padding:10px 12px}.input{min-width:250px}.btn{cursor:pointer}.btn:hover{background:#1b232d}.btn.primary{border-color:#405d8a;background:#16243a}.btn.danger{border-color:#70404a}.section{margin-top:22px;scroll-margin-top:15px}.section-head{display:flex;justify-content:space-between;align-items:end;gap:10px;margin-bottom:10px}.section-head h2{font-size:17px;margin:0}.hint{color:var(--muted);font-size:12px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:linear-gradient(180deg,#121821,#0e131a);border:1px solid var(--line);border-radius:16px;padding:15px;box-shadow:var(--shadow);min-width:0}.stat .label{color:var(--muted);font-size:12px}.stat .num{font-size:30px;font-weight:800;margin-top:7px}.status{font-size:13px;line-height:1.8}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}.wide{grid-column:1/-1}.half{grid-column:span 2}.cards2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.chips{display:flex;flex-wrap:wrap;gap:6px}.chip{border:1px solid var(--line);background:#0b1016;border-radius:999px;padding:5px 9px;font-size:11px;color:#cdd6df}.chip.ok{border-color:#285b46}.chip.bad{border-color:#6b3940}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:collapse;min-width:680px;font-size:12px}th,td{padding:10px;border-bottom:1px solid #202832;text-align:right;vertical-align:top}th{color:#aab5c2;background:#0d1218;position:sticky;top:0}tr:hover td{background:#111820}.row-actions{display:flex;gap:6px;flex-wrap:wrap}.mini{padding:6px 8px;font-size:11px;border-radius:8px}.empty{padding:25px;text-align:center;color:var(--muted)}pre{white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;background:#080c11;border:1px solid #1d252e;border-radius:11px;padding:12px;font-size:11px;direction:ltr;text-align:left}.progress{height:7px;background:#202733;border-radius:99px;overflow:hidden}.progress i{display:block;height:100%;background:var(--accent);width:0}.toast{position:fixed;bottom:18px;left:18px;right:18px;max-width:520px;margin:auto;padding:12px 14px;border:1px solid var(--line);background:#10161fF5;border-radius:12px;display:none;z-index:20}.mobile-nav{display:none}.search{width:100%;margin:8px 0 12px}
-@media(max-width:1050px){.grid{grid-template-columns:repeat(2,1fr)}.side{width:210px}.command-strip{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:760px){.command-strip{grid-template-columns:1fr 1fr}.pipeline{padding-bottom:12px}.app{display:block}.side{display:none}.main{padding:14px 12px 78px}.grid,.cards2{grid-template-columns:1fr}.half{grid-column:auto}.mobile-nav{display:flex;position:fixed;bottom:0;left:0;right:0;background:#0b1017F5;border-top:1px solid var(--line);z-index:10;overflow:auto}.mobile-nav button{flex:1;min-width:105px;border:0;background:transparent;color:#b8c2ce;padding:12px 8px;font-size:11px}.mobile-nav button.active{color:#fff;background:#151c25}.input{min-width:0;width:100%}.top{align-items:stretch}.tools{width:100%}.tools .btn{flex:1}}
-</style>
-</head>
-<body>
-<div class="app">
-<aside class="side">
-  <div class="brand"><b>HAMZEHI SOCIAL AI</b><span>مرکز فرمان و نظارت عملیاتی · V9.4</span></div>
-  <nav class="nav">
-    <button class="active" data-go="overview">🏠 نمای کلی</button>
-    <button data-go="telegram">✈️ تلگرام و صندوق ورودی</button>
-    <button data-go="content">✍️ محتوا و انتشار</button>
-    <button data-go="crm">👤 مشتری و سرنخ فروش</button>
-    <button data-go="calendar">📅 تقویم و کمپین</button>
-    <button data-go="analytics">📊 آمار و رشد</button>
-    <button data-go="operations">⚙️ عملیات و خطا</button>
-    <button data-go="audit">🧾 گزارش فعالیت</button>
-    <button data-go="diagnostic">🩺 عیب‌یابی فنی</button>
-  </nav>
-</aside>
-<main class="main">
+:root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#06080d;color:#eef2f7}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% -10%,#1c2943 0,#090d15 42%,#06080d 100%);min-height:100vh}
+.wrap{max-width:1500px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}
+.ey{font-size:10px;letter-spacing:.22em;color:#8793a7}.brand{font-size:30px;font-weight:900;margin:6px 0}.sub{font-size:12px;color:#9ba7ba;line-height:1.9}.pill{border:1px solid #2b374b;background:#0b111a;border-radius:999px;padding:8px 12px;white-space:nowrap}
+.ok{color:#7ae1ad}.warn{color:#ffd278}.bad{color:#ff8796}.muted{color:#7f8b9f}.section{margin-top:13px}.card{background:rgba(11,16,24,.94);border:1px solid #202b3b;border-radius:17px;padding:15px;box-shadow:0 16px 50px rgba(0,0,0,.2)}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.grid2{display:grid;grid-template-columns:1.25fr .75fr;gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.k{font-size:10px;letter-spacing:.08em;color:#8793a6}.num{font-size:27px;font-weight:900;margin-top:5px}.title{display:flex;justify-content:space-between;gap:12px;align-items:center}.title h2{font-size:16px;margin:0}.hint{font-size:11px;color:#8793a6;line-height:1.8}
+.tools{display:flex;flex-wrap:wrap;gap:7px}.btn{border:1px solid #2a3648;background:#111823;color:#eef2f6;border-radius:10px;padding:9px 12px;cursor:pointer;font-weight:700}.btn:hover{border-color:#68768d}.primary{background:#e9edf4;color:#070a0f}.danger{border-color:#713342}.input{width:100%;background:#080d15;color:#fff;border:1px solid #2b3749;border-radius:11px;padding:12px;outline:none}
+.command{display:grid;grid-template-columns:1fr auto;gap:8px}.examples{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:9px}.example{border:1px solid #202c3c;border-radius:10px;padding:9px;background:#0a0f17;cursor:pointer}.example b{font-size:11px;display:block}.example span{font-size:10px;color:#7f8b9f}
+.channels{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.channel{min-height:165px;position:relative}.channel .head{display:flex;justify-content:space-between;align-items:center}.channel .state{font-size:10px;border:1px solid #293548;border-radius:999px;padding:4px 7px}.channel h3{margin:9px 0 4px;font-size:15px}.channel p{margin:0;font-size:10px;color:#7f8b9f;line-height:1.7}.channel .actions{display:flex;gap:6px;margin-top:12px}.mini{font-size:10px;color:#8b97a9}.switch{accent-color:#dce5f2}
+.rows{display:grid;gap:6px;margin-top:9px}.row{border:1px solid #202b3b;border-radius:10px;padding:8px;background:#090e16;font-size:11px;line-height:1.7}.row small{display:block;color:#69758a;font-size:9px}.tag{display:inline-block;border:1px solid #293548;border-radius:999px;padding:3px 7px;font-size:9px;margin:2px}
+.progress{height:7px;background:#1b2432;border-radius:99px;overflow:hidden;margin-top:8px}.progress i{display:block;height:100%;background:#d7e0ef;width:0}
+.timeline{max-height:360px;overflow:auto}.dangerbox{border-color:#5d2b36}.footer{text-align:center;padding:24px 0;color:#667287;font-size:10px}
+@media(max-width:1050px){.channels{grid-template-columns:repeat(2,1fr)}.grid4{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}.examples{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.wrap{padding:10px}.top{flex-direction:column}.brand{font-size:24px}.channels,.grid4,.examples{grid-template-columns:1fr}.command{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+
 <header class="top">
-  <div class="title">
-    <div class="eyebrow">HAMZEHI SOCIAL AI · OPERATION CENTER</div>
-    <h1>مرکز فرمان سیستم خودکار</h1>
-    <p>سیستم کارهای روزمره را خودش جلو می‌برد؛ تو فقط وضعیت، خروجی، خطاها و مواردی را که نیاز به تصمیم انسانی دارند می‌بینی.</p>
-  </div>
-  <div class="tools">
-    <input id="token" class="input" type="password" placeholder="توکن مدیریت (فقط روی این دستگاه)">
-    <button class="btn" id="save">ذخیره محلی</button>
-    <button class="btn primary" id="refresh">↻ بروزرسانی</button>
-  </div>
+<div><div class="ey">HAMZEHI SOCIAL AI · OPERATION CENTER</div><div class="brand">AUTONOMOUS BUSINESS OS</div>
+<div class="sub">مرکز فرمان و نظارت؛ دستور می‌دهی، سیستم Plan می‌سازد، Task ایجاد می‌کند، اجرا را ثبت می‌کند و وضعیت هر بخش را نشان می‌دهد.</div></div>
+<div class="pill" id="masterState">CONNECTING…</div>
 </header>
-<div class="command-strip">
-  <div class="command-card"><span>وضعیت سیستم</span><b id="overallState">در حال بررسی…</b><small id="lastRefresh">—</small></div>
-  <div class="command-card"><span>نیازمند توجه</span><b id="attentionCount">—</b><small>بر اساس داده‌های زنده</small></div>
-  <div class="command-card"><span>چرخه خودکار</span><b>۱۰ مرحله</b><small>برنامه‌ریزی تا بهینه‌سازی</small></div>
-  <div class="command-card"><span>هدف معماری</span><b>۹۵٪ خودکار</b><small>این عدد «هدف طراحی» است، نه درصد اندازه‌گیری‌شده</small></div>
-</div>
 
-<section id="overview" class="section">
-<div class="section-head"><div><h2>وضعیت لحظه‌ای</h2><div class="hint">اطلاعات از APIهای واقعی Worker خوانده می‌شود.</div></div></div>
-<div class="grid">
-  <div class="card stat"><div class="label">وضعیت Worker</div><div id="health" class="status">در حال بررسی…</div></div>
-  <div class="card stat"><div class="label">پایگاه داده و بازیابی</div><div id="recovery" class="status">—</div></div>
-  <div class="card stat"><div class="label">تأیید انتشار</div><div id="release" class="status">—</div></div>
-  <div class="card stat"><div class="label">یادگیری خودکار</div><div id="learning" class="status">—</div></div>
-  <div class="card stat"><div class="label">محتوا</div><div id="contentCount" class="num">—</div></div>
-  <div class="card stat"><div class="label">سرنخ‌های فروش</div><div id="leadCount" class="num">—</div></div>
-  <div class="card stat"><div class="label">پیام‌های ورودی</div><div id="inboxCount" class="num">—</div></div>
-  <div class="card stat"><div class="label">کارهای در صف خطا</div><div id="retryCount" class="num">—</div></div>
+<section class="grid4 section">
+<div class="card"><div class="k">MASTER</div><div class="num" id="masterValue">—</div><div class="hint">وضعیت کنترل مرکزی</div></div>
+<div class="card"><div class="k">AUTONOMY</div><div class="num" id="autoRate">—</div><div class="hint">نرخ واقعی از Taskهای ثبت‌شده</div><div class="progress"><i id="autoBar"></i></div></div>
+<div class="card"><div class="k">OPEN OPPORTUNITIES</div><div class="num" id="opp">—</div><div class="hint">فرصت‌های واقعی CRM</div></div>
+<div class="card"><div class="k">CONVERSIONS</div><div class="num" id="conv">—</div><div class="hint">Customer / Converted</div></div>
+</section>
+
+<section class="card section">
+<div class="title"><div><h2>🤖 AI COMMAND CENTER</h2><div class="hint">فرمان طبیعی بنویس. نمونه: «تلگرام را بررسی کن، ولی اینستاگرام را فعلاً متوقف کن و فرصت‌های تبلیغاتی را پیدا کن.»</div></div><span class="tag">ADMIN CONTROLLED</span></div>
+<div class="command" style="margin-top:11px"><input id="command" class="input" placeholder="دستور عملیاتی خودت را اینجا بنویس…"><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button></div>
+<div class="examples">
+<div class="example" onclick="setCmd('تلگرام را بررسی کن و مشتری‌های جدید را تحلیل کن')"><b>📥 Telegram + CRM</b><span>بررسی پیام و تحلیل مشتری</span></div>
+<div class="example" onclick="setCmd('واتساپ را بررسی کن ولی فعلاً هیچ اقدامی انجام نده')"><b>🛑 WhatsApp observe</b><span>فقط مشاهده و عدم اقدام</span></div>
+<div class="example" onclick="setCmd('اینستاگرام را متوقف کن و تبلیغات را بررسی کن')"><b>⛔ Instagram + Ads</b><span>کنترل ماژول و کشف فرصت</span></div>
+<div class="example" onclick="setCmd('سایت و مشتری‌ها را بررسی کن و گزارش بده')"><b>🌐 Website + CRM</b><span>رصد رشد و مشتری</span></div>
 </div>
-<div class="cards2 section">
-  <div class="card">
-    <div class="section-head"><div><h2>اتصال سرویس‌ها</h2><div class="hint">وضعیت تنظیمات سرویس‌ها؛ «آماده» با «تست موفق» یکی نیست.</div></div></div>
-    <div id="providers" class="chips">—</div>
-  </div>
-  <div class="card">
-    <div class="section-head"><div><h2>نیازمند توجه</h2><div class="hint">فقط مواردی که از داده‌های واقعی پنل قابل تشخیص‌اند.</div></div></div>
-    <div id="attentionList" class="status">—</div>
-  </div>
+<div id="commandStatus" class="hint" style="margin-top:10px">آماده دریافت دستور.</div>
+</section>
+
+<section class="card section" id="authPanel">
+<div class="title"><div><h2>🔐 ADMIN TOKEN</h2><div class="hint">اتصال امن پنل به Worker</div></div><span id="tokenState" class="tag">NOT SET</span></div>
+<div class="hint" style="margin-top:8px">توکن فقط روی همین مرورگر در localStorage ذخیره می‌شود و در صفحه به‌صورت مخفی نگه داشته می‌شود.</div>
+<div class="command" style="margin-top:10px">
+<input id="adminTokenInput" class="input" type="password" autocomplete="off" placeholder="Admin Token را اینجا وارد کن">
+<div class="tools"><button class="btn primary" onclick="saveToken()">SAVE TOKEN</button><button class="btn danger" onclick="clearToken()">CLEAR</button></div>
 </div>
-<div class="card section pipeline-card">
-  <div class="section-head"><div><h2>سیستم دقیقاً چه کار می‌کند؟</h2><div class="hint">این نقشه، ترتیب معماری چرخه محتوا را ساده و قابل فهم نشان می‌دهد.</div></div></div>
-  <div class="pipeline">
-    <div><b>۱</b><span>برنامه‌ریزی</span><small>هدف و موضوع</small></div>
-    <i>←</i><div><b>۲</b><span>تولید</span><small>محتوا با AI</small></div>
-    <i>←</i><div><b>۳</b><span>اعتبارسنجی</span><small>کنترل داده</small></div>
-    <i>←</i><div><b>۴</b><span>ذخیره</span><small>ثبت در D1</small></div>
-    <i>←</i><div><b>۵</b><span>تأیید</span><small>مرز انسانی</small></div>
-    <i>←</i><div><b>۶</b><span>زمان‌بندی</span><small>تقویم</small></div>
-    <i>←</i><div><b>۷</b><span>انتشار</span><small>کانال مجاز</small></div>
-    <i>←</i><div><b>۸</b><span>راستی‌آزمایی</span><small>نتیجه انتشار</small></div>
-    <i>←</i><div><b>۹</b><span>تحلیل</span><small>داده عملکرد</small></div>
-    <i>←</i><div><b>۱۰</b><span>بهینه‌سازی</span><small>یادگیری</small></div>
-  </div>
+<div id="tokenStatus" class="hint" style="margin-top:8px">وضعیت: توکن وارد نشده است.</div>
+</section>
+
+<section class="card section">
+<div class="title"><div><h2>🎛️ MASTER CONTROL</h2><div class="hint">کنترل فوری کل صف Autonomous. توقف، اجرای Taskهای آماده را کنترل می‌کند.</div></div><button class="btn" onclick="refreshAll()">↻ REFRESH</button></div>
+<div class="tools" style="margin-top:10px">
+<button class="btn primary" onclick="masterAction('on')">▶ START ALL</button>
+<button class="btn" onclick="masterAction('pause')">Ⅱ PAUSE ALL</button>
+<button class="btn danger" onclick="masterAction('stop')">■ STOP ALL</button>
+<button class="btn danger" onclick="masterAction('emergency_stop')">🚨 EMERGENCY STOP</button>
+<button class="btn" onclick="runTasks()">⚙ RUN DUE TASKS</button>
 </div>
-<div class="card section">
-  <div class="section-head"><div><h2>خلاصه عملیات</h2><div class="hint">جمع‌بندی انسانی؛ برای فهم سریع، نه جایگزین لاگ فنی.</div></div></div>
-  <div id="summary" class="status">—</div>
+<div id="masterHelp" class="hint" style="margin-top:9px">START = روشن · PAUSE = توقف موقت صف · STOP/EMERGENCY = خاموشی صف Autonomous. وضعیت واقعی بعد از پاسخ API نمایش داده می‌شود.</div>
+</section>
+
+<section class="section">
+<div class="title"><div><h2>📡 CHANNEL CONTROL · کنترل مستقل کانال‌ها</h2><div class="hint">هر کانال جداگانه قابل روشن/خاموش‌کردن است. OFF یعنی Taskهای آن ماژول در Executor جدید مسدود می‌شوند.</div></div></div>
+<div class="channels" style="margin-top:9px">
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="telegramState" class="state">—</span></div><h3>✈️ Telegram</h3><p>Inbox، پاسخ/پیش‌نویس و مسیر محتوای Telegram.</p><div class="actions"><button class="btn" onclick="moduleToggle('telegram',true)">ON</button><button class="btn danger" onclick="moduleToggle('telegram',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="whatsappState" class="state">—</span></div><h3>🟢 WhatsApp</h3><p>رصد Inbox و عملیات ماژول WhatsApp از مسیر Worker.</p><div class="actions"><button class="btn" onclick="moduleToggle('whatsapp',true)">ON</button><button class="btn danger" onclick="moduleToggle('whatsapp',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="instagramState" class="state">—</span></div><h3>◎ Instagram</h3><p>Health و Lead intelligence؛ وضعیت Provider جداگانه قابل مشاهده است.</p><div class="actions"><button class="btn" onclick="moduleToggle('instagram',true)">ON</button><button class="btn danger" onclick="moduleToggle('instagram',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="websiteState" class="state">—</span></div><h3>🌐 Website</h3><p>Growth scan و پایش رشد وب‌سایت از API موجود.</p><div class="actions"><button class="btn" onclick="moduleToggle('website',true)">ON</button><button class="btn danger" onclick="moduleToggle('website',false)">OFF / BLOCK</button></div></div>
 </div>
 </section>
 
-<section id="telegram" class="section">
-<div class="section-head"><div><h2>✈️ تلگرام و صندوق ورودی</h2><div class="hint">پیام‌هایی که Worker دریافت کرده، وضعیت رسیدگی و زمان دریافت.</div></div><button class="btn mini" data-load="inbox">بروزرسانی</button></div>
-<div class="card"><input id="inboxSearch" class="input search" placeholder="جست‌وجو در فرستنده، متن پیام، شناسه…"><div id="inboxTable">در حال بارگذاری…</div></div>
+<section class="grid2 section">
+<div class="card"><div class="title"><h2>📋 LIVE TASK MANAGER</h2><span id="taskCount" class="tag">—</span></div><div id="tasks" class="rows">—</div></div>
+<div class="card"><div class="title"><h2>🧠 BUSINESS BRAIN</h2><button class="btn" onclick="loadBrain()">↻</button></div><div id="brain" class="row" style="margin-top:9px">در انتظار داده…</div><div class="title" style="margin-top:14px"><h2>🕒 LIVE ACTIVITY</h2><span class="tag">RECENT</span></div><div id="timeline" class="rows timeline">—</div></div>
 </section>
 
-<section id="content" class="section">
-<div class="section-head"><div><h2>✍️ محتوا، تأیید و انتشار</h2><div class="hint">مسیر محتوا: برنامه‌ریزی → تولید → بررسی → تأیید → زمان‌بندی → انتشار → تحلیل.</div></div><button class="btn mini" data-load="content">بروزرسانی</button></div>
-<div class="card"><input id="contentSearch" class="input search" placeholder="جست‌وجوی موضوع، پلتفرم یا وضعیت…"><div id="contentTable">در حال بارگذاری…</div></div>
+<section class="grid3 section">
+<div class="card"><div class="title"><h2>💰 REVENUE</h2><span class="tag">REAL CRM</span></div><div id="revenue" class="rows">—</div></div>
+<div class="card"><div class="title"><h2>🎯 OPPORTUNITIES</h2><span class="tag">LEADS</span></div><div id="opportunities" class="rows">—</div></div>
+<div class="card dangerbox"><div class="title"><h2>🚨 ERRORS & RECOVERY</h2><button class="btn" onclick="loadErrors()">↻</button></div><div id="errors" class="rows">—</div></div>
 </section>
 
-<section id="crm" class="section">
-<div class="section-head"><div><h2>👤 مشتری و سرنخ فروش</h2><div class="hint">مراحل ارتباط، اولویت، امتیاز و اطلاعات ثبت‌شده.</div></div><button class="btn mini" data-load="leads">بروزرسانی</button></div>
-<div class="card"><input id="leadSearch" class="input search" placeholder="جست‌وجوی نام، تماس، مرحله یا یادداشت…"><div id="leadTable">در حال بارگذاری…</div></div>
+<section class="card section">
+<div class="title"><h2>🛡️ SAFETY GATE</h2><span class="tag ok">ACTIVE</span></div>
+<div class="hint" style="margin-top:8px">این پنل وضعیت و کنترل‌های واقعی V10 را نمایش می‌دهد. پرداخت، قرارداد، Secret، DNS، R2 و Deploy از این UI قابل دستکاری نیستند. عملیات بیرونی نیازمند مجوز باید همچنان Gate داشته باشند.</div>
+<div id="safety" class="row" style="margin-top:9px">در انتظار پاسخ Worker…</div>
 </section>
 
-<section id="calendar" class="section">
-<div class="section-head"><div><h2>📅 تقویم و کمپین</h2><div class="hint">زمان‌بندی محتوا و وضعیت کمپین‌ها.</div></div></div>
-<div class="cards2">
- <div class="card"><h2>تقویم محتوا</h2><div id="calendarTable">در حال بارگذاری…</div></div>
- <div class="card"><h2>کمپین‌ها</h2><div id="campaignTable">در حال بارگذاری…</div></div>
-</div>
-</section>
+<div class="footer">HAMZEHI SOCIAL AI · V10 Professional Operation Center · Real backend state · No fake metrics · No external libraries</div>
 
-<section id="analytics" class="section">
-<div class="section-head"><div><h2>📊 آمار و رشد</h2><div class="hint">اعداد خام و گزارش رشد؛ بدون ساختن عدد فرضی.</div></div></div>
-<div class="cards2">
- <div class="card"><h2>شاخص‌های شبکه‌های اجتماعی</h2><div id="metricsTable">در حال بارگذاری…</div></div>
- <div class="card"><h2>رشد وب‌سایت</h2><div id="growth">در حال بارگذاری…</div></div>
-</div>
-</section>
-
-<section id="operations" class="section">
-<div class="section-head"><div><h2>⚙️ عملیات، صف خطا و بازیابی</h2><div class="hint">برای هر خطا باید علت، وضعیت تلاش مجدد و نتیجه قابل مشاهده باشد.</div></div></div>
-<div class="cards2">
- <div class="card"><h2>صف Retry</h2><div id="retryTable">در حال بارگذاری…</div></div>
- <div class="card"><h2>اجراهای تولید</h2><div id="runsTable">در حال بارگذاری…</div></div>
-</div>
-</section>
-
-<section id="audit" class="section">
-<div class="section-head"><div><h2>🧾 گزارش فعالیت سیستم</h2><div class="hint">آخرین رویدادهای ثبت‌شده در system_events.</div></div><button class="btn mini" data-load="events">بروزرسانی</button></div>
-<div class="card"><div id="eventsTable">در حال بارگذاری…</div></div>
-</section>
-
-<section id="diagnostic" class="section">
-<div class="section-head"><div><h2>🩺 عیب‌یابی فنی</h2><div class="hint">داده خام برای بررسی دقیق؛ بدون نمایش Secretها.</div></div></div>
-<div class="card"><pre id="raw">—</pre></div>
-</section>
-</main>
-</div>
-<div id="toast" class="toast"></div>
-<div class="mobile-nav">
-<button class="active" data-go="overview">خانه</button><button data-go="telegram">تلگرام</button><button data-go="content">محتوا</button><button data-go="crm">فروش</button><button data-go="operations">عملیات</button>
-</div>
 <script>
-const KEY="hamzehi_admin_token_v94";
-const $=id=>document.getElementById(id);
-$("token").value=localStorage.getItem(KEY)||"";
-let cache={inbox:[],content:[],leads:[],calendar:[],campaigns:[],metrics:[],retry:[],runs:[],events:[]};
-function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
-function toast(s){const t=$("toast");t.textContent=s;t.style.display="block";clearTimeout(window.__toast);window.__toast=setTimeout(()=>t.style.display="none",2800);}
-function headers(){const t=$("token").value.trim();return t?{"Authorization":"Bearer "+t,"Content-Type":"application/json"}:{"Content-Type":"application/json"};}
-async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...headers(),...(opts.headers||{})}});const tx=await r.text();let d;try{d=JSON.parse(tx)}catch{d={raw:tx}}if(!r.ok)throw Error(d?.error||("HTTP "+r.status));return d;}
-function arr(d,...keys){for(const k of keys)if(Array.isArray(d?.[k]))return d[k];return[];}
-function val(x,...keys){for(const k of keys){if(x?.[k]!==undefined&&x?.[k]!==null)return x[k]}return"";}
-function fmt(v){if(!v)return"—";try{return new Date(v).toLocaleString("fa-IR",{dateStyle:"short",timeStyle:"short"})}catch{return v}}
-function table(items,cols,actions){if(!items.length)return"<div class='empty'>داده‌ای برای نمایش وجود ندارد.</div>";return"<div class='table-wrap'><table><thead><tr>"+cols.map(c=>"<th>"+esc(c[1])+"</th>").join("")+(actions?"<th>عملیات</th>":"")+"</tr></thead><tbody>"+items.slice(0,200).map(x=>"<tr>"+cols.map(c=>"<td>"+esc(typeof c[0]==="function"?c[0](x):val(x,c[0]))+"</td>").join("")+(actions?"<td><div class='row-actions'>"+actions(x)+"</div></td>":"")+"</tr>").join("")+"</tbody></table></div>";}
-function set(id,h){$(id).innerHTML=h}
-async function loadHealth(){try{const d=await api("/api/health");set("health","<b class='ok'>● آنلاین</b><br><span class='muted'>نسخه: "+esc(d.version)+"<br>محیط تولید: "+(d.production?"بله":"خیر")+"<br>تأیید انتشار: "+(d.approval_required?"فعال":"غیرفعال")+"</span>");return d}catch(e){set("health","<b class='bad'>● خطا</b><br>"+esc(e.message));throw e}}
-async function loadRecovery(){try{const d=await api("/api/recovery/validate");set("recovery",d.ok?"<b class='ok'>● سالم</b>":"<b class='bad'>● مسدود</b>");return d}catch(e){set("recovery","<b class='warn'>احراز هویت/خطا</b><br>"+esc(e.message));return{error:e.message}}}
-async function loadSettings(){try{const d=await api("/api/settings");const p=d.providers||{};set("providers",Object.entries(p).map(([k,v])=>"<span class='chip "+(v.configured?"ok":"bad")+"'>"+esc(k)+" · "+(v.configured?"آماده":"تنظیم نشده")+"</span>").join("")||"<span class='muted'>اطلاعاتی برنگشت.</span>");return d}catch(e){set("providers","<span class='bad'>"+esc(e.message)+"</span>");return{error:e.message}}}
-async function loadContent(){try{const d=await api("/api/content");cache.content=arr(d,"items");$("contentCount").textContent=cache.content.length;renderContent();return d}catch(e){$("contentCount").textContent="ERR";set("contentTable","خطا: "+esc(e.message));return{error:e.message}}}
-function renderContent(){const q=$("contentSearch").value.trim().toLowerCase();const a=cache.content.filter(x=>JSON.stringify(x).toLowerCase().includes(q));set("contentTable",table(a,[["title","عنوان"],["platform","پلتفرم"],["status","وضعیت"],[x=>fmt(val(x,"created_at","updated_at")),"تاریخ"]],x=>"<span class='muted'>شناسه: "+esc(x.id||"")+"</span>"))}
-async function loadInbox(){try{const d=await api("/api/inbox");cache.inbox=arr(d,"items");$("inboxCount").textContent=cache.inbox.length;renderInbox();return d}catch(e){$("inboxCount").textContent="ERR";set("inboxTable","خطا: "+esc(e.message));return{error:e.message}}}
-function renderInbox(){const q=$("inboxSearch").value.trim().toLowerCase();const a=cache.inbox.filter(x=>JSON.stringify(x).toLowerCase().includes(q));set("inboxTable",table(a,[["platform","کانال"],[x=>val(x,"sender_name","from_name","sender","username"),"فرستنده"],[x=>val(x,"text","message","body","content"),"پیام"],["status","وضعیت"],[x=>fmt(val(x,"created_at","received_at","updated_at")),"دریافت"]],x=>"<span class='muted'>"+esc(x.id||"")+"</span>"))}
-async function loadLeads(){try{const d=await api("/api/leads");cache.leads=arr(d,"items");$("leadCount").textContent=cache.leads.length;renderLeads();return d}catch(e){$("leadCount").textContent="ERR";set("leadTable","خطا: "+esc(e.message));return{error:e.message}}}
-function leadScore(x){if(x?.score!==undefined&&x?.score!==null)return x.score;try{const n=JSON.parse(x?.notes||"{}");return n.score??"—"}catch{return"—"}}
-function renderLeads(){const q=$("leadSearch").value.trim().toLowerCase();const a=cache.leads.filter(x=>JSON.stringify(x).toLowerCase().includes(q));set("leadTable",table(a,[["name","نام"],["contact","تماس/آدرس"],["stage","مرحله"],["priority","اولویت"],[leadScore,"امتیاز"],[x=>fmt(val(x,"updated_at","created_at")),"آخرین تغییر"]],x=>"<span class='muted'>"+esc(x.id||"")+"</span>"))}
-async function loadCalendar(){try{const d=await api("/api/calendar");cache.calendar=arr(d,"items");set("calendarTable",table(cache.calendar,[["planned_at","زمان"],["content_id","شناسه محتوا"],["status","وضعیت"],["campaign_id","کمپین"]]));return d}catch(e){set("calendarTable","خطا: "+esc(e.message));return{error:e.message}}}
-async function loadCampaigns(){try{const d=await api("/api/campaigns");cache.campaigns=arr(d,"items");set("campaignTable",table(cache.campaigns,[["name","نام"],["goal","هدف"],["audience","مخاطب"],["status","وضعیت"],[x=>fmt(x.created_at),"ایجاد"]]));return d}catch(e){set("campaignTable","خطا: "+esc(e.message));return{error:e.message}}}
-async function loadMetrics(){try{const d=await api("/api/metrics");cache.metrics=arr(d,"items");set("metricsTable",table(cache.metrics,[["metric_date","تاریخ"],["platform","پلتفرم"],["impressions","نمایش"],["engagements","تعامل"],["leads","سرنخ"],["conversions","تبدیل"]]));return d}catch(e){set("metricsTable","خطا: "+esc(e.message));return{error:e.message}}}
-async function loadGrowth(){try{const d=await api("/api/website/growth");set("growth","<pre>"+esc(JSON.stringify(d,null,2))+"</pre>");return d}catch(e){set("growth","<span class='bad'>"+esc(e.message)+"</span>");return{error:e.message}}}
-async function loadRetry(){try{const d=await api("/api/retry");cache.retry=arr(d,"items");$("retryCount").textContent=cache.retry.length;set("retryTable",table(cache.retry,[["type","نوع"],["status","وضعیت"],[x=>val(x,"attempts","retry_count"),"تلاش"],[x=>fmt(val(x,"next_attempt_at","updated_at","created_at")),"زمان بعدی"]]));return d}catch(e){$("retryCount").textContent="ERR";set("retryTable","خطا: "+esc(e.message));return{error:e.message}}}
-async function loadRuns(){try{const d=await api("/api/production/runs");cache.runs=arr(d,"items");set("runsTable",table(cache.runs,[["status","وضعیت"],["stage","مرحله"],[x=>fmt(val(x,"started_at","created_at")),"شروع"],[x=>fmt(val(x,"finished_at","updated_at")),"پایان"]]));return d}catch(e){set("runsTable","خطا: "+esc(e.message));return{error:e.message}}}
-async function loadRelease(){try{const d=await api("/api/release/checks");const a=arr(d,"items");const pass=a.filter(x=>String(x.status).toUpperCase()==="PASS").length;set("release","<b class='"+(pass===a.length?"ok":"warn")+"'>"+pass+" مورد موفق</b><br><span class='muted'>از "+a.length+" بررسی ثبت‌شده</span>");return d}catch(e){set("release","<span class='bad'>"+esc(e.message)+"</span>");return{error:e.message}}}
-async function loadEvents(){try{const d=await api("/api/system/events");cache.events=arr(d,"items");set("eventsTable",table(cache.events,[["severity","سطح"],["type","نوع رویداد"],["message","شرح"],[x=>fmt(x.created_at),"زمان"]]));return d}catch(e){set("eventsTable","خطا: "+esc(e.message));return{error:e.message}}}
-async function loadLearning(){try{const d=await api("/api/learning/status");set("learning",d.enabled?"<b class='ok'>● فعال</b><br><span class='muted'>دوره: "+esc(val(d,"interval_hours"))+" ساعت</span>":"<b class='warn'>غیرفعال</b>");return d}catch(e){set("learning","<span class='bad'>خطا</span>");return{error:e.message}}}
-async function refreshAll(){
-  const out={};const fns=[loadHealth,loadRecovery,loadSettings,loadContent,loadInbox,loadLeads,loadCalendar,loadCampaigns,loadMetrics,loadGrowth,loadRetry,loadRuns,loadRelease,loadEvents,loadLearning];
-  for(const fn of fns){try{out[fn.name]=await fn()}catch(e){out[fn.name]={error:e.message}}}
-  const ok=Object.values(out).filter(x=>x&&!x.error).length;
-  const retryN=cache.retry.length;
-  const missingProviders=Object.values(out.loadSettings?.providers||{}).filter(x=>x && x.configured===false).length;
-  const attention=(retryN?1:0)+(missingProviders?1:0)+(out.loadRecovery?.error?1:0);
-  $("attentionCount").textContent=attention;
-  $("overallState").textContent=attention?"نیازمند توجه":"عملیات عادی";
-  $("overallState").className=attention?"warn":"ok";
-  $("lastRefresh").textContent="آخرین بروزرسانی: "+new Date().toLocaleTimeString("fa-IR");
-  set("attentionList",attention
-    ? "<b class='warn'>"+attention+" مورد قابل بررسی</b><br><span class='muted'>"+(retryN?"صف Retry دارای مورد است. ":"")+(missingProviders?"یک یا چند Provider تنظیم نشده است. ":"")+(out.loadRecovery?.error?"بازیابی/احراز هویت پاسخ کامل نداده است. ":"")+"</span>"
-    : "<b class='ok'>✓ مورد فوری قابل تشخیص نیست</b><br><span class='muted'>وضعیت بر اساس داده‌های فعلی APIها محاسبه شد.</span>");
-  set("summary","<b>"+ok+" بخش از "+fns.length+" بخش</b> با API زنده پاسخ دادند.<br><span class='muted'>این صفحه فقط APIهای موجود Worker را مصرف می‌کند و هیچ deploy، Secret، DNS یا R2 انجام نمی‌دهد.</span>");
-  $("raw").textContent=JSON.stringify(out,null,2);toast("داده‌های زنده بروزرسانی شد");
+const A="/api/autonomy",KEY="hamzehi_admin_token",$=id=>document.getElementById(id);
+function esc(x){return String(x??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+function token(){return localStorage.getItem(KEY)||""}
+function hdr(){const t=token();return t?{"Authorization":"Bearer "+t}:{}}
+function updateTokenUI(){
+ const t=token(), state=$("tokenState"), status=$("tokenStatus");
+ if(t){state.textContent="SET";state.className="tag ok";status.innerHTML="<span class='ok'>✓ توکن ذخیره شده و آماده اتصال به Worker است.</span>";}
+ else{state.textContent="NOT SET";state.className="tag";status.textContent="وضعیت: توکن وارد نشده است.";}
 }
-function go(id){document.getElementById(id)?.scrollIntoView({behavior:"smooth",block:"start"});document.querySelectorAll("[data-go]").forEach(b=>b.classList.toggle("active",b.dataset.go===id));}
-document.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>go(b.dataset.go));
-$("save").onclick=()=>{localStorage.setItem(KEY,$("token").value.trim());toast("توکن فقط روی همین دستگاه ذخیره شد.");refreshAll()};
-$("refresh").onclick=refreshAll;
-document.querySelectorAll("[data-load]").forEach(b=>b.onclick=()=>{const m={inbox:loadInbox,content:loadContent,leads:loadLeads,events:loadEvents};m[b.dataset.load]?.()});
-$("inboxSearch").oninput=renderInbox;$("contentSearch").oninput=renderContent;$("leadSearch").oninput=renderLeads;
-refreshAll();
-</script>
-</body>
-</html>`;
+function saveToken(){
+ const v=$("adminTokenInput").value.trim();
+ if(!v){$("tokenStatus").innerHTML="<span class='bad'>✕ توکن خالی است.</span>";return;}
+ localStorage.setItem(KEY,v);
+ $("adminTokenInput").value="";
+ updateTokenUI();
+ refreshAll();
+}
+function clearToken(){
+ localStorage.removeItem(KEY);
+ $("adminTokenInput").value="";
+ updateTokenUI();
+ $("commandStatus").innerHTML="<span class='warn'>توکن پاک شد. برای اتصال دوباره، Admin Token را وارد کن.</span>";
+}
+async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});return await r.json().catch(()=>({ok:false,error:"Invalid JSON"}))}
+function setCmd(x){$("command").value=x}
+function rows(a,fn){return (a||[]).slice(0,15).map(x=>"<div class='row'>"+fn(x)+"</div>").join("")||"<div class='hint'>داده‌ای وجود ندارد.</div>"}
+async function loadStatus(){
+ const d=await api(A+"/status");if(!d.ok){$("masterState").textContent="AUTH / API ERROR";$("masterState").className="pill bad";return}
+ const c=d.controls||{},m=c.master||"—";$("masterState").textContent="MASTER: "+m.toUpperCase();$("masterState").className="pill "+(m==="on"?"ok":m==="paused"?"warn":"bad");$("masterValue").textContent=m.toUpperCase();
+ $("opp").textContent=d.revenue?.opportunities??0;$("conv").textContent=d.revenue?.conversions??0;
+ const mt=await api(A+"/metrics");if(mt.ok){$("autoRate").textContent=(mt.autonomous_rate??0)+"%";$("autoBar").style.width=Math.min(100,mt.autonomous_rate||0)+"%"}
+ const mods=c.modules||{};for(const k of ["telegram","whatsapp","instagram","website"]){const e=$(k+"State"),on=mods[k]!==false;e.textContent=on?"ON":"OFF / BLOCK";e.className="state "+(on?"ok":"bad")}
+}
+async function masterAction(action){$("masterHelp").textContent="در حال اجرای "+action+"…";const d=await api(A+"/master",{method:"POST",body:JSON.stringify({action})});$("masterHelp").innerHTML=d.ok?"<span class='ok'>✓ MASTER → "+esc(action)+" · وضعیت ثبت شد.</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}
+async function moduleToggle(module,enabled){const d=await api(A+"/module",{method:"POST",body:JSON.stringify({module,enabled}));if(!d.ok)alert(d.error||"خطا");await loadStatus()}
+async function sendCommand(){const raw=$("command").value.trim();if(!raw)return;$("commandStatus").textContent="در حال ساخت Plan و Task…";const d=await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw})});$("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ فرمان ثبت شد · "+esc(d.command_id)+" · "+(d.plan?.tasks?.length||0)+" Task ساخته شد.</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";if(d.ok){await runTasks()}}
+async function runTasks(){$("commandStatus").textContent="در حال اجرای Taskهای آماده…";const d=await api(A+"/tasks/run",{method:"POST",body:"{}"});$("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ اجرا: "+d.executed+" · خطا: "+d.failed+(d.paused?" · PAUSED":"")+"</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}
+async function loadTasks(){const d=await api(A+"/tasks");if(d.ok){$("taskCount").textContent=(d.items||[]).length+" recent";$("tasks").innerHTML=rows(d.items,x=>esc(x.module+" / "+x.action)+" · "+esc(x.status)+(x.error?"<br><span class='bad'>"+esc(x.error)+"</span>":"")+"<small>"+esc(x.updated_at)+"</small>")}}
+async function loadBrain(){const d=await api(A+"/brain");if(!d.ok)return;$("brain").textContent=d.brain?.mission||"—";$("timeline").innerHTML=rows(d.brain?.timeline,x=>esc((x.type||"event")+" · "+(x.message||""))+"<small>"+esc(x.created_at)+"</small>")}
+async function loadRevenue(){const d=await api(A+"/revenue");$("revenue").innerHTML=d.ok?rows(Object.entries(d.funnel||{}).map(([k,v])=>({k,v})),x=>esc(x.k)+" · "+esc(x.v)):"—"}
+async function loadOpp(){const d=await api(A+"/opportunities");$("opportunities").innerHTML=d.ok?rows(d.items,x=>esc(x.name||x.contact||x.id)+" · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal")):"—"}
+async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
+async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
+async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety()])}
+updateTokenUI();refreshAll();setInterval(refreshAll,15000);
+</script></body></html>`;
 }
