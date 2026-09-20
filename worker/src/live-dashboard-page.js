@@ -77,11 +77,41 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </div>
 </section>
 
-<section class="grid2 section">
-<div class="card"><div class="title"><h2>📋 LIVE TASK MANAGER</h2><span id="taskCount" class="tag">—</span></div><div id="tasks" class="rows">—</div></div>
-<div class="card"><div class="title"><h2>🧠 BUSINESS BRAIN</h2><button class="btn" onclick="loadBrain()">↻</button></div><div id="brain" class="row" style="margin-top:9px">در انتظار داده…</div><div class="title" style="margin-top:14px"><h2>🕒 LIVE ACTIVITY</h2><span class="tag">RECENT</span></div><div id="timeline" class="rows timeline">—</div></div>
-</section>
+<section class="card section">
+<div class="title">
+<div>
+<h2>🔎 AUTONOMY DIAGNOSTIC</h2>
+<div class="hint">خواندن مستقیم وضعیت واقعی Queue، Lock و Content Module از /api/autonomy/status</div>
+</div>
+<button class="btn" onclick="loadDiagnostic()">↻ CHECK</button>
+</div>
 
+<div class="grid3" style="margin-top:10px">
+<div class="row">
+<b>MASTER</b>
+<div id="diagMaster" class="muted">—</div>
+</div>
+
+<div class="row">
+<b>CONTENT MODULE</b>
+<div id="diagContent" class="muted">—</div>
+</div>
+
+<div class="row">
+<b>TASK COUNTS</b>
+<div id="diagTasks" class="muted">—</div>
+</div>
+</div>
+
+<div class="row" style="margin-top:9px">
+<b>ACTIVE LOCKS</b>
+<div id="diagLocks" class="muted" style="margin-top:6px">در انتظار بررسی…</div>
+</div>
+
+<div id="diagStatus" class="hint" style="margin-top:8px">
+هنوز بررسی نشده است.
+</div>
+</section>
 <section class="grid3 section">
 <div class="card"><div class="title"><h2>💰 REVENUE</h2><span class="tag">REAL CRM</span></div><div id="revenue" class="rows">—</div></div>
 <div class="card"><div class="title"><h2>🎯 OPPORTUNITIES</h2><span class="tag">LEADS</span></div><div id="opportunities" class="rows">—</div></div>
@@ -123,6 +153,51 @@ function clearToken(){
 async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});return await r.json().catch(()=>({ok:false,error:"Invalid JSON"}))}
 function setCmd(x){$("command").value=x}
 function rows(a,fn){return (a||[]).slice(0,15).map(x=>"<div class='row'>"+fn(x)+"</div>").join("")||"<div class='hint'>داده‌ای وجود ندارد.</div>"}
+async function loadDiagnostic(){
+ const d=await api(A+"/status");
+
+ if(!d.ok){
+  $("diagStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Unable to read autonomy status")+"</span>";
+  $("diagMaster").textContent="—";
+  $("diagContent").textContent="—";
+  $("diagTasks").textContent="—";
+  $("diagLocks").textContent="—";
+  return;
+ }
+
+ const master=d.controls?.master||"—";
+ const contentEnabled=d.controls?.modules?.content!==false;
+ const tasks=d.tasks||{};
+ const locks=d.active_locks||[];
+
+ $("diagMaster").textContent=String(master).toUpperCase();
+
+ $("diagContent").innerHTML=contentEnabled
+  ? "<span class='ok'>ON</span>"
+  : "<span class='bad'>OFF / BLOCK</span>";
+
+ $("diagTasks").innerHTML=
+  "queued: "+esc(tasks.queued??0)+
+  " · running: "+esc(tasks.running??0)+
+  " · completed: "+esc(tasks.completed??0)+
+  " · failed: "+esc(tasks.failed??0)+
+  " · blocked: "+esc(tasks.blocked??0);
+
+ if(!locks.length){
+  $("diagLocks").innerHTML="<span class='ok'>NO ACTIVE LOCKS</span>";
+ }else{
+  $("diagLocks").innerHTML=locks.map(x=>
+   "<div style='margin-bottom:6px'>"+
+   "<b>"+esc(x.module)+"</b>"+
+   " · task: "+esc(x.task_id)+
+   "<br><small>"+esc(x.locked_at||"")+"</small>"+
+   "</div>"
+  ).join("");
+ }
+
+ $("diagStatus").innerHTML=
+  "<span class='ok'>✓ وضعیت واقعی از /api/autonomy/status خوانده شد.</span>";
+}
 async function loadStatus(){
  const d=await api(A+"/status");if(!d.ok){$("masterState").textContent="AUTH / API ERROR";$("masterState").className="pill bad";return}
  const c=d.controls||{},m=c.master||"—";$("masterState").textContent="MASTER: "+m.toUpperCase();$("masterState").className="pill "+(m==="on"?"ok":m==="paused"?"warn":"bad");$("masterValue").textContent=m.toUpperCase();
