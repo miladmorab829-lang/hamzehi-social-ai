@@ -236,6 +236,6 @@ async function loadOpp(){const d=await api(A+"/opportunities");$("opportunities"
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
 async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
 async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety()])}
-updateTokenUI();refreshAll();setInterval(refreshAll,15000);
+updateTokenUI();refreshAll();loadDiagnostic();setInterval(refreshAll,15000);
 </script></body></html>`;
 }
