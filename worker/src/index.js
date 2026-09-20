@@ -805,7 +805,16 @@ async function runAutoContentGeneration(env, source = "scheduled", force = false
     await audit(env, "auto_content_generated", "Scheduled content generated automatically and queued for approval", {
       content_id: content.id, source, topic, interval_hours: cfg.interval_hours
     });
-    return { ok:true, generated:true, content_id:content.id, topic };
+    return {
+  ok:true,
+  generated:true,
+  content_id:content.id,
+  topic,
+  media_processing:content.media_processing || {
+    processed:false,
+    reason:"media_processing_result_missing"
+  }
+};
   } catch (e) {
     // Release the claim on failure so a later scheduled run can retry.
     await env.DB.prepare("DELETE FROM system_kv WHERE key='auto_content_generation_lock' AND value=?").bind(claim).run();
