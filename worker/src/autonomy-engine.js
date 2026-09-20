@@ -119,13 +119,22 @@ async function callSelf(req,env,path,method="GET",body){
     body:body?JSON.stringify(body):undefined
   });
 
-  const data=await r.json().catch(()=>({
-    ok:false,
-    error:`HTTP ${r.status}`
-  }));
+  const raw=await r.text();
+
+  let data;
+  try{
+    data=JSON.parse(raw);
+  }catch{
+    data={
+      ok:false,
+      error:`HTTP ${r.status}`,
+      response_text:raw.slice(0,500)
+    };
+  }
 
   return {
     status:r.status,
+    url:url.toString(),
     data
   };
 }
