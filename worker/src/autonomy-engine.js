@@ -96,10 +96,38 @@ async function actionEnabled(env,module,action){
  return r===null||Number(r.enabled)!==0;
 }
 async function callSelf(req,env,path,method="GET",body){
- const url=new URL(req.url);url.pathname=path;url.search="";
- const headers={Authorization:`Bearer ${env.ADMIN_TOKEN}`};if(body)headers["Content-Type"]="application/json";
- const r=await fetch(url,{method,headers,body:body?JSON.stringify(body):undefined});
- const data=await r.json().catch(()=>({ok:false,error:`HTTP ${r.status}`}));return {status:r.status,data};
+  const base=String(
+    env.PUBLIC_WORKER_BASE_URL ||
+    "https://hamzehi-social-ai.miladmorab829.workers.dev"
+  ).replace(/\/$/,'');
+
+  const url=new URL(base);
+  url.pathname=path;
+  url.search="";
+
+  const headers={
+    Authorization:`Bearer ${env.ADMIN_TOKEN}`
+  };
+
+  if(body){
+    headers["Content-Type"]="application/json";
+  }
+
+  const r=await fetch(url,{
+    method,
+    headers,
+    body:body?JSON.stringify(body):undefined
+  });
+
+  const data=await r.json().catch(()=>({
+    ok:false,
+    error:`HTTP ${r.status}`
+  }));
+
+  return {
+    status:r.status,
+    data
+  };
 }
 async function revenue(env){
  const r=await env.DB.prepare("SELECT stage,COUNT(*) n FROM leads GROUP BY stage").all(),f={};
