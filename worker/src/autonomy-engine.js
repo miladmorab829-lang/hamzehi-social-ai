@@ -15,7 +15,7 @@ const ACTIONS={
  crm:["status","lead_intelligence"],
  ads:["status","discover_opportunities"],
  content:["status","generate_and_queue"],
- media:["status"],
+ media:["status","video_generate"],
  learning:["status","run"],
  revenue:["status","funnel_snapshot"]
 };
