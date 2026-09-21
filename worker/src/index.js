@@ -2311,10 +2311,34 @@ export default {
         return json({ok:true,media:await attachContentMedia(env,await req.json().catch(()=>({})))});
       }
       if (u.pathname === "/api/content/media/auto" && req.method === "POST") {
-        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
-        const b=await req.json().catch(()=>({})); if(!b.content_id) return json({ok:false,error:"content_id is required"},400);
-        return json({ok:true,result:await autoAttachTelegramMedia(env,String(b.content_id))});
-      }
+  if (!auth(req, env)) return json({ok:false,error:"Unauthorized"});
+
+  const b = await req.json().catch(()=>({}));
+  if (!b.content_id) {
+    return json({ok:false,error:"content_id is required"},400);
+  }
+
+  const contentId = String(b.content_id);
+  const attached = await autoAttachTelegramMedia(env, contentId);
+
+  if (!attached?.attached) {
+    return json({ok:true,result:attached});
+  }
+
+  const processed = await autoProcessContentMedia(
+    env,
+    contentId,
+    attached
+  );
+
+  return json({
+    ok:true,
+    result:{
+      ...attached,
+      media_processing: processed
+    }
+  });
+}
       if (u.pathname === "/media/telegram" && req.method === "GET") return await publicTelegramMediaProxy(env,req);
 
       if (u.pathname === "/api/website/track" && req.method === "POST") {
