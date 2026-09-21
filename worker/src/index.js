@@ -1504,7 +1504,9 @@ if(media.media_type==='photo'){
       ),
       resolution:String(env.AUTO_VIDEO_RESOLUTION||'1080P'),
       watermark:false
-    });
+},{
+  gateway:{id:'default'}
+});
 
     const videoUrl=String(
       result?.video ||
