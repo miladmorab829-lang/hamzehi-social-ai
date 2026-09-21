@@ -1732,7 +1732,58 @@ async function recovery(env){await reconcileStalePublishes(env);await reconcileS
           await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=?").bind(result.external_id||null,now(),d.id).run();
           await audit(env,'telegram_content_published_retry','Failed Telegram content distribution retried successfully',{content_id:d.content_id,external_id:result.external_id||null});
         } else throw Error('Unsupported distribution target');
-      }else if(x.operation==='calendar_publish'){const cal=await env.DB.prepare("SELECT * FROM calendar WHERE id=?").bind(p.calendar_id).first();if(!cal||cal.status==='published'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue}const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(p.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,p.calendar_id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');const publishPlatform=resolvePublishPlatforms(content.platform)[0];await publish(env,{content_id:p.content_id,platform:publishPlatform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),p.calendar_id).run()}else throw Error('Unsupported retry operation');await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run()}catch(e){const attempts=Number(x.attempts)+1,status=attempts>=Number(x.max_attempts)?'failed':'queued';if(x.operation==='content_distribution'){
+      }
+else if(x.operation==='video_generation'){
+  const p=JSON.parse(x.payload_json||'{}');
+  const contentId=String(p.content_id||'').trim();
+  const contentMediaId=String(p.content_media_id||'').trim();
+
+  if(!contentId||!contentMediaId){
+    throw Error('Video generation job payload is incomplete');
+  }
+
+  const media=await env.DB.prepare(
+    "SELECT * FROM content_media WHERE id=? AND content_id=? LIMIT 1"
+  ).bind(contentMediaId,contentId).first();
+
+  if(!media){
+    throw Error('Video generation media not found');
+  }
+
+  if(
+    String(media.media_type)==='video' &&
+    String(media.status)==='ready'
+  ){
+    await env.DB.prepare(
+      "UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?"
+    ).bind(now(),x.id).run();
+    continue;
+  }
+
+  const result=await autoProcessContentMedia(
+    env,
+    contentId,
+    {
+      attached:true,
+      id:contentMediaId,
+      source_id:String(media.source_id),
+      media_type:String(media.media_type),
+      media_url:String(media.media_url||'')
+    }
+  );
+
+  if(
+    result?.processed!==true &&
+    result?.mode!=='existing_video_reused'
+  ){
+    throw Error(
+      result?.error ||
+      result?.reason ||
+      'Video generation did not complete'
+    );
+  }
+}
+else if(x.operation==='calendar_publish'){const cal=await env.DB.prepare("SELECT * FROM calendar WHERE id=?").bind(p.calendar_id).first();if(!cal||cal.status==='published'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue}const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(p.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,p.calendar_id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');const publishPlatform=resolvePublishPlatforms(content.platform)[0];await publish(env,{content_id:p.content_id,platform:publishPlatform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),p.calendar_id).run()}else throw Error('Unsupported retry operation');await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run()}catch(e){const attempts=Number(x.attempts)+1,status=attempts>=Number(x.max_attempts)?'failed':'queued';if(x.operation==='content_distribution'){
         try{const p2=JSON.parse(x.payload_json||'{}');if(p2.distribution_id)await env.DB.prepare("UPDATE content_distribution SET status='failed',error=?,updated_at=? WHERE id=? AND status!='published'").bind(e.message,now(),p2.distribution_id).run()}catch{}
       }
       await env.DB.prepare("UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").bind(status,e.message,new Date(Date.now()+Math.min(3600000,2**attempts*60000)).toISOString(),now(),x.id).run()}await collectInstagramMetrics(env)}
