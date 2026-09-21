@@ -157,7 +157,44 @@ async function revenue(env){
 async function executeTask(env,req,t){
  const p=JSON.parse(t.payload_json||"{}");
  if(t.action==="status")return {ok:true,module:t.module,mode:"observed"};
- if(t.module==="telegram"&&t.action==="inbox_scan")return (await callSelf(req,env,"/api/inbox")).data;
+ if(t.module==="media"&&t.action==="video_generate"){
+  let contentId=String(p.content_id||"").trim();
+
+  if(!contentId){
+    const latest=await env.DB.prepare(
+      "SELECT id FROM contents ORDER BY created_at DESC LIMIT 1"
+    ).first();
+
+    contentId=String(latest?.id||"").trim();
+  }
+
+  if(!contentId){
+    throw new Error("No content available for video generation");
+  }
+
+  const r=await callSelf(
+    req,
+    env,
+    "/api/content/media/auto",
+    "POST",
+    {content_id:contentId}
+  );
+
+  if(r.status>=300||r.data?.ok===false){
+    throw new Error(
+      r.data?.error||
+      r.data?.result?.media_processing?.error||
+      `Video generation request failed (HTTP ${r.status})`
+    );
+  }
+
+  return {
+    ok:true,
+    content_id:contentId,
+    result:r.data?.result||r.data
+  };
+}
+  if(t.module==="telegram"&&t.action==="inbox_scan")return (await callSelf(req,env,"/api/inbox")).data;
  if(t.module==="telegram"&&t.action==="inbox_reply"){const r=await callSelf(req,env,"/api/inbox");return {ok:r.status<300,mode:"reply_queue",items:r.data.items||[],note:"Reply drafts are queued; no external send is performed by this action."}}
  if(t.module==="content"&&t.action==="generate_and_queue")return (await callSelf(req,env,"/api/content/automation/run","POST",{platform:p.platform||"telegram",market:p.market||"iran_iraq"})).data;
  if(t.module==="ads"&&t.action==="discover_opportunities")return (await callSelf(req,env,"/api/ads/autopilot","POST",p)).data;
