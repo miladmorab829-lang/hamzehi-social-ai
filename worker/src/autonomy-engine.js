@@ -161,10 +161,63 @@ async function acquire(env,module,taskId){
  const r=await env.DB.prepare("INSERT OR IGNORE INTO autonomy_locks(module,task_id,locked_at) VALUES(?,?,?)").bind(module,taskId,now()).run();
  return Number(r.meta?.changes||0)===1;
 }
-async function release(env,module,taskId){await env.DB.prepare("DELETE FROM autonomy_locks WHERE module=? AND task_id=?").bind(module,taskId).run()}
+async function release(env,module,taskId){
+ await env.DB.prepare("DELETE FROM autonomy_locks WHERE module=? AND task_id=?").bind(module,taskId).run();
+}
+
+async function recoverStaleLocks(env,maxAgeMs=15*60*1000){
+ const cutoff=Date.now()-maxAgeMs;
+ const rows=await env.DB.prepare(
+  "SELECT l.module,l.task_id,l.locked_at,t.status FROM autonomy_locks l LEFT JOIN autonomy_tasks t ON t.id=l.task_id"
+ ).all();
+
+ let recovered=0;
+
+ for(const row of rows.results||[]){
+  if(row.status!=="running")continue;
+
+  const lockedAt=Date.parse(row.locked_at||"");
+  if(!Number.isFinite(lockedAt)||lockedAt>cutoff)continue;
+
+  const t=now();
+  const ageMs=Math.max(0,Date.now()-lockedAt);
+
+  const r=await env.DB.prepare(
+   "UPDATE autonomy_tasks SET status='failed',error=?,finished_at=?,updated_at=? WHERE id=? AND status='running'"
+  ).bind(
+   "Stale autonomous lock recovered automatically",
+   t,
+   t,
+   row.task_id
+  ).run();
+
+  if(Number(r.meta?.changes||0)!==1)continue;
+
+  await env.DB.prepare(
+   "DELETE FROM autonomy_locks WHERE module=? AND task_id=?"
+  ).bind(row.module,row.task_id).run();
+
+  recovered++;
+
+  await event(
+   env,
+   "stale_lock_recovered",
+   row.module,
+   "Recovered stale autonomous lock",
+   {
+    task_id:row.task_id,
+    locked_at:row.locked_at,
+    age_ms:ageMs
+   }
+  );
+ }
+
+ return recovered;
+}
 export async function runTasks(env,req,limit=20){
  const c=await controls(env);if(c.master!=="on")return {ok:true,paused:true,executed:0,failed:0,blocked:0};
- const rows=await env.DB.prepare("SELECT * FROM autonomy_tasks WHERE status='queued' AND (scheduled_at IS NULL OR scheduled_at<=?) ORDER BY priority DESC,created_at ASC LIMIT ?").bind(now(),limit).all();
+ await recoverStaleLocks(env);
+  const rows=await env.DB.prepare("SELECT * FROM autonomy_tasks WHERE status='queued' AND (scheduled_at IS NULL OR scheduled_at<=?) ORDER BY priority DESC,created_at ASC LIMIT ?").bind(now(),limit).all();
  let executed=0,failed=0,blocked=0;
  for(const t of rows.results||[]){
   if(c.modules[t.module]===false||!(await actionEnabled(env,t.module,t.action))){
