@@ -107,7 +107,12 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 <b>ACTIVE LOCKS</b>
 <div id="diagLocks" class="muted" style="margin-top:6px">در انتظار بررسی…</div>
 </div>
-
+<div class="row" style="margin-top:9px">
+<b>🔍 LOCKED CONTENT TASK</b>
+<div id="diagLockedTask" class="muted" style="margin-top:6px">
+در انتظار بررسی…
+</div>
+</div>
 <div id="diagStatus" class="hint" style="margin-top:8px">
 هنوز بررسی نشده است.
 </div>
@@ -155,8 +160,27 @@ function setCmd(x){$("command").value=x}
 function rows(a,fn){return (a||[]).slice(0,15).map(x=>"<div class='row'>"+fn(x)+"</div>").join("")||"<div class='hint'>داده‌ای وجود ندارد.</div>"}
 async function loadDiagnostic(){
  const d=await api(A+"/status");
-
+const taskData=await api(A+"/tasks");
  if(!d.ok){
+  const lockedTaskId=(d.active_locks||[]).find(x=>x.module==="content")?.task_id||"";
+
+const lockedTask=(taskData.items||[]).find(x=>x.id===lockedTaskId);
+
+$("diagLockedTask").innerHTML=lockedTask
+  ? "<b>MODULE:</b> "+esc(lockedTask.module)+
+    " · <b>ACTION:</b> "+esc(lockedTask.action)+
+    "<br><b>STATUS:</b> "+esc(lockedTask.status)+
+    " · <b>ATTEMPTS:</b> "+esc(lockedTask.attempts)+
+    "<br><b>STARTED:</b> "+esc(lockedTask.started_at||"—")+
+    "<br><b>UPDATED:</b> "+esc(lockedTask.updated_at||"—")+
+    "<br><b>COMMAND:</b> "+esc(lockedTask.command_id||"—")+
+    (lockedTask.error
+      ? "<br><span class='bad'><b>ERROR:</b> "+esc(lockedTask.error)+"</span>"
+      : "")+
+    (lockedTask.result_json
+      ? "<br><span class='muted'><b>RESULT:</b> "+esc(lockedTask.result_json)+"</span>"
+      : "")
+  : "<span class='warn'>Task مربوط به Lock پیدا نشد.</span>";
   $("diagStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Unable to read autonomy status")+"</span>";
   $("diagMaster").textContent="—";
   $("diagContent").textContent="—";
