@@ -1138,7 +1138,15 @@ async function publicTelegramMediaProxy(env,req){
   if(!fr.ok||!fd.ok||!fd.result?.file_path) return new Response('Telegram file lookup failed',{status:502});
   const media=await fetch(`${base.replace('/bot'+env.TELEGRAM_BOT_TOKEN,'')}/file/bot${env.TELEGRAM_BOT_TOKEN}/${fd.result.file_path}`);
   if(!media.ok) return new Response('Telegram media fetch failed',{status:502});
-  const h=new Headers(); h.set('Content-Type',media.headers.get('Content-Type')||'application/octet-stream'); h.set('Cache-Control','public, max-age=300');
+  const path=String(fd.result.file_path||'').toLowerCase();
+let contentType='application/octet-stream';
+if(path.endsWith('.jpg')||path.endsWith('.jpeg')) contentType='image/jpeg';
+else if(path.endsWith('.png')) contentType='image/png';
+else if(path.endsWith('.webp')) contentType='image/webp';
+else if(path.endsWith('.mp4')) contentType='video/mp4';
+const h=new Headers();
+h.set('Content-Type',contentType);
+h.set('Cache-Control','public, max-age=300');
   return new Response(media.body,{status:200,headers:h});
 }
 
