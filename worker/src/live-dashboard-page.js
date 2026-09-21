@@ -190,7 +190,6 @@ $("diagLockedTask").innerHTML=lockedTask
       : "")
   : "<span class='warn'>Task مربوط به Lock پیدا نشد.</span>";
 
-const master=d.controls?.master||"—";
  const master=d.controls?.master||"—";
  const contentEnabled=d.controls?.modules?.content!==false;
  const tasks=d.tasks||{};
