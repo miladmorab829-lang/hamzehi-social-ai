@@ -76,7 +76,33 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 <div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="websiteState" class="state">—</span></div><h3>🌐 Website</h3><p>Growth scan و پایش رشد وب‌سایت از API موجود.</p><div class="actions"><button class="btn" onclick="moduleToggle('website',true)">ON</button><button class="btn danger" onclick="moduleToggle('website',false)">OFF / BLOCK</button></div></div>
 </div>
 </section>
+<section class="grid2 section">
+<div class="card">
+<div class="title">
+<h2>📋 LIVE TASK MANAGER</h2>
+<span id="taskCount" class="tag">—</span>
+</div>
+<div id="tasks" class="rows">—</div>
+</div>
 
+<div class="card">
+<div class="title">
+<h2>🧠 BUSINESS BRAIN</h2>
+<button class="btn" onclick="loadBrain()">↻</button>
+</div>
+
+<div id="brain" class="row" style="margin-top:9px">
+در انتظار داده…
+</div>
+
+<div class="title" style="margin-top:14px">
+<h2>🕒 LIVE ACTIVITY</h2>
+<span class="tag">RECENT</span>
+</div>
+
+<div id="timeline" class="rows timeline">—</div>
+</div>
+</section>
 <section class="card section">
 <div class="title">
 <div>
