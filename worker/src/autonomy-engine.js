@@ -118,7 +118,13 @@ async function callSelf(req,env,path,method="GET",body){
     headers,
     body:body?JSON.stringify(body):undefined
   });
-
+await audit(env,"autonomy_self_call_diagnostic","Self-call diagnostic",{
+  path,
+  method,
+  url:url.toString(),
+  status:r.status,
+  ok:r.ok
+});
   const data=await r.json().catch(()=>({
     ok:false,
     error:`HTTP ${r.status}`
