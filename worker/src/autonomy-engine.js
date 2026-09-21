@@ -52,7 +52,8 @@ function fallbackPlan(raw){
  if(/مشتری|lead|crm|لید/.test(s))add("crm","lead_intelligence",{},85);
  if(/تبلیغ|اسپانسر|ads|advertis|رپورتاژ/.test(s))add("ads","discover_opportunities",{},85);
  if(/محتوا|content|پست|استوری|story/.test(s))add("content","generate_and_queue",{platform:"telegram",market:"iran_iraq"},70);
- if(/یادگیری|learn|بهینه|optimi/.test(s))add("learning","run",{},55);
+ if(/ویدیو|ویدیوی|video|wan\s*2\.7|i2v|image[- ]to[- ]video/.test(s))add("media","video_generate",{},95);
+  if(/یادگیری|learn|بهینه|optimi/.test(s))add("learning","run",{},55);
  if(/درآمد|فروش|revenue|پول/.test(s))add("revenue","funnel_snapshot",{},90);
  if(/همه|all|فعالیت|شروع|start/.test(s))for(const m of MODULES)if(!tasks.some(x=>x.module===m))add(m,m==="learning"?"run":"status",{},40);
  for(let i=tasks.length-1;i>=0;i--)if(blocked.has(tasks[i].module))tasks.splice(i,1);
