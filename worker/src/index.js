@@ -1341,12 +1341,41 @@ async function aiEditVaultImageCore(env, sourceId, prompt, meta = {}){
   const fd=await fr.json().catch(()=>({}));
   if(!fr.ok||!fd.ok||!fd.result?.file_path) throw Error('Telegram source image lookup failed');
   const img=await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fd.result.file_path}`);
-  if(!img.ok) throw Error('Telegram source image download failed');
-  const blob=await img.blob();
-  const form=new FormData();
-  form.append('model',String(env.OPENAI_IMAGE_MODEL||'gpt-image-2'));
-  form.append('prompt',prompt);
-  form.append('image',blob,'source.png');
+if(!img.ok) throw Error('Telegram source image download failed');
+
+const rawBlob=await img.blob();
+const filePath=String(fd.result.file_path||'').toLowerCase();
+
+let contentType=String(
+  img.headers.get('content-type')||rawBlob.type||''
+).split(';')[0].trim().toLowerCase();
+
+let filename='source.png';
+
+if(filePath.endsWith('.jpg')||filePath.endsWith('.jpeg')){
+  contentType='image/jpeg';
+  filename='source.jpg';
+}else if(filePath.endsWith('.png')){
+  contentType='image/png';
+  filename='source.png';
+}else if(filePath.endsWith('.webp')){
+  contentType='image/webp';
+  filename='source.webp';
+}
+
+if(!/^image\/(jpeg|png|webp)$/.test(contentType)){
+  throw Error(`Unsupported Telegram image MIME type: ${contentType||'unknown'}`);
+}
+
+const blob=new Blob(
+  [await rawBlob.arrayBuffer()],
+  {type:contentType}
+);
+
+const form=new FormData();
+form.append('model',String(env.OPENAI_IMAGE_MODEL||'gpt-image-2'));
+form.append('prompt',prompt);
+form.append('image',blob,filename);
   form.append('size',String(env.OPENAI_IMAGE_SIZE||'1024x1024'));
   const r=await fetch('https://api.openai.com/v1/images/edits',{method:'POST',headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`},body:form});
   const d=await r.json().catch(()=>({}));
