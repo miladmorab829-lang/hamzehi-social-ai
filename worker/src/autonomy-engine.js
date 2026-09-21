@@ -118,7 +118,33 @@ async function callSelf(req,env,path,method="GET",body){
     headers,
     body:body?JSON.stringify(body):undefined
   });
+const responseText = await r.text();
+
 await event(env,"autonomy_self_call_diagnostic","self","Self-call diagnostic",{
+ path,
+ method,
+ url:url.toString(),
+ status:r.status,
+ ok:r.ok,
+ response:responseText.slice(0,1000)
+});
+
+let data;
+try{
+ data=JSON.parse(responseText);
+}catch{
+ data={
+  ok:false,
+  error:`HTTP ${r.status}`,
+  response_text:responseText.slice(0,1000)
+ };
+}
+
+return {
+ status:r.status,
+ data
+};
+  await event(env,"autonomy_self_call_diagnostic","self","Self-call diagnostic",{
   path,
   method,
   url:url.toString(),
