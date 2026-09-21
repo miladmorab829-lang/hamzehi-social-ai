@@ -162,7 +162,15 @@ async function loadDiagnostic(){
  const d=await api(A+"/status");
 const taskData=await api(A+"/tasks");
  if(!d.ok){
-  const lockedTaskId=(d.active_locks||[]).find(x=>x.module==="content")?.task_id||"";
+  $("diagStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Unable to read autonomy status")+"</span>";
+  $("diagMaster").textContent="—";
+  $("diagContent").textContent="—";
+  $("diagTasks").textContent="—";
+  $("diagLocks").textContent="—";
+  return;
+}
+
+const lockedTaskId=(d.active_locks||[]).find(x=>x.module==="content")?.task_id||"";
 
 const lockedTask=(taskData.items||[]).find(x=>x.id===lockedTaskId);
 
@@ -181,14 +189,8 @@ $("diagLockedTask").innerHTML=lockedTask
       ? "<br><span class='muted'><b>RESULT:</b> "+esc(lockedTask.result_json)+"</span>"
       : "")
   : "<span class='warn'>Task مربوط به Lock پیدا نشد.</span>";
-  $("diagStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Unable to read autonomy status")+"</span>";
-  $("diagMaster").textContent="—";
-  $("diagContent").textContent="—";
-  $("diagTasks").textContent="—";
-  $("diagLocks").textContent="—";
-  return;
- }
 
+const master=d.controls?.master||"—";
  const master=d.controls?.master||"—";
  const contentEnabled=d.controls?.modules?.content!==false;
  const tasks=d.tasks||{};
