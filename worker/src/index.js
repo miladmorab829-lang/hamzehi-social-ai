@@ -2342,7 +2342,7 @@ export default {
         return json({ok:true,media:await attachContentMedia(env,await req.json().catch(()=>({})))});
       }
       if (u.pathname === "/api/content/media/auto" && req.method === "POST") {
-  if (!auth(req, env)) return json({ok:false,error:"Unauthorized"});
+  if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
 
   const b = await req.json().catch(()=>({}));
   if (!b.content_id) {
@@ -2350,25 +2350,119 @@ export default {
   }
 
   const contentId = String(b.content_id);
+
   const attached = await autoAttachTelegramMedia(env, contentId);
 
   if (!attached?.attached) {
     return json({ok:true,result:attached});
   }
 
-  const processed = await autoProcessContentMedia(
-    env,
-    contentId,
-    attached
-  );
+  const media = await env.DB.prepare(
+    "SELECT * FROM content_media WHERE id=? AND content_id=? LIMIT 1"
+  ).bind(String(attached.id),contentId).first();
+
+  if (!media) {
+    return json({
+      ok:false,
+      error:"content_media record not found"
+    },404);
+  }
+
+  if (
+    String(media.media_type)==='video' &&
+    String(media.status)==='ready'
+  ) {
+    return json({
+      ok:true,
+      result:{
+        ...attached,
+        media_processing:{
+          processed:true,
+          mode:'existing_video_reused',
+          media_id:media.source_id,
+          media_type:'video'
+        }
+      }
+    });
+  }
+
+  if (String(media.media_type)!=='photo') {
+    return json({
+      ok:true,
+      result:{
+        ...attached,
+        media_processing:{
+          processed:false,
+          mode:'unsupported_media_type',
+          media_type:media.media_type
+        }
+      }
+    });
+  }
+
+  const pending = await env.DB.prepare(
+    "SELECT id,payload_json,status FROM retry_queue " +
+    "WHERE operation='video_generation' " +
+    "AND status IN ('queued','running') " +
+    "ORDER BY created_at DESC LIMIT 20"
+  ).all();
+
+  for (const job of pending.results || []) {
+    try {
+      const p = JSON.parse(job.payload_json || "{}");
+
+      if (
+        String(p.content_id)===contentId &&
+        String(p.content_media_id)===String(media.id)
+      ) {
+        return json({
+          ok:true,
+          queued:true,
+          job_id:job.id,
+          content_id:contentId,
+          status:job.status,
+          message:"Video generation already queued"
+        },202);
+      }
+    } catch {}
+  }
+
+  const jobId = uid();
+  const t = now();
+
+  await env.DB.prepare(
+    "UPDATE content_media SET status='processing',updated_at=? WHERE id=?"
+  ).bind(t,String(media.id)).run();
+
+  await env.DB.prepare(
+    "INSERT INTO retry_queue " +
+    "(id,operation,payload_json,attempts,max_attempts,status,next_attempt_at,last_error,created_at,updated_at) " +
+    "VALUES(?,?,?,?,?,?,?,?,?,?)"
+  ).bind(
+    jobId,
+    'video_generation',
+    JSON.stringify({
+      content_id:contentId,
+      content_media_id:String(media.id)
+    }),
+    0,
+    3,
+    'queued',
+    null,
+    null,
+    t,
+    t
+  ).run();
 
   return json({
     ok:true,
-    result:{
-      ...attached,
-      media_processing: processed
-    }
-  });
+    queued:true,
+    job_id:jobId,
+    content_id:contentId,
+    content_media_id:String(media.id),
+    status:'queued',
+    mode:'wan-2.7-i2v'
+  },202);
 }
       if (u.pathname === "/media/telegram" && req.method === "GET") return await publicTelegramMediaProxy(env,req);
 
