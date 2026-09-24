@@ -2544,6 +2544,67 @@ export default {
     return json({ ok:false, error:e.message||"Photo Autopilot failed" },500);
   }
 }
+   if (u.pathname === "/api/photo-autopilot/status" && req.method === "GET") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
+
+  const status = await getPhotoAutopilotStatus(env);
+  const modules = await env.DB.prepare(
+    "SELECT value FROM autonomy_controls WHERE key='modules'"
+  ).first();
+
+  let enabled = true;
+
+  try {
+    const parsed = JSON.parse(modules?.value || "{}");
+    enabled = parsed.photo !== false;
+  } catch {}
+
+  return json({
+    ...status,
+    enabled
+  });
+}
+
+if (u.pathname === "/api/photo-autopilot/toggle" && req.method === "POST") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
+
+  const body = await req.json().catch(() => ({}));
+  const enabled = body.enabled !== false;
+
+  const row = await env.DB.prepare(
+    "SELECT value FROM autonomy_controls WHERE key='modules'"
+  ).first();
+
+  let modules = {};
+
+  try {
+    modules = JSON.parse(row?.value || "{}");
+  } catch {}
+
+  modules.photo = enabled;
+
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO autonomy_controls
+    (key,value,updated_at)
+    VALUES('modules',?,?)
+  `).bind(
+    JSON.stringify(modules),
+    now()
+  ).run();
+
+  await audit(
+    env,
+    "photo_autopilot_toggle",
+    `Photo Autopilot ${enabled ? "enabled" : "disabled"}`,
+    { enabled }
+  );
+
+  return json({
+    ok:true,
+    module:"photo",
+    enabled
+  });
+}
       if (u.pathname === "/webhooks/instagram" && (req.method === "GET" || req.method === "POST")) return await handleInstagramWebhook(env, req);
 
       if (u.pathname === "/api/release/test" && req.method === "POST") {
