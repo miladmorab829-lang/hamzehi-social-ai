@@ -344,6 +344,7 @@ async function loadStatus(){
  const mt=await api(A+"/metrics");if(mt.ok){$("autoRate").textContent=(mt.autonomous_rate??0)+"%";$("autoBar").style.width=Math.min(100,mt.autonomous_rate||0)+"%"}
  const mods=c.modules||{};for(const k of ["telegram","whatsapp","instagram","website"]){const e=$(k+"State"),on=mods[k]!==false;e.textContent=on?"ON":"OFF / BLOCK";e.className="state "+(on?"ok":"bad")}
   await loadPhotoAutopilot();
+await loadVideoAutopilot();
 }
 async function loadPhotoAutopilot(){
   const d=await api("/api/photo-autopilot/status");
@@ -386,7 +387,58 @@ async function loadPhotoAutopilot(){
     $("photoActivity").textContent="امروز هنوز تصویری تولید نشده است.";
   }
 }
+async function loadVideoAutopilot(){
+  const d=await api("/api/video-autopilot/status");
 
+  if(!d.ok){
+    $("videoAutoState").textContent="ERROR";
+    $("videoAutoState").className="tag bad";
+    $("videoStatus").innerHTML=
+      "<span class='bad'>✕ "+esc(d.error||"Video API error")+"</span>";
+    $("videoActivity").textContent="خطا در دریافت وضعیت Video Autopilot.";
+    return;
+  }
+
+  const on=d.enabled!==false;
+
+  $("videoAutoState").textContent=on?"ON":"OFF";
+  $("videoAutoState").className="tag "+(on?"ok":"bad");
+
+  $("videoStatus").innerHTML=
+    on
+      ? "<span class='ok'>ENABLED</span>"
+      : "<span class='bad'>DISABLED</span>";
+
+  $("videoCycle").textContent=d.week_id||"—";
+
+  $("videoProgress").textContent=
+    String(d.status||"idle");
+
+  $("videoToday").innerHTML=
+    d.status==="video_ready"
+      ? "<span class='ok'>READY</span>"
+      : "<span class='muted'>NOT READY</span>";
+
+  $("videoActivity").innerHTML=
+    "<span class='ok'>✓ WEEK</span>"+
+    " · "+esc(d.week_id||"—")+
+    " · status: "+esc(d.status||"idle");
+}
+
+async function videoToggle(enabled){
+  const d=await api("/api/video-autopilot/toggle",{
+    method:"POST",
+    body:JSON.stringify({enabled})
+  });
+
+  if(!d.ok){
+    alert(d.error||"Video Autopilot toggle failed");
+    return;
+  }
+
+  await loadVideoAutopilot();
+  await loadStatus();
+}
 async function photoToggle(enabled){
   const d=await api("/api/photo-autopilot/toggle",{
     method:"POST",
