@@ -2219,6 +2219,21 @@ async function pollWeeklyVideoAutopilot(env){
         shotstackStatus==='failed' ||
         shotstackStatus==='error'
       ){
+                const shotstackError=String(
+          render.error||"Shotstack render failed without error message"
+        );
+
+        await audit(
+          env,
+          "weekly_video_autopilot_failed",
+          "Weekly Video Autopilot failed at Shotstack",
+          {
+            week_id:row.week_id,
+            shotstack_task_id:row.shotstack_task_id,
+            stage:"shotstack",
+            error:shotstackError
+          }
+        );
         await env.DB.prepare(`
           UPDATE weekly_video_autopilot
           SET status=?,
