@@ -1654,6 +1654,102 @@ async function aiEditVaultImage(env,req){
   try { const result=await aiEditVaultImageCore(env,sourceId,prompt,{content_id:b?.content_id||null,tags:b?.tags||''}); return json({ok:true,...result}); }
   catch(e){ return json({ok:false,error:e.message||'AI edit failed'},500); }
 }
+async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId){
+  const apiKey=String(env.SHOTSTACK_API_KEY||'').trim();
+
+  if(!apiKey){
+    throw Error('SHOTSTACK_API_KEY missing');
+  }
+
+  const url=String(videoUrl||'').trim();
+
+  if(!/^https?:\/\//i.test(url)){
+    throw Error('Weekly Kling video URL missing or invalid');
+  }
+
+  const payload={
+    timeline:{
+      tracks:[
+        {
+          clips:[
+            {
+              asset:{
+                type:'video',
+                src:url
+              },
+              start:0,
+              length:'auto'
+            }
+          ]
+        },
+        {
+          clips:[
+            {
+              asset:{
+                type:'text',
+                text:'HAMZEHIBOX',
+                font:{
+                  family:'Montserrat',
+                  size:64,
+                  color:'#FFFFFF'
+                },
+                alignment:'center'
+              },
+              start:8,
+              length:2,
+              position:'center'
+            }
+          ]
+        }
+      ]
+    },
+    output:{
+      format:'mp4',
+      resolution:'hd',
+      aspectRatio:'16:9'
+    },
+    callback:{
+      url:''
+    }
+  };
+
+  const response=await fetch(
+    'https://api.shotstack.io/edit/stage/render',
+    {
+      method:'POST',
+      headers:{
+        'x-api-key':apiKey,
+        'Content-Type':'application/json',
+        'Accept':'application/json'
+      },
+      body:JSON.stringify(payload)
+    }
+  );
+
+  const data=await response.json().catch(()=>({}));
+
+  if(!response.ok||!data?.success){
+    throw Error(
+      data?.message||
+      data?.response?.message||
+      `Shotstack render failed (HTTP ${response.status})`
+    );
+  }
+
+  const renderId=String(
+    data?.response?.id||''
+  ).trim();
+
+  if(!renderId){
+    throw Error('Shotstack did not return render id');
+  }
+
+  return {
+    ok:true,
+    render_id:renderId,
+    week_id:String(weekId)
+  };
+}
 async function createKlingWeeklyVideoTask(env,brief,imageUrls){
   const apiKey=String(env.KLING_API_KEY||'').trim();
   if(!apiKey) throw Error('KLING_API_KEY missing');
