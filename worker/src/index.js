@@ -1654,7 +1654,7 @@ async function aiEditVaultImage(env,req){
   try { const result=await aiEditVaultImageCore(env,sourceId,prompt,{content_id:b?.content_id||null,tags:b?.tags||''}); return json({ok:true,...result}); }
   catch(e){ return json({ok:false,error:e.message||'AI edit failed'},500); }
 }
-async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId){
+async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId,duration){
   const apiKey=String(env.SHOTSTACK_API_KEY||'').trim();
 
   if(!apiKey){
@@ -1667,8 +1667,21 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId){
     throw Error('Weekly Kling video URL missing or invalid');
   }
 
+  const videoDuration=Number(duration);
+
+  if(!Number.isFinite(videoDuration)||videoDuration<=0){
+    throw Error('Weekly Kling video duration missing or invalid');
+  }
+
+  const endCardDuration=2;
+  const endCardStart=Math.max(
+    0,
+    videoDuration-endCardDuration
+  );
+
   const payload={
     timeline:{
+      background:'#000000',
       tracks:[
         {
           clips:[
@@ -1678,7 +1691,7 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId){
                 src:url
               },
               start:0,
-              length:'auto'
+              length:videoDuration
             }
           ]
         },
@@ -1686,17 +1699,21 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId){
           clips:[
             {
               asset:{
-                type:'text',
+                type:'rich-text',
                 text:'HAMZEHIBOX',
                 font:{
                   family:'Montserrat',
                   size:64,
+                  weight:600,
                   color:'#FFFFFF'
                 },
-                alignment:'center'
+                align:{
+                  horizontal:'center',
+                  vertical:'middle'
+                }
               },
-              start:8,
-              length:2,
+              start:endCardStart,
+              length:endCardDuration,
               position:'center'
             }
           ]
@@ -1707,9 +1724,6 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId){
       format:'mp4',
       resolution:'hd',
       aspectRatio:'16:9'
-    },
-    callback:{
-      url:''
     }
   };
 
@@ -1747,7 +1761,8 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId){
   return {
     ok:true,
     render_id:renderId,
-    week_id:String(weekId)
+    week_id:String(weekId),
+    duration:videoDuration
   };
 }
 async function createKlingWeeklyVideoTask(env,brief,imageUrls){
