@@ -1449,19 +1449,32 @@ async function runPhotoAutopilot(env){
 
   const today=new Date().toISOString().slice(0,10);
 
-  const alreadyToday=await env.DB.prepare(
-    "SELECT id FROM photo_autopilot_usage WHERE substr(used_at,1,10)=? LIMIT 1"
-  ).bind(today).first();
+await env.DB.prepare(`
+  CREATE TABLE IF NOT EXISTS photo_autopilot_daily_lock (
+    date TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )
+`).run();
 
-  if(alreadyToday){
-    return {
-      ok:true,
-      skipped:true,
-      reason:"already_generated_today",
-      date:today
-    };
-  }
+const lock=await env.DB.prepare(`
+  INSERT OR IGNORE INTO photo_autopilot_daily_lock
+  (date,status,created_at)
+  VALUES(?,?,?)
+`).bind(
+  today,
+  "reserved",
+  now()
+).run();
 
+if(!lock.meta?.changes){
+  return {
+    ok:true,
+    skipped:true,
+    reason:"already_generated_today",
+    date:today
+  };
+}
   const sources=await env.DB.prepare(`
     SELECT m.id,m.created_at
     FROM telegram_media_sources m
@@ -1488,29 +1501,34 @@ async function runPhotoAutopilot(env){
   let cycle=Number(latestCycle?.cycle||1);
   if(cycle<1)cycle=1;
 
-  let used=await env.DB.prepare(
-    "SELECT source_media_id FROM photo_autopilot_usage WHERE cycle=?"
-  ).bind(cycle).all();
+  let source=null;
 
-  let usedSet=new Set(
-    (used.results||[]).map(x=>String(x.source_media_id))
-  );
+for(;;){
+  const unused=await env.DB.prepare(`
+    SELECT m.id,m.created_at
+    FROM telegram_media_sources m
+    LEFT JOIN media_vault_items v
+      ON v.telegram_media_id=m.id
+    WHERE m.source_kind='vault'
+      AND m.media_type='photo'
+      AND (v.parent_media_id IS NULL OR v.parent_media_id='')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM photo_autopilot_usage u
+        WHERE u.source_media_id=m.id
+          AND u.cycle=?
+      )
+    ORDER BY m.created_at ASC
+    LIMIT 1
+  `).bind(cycle).first();
 
-  if(usedSet.size>=sourceRows.length){
-    cycle++;
-    usedSet=new Set();
+  if(unused){
+    source=unused;
+    break;
   }
 
-  let source=sourceRows.find(
-    x=>!usedSet.has(String(x.id))
-  );
-
-  if(!source){
-    cycle++;
-    usedSet=new Set();
-    source=sourceRows[0];
-  }
-
+  cycle++;
+}
   const scenes=[
     "luxury black marble studio, dramatic cinematic lighting, premium jewelry advertising",
     "deep navy velvet luxury setting, elegant warm spotlight, high-end product campaign",
@@ -1521,8 +1539,12 @@ async function runPhotoAutopilot(env){
     "modern black-and-gold showroom, dramatic soft lighting, sophisticated advertising scene"
   ];
 
-  const sceneIndex=(cycle-1)%scenes.length;
-  const scene=scenes[sceneIndex];
+  const usageCount=await env.DB.prepare(
+  "SELECT COUNT(*) n FROM photo_autopilot_usage"
+).first();
+
+const sceneIndex=Number(usageCount?.n||0)%scenes.length;
+const scene=scenes[sceneIndex];
 
   const prompt=
     "Preserve the exact identity, shape, proportions, materials, colors and details of the original product photo. " +
