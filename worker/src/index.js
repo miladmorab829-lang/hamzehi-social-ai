@@ -103,7 +103,9 @@ function extractSearchLinks(html, limit = 12) {
           if (value.startsWith("a1")) value = value.slice(2);
 
           try {
-            const decoded = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+            const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+const decoded = atob(padded);
             if (/^https?:\/\//i.test(decoded)) href = decoded;
           } catch {}
         }
