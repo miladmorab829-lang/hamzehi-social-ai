@@ -1674,56 +1674,51 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId,duration){
   }
 
   const endCardDuration=2;
-  const endCardStart=Math.max(
-    0,
-    videoDuration-endCardDuration
-  );
-
+  
   const payload={
     timeline:{
       background:'#000000',
       tracks:[
-        {
-          clips:[
-            {
-              asset:{
-                type:'video',
-                src:url
-              },
-              start:0,
-              length:videoDuration
-            }
-          ]
+  {
+    clips:[
+      {
+        asset:{
+          type:'video',
+          src:url
         },
-        
-          {
-  clips:[
-    {
-      asset:{
-        type:'rich-text',
-        text:'HAMZEHIBOX',
-        font:{
-          family:'Montserrat',
-          size:64,
-          weight:600,
-          color:'#FFFFFF'
+        start:0,
+        length:videoDuration
+      }
+    ]
+  },
+  {
+    clips:[
+      {
+        asset:{
+          type:'rich-text',
+          text:'HAMZEHIBOX',
+          font:{
+            family:'Montserrat',
+            size:64,
+            weight:600,
+            color:'#FFFFFF'
+          },
+          align:{
+            horizontal:'center',
+            vertical:'middle'
+          },
+          background:{
+            color:'#000000',
+            opacity:1
+          }
         },
-        align:{
-          horizontal:'center',
-          vertical:'middle'
-        },
-        background:{
-          color:'#000000',
-          opacity:1
-        }
-      },
-      start:videoDuration,
-      length:endCardDuration,
-      position:'center'
-    }
-  ]
-}
-      ]
+        start:videoDuration,
+        length:endCardDuration,
+        position:'center'
+      }
+    ]
+  }
+]
     },
     output:{
       format:'mp4',
