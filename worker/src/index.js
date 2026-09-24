@@ -1778,12 +1778,20 @@ async function getWeeklyPhotoPool(env,limit=6){
     window.end,
     Math.min(6,Math.max(1,Number(limit)||6))
   ).all();
+  const base=String(
+    env.PUBLIC_WORKER_BASE_URL ||
+    'https://hamzehi-social-ai.miladmorab829.workers.dev'
+  ).replace(/\/$/,'');
 
+  const photos=(rows.results||[]).map(photo=>({
+    ...photo,
+    image_url:`${base}${mediaProxyUrl(photo.output_media_id)}`
+  }));
   return {
     weekId:window.weekId,
     start:window.start,
     end:window.end,
-    photos:rows.results||[]
+        photos
   };
 }
 async function buildWeeklyVideoCreativeBrief(env,weekId,photos){
