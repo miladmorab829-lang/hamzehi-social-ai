@@ -1889,7 +1889,18 @@ async function prepareWeeklyVideoAutopilot(env){
   if(!brief.ok){
     return brief;
   }
+  const imageUrls=pool.photos
+    .map(photo=>String(photo.image_url||'').trim())
+    .filter(Boolean)
+    .slice(0,7);
 
+  if(!imageUrls.length){
+    return {
+      ok:false,
+      skipped:true,
+      reason:"no_weekly_image_urls"
+    };
+  }
   const reserved=await reserveWeeklyVideoLock(
     env,
     pool.weekId
