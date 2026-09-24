@@ -1436,7 +1436,7 @@ upload.append(
   const tm=td.result,photo=tm.photo?.at(-1); if(!photo?.file_id) throw Error('Vault did not return AI file_id');
   const t=now(),id=uid();
   await env.DB.prepare("INSERT INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-    .bind(id,chat,'',String(tm.message_id||''),String(photo.file_id),String(photo.file_unique_id||''),'photo',`AI EDIT | parent:${sourceId}`,'vault',t,t).run();
+ .bind(id,chat,'',String(tm.message_id||''),String(photo.file_id),String(photo.file_unique_id||''),'photo',String(meta.caption||''),'vault',t,t).run();
   await env.DB.prepare("INSERT INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
     .bind(uid(),id,meta.content_id||null,'ai_edit','ready',prompt,sourceId,String(meta.tags||'').slice(0,500),t,t).run();
   await audit(env,'media_vault_ai_edit','AI image edit created and stored in Telegram vault',{source_media_id:sourceId,media_id:id,content_id:meta.content_id||null});
