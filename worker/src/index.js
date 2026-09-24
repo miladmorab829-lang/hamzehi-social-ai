@@ -1435,6 +1435,74 @@ form.append('image',blob,filename);
 
   return `data:${outBlob.type||"image/png"};base64,${btoa(binary)}`;
 });
+  let finalCaption=String(meta.caption||"").trim();
+
+try{
+  const captionPrompt=
+    "Write one original luxury advertising caption for this exact final product image. " +
+    "Write entirely in Persian (Farsi). " +
+    "Describe only what is actually visible or explicitly verified. " +
+    "Use the advertising scene and verified product information as context. " +
+    "Include useful product information, a natural call to action, and relevant hashtags. " +
+    "Do not invent price, dimensions, materials, features or specifications. " +
+    "Do not mention AI, editing, image generation, source IDs, parent IDs, cycles or internal systems. " +
+    "Keep the caption elegant, premium, informative and suitable for Telegram. " +
+    `Advertising scene: ${String(meta.scene||"")}. ` +
+    `Verified product information: ${String(meta.source_caption||"No verified product information available.")}. ` +
+    "Return only the final Persian caption.";
+
+  const cr=await fetch(
+    "https://api.openai.com/v1/responses",
+    {
+      method:"POST",
+      headers:{
+        Authorization:`Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type":"application/json"
+      },
+      body:JSON.stringify({
+        model:String(env.OPENAI_MODEL||"gpt-5.6-luna"),
+        input:[
+          {
+            role:"user",
+            content:[
+              {
+                type:"input_text",
+                text:captionPrompt
+              },
+              {
+                type:"input_image",
+                image_url:captionImageBase64
+              }
+            ]
+          }
+        ]
+      })
+    }
+  );
+
+  const cd=await cr.json().catch(()=>({}));
+
+  if(!cr.ok){
+    throw Error(
+      cd?.error?.message||
+      `Caption generation failed (HTTP ${cr.status})`
+    );
+  }
+
+  finalCaption=String(
+    cd?.output_text||
+    cd?.output?.[0]?.content?.[0]?.text||
+    ""
+  ).trim();
+
+  if(!finalCaption){
+    throw Error("Caption generation returned empty text");
+  }
+}catch(e){
+  throw Error(`Photo caption generation failed: ${e.message||e}`);
+}
+
+meta.caption=finalCaption;
   const chat=vaultChatId(env); if(!chat) throw Error('TELEGRAM_VAULT_CHAT_ID missing');const upload=new FormData();
 upload.append('chat_id',chat);
 upload.append('photo',outBlob,'ai-edit.png');
