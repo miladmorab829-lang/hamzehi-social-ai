@@ -1901,6 +1901,64 @@ async function getKlingWeeklyVideoTask(env,taskId){
     duration:task?.task_result?.videos?.[0]?.duration||null
   };
 }
+async function prepareWeeklyVideoAutopilot(env){
+  const pool=await getWeeklyPhotoPool(env,6);
+
+  if(!pool.photos.length){
+    return {
+      ok:false,
+      skipped:true,
+      reason:"no_weekly_photos"
+    };
+  }
+
+  const brief=await buildWeeklyVideoCreativeBrief(
+    env,
+    pool.weekId,
+    pool.photos
+  );
+
+  if(!brief.ok){
+    return brief;
+  }
+
+  const reserved=await reserveWeeklyVideoLock(
+    env,
+    pool.weekId
+  );
+
+  if(!reserved){
+    return {
+      ok:true,
+      skipped:true,
+      reason:"weekly_video_already_reserved",
+      week_id:pool.weekId
+    };
+  }
+
+  await env.DB.prepare(`
+    UPDATE weekly_video_autopilot
+    SET status=?,
+        source_media_ids=?,
+        scenario_json=?,
+        updated_at=?
+    WHERE week_id=? AND status='reserved'
+  `).bind(
+    "prepared",
+    JSON.stringify(brief.source_media_ids),
+    JSON.stringify(brief),
+    now(),
+    pool.weekId
+  ).run();
+
+  return {
+    ok:true,
+    status:"prepared",
+    week_id:pool.weekId,
+    photo_count:pool.photos.length,
+    brief
+  };
+}
 async function runPhotoAutopilot(env){
   await ensureMediaVaultStore(env);
 const modulesRow=await env.DB.prepare(
