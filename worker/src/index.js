@@ -2902,7 +2902,8 @@ export default {
         await runAutoPilotCycle(env,"scheduled");
         await runAnalyzeOptimizeCycle(env,"scheduled");
         await recovery(env);
-      })());
+    await prepareWeeklyVideoAutopilot(env);
+    })());
       ctx.waitUntil((async()=>{ 
   try { 
     await runAutonomyScheduled(
