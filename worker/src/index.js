@@ -1674,6 +1674,96 @@ async function getKlingWeeklyVideoTask(env,taskId){
     duration:task?.task_result?.videos?.[0]?.duration||null
   };
 }
+async function pollWeeklyVideoAutopilot(env){
+  const row=await env.DB.prepare(`
+    SELECT
+      week_id,
+      task_id,
+      status
+    FROM weekly_video_autopilot
+    WHERE status='generating'
+      AND task_id IS NOT NULL
+      AND task_id!=''
+    ORDER BY updated_at ASC
+    LIMIT 1
+  `).first();
+
+  if(!row?.task_id){
+    return {
+      ok:true,
+      skipped:true,
+      reason:"no_generating_weekly_video"
+    };
+  }
+
+  try{
+    const task=await getKlingWeeklyVideoTask(
+      env,
+      row.task_id
+    );
+
+    const klingStatus=String(task.status||'').toLowerCase();
+
+    if(klingStatus==='succeed' || klingStatus==='completed'){
+      await env.DB.prepare(`
+        UPDATE weekly_video_autopilot
+        SET status=?,
+            updated_at=?
+        WHERE week_id=? AND task_id=? AND status='generating'
+      `).bind(
+        "video_ready",
+        now(),
+        row.week_id,
+        row.task_id
+      ).run();
+
+      return {
+        ok:true,
+        status:"video_ready",
+        week_id:row.week_id,
+        task_id:row.task_id,
+        video_url:task.video_url
+      };
+    }
+
+    if(klingStatus==='failed'){
+      await env.DB.prepare(`
+        UPDATE weekly_video_autopilot
+        SET status=?,
+            updated_at=?
+        WHERE week_id=? AND task_id=? AND status='generating'
+      `).bind(
+        "failed",
+        now(),
+        row.week_id,
+        row.task_id
+      ).run();
+
+      return {
+        ok:false,
+        status:"failed",
+        week_id:row.week_id,
+        task_id:row.task_id
+      };
+    }
+
+    return {
+      ok:true,
+      status:"generating",
+      week_id:row.week_id,
+      task_id:row.task_id,
+      kling_status:klingStatus
+    };
+  }catch(e){
+    return {
+      ok:false,
+      status:"poll_error",
+      week_id:row.week_id,
+      task_id:row.task_id,
+      error:e.message||String(e)
+    };
+  }
+}
 async function reserveWeeklyVideoLock(env, weekId){
   await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS weekly_video_autopilot (
