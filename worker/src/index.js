@@ -76,13 +76,12 @@ async function fetchWithRetry(url, options = {}, attempts = 2, timeoutMs = AD_FE
   throw last || new Error('external request failed');
 }
 
-function extractSearchLinks(html, limit = 12) {
+function extractSearchLinks(html, limit = 12, providerHost = "") {
   const out = [], seen = new Set();
-  const re = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
-  let m;
+  const source = String(html || "");
 
-  while ((m = re.exec(String(html || ""))) && out.length < limit) {
-    let href = m[1] || "";
+  function addLink(rawHref) {
+    let href = rawHref || "";
 
     try {
       if (href.startsWith("/url?q=")) {
@@ -94,39 +93,74 @@ function extractSearchLinks(html, limit = 12) {
         href = "https:" + href;
       }
 
-      let parsed = new URL(href, "https://www.bing.com");
+      const parsed = new URL(href, "https://www.bing.com");
 
       if (/bing\.com$/i.test(parsed.hostname) && /^\/ck\/a/i.test(parsed.pathname)) {
         const encoded = parsed.searchParams.get("u") || "";
+
         if (encoded) {
           let value = decodeURIComponent(encoded);
           if (value.startsWith("a1")) value = value.slice(2);
 
           try {
-            const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
-const decoded = atob(padded);
-            if (/^https?:\/\//i.test(decoded)) href = decoded;
+            const normalized = value
+              .replace(/-/g, "+")
+              .replace(/_/g, "/");
+
+            const padded =
+              normalized +
+              "=".repeat((4 - normalized.length % 4) % 4);
+
+            const decoded = atob(padded);
+
+            if (/^https?:\/\//i.test(decoded)) {
+              href = decoded;
+            }
           } catch {}
         }
       }
 
       const safe = safeHttpUrl(href);
-      if (!safe) continue;
+      if (!safe) return;
 
       const u = new URL(safe);
 
-      if (/google\./i.test(u.hostname) ||
-          /youtube\./i.test(u.hostname) ||
-          /bing\./i.test(u.hostname) ||
-          /microsoft\.com$/i.test(u.hostname)) continue;
+      if (
+        /google\./i.test(u.hostname) ||
+        /youtube\./i.test(u.hostname) ||
+        /bing\./i.test(u.hostname) ||
+        /microsoft\.com$/i.test(u.hostname)
+      ) return;
 
       const key = u.origin;
-      if (seen.has(key)) continue;
+
+      if (seen.has(key)) return;
 
       seen.add(key);
       out.push(safe);
     } catch {}
+  }
+
+  if (/bing\.com$/i.test(String(providerHost || ""))) {
+    const bingRe =
+      /<li\b[^>]*class\s*=\s*["'][^"']*\bb_algo\b[^"']*["'][^>]*>[\s\S]*?<h2\b[^>]*>\s*<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>/gi;
+
+    let m;
+
+    while ((m = bingRe.exec(source)) && out.length < limit) {
+      addLink(m[1]);
+    }
+
+    if (out.length) return out;
+  }
+
+  const re =
+    /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
+
+  let m;
+
+  while ((m = re.exec(source)) && out.length < limit) {
+    addLink(m[1]);
   }
 
   return out;
@@ -160,7 +194,7 @@ async function discoverWebLinks(query, limit = 8) {
       }
 
       const html = await r.text();
-      const links = extractSearchLinks(html, limit);
+      const links = extractSearchLinks(html, limit, host);
 
       diagnostics.push({
         provider: host,
