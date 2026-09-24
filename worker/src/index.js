@@ -97,7 +97,7 @@ function extractSearchLinks(html, limit = 12, providerHost = "") {
 
       if (/bing\.com$/i.test(parsed.hostname) && /^\/ck\/a/i.test(parsed.pathname)) {
         let encoded = parsed.searchParams.get("u") || "";
-encoded = encoded.replace(/&amp;/g, "&");
+        encoded = encoded.replace(/&amp;/g, "&");
 
         if (encoded) {
           let value = decodeURIComponent(encoded);
