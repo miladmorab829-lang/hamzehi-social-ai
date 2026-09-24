@@ -1446,7 +1446,24 @@ async function aiEditVaultImage(env,req){
 }
 async function runPhotoAutopilot(env){
   await ensureMediaVaultStore(env);
+const modulesRow=await env.DB.prepare(
+  "SELECT value FROM autonomy_controls WHERE key='modules'"
+).first();
 
+let modules={};
+
+try{
+  modules=JSON.parse(modulesRow?.value||"{}");
+}catch{}
+
+if(modules.photo===false){
+  return {
+    ok:false,
+    skipped:true,
+    reason:"photo_autopilot_disabled",
+    error:"Photo Autopilot is disabled"
+  };
+}
   const today=new Date().toISOString().slice(0,10);
 
 await env.DB.prepare(`
