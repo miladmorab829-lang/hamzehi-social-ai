@@ -1558,16 +1558,10 @@ async function createKlingWeeklyVideoTask(env,brief,imageUrls){
     throw Error('No weekly shots available');
   }
 
-  const duration=Math.max(
-    3,
-    Math.min(
-      15,
-      shots.reduce(
-        (sum)=>sum+3,
-        0
-      )
-    )
-  );
+  const duration=Math.min(
+  12,
+  shots.length*2
+);
 
   const multiPrompt=shots.map((shot,index)=>({
     index:index+1,
@@ -1582,10 +1576,10 @@ async function createKlingWeeklyVideoTask(env,brief,imageUrls){
       'End-card text is handled separately; do not generate text inside the scene.'
     ].filter(Boolean).join(' '),
     duration:String(
-      index===shots.length-1
-        ? Math.max(1,duration-(shots.length-1)*3)
-        : 3
-    )
+  index===shots.length-1
+    ? Math.max(1,duration-(shots.length-1)*2)
+    : 2
+)
   }));
 
   const payload={
