@@ -1696,33 +1696,38 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId,duration){
           ]
         },
         {
-          clips:[
-            {
-              asset:{
-                type:'rich-text',
-                text:'HAMZEHIBOX',
-                font:{
-                  family:'Montserrat',
-                  size:64,
-                  weight:600,
-                  color:'#FFFFFF'
-                },
-                align:{
-                  horizontal:'center',
-                  vertical:'middle'
-                }
-              },
-              start:endCardStart,
-              length:endCardDuration,
-              position:'center'
-            }
-          ]
+          {
+  clips:[
+    {
+      asset:{
+        type:'rich-text',
+        text:'HAMZEHIBOX',
+        font:{
+          family:'Montserrat',
+          size:64,
+          weight:600,
+          color:'#FFFFFF'
+        },
+        align:{
+          horizontal:'center',
+          vertical:'middle'
+        },
+        background:{
+          color:'#000000',
+          opacity:1
         }
+      },
+      start:videoDuration,
+      length:endCardDuration,
+      position:'center'
+    }
+  ]
+}
       ]
     },
     output:{
       format:'mp4',
-      resolution:'hd',
+      resolution:'1080',
       aspectRatio:'16:9'
     }
   };
