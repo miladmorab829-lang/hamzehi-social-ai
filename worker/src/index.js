@@ -1861,6 +1861,46 @@ async function buildWeeklyVideoCreativeBrief(env,weekId,photos){
     }
   };
 }
+async function getKlingWeeklyVideoTask(env,taskId){
+  const apiKey=String(env.KLING_API_KEY||'').trim();
+  if(!apiKey) throw Error('KLING_API_KEY missing');
+
+  const id=String(taskId||'').trim();
+  if(!id) throw Error('Kling task_id missing');
+
+  const response=await fetch(
+    `https://api-singapore.klingai.com/v1/videos/omni-video/${encodeURIComponent(id)}`,
+    {
+      method:'GET',
+      headers:{
+        Authorization:`Bearer ${apiKey}`
+      }
+    }
+  );
+
+  const data=await response.json().catch(()=>({}));
+
+  if(!response.ok||Number(data?.code||0)!==0){
+    throw Error(
+      data?.message||
+      `Kling task query failed (HTTP ${response.status})`
+    );
+  }
+
+  const task=data?.data||{};
+
+  return {
+    ok:true,
+    task_id:id,
+    status:String(task?.task_status||''),
+    task_status_msg:String(task?.task_status_msg||''),
+    video_url:String(
+      task?.task_result?.videos?.[0]?.url||
+      ''
+    ),
+    duration:task?.task_result?.videos?.[0]?.duration||null
+  };
+}
 async function runPhotoAutopilot(env){
   await ensureMediaVaultStore(env);
 const modulesRow=await env.DB.prepare(
