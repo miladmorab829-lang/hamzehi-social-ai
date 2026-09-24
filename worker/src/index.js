@@ -3384,9 +3384,9 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
           const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           if(!/طلا|جواهر|ساعت|بدلی|زیورآلات|ذهب|مجوهرات|ساعات|صياغ|صائغ|اكسسوارات|حلي/i.test(plain)) continue;
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
-          const adHit=/ØªØ¨ÙÛØº|advertis|sponsor|Ø±Ù¾ÙØ±ØªØ§Ú|media kit|ÙÙÚ©Ø§Ø±Û|ØªÙØ§Ø³ Ø¨Ø§ ÙØ§|contact us/i.test(plain);
+          const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا/i.test(plain);
           const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
-          const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
+          const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية)[^<]*</i);
           let contactUrl=null; if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
           const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type,city,query:q,url:href,evidence:plain.slice(0,1000),contact_url:contactUrl,score,updated_by:"autopilot"};
