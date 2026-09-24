@@ -74,6 +74,50 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 <div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="whatsappState" class="state">—</span></div><h3>🟢 WhatsApp</h3><p>رصد Inbox و عملیات ماژول WhatsApp از مسیر Worker.</p><div class="actions"><button class="btn" onclick="moduleToggle('whatsapp',true)">ON</button><button class="btn danger" onclick="moduleToggle('whatsapp',false)">OFF / BLOCK</button></div></div>
 <div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="instagramState" class="state">—</span></div><h3>◎ Instagram</h3><p>Health و Lead intelligence؛ وضعیت Provider جداگانه قابل مشاهده است.</p><div class="actions"><button class="btn" onclick="moduleToggle('instagram',true)">ON</button><button class="btn danger" onclick="moduleToggle('instagram',false)">OFF / BLOCK</button></div></div>
 <div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="websiteState" class="state">—</span></div><h3>🌐 Website</h3><p>Growth scan و پایش رشد وب‌سایت از API موجود.</p><div class="actions"><button class="btn" onclick="moduleToggle('website',true)">ON</button><button class="btn danger" onclick="moduleToggle('website',false)">OFF / BLOCK</button></div></div>
+<section class="card section">
+  <div class="title">
+    <div>
+      <h2>📸 PHOTO AUTOPILOT</h2>
+      <div class="hint">
+        تولید روزانه یک تصویر جدید از عکس‌های واقعی Telegram Vault، بدون تکرار تا پایان Cycle.
+      </div>
+    </div>
+    <span id="photoAutoState" class="tag">—</span>
+  </div>
+
+  <div class="grid4" style="margin-top:10px">
+    <div class="row">
+      <b>STATUS</b>
+      <div id="photoStatus" class="muted">—</div>
+    </div>
+
+    <div class="row">
+      <b>CYCLE</b>
+      <div id="photoCycle" class="muted">—</div>
+    </div>
+
+    <div class="row">
+      <b>USED / TOTAL</b>
+      <div id="photoProgress" class="muted">—</div>
+    </div>
+
+    <div class="row">
+      <b>TODAY</b>
+      <div id="photoToday" class="muted">—</div>
+    </div>
+  </div>
+
+  <div class="tools" style="margin-top:10px">
+    <button class="btn primary" onclick="photoToggle(true)">▶ PHOTO ON</button>
+    <button class="btn danger" onclick="photoToggle(false)">■ PHOTO OFF</button>
+    <button class="btn" onclick="photoRunNow()">⚙ RUN NOW</button>
+    <button class="btn" onclick="loadPhotoAutopilot()">↻ REFRESH</button>
+  </div>
+
+  <div id="photoActivity" class="hint" style="margin-top:10px">
+    در انتظار وضعیت…
+  </div>
+</section>
 </div>
 </section>
 <section class="grid2 section">
