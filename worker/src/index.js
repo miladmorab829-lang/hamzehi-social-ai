@@ -1822,14 +1822,27 @@ async function pollWeeklyVideoAutopilot(env){
 
     const klingStatus=String(task.status||'').toLowerCase();
 
-    if(klingStatus==='succeed' || klingStatus==='completed'){
+        if(klingStatus==='succeed' || klingStatus==='completed'){
+      if(!task.video_url){
+        throw Error('Kling completed but video_url is missing');
+      }
+
+      const stored=await storeWeeklyVideoInVault(
+        env,
+        task.video_url,
+        row.week_id,
+        `HAMZEHIBOX | Weekly Video | ${row.week_id}`
+      );
+
       await env.DB.prepare(`
         UPDATE weekly_video_autopilot
         SET status=?,
+            output_media_id=?,
             updated_at=?
         WHERE week_id=? AND task_id=? AND status='generating'
       `).bind(
         "video_ready",
+        stored.media_id,
         now(),
         row.week_id,
         row.task_id
@@ -1840,10 +1853,10 @@ async function pollWeeklyVideoAutopilot(env){
         status:"video_ready",
         week_id:row.week_id,
         task_id:row.task_id,
+        output_media_id:stored.media_id,
         video_url:task.video_url
       };
     }
-
     if(klingStatus==='failed'){
       await env.DB.prepare(`
         UPDATE weekly_video_autopilot
