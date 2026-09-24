@@ -156,7 +156,7 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
   <div class="tools" style="margin-top:10px">
     <button class="btn primary" onclick="videoToggle(true)">▶ VIDEO ON</button>
     <button class="btn danger" onclick="videoToggle(false)">■ VIDEO OFF</button>
-    <button class="btn" onclick="videoRunNow()">⚙ RUN NOW</button>
+    <button class="btn" disabled title="Run Now هنوز فعال نشده">⚙ RUN NOW</button>
     <button class="btn" onclick="loadVideoAutopilot()">↻ REFRESH</button>
   </div>
 
