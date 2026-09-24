@@ -1709,7 +1709,11 @@ try{
     now(),
     now()
   ).run();
-
+try{
+  await env.DB.prepare(
+    "ALTER TABLE weekly_video_autopilot ADD COLUMN task_id TEXT"
+  ).run();
+}catch{}
   return Number(result?.meta?.changes||0)===1;
 }
 function getCurrentISOWeekWindow(){
