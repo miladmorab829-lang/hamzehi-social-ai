@@ -3361,9 +3361,9 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   ["watch_fa","فروشگاه ساعت ساعت فروشی ساعت مچی"],
   ["fashion_jewelry_fa","بدلیجات بدلی فروشی زیورآلات اکسسوری"],
 
-  ["gold_ar","ذهب مجوهرات محل ذهب مجوهرات اكسسوارات ذهبية"],
-  ["watch_ar","ساعات متجر ساعات بيع الساعات ساعات فاخرة"],
-  ["fashion_jewelry_ar","مجوهرات اكسسوارات حلي أزياء اكسسوارات نسائية"]
+  ["gold_ar","ذهب مجوهرات محل ذهب صياغ صائغ محلات ذهب"],
+["watch_ar","ساعات محل ساعات ساعات رجالية ساعات نسائية"],
+["fashion_jewelry_ar","اكسسوارات اكسسوارات نسائية حلي"]
 ];
   const groups=type==="all"
   ?allGroups
@@ -3382,7 +3382,7 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
           const rr=await fetchWithRetry(safeHref,{headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}},2,AD_FETCH_TIMEOUT_MS);
           const tx=(await rr.text()).slice(0,100000);
           const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
-          if(!/Ø·ÙØ§|Ø¬ÙØ§ÙØ±|Ø³Ø§Ø¹Øª|Ø¨Ø¯ÙÛ|gold|jewel|watch|accessor/i.test(plain)) continue;
+          if(!/طلا|جواهر|ساعت|بدلی|زیورآلات|ذهب|مجوهرات|ساعات|صياغ|صائغ|اكسسوارات|حلي/i.test(plain)) continue;
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
           const adHit=/ØªØ¨ÙÛØº|advertis|sponsor|Ø±Ù¾ÙØ±ØªØ§Ú|media kit|ÙÙÚ©Ø§Ø±Û|ØªÙØ§Ø³ Ø¨Ø§ ÙØ§|contact us/i.test(plain);
           const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
