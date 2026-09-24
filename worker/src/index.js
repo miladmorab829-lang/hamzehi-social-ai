@@ -1586,7 +1586,6 @@ let caption="";
 
 try{
   const captionPrompt=
-    "const captionPrompt=
   "Write one original luxury advertising caption for a premium product photo. " +
   "Write the final caption entirely in Persian (Farsi). " +
   "The caption must be based on the actual product context and the exact advertising scene. " +
