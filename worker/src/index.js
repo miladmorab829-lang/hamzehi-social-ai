@@ -4153,7 +4153,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
   if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
 
   const rows = await env.DB.prepare(`
-    SELECT id,type,level,message,details,created_at
+    SELECT id,type,severity AS level,message,details_json AS details,created_at
     FROM system_events
     WHERE type IN (
       'weekly_video_autopilot_failed',
