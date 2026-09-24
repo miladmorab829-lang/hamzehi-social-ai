@@ -78,23 +78,38 @@ async function fetchWithRetry(url, options = {}, attempts = 2, timeoutMs = AD_FE
 
 function extractSearchLinks(html, limit = 12) {
   const out = [], seen = new Set();
-  const re = /<a[^>]+href="(\/url\?q=|https?:\/\/)[^"]+"[^>]*>[\s\S]*?<\/a>/gi;
+  const re = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
   let m;
-  while ((m = re.exec(String(html || ''))) && out.length < limit) {
-    let href = m[0].match(/href="([^"]+)"/i)?.[1] || '';
-    if (href.startsWith('/url?q=')) {
-      try { href = decodeURIComponent(href.slice(7).split('&')[0]); } catch {}
-    }
-    const safe = safeHttpUrl(href);
-    if (!safe) continue;
+
+  while ((m = re.exec(String(html || ""))) && out.length < limit) {
+    let href = m[1] || "";
+
     try {
+      if (href.startsWith("/url?q=")) {
+        href = decodeURIComponent(href.slice(7).split("&")[0]);
+      } else if (href.startsWith("/url?")) {
+        const u = new URL(href, "https://www.google.com");
+        href = u.searchParams.get("q") || u.searchParams.get("url") || "";
+      } else if (href.startsWith("//")) {
+        href = "https:" + href;
+      }
+
+      const safe = safeHttpUrl(href);
+      if (!safe) continue;
+
       const u = new URL(safe);
-      if (/google\./i.test(u.hostname) || /youtube\./i.test(u.hostname) || /bing\./i.test(u.hostname)) continue;
+      if (/google\./i.test(u.hostname) ||
+          /youtube\./i.test(u.hostname) ||
+          /bing\./i.test(u.hostname)) continue;
+
       const key = u.origin;
       if (seen.has(key)) continue;
-      seen.add(key); out.push(safe);
+
+      seen.add(key);
+      out.push(safe);
     } catch {}
   }
+
   return out;
 }
 
