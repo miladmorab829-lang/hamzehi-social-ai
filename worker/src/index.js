@@ -1695,7 +1695,7 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId,duration){
             }
           ]
         },
-        {
+        
           {
   clips:[
     {
