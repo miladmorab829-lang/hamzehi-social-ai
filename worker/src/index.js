@@ -1303,8 +1303,44 @@ async function ensureTelegramMediaTable(env){
 }
 async function ensureMediaVaultStore(env){
   await ensureTelegramMediaTable(env);
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS media_vault_items (id TEXT PRIMARY KEY, telegram_media_id TEXT NOT NULL, content_id TEXT, source_type TEXT NOT NULL, ai_status TEXT NOT NULL DEFAULT 'none', ai_prompt TEXT, parent_media_id TEXT, tags TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(telegram_media_id))`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_media_outputs (id TEXT PRIMARY KEY, content_id TEXT NOT NULL, media_id TEXT NOT NULL, ready_chat_id TEXT NOT NULL, ready_message_id TEXT, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(content_id,media_id,ready_chat_id))`).run();
+
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS media_vault_items (
+    id TEXT PRIMARY KEY,
+    telegram_media_id TEXT NOT NULL,
+    content_id TEXT,
+    source_type TEXT NOT NULL,
+    ai_status TEXT NOT NULL DEFAULT 'none',
+    ai_prompt TEXT,
+    parent_media_id TEXT,
+    tags TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(telegram_media_id)
+  )`).run();
+
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_media_outputs (
+    id TEXT PRIMARY KEY,
+    content_id TEXT NOT NULL,
+    media_id TEXT NOT NULL,
+    ready_chat_id TEXT NOT NULL,
+    ready_message_id TEXT,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(content_id,media_id,ready_chat_id)
+  )`).run();
+
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS photo_autopilot_usage (
+    id TEXT PRIMARY KEY,
+    source_media_id TEXT NOT NULL,
+    cycle INTEGER NOT NULL,
+    used_at TEXT NOT NULL,
+    output_media_id TEXT,
+    scene_prompt TEXT,
+    status TEXT NOT NULL DEFAULT 'used',
+    UNIQUE(source_media_id,cycle)
+  )`).run();
 }
 function vaultChatId(env){return String(env.TELEGRAM_VAULT_CHAT_ID||'').trim()}
 function videoVaultChatId(env){return String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||env.TELEGRAM_VAULT_CHAT_ID||'').trim()}
