@@ -3825,6 +3825,81 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
     activities: rows.results || []
   });
 }  
+  if (u.pathname === "/api/video-autopilot/status" && req.method === "GET") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
+
+  const row = await env.DB.prepare(`
+    SELECT
+      week_id,
+      status,
+      created_at,
+      updated_at
+    FROM weekly_video_autopilot
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).first();
+
+  const modules = await env.DB.prepare(
+    "SELECT value FROM autonomy_controls WHERE key='modules'"
+  ).first();
+
+  let enabled = true;
+
+  try {
+    const parsed = JSON.parse(modules?.value || "{}");
+    enabled = parsed.video !== false;
+  } catch {}
+
+  return json({
+    ok:true,
+    enabled,
+    week_id: row?.week_id || null,
+    status: row?.status || "idle",
+    created_at: row?.created_at || null,
+    updated_at: row?.updated_at || null
+  });
+}
+
+if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
+
+  const body = await req.json().catch(() => ({}));
+  const enabled = body.enabled !== false;
+
+  const row = await env.DB.prepare(
+    "SELECT value FROM autonomy_controls WHERE key='modules'"
+  ).first();
+
+  let modules = {};
+
+  try {
+    modules = JSON.parse(row?.value || "{}");
+  } catch {}
+
+  modules.video = enabled;
+
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO autonomy_controls
+    (key,value,updated_at)
+    VALUES('modules',?,?)
+  `).bind(
+    JSON.stringify(modules),
+    now()
+  ).run();
+
+  await audit(
+    env,
+    "video_autopilot_toggle",
+    `Video Autopilot ${enabled ? "enabled" : "disabled"}`,
+    { enabled }
+  );
+
+  return json({
+    ok:true,
+    module:"video",
+    enabled
+  });
+}
       if (u.pathname === "/webhooks/instagram" && (req.method === "GET" || req.method === "POST")) return await handleInstagramWebhook(env, req);
 
       if (u.pathname === "/api/release/test" && req.method === "POST") {
