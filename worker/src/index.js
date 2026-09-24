@@ -1536,6 +1536,39 @@ async function aiEditVaultImage(env,req){
   try { const result=await aiEditVaultImageCore(env,sourceId,prompt,{content_id:b?.content_id||null,tags:b?.tags||''}); return json({ok:true,...result}); }
   catch(e){ return json({ok:false,error:e.message||'AI edit failed'},500); }
 }
+async function reserveWeeklyVideoLock(env, weekId){
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS weekly_video_autopilot (
+      week_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      source_media_ids TEXT,
+      scenario_json TEXT,
+      music_id TEXT,
+      output_media_id TEXT,
+      caption TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `).run();
+
+  const result=await env.DB.prepare(`
+    INSERT OR IGNORE INTO weekly_video_autopilot
+    (week_id,status,source_media_ids,scenario_json,music_id,output_media_id,caption,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?)
+  `).bind(
+    String(weekId),
+    "reserved",
+    "[]",
+    "{}",
+    "",
+    "",
+    "",
+    now(),
+    now()
+  ).run();
+
+  return Number(result?.meta?.changes||0)===1;
+}
 async function runPhotoAutopilot(env){
   await ensureMediaVaultStore(env);
 const modulesRow=await env.DB.prepare(
