@@ -563,4 +563,3 @@ async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),lo
 updateTokenUI();refreshAll();loadDiagnostic();setInterval(refreshAll,15000);
 </script></body></html>`;
 }
- 
