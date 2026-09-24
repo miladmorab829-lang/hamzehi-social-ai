@@ -1963,6 +1963,50 @@ async function generateWeeklyVideoCaption(env,brief){
 
   return caption.slice(0,1024);
 }
+async function getShotstackWeeklyRender(env,renderId){
+  const apiKey=String(env.SHOTSTACK_API_KEY||'').trim();
+
+  if(!apiKey){
+    throw Error('SHOTSTACK_API_KEY missing');
+  }
+
+  const id=String(renderId||'').trim();
+
+  if(!id){
+    throw Error('Shotstack render_id missing');
+  }
+
+  const response=await fetch(
+    `https://api.shotstack.io/edit/stage/render/${encodeURIComponent(id)}`,
+    {
+      method:'GET',
+      headers:{
+        'x-api-key':apiKey,
+        'Accept':'application/json'
+      }
+    }
+  );
+
+  const data=await response.json().catch(()=>({}));
+
+  if(!response.ok||!data?.success){
+    throw Error(
+      data?.message||
+      data?.response?.error||
+      `Shotstack status request failed (HTTP ${response.status})`
+    );
+  }
+
+  const render=data?.response||{};
+
+  return {
+    ok:true,
+    render_id:id,
+    status:String(render.status||'').toLowerCase(),
+    url:String(render.url||''),
+    error:String(render.error||'')
+  };
+}
 async function pollWeeklyVideoAutopilot(env){
   const row=await env.DB.prepare(`
     SELECT
