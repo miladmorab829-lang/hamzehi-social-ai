@@ -143,11 +143,22 @@ async function rate(env, req) {
   const key = req.headers.get("CF-Connecting-IP") || "unknown";
   const minute = Math.floor(Date.now() / 60000);
   const lim = Number(env.RATE_LIMIT_PER_MINUTE || 60);
-  const r = await env.DB.prepare(
+
+  const updated = await env.DB.prepare(
+    "UPDATE api_rate_limits " +
+    "SET count=count+1 " +
+    "WHERE key=? AND window_start=? AND count<?"
+  ).bind(key, minute, lim).run();
+
+  if (Number(updated?.meta?.changes || 0) === 1) {
+    return true;
+  }
+
+  const current = await env.DB.prepare(
     "SELECT window_start,count FROM api_rate_limits WHERE key=?"
   ).bind(key).first();
 
-  if (!r || Number(r.window_start) !== minute) {
+  if (!current || Number(current.window_start) !== minute) {
     await env.DB.prepare(
       "INSERT INTO api_rate_limits(key,window_start,count) VALUES(?,?,1) " +
       "ON CONFLICT(key) DO UPDATE SET window_start=excluded.window_start,count=1"
@@ -155,12 +166,7 @@ async function rate(env, req) {
     return true;
   }
 
-  if (Number(r.count) >= lim) return false;
-
-  await env.DB.prepare(
-    "UPDATE api_rate_limits SET count=count+1 WHERE key=?"
-  ).bind(key).run();
-  return true;
+  return Number(current.count) < lim;
 }
 
 function auth(req, env) {
