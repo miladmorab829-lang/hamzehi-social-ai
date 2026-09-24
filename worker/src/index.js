@@ -1728,10 +1728,12 @@ try {
     env,
     String(source.id),
     prompt,
-   {
+ {
   tags:"photo_autopilot",
   content_id:null,
-  caption
+  caption,
+  scene,
+  source_caption:String(source.caption||"")
 }
   );
 } catch(e) {
