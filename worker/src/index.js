@@ -3357,11 +3357,17 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   const {type,city,extra}=input;
   const sourceSite="https://www.hamzehibox.com";
   const allGroups=[
-    ["gold","Ø·ÙØ§ÙØ±ÙØ´ Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ±"],
-    ["watch","Ø³Ø§Ø¹Øª ÙØ±ÙØ´ Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª"],
-    ["fashion_jewelry","Ø¨Ø¯ÙÛ ÙØ±ÙØ´ Ø¨Ø¯ÙÛØ¬Ø§Øª Ø§Ú©Ø³Ø³ÙØ±Û" ]
-  ];
-  const groups=type==="all"?allGroups:allGroups.filter(x=>x[0]===type);
+  ["gold_fa","طلافروشی طلا جواهر زرگری گالری طلا"],
+  ["watch_fa","فروشگاه ساعت ساعت فروشی ساعت مچی"],
+  ["fashion_jewelry_fa","بدلیجات بدلی فروشی زیورآلات اکسسوری"],
+
+  ["gold_ar","ذهب مجوهرات محل ذهب مجوهرات اكسسوارات ذهبية"],
+  ["watch_ar","ساعات متجر ساعات بيع الساعات ساعات فاخرة"],
+  ["fashion_jewelry_ar","مجوهرات اكسسوارات حلي أزياء اكسسوارات نسائية"]
+];
+  const groups=type==="all"
+  ?allGroups
+  :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`);
   const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0};
   const items=[],seen=new Set(),started=now();
   for(const [type,term] of groups){
