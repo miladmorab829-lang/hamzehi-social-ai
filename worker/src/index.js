@@ -1621,7 +1621,7 @@ if(!lock.meta?.changes){
 
 for(;;){
   const unused=await env.DB.prepare(`
-    SELECT m.id,m.created_at
+    SELECT m.id,m.created_at,m.caption
     FROM telegram_media_sources m
     LEFT JOIN media_vault_items v
       ON v.telegram_media_id=m.id
