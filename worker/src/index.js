@@ -1995,48 +1995,45 @@ async function pollWeeklyVideoAutopilot(env){
     const klingStatus=String(task.status||'').toLowerCase();
 
         if(klingStatus==='succeed' || klingStatus==='completed'){
-      if(!task.video_url){
-        throw Error('Kling completed but video_url is missing');
-      }
-const brief=JSON.parse(
-  String(row.scenario_json||'{}')
-);
+  if(!task.video_url){
+    throw Error('Kling completed but video_url is missing');
+  }
 
-const caption=await generateWeeklyVideoCaption(
-  env,
-  brief
-);
-      const stored=await storeWeeklyVideoInVault(
-        env,
-        task.video_url,
-        row.week_id,
-        caption
-      );
+  const videoDuration=Number(task.duration);
 
-      await env.DB.prepare(`
-        UPDATE weekly_video_autopilot
-        SET status=?,
-    output_media_id=?,
-    caption=?,
-    updated_at=?
-        WHERE week_id=? AND task_id=? AND status='generating'
-      `).bind("video_ready",
-stored.media_id,
-caption,
-now(),
-row.week_id,
-row.task_id
-      ).run();
+  if(!Number.isFinite(videoDuration)||videoDuration<=0){
+    throw Error('Kling completed but video duration is missing');
+  }
 
-      return {
-        ok:true,
-        status:"video_ready",
-        week_id:row.week_id,
-        task_id:row.task_id,
-        output_media_id:stored.media_id,
-        video_url:task.video_url
-      };
-    }
+  const shotstack=await createShotstackWeeklyEndCardTask(
+    env,
+    task.video_url,
+    row.week_id,
+    videoDuration
+  );
+
+  await env.DB.prepare(`
+    UPDATE weekly_video_autopilot
+    SET status=?,
+        shotstack_task_id=?,
+        updated_at=?
+    WHERE week_id=? AND task_id=? AND status='generating'
+  `).bind(
+    "compositing",
+    shotstack.render_id,
+    now(),
+    row.week_id,
+    row.task_id
+  ).run();
+
+  return {
+    ok:true,
+    status:"compositing",
+    week_id:row.week_id,
+    task_id:row.task_id,
+    shotstack_task_id:shotstack.render_id
+  };
+}
     if(klingStatus==='failed'){
       await env.DB.prepare(`
         UPDATE weekly_video_autopilot
