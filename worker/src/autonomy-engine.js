@@ -8,23 +8,18 @@ export const MODULES=[
 const DEFAULTS=Object.fromEntries(MODULES.map(x=>[x,true]));
 
 const ACTIONS={
- telegram:["status","inbox_scan","inbox_reply"],
- whatsapp:["status","inbox_scan"],
- instagram:["status","health_and_leads"],
- website:["status","growth_scan"],
- crm:["status","lead_intelligence"],
- ads:["status","discover_opportunities"],
- content:["status","generate_and_queue"],
- media:["status","video_generate"],
- content:["status","generate_and_queue"],
-media:["status","video_generate"],
-photo:["status","photo_generate"],
-learning:["status","run"],
-revenue:["status","funnel_snapshot"]
+  telegram:["status","inbox_scan","inbox_reply"],
+  whatsapp:["status","inbox_scan"],
+  instagram:["status","health_and_leads"],
+  website:["status","growth_scan"],
+  crm:["status","lead_intelligence"],
+  ads:["status","discover_opportunities"],
+  content:["status","generate_and_queue"],
+  media:["status","video_generate"],
+  photo:["status","photo_generate"],
   learning:["status","run"],
- revenue:["status","funnel_snapshot"]
+  revenue:["status","funnel_snapshot"]
 };
-
 async function ensure(env){
  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS autonomy_controls(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)`).run();
  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS autonomy_commands(id TEXT PRIMARY KEY,raw_command TEXT NOT NULL,plan_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`).run();
