@@ -2456,6 +2456,24 @@ async function buildWeeklyVideoCreativeBrief(env,weekId,photos){
 }
 
 async function prepareWeeklyVideoAutopilot(env){
+   const modulesRow=await env.DB.prepare(
+    "SELECT value FROM autonomy_controls WHERE key='modules'"
+  ).first();
+
+  let videoEnabled=true;
+
+  try{
+    const modules=JSON.parse(modulesRow?.value||"{}");
+    videoEnabled=modules.video!==false;
+  }catch{}
+
+  if(!videoEnabled){
+    return {
+      ok:true,
+      skipped:true,
+      reason:"video_autopilot_disabled"
+    };
+  }
   const pool=await getWeeklyPhotoPool(env,6);
 
   if(!pool.photos.length){
