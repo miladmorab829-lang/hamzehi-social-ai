@@ -1643,6 +1643,80 @@ async function getWeeklyPhotoPool(env,limit=6){
     photos:rows.results||[]
   };
 }
+async function buildWeeklyVideoCreativeBrief(env,weekId,photos){
+  if(!Array.isArray(photos)||!photos.length){
+    return {
+      ok:false,
+      error:"No weekly photos available for creative planning"
+    };
+  }
+
+  const concepts=[
+    {
+      name:"Luxury Reveal",
+      story:"A refined visual reveal of the real HAMZEHI BOX product through a sequence of premium luxury scenes.",
+      music_mood:"Luxury Cinematic"
+    },
+    {
+      name:"Premium Product Story",
+      story:"A cinematic presentation showing the product identity through elegant transitions and controlled camera movement.",
+      music_mood:"Premium Ambient"
+    },
+    {
+      name:"Jewelry Presentation",
+      story:"A sophisticated jewelry presentation focused on detail, atmosphere and premium packaging.",
+      music_mood:"Jewelry Commercial"
+    },
+    {
+      name:"Boutique Experience",
+      story:"A premium boutique-style visual journey presenting the real product in an exclusive environment.",
+      music_mood:"Elegant Piano"
+    },
+    {
+      name:"Dark Luxury",
+      story:"A dramatic luxury campaign built around controlled light, shadows, reflections and the real product.",
+      music_mood:"Dark Luxury"
+    }
+  ];
+
+  const concept=concepts[
+    Math.floor(
+      Number(String(weekId).replace(/\D/g,"")||0)
+      %concepts.length
+    )
+  ];
+
+  const shots=photos.slice(0,6).map((photo,index)=>({
+    order:index+1,
+    source_media_id:String(photo.output_media_id||""),
+    scene:String(photo.scene_prompt||""),
+    direction:
+      index===0
+      ? "Opening hero shot with slow cinematic camera movement."
+      : index===photos.length-1
+      ? "Closing premium product shot with clean composition."
+      : "Elegant cinematic transition preserving exact product identity."
+  }));
+
+  return {
+    ok:true,
+    week_id:String(weekId),
+    concept:concept.name,
+    story:concept.story,
+    music_mood:concept.music_mood,
+    source_media_ids:shots.map(x=>x.source_media_id),
+    shots,
+    product_context:
+      "Use only the real product identity visible in the supplied source photos. Preserve shape, proportions, colors, materials and recognizable details.",
+    caption_brief:
+      "Write a Persian luxury advertising caption based only on the final video and verified product details. Do not invent price, dimensions, materials, specifications or features.",
+    end_card:{
+      text:"HAMZEHIBOX",
+      duration_seconds:2,
+      style:"clean minimal luxury end card"
+    }
+  };
+}
 async function runPhotoAutopilot(env){
   await ensureMediaVaultStore(env);
 const modulesRow=await env.DB.prepare(
