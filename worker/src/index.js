@@ -1578,6 +1578,56 @@ async function runPhotoAutopilot(env){
     scene
   };
 }
+async function getPhotoAutopilotStatus(env){
+  await ensureMediaVaultStore(env);
+
+  const today=new Date().toISOString().slice(0,10);
+
+  const sources=await env.DB.prepare(`
+    SELECT COUNT(*) n
+    FROM telegram_media_sources m
+    LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id
+    WHERE m.source_kind='vault'
+      AND m.media_type='photo'
+      AND (v.parent_media_id IS NULL OR v.parent_media_id='')
+  `).first();
+
+  const total=Number(sources?.n||0);
+
+  const cycleRow=await env.DB.prepare(
+    "SELECT MAX(cycle) cycle FROM photo_autopilot_usage"
+  ).first();
+
+  const cycle=Number(cycleRow?.cycle||1);
+
+  const used=await env.DB.prepare(
+    "SELECT COUNT(*) n FROM photo_autopilot_usage WHERE cycle=?"
+  ).bind(cycle).first();
+
+  const usedCount=Number(used?.n||0);
+
+  const todayRow=await env.DB.prepare(`
+    SELECT *
+    FROM photo_autopilot_usage
+    WHERE substr(used_at,1,10)=?
+    ORDER BY used_at DESC
+    LIMIT 1
+  `).bind(today).first();
+
+  const remaining=Math.max(0,total-usedCount);
+
+  return {
+    ok:true,
+    enabled:true,
+    date:today,
+    cycle,
+    total_source_photos:total,
+    used_in_cycle:usedCount,
+    remaining_in_cycle:remaining,
+    generated_today:!!todayRow,
+    today:todayRow||null
+  };
+}
 async function autoProcessContentMedia(env, contentId, attached){
   const enabled=String(env.AUTO_AI_MEDIA_ENABLED||'true').toLowerCase()!=='false';
   if(!enabled) return {processed:false,reason:'auto_ai_media_disabled'};
