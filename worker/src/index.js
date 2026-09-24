@@ -1424,6 +1424,17 @@ form.append('image',blob,filename);
     const bin=atob(item.b64_json); const bytes=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i); outBlob=new Blob([bytes],{type:'image/png'});
   } else if(item?.url){ const ur=await fetch(item.url); if(ur.ok) outBlob=await ur.blob(); }
   if(!outBlob) throw Error('AI did not return an image');
+  const captionImageBase64=await outBlob.arrayBuffer().then(buf=>{
+  const bytes=new Uint8Array(buf);
+  let binary="";
+  const chunkSize=0x8000;
+
+  for(let i=0;i<bytes.length;i+=chunkSize){
+    binary+=String.fromCharCode(...bytes.subarray(i,i+chunkSize));
+  }
+
+  return `data:${outBlob.type||"image/png"};base64,${btoa(binary)}`;
+});
   const chat=vaultChatId(env); if(!chat) throw Error('TELEGRAM_VAULT_CHAT_ID missing');const upload=new FormData();
 upload.append('chat_id',chat);
 upload.append('photo',outBlob,'ai-edit.png');
