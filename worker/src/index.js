@@ -1645,10 +1645,11 @@ try {
     env,
     String(source.id),
     prompt,
-    {
-      tags:"photo_autopilot",
-      content_id:null
-    }
+   {
+  tags:"photo_autopilot",
+  content_id:null,
+  caption
+}
   );
 } catch(e) {
   await env.DB.prepare(
