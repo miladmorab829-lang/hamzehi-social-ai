@@ -1936,7 +1936,12 @@ async function prepareWeeklyVideoAutopilot(env){
     now(),
     pool.weekId
   ).run();
-
+  const klingReady={
+    week_id:pool.weekId,
+    image_urls:imageUrls,
+    source_media_ids:brief.source_media_ids,
+    brief
+  };
   return {
     ok:true,
     status:"prepared",
