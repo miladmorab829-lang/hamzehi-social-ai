@@ -1914,7 +1914,16 @@ async function prepareWeeklyVideoAutopilot(env){
       week_id:pool.weekId
     };
   }
-
+  await env.DB.prepare(`
+    UPDATE weekly_video_autopilot
+    SET status=?,
+        updated_at=?
+    WHERE week_id=? AND status='reserved'
+  `).bind(
+    "generating",
+    now(),
+    pool.weekId
+  ).run();
   await env.DB.prepare(`
     UPDATE weekly_video_autopilot
     SET status=?,
