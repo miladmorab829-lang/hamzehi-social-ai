@@ -404,7 +404,36 @@ async function loadTasks(){
   })
  }
 }
-async function loadBrain(){const d=await api(A+"/brain");if(!d.ok)return;$("brain").textContent=d.brain?.mission||"—";$("timeline").innerHTML=rows(d.brain?.timeline,x=>esc((x.type||"event")+" · "+(x.message||""))+"<small>"+esc(x.created_at)+"</small>")}
+async function loadBrain(){
+  const [d,photo]=await Promise.all([
+    api(A+"/brain"),
+    api("/api/photo-autopilot/activity")
+  ]);
+
+  if(!d.ok)return;
+
+  $("brain").textContent=d.brain?.mission||"—";
+
+  const base=d.brain?.timeline||[];
+
+  const photoEvents=photo.ok
+    ? (photo.activities||[]).map(x=>({
+        type:x.type||"photo",
+        message:x.message||"Photo Autopilot",
+        created_at:x.created_at||""
+      }))
+    : [];
+
+  const timeline=[...base,...photoEvents]
+    .sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||"")))
+    .slice(0,30);
+
+  $("timeline").innerHTML=rows(
+    timeline,
+    x=>esc((x.type||"event")+" · "+(x.message||""))+
+      "<small>"+esc(x.created_at||"")+"</small>"
+  );
+}
 async function loadRevenue(){const d=await api(A+"/revenue");$("revenue").innerHTML=d.ok?rows(Object.entries(d.funnel||{}).map(([k,v])=>({k,v})),x=>esc(x.k)+" · "+esc(x.v)):"—"}
 async function loadOpp(){const d=await api(A+"/opportunities");$("opportunities").innerHTML=d.ok?rows(d.items,x=>esc(x.name||x.contact||x.id)+" · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal")):"—"}
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
