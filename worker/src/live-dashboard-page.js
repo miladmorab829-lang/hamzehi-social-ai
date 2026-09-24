@@ -299,6 +299,85 @@ async function loadStatus(){
  $("opp").textContent=d.revenue?.opportunities??0;$("conv").textContent=d.revenue?.conversions??0;
  const mt=await api(A+"/metrics");if(mt.ok){$("autoRate").textContent=(mt.autonomous_rate??0)+"%";$("autoBar").style.width=Math.min(100,mt.autonomous_rate||0)+"%"}
  const mods=c.modules||{};for(const k of ["telegram","whatsapp","instagram","website"]){const e=$(k+"State"),on=mods[k]!==false;e.textContent=on?"ON":"OFF / BLOCK";e.className="state "+(on?"ok":"bad")}
+  await loadPhotoAutopilot();
+}
+async function loadPhotoAutopilot(){
+  const d=await api("/api/photo-autopilot/status");
+
+  if(!d.ok){
+    $("photoAutoState").textContent="ERROR";
+    $("photoAutoState").className="tag bad";
+    $("photoActivity").innerHTML=
+      "<span class='bad'>✕ "+esc(d.error||"Photo API error")+"</span>";
+    return;
+  }
+
+  const on=d.enabled!==false;
+
+  $("photoAutoState").textContent=on?"ON":"OFF";
+  $("photoAutoState").className="tag "+(on?"ok":"bad");
+
+  $("photoStatus").innerHTML=
+    on
+      ? "<span class='ok'>ENABLED</span>"
+      : "<span class='bad'>DISABLED</span>";
+
+  $("photoCycle").textContent=String(d.cycle??"—");
+
+  $("photoProgress").textContent=
+    String(d.used_in_cycle??0)+" / "+String(d.total_source_photos??0)+
+    " · remaining: "+String(d.remaining_in_cycle??0);
+
+  $("photoToday").innerHTML=d.generated_today
+    ? "<span class='ok'>GENERATED</span>"
+    : "<span class='muted'>NOT GENERATED</span>";
+
+  if(d.today){
+    $("photoActivity").innerHTML=
+      "<span class='ok'>✓ TODAY</span>"+
+      " · source: "+esc(d.today.source_media_id||"—")+
+      " · output: "+esc(d.today.output_media_id||"—")+
+      " · cycle: "+esc(d.today.cycle??"—");
+  }else{
+    $("photoActivity").textContent="امروز هنوز تصویری تولید نشده است.";
+  }
+}
+
+async function photoToggle(enabled){
+  const d=await api("/api/photo-autopilot/toggle",{
+    method:"POST",
+    body:JSON.stringify({enabled})
+  });
+
+  if(!d.ok){
+    alert(d.error||"Photo Autopilot toggle failed");
+    return;
+  }
+
+  await loadPhotoAutopilot();
+  await loadStatus();
+}
+
+async function photoRunNow(){
+  $("photoActivity").textContent="در حال اجرای Photo Autopilot…";
+
+  const d=await api("/api/photo-autopilot/run",{
+    method:"POST",
+    body:"{}"
+  });
+
+  if(d.ok){
+    $("photoActivity").innerHTML=
+      d.skipped
+        ? "<span class='warn'>⚠ امروز قبلاً اجرا شده است.</span>"
+        : "<span class='ok'>✓ Photo Autopilot اجرا شد.</span>";
+
+    await loadPhotoAutopilot();
+    await loadBrain();
+  }else{
+    $("photoActivity").innerHTML=
+      "<span class='bad'>✕ "+esc(d.error||"Photo Autopilot failed")+"</span>";
+  }
 }
 async function masterAction(action){$("masterHelp").textContent="در حال اجرای "+action+"…";const d=await api(A+"/master",{method:"POST",body:JSON.stringify({action})});$("masterHelp").innerHTML=d.ok?"<span class='ok'>✓ MASTER → "+esc(action)+" · وضعیت ثبت شد.</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}
 async function moduleToggle(module,enabled){const d=await api(A+"/module",{method:"POST",body:JSON.stringify({module,enabled})});if(!d.ok)alert(d.error||"خطا");await loadStatus()}
