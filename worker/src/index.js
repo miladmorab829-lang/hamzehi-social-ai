@@ -1793,6 +1793,65 @@ async function getKlingWeeklyVideoTask(env,taskId){
     duration:task?.task_result?.videos?.[0]?.duration||null
   };
 }
+async function generateWeeklyVideoCaption(env,brief){
+  if(!env.OPENAI_API_KEY){
+    throw Error('OPENAI_API_KEY missing');
+  }
+
+  if(!brief?.ok){
+    throw Error('Weekly creative brief is invalid');
+  }
+
+  const prompt=[
+    'Write one short Persian luxury advertising caption for the completed HAMZEHIBOX weekly video.',
+    'Use only the verified information contained in the creative brief below.',
+    'Do not invent price, dimensions, materials, specifications, features, certifications or claims.',
+    'Do not mention AI, Kling or the generation process.',
+    'Do not use English except the brand name HAMZEHIBOX.',
+    'Keep the tone elegant, premium and suitable for a luxury jewelry packaging brand.',
+    'Return only the final Persian caption, with no quotation marks and no explanation.',
+    '',
+    `Brand: HAMZEHIBOX`,
+    `Concept: ${String(brief.concept||'')}`,
+    `Story: ${String(brief.story||'')}`,
+    `Product context: ${String(brief.product_context||'')}`,
+    `Source scenes: ${JSON.stringify(brief.shots||[])}`,
+    `Caption brief: ${String(brief.caption_brief||'')}`
+  ].join('\n');
+
+  const r=await fetch(
+    'https://api.openai.com/v1/responses',
+    {
+      method:'POST',
+      headers:{
+        Authorization:`Bearer ${env.OPENAI_API_KEY}`,
+        'Content-Type':'application/json'
+      },
+      body:JSON.stringify({
+        model:env.OPENAI_MODEL||'gpt-5.6-luna',
+        input:prompt
+      }),
+      signal:AbortSignal.timeout(15000)
+    }
+  );
+
+  const data=await r.json().catch(()=>({}));
+
+  if(!r.ok){
+    throw Error(
+      data?.error?.message||
+      `OpenAI caption generation failed (HTTP ${r.status})`
+    );
+  }
+
+  const caption=responseText(data).trim();
+
+  if(!caption){
+    throw Error('OpenAI returned an empty weekly video caption');
+  }
+
+  return caption.slice(0,1024);
+}
 async function pollWeeklyVideoAutopilot(env){
   const row=await env.DB.prepare(`
     SELECT
