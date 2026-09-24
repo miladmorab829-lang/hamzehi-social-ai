@@ -1569,6 +1569,80 @@ async function reserveWeeklyVideoLock(env, weekId){
 
   return Number(result?.meta?.changes||0)===1;
 }
+function getCurrentISOWeekWindow(){
+  const d=new Date();
+  const day=(d.getUTCDay()+6)%7;
+  const monday=new Date(Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate()-day
+  ));
+
+  const thursday=new Date(monday);
+  thursday.setUTCDate(monday.getUTCDate()+3);
+
+  const firstThursday=new Date(Date.UTC(
+    thursday.getUTCFullYear(),
+    0,
+    4
+  ));
+
+  const firstDay=(firstThursday.getUTCDay()+6)%7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate()-firstDay);
+
+  const weekNumber=
+    1+
+    Math.floor(
+      (monday.getTime()-firstThursday.getTime())/
+      (7*24*60*60*1000)
+    );
+
+  const year=thursday.getUTCFullYear();
+
+  const nextMonday=new Date(monday);
+  nextMonday.setUTCDate(monday.getUTCDate()+7);
+
+  return {
+    weekId:`${year}-W${String(weekNumber).padStart(2,"0")}`,
+    start:monday.toISOString(),
+    end:nextMonday.toISOString()
+  };
+}
+
+async function getWeeklyPhotoPool(env,limit=6){
+  const window=getCurrentISOWeekWindow();
+
+  const rows=await env.DB.prepare(`
+    SELECT
+      u.output_media_id,
+      u.source_media_id,
+      u.used_at,
+      u.scene_prompt,
+      m.caption
+    FROM photo_autopilot_usage u
+    JOIN telegram_media_sources m
+      ON m.id=u.output_media_id
+    WHERE u.status='completed'
+      AND u.output_media_id IS NOT NULL
+      AND u.output_media_id!=''
+      AND m.media_type='photo'
+      AND u.used_at>=?
+      AND u.used_at<?
+    ORDER BY u.used_at ASC
+    LIMIT ?
+  `).bind(
+    window.start,
+    window.end,
+    Math.min(6,Math.max(1,Number(limit)||6))
+  ).all();
+
+  return {
+    weekId:window.weekId,
+    start:window.start,
+    end:window.end,
+    photos:rows.results||[]
+  };
+}
 async function runPhotoAutopilot(env){
   await ensureMediaVaultStore(env);
 const modulesRow=await env.DB.prepare(
