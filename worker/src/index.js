@@ -1678,7 +1678,6 @@ try {
  {
   tags:"photo_autopilot",
   content_id:null,
-  caption,
   scene,
   source_caption:String(source.caption||"")
 }
