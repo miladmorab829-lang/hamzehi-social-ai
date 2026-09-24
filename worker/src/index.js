@@ -1942,6 +1942,39 @@ async function prepareWeeklyVideoAutopilot(env){
     source_media_ids:brief.source_media_ids,
     brief
   };
+   try{
+    const kling=await createKlingWeeklyVideoTask(
+      env,
+      klingReady.brief,
+      klingReady.image_urls
+    );
+
+    await env.DB.prepare(`
+      UPDATE weekly_video_autopilot
+      SET status=?,
+          task_id=?,
+          updated_at=?
+      WHERE week_id=? AND status='prepared'
+    `).bind(
+      "generating",
+      kling.task_id,
+      now(),
+      pool.weekId
+    ).run();
+  }catch(e){
+    await env.DB.prepare(`
+      UPDATE weekly_video_autopilot
+      SET status=?,
+          updated_at=?
+      WHERE week_id=? AND status='prepared'
+    `).bind(
+      "failed",
+      now(),
+      pool.weekId
+    ).run();
+
+    throw e;
+  }
   return {
     ok:true,
     status:"prepared",
