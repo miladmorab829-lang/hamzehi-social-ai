@@ -1386,7 +1386,7 @@ let contentType=String(
   img.headers.get('content-type')||rawBlob.type||''
 ).split(';')[0].trim().toLowerCase();
 
-let filename='source.png';
+let filename='source.jpg';
 
 if(filePath.endsWith('.jpg')||filePath.endsWith('.jpeg')){
   contentType='image/jpeg';
@@ -1397,12 +1397,14 @@ if(filePath.endsWith('.jpg')||filePath.endsWith('.jpeg')){
 }else if(filePath.endsWith('.webp')){
   contentType='image/webp';
   filename='source.webp';
+}else if(contentType==='application/octet-stream'){
+  contentType='image/jpeg';
+  filename='source.jpg';
 }
 
 if(!/^image\/(jpeg|png|webp)$/.test(contentType)){
   throw Error(`Unsupported Telegram image MIME type: ${contentType||'unknown'}`);
 }
-
 const blob=new Blob(
   [await rawBlob.arrayBuffer()],
   {type:contentType}
