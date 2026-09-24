@@ -1371,6 +1371,124 @@ async function ingestVaultUpload(env,req){
   await audit(env,'media_vault_uploaded','Media uploaded to Telegram Media Vault',{media_id:id,media_type:type.startsWith('video/')?'video':'photo'});
   return json({ok:true,media_id:id,message_id:messageId,media_type:type.startsWith('video/')?'video':'photo'});
 }
+async function storeWeeklyVideoInVault(env,videoUrl,weekId,caption){
+  await ensureMediaVaultStore(env);
+
+  const url=String(videoUrl||'').trim();
+  if(!/^https?:\/\//i.test(url)){
+    throw Error('Weekly video URL missing or invalid');
+  }
+
+  const chat=videoVaultChatId(env);
+  if(!chat){
+    throw Error('TELEGRAM_VIDEO_VAULT_CHAT_ID missing');
+  }
+
+  const response=await fetch(url);
+
+  if(!response.ok){
+    throw Error(
+      `Failed to download Kling video (HTTP ${response.status})`
+    );
+  }
+
+  const videoBlob=await response.blob();
+
+  if(!videoBlob.size){
+    throw Error('Kling video download returned empty file');
+  }
+
+  const upload=new FormData();
+
+  upload.append(
+    'chat_id',
+    chat
+  );
+
+  upload.append(
+    'video',
+    videoBlob,
+    `hamzehi-weekly-${String(weekId||'').replace(/[^a-zA-Z0-9_-]/g,'-')}.mp4`
+  );
+
+  if(caption){
+    upload.append(
+      'caption',
+      String(caption).slice(0,1024)
+    );
+  }
+
+  const telegramResponse=await fetch(
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,
+    {
+      method:'POST',
+      body:upload
+    }
+  );
+
+  const telegramData=await telegramResponse.json().catch(()=>({}));
+
+  if(!telegramResponse.ok || !telegramData.ok){
+    throw Error(
+      telegramData.description ||
+      'Failed to store weekly video in Telegram Video Vault'
+    );
+  }
+
+  const message=telegramData.result;
+  const video=message?.video;
+
+  if(!video?.file_id){
+    throw Error(
+      'Telegram did not return weekly video file_id'
+    );
+  }
+
+  const t=now();
+  const mediaId=uid();
+
+  await env.DB.prepare(
+    "INSERT INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+  )
+  .bind(
+    mediaId,
+    chat,
+    '',
+    String(message.message_id||''),
+    String(video.file_id),
+    String(video.file_unique_id||''),
+    'video',
+    String(caption||''),
+    'vault',
+    t,
+    t
+  )
+  .run();
+
+  await env.DB.prepare(
+    "INSERT INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)"
+  )
+  .bind(
+    uid(),
+    mediaId,
+    null,
+    'weekly_ai_video',
+    'ready',
+    null,
+    null,
+    `weekly_video:${weekId}`,
+    t,
+    t
+  )
+  .run();
+
+  return {
+    ok:true,
+    media_id:mediaId,
+    message_id:String(message.message_id||''),
+    file_id:String(video.file_id)
+  };
+}
 async function getMediaVault(env,req){
   if(req.method!=='GET')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);await ensureMediaVaultStore(env);const u=new URL(req.url);const limit=Math.min(50,Math.max(1,Number(u.searchParams.get('limit')||24)));const r=await env.DB.prepare("SELECT m.*,v.content_id,v.source_type,v.ai_status,v.ai_prompt,v.parent_media_id,v.tags FROM telegram_media_sources m LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id WHERE m.source_kind='vault' ORDER BY m.created_at DESC LIMIT ?").bind(limit).all();return json({ok:true,items:r.results||[],vault_configured:!!vaultChatId(env)});
 }
