@@ -2664,6 +2664,26 @@ if (u.pathname === "/api/photo-autopilot/toggle" && req.method === "POST") {
     enabled
   });
 }
+if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
+
+  const rows = await env.DB.prepare(`
+    SELECT id,type,level,message,details,created_at
+    FROM system_events
+    WHERE type IN (
+      'photo_autopilot_completed',
+      'photo_autopilot_error',
+      'photo_autopilot_toggle'
+    )
+    ORDER BY created_at DESC
+    LIMIT 20
+  `).all();
+
+  return json({
+    ok:true,
+    activities: rows.results || []
+  });
+}  
       if (u.pathname === "/webhooks/instagram" && (req.method === "GET" || req.method === "POST")) return await handleInstagramWebhook(env, req);
 
       if (u.pathname === "/api/release/test" && req.method === "POST") {
