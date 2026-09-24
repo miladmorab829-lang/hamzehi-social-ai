@@ -2483,6 +2483,17 @@ export default {
       if (u.pathname === "/api/telegram/vault/ai-edit" && req.method === "POST") return await aiEditVaultImage(env, req);
       if (u.pathname === "/api/telegram/media/ready" && req.method === "GET") return await getReadyMediaStatus(env, req);
       if (u.pathname === "/webhooks/telegram" && req.method === "POST") return await handleTelegramWebhook(env, req);
+      if (u.pathname === "/api/photo-autopilot/run" && req.method === "POST") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
+  try {
+    return json(await runPhotoAutopilot(env));
+  } catch (e) {
+    await audit(env,"photo_autopilot_error","Photo Autopilot failed",{
+      error:String(e.message||e)
+    });
+    return json({ ok:false, error:e.message||"Photo Autopilot failed" },500);
+  }
+}
       if (u.pathname === "/webhooks/instagram" && (req.method === "GET" || req.method === "POST")) return await handleInstagramWebhook(env, req);
 
       if (u.pathname === "/api/release/test" && req.method === "POST") {
