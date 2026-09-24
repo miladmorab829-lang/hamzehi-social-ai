@@ -1424,8 +1424,13 @@ form.append('image',blob,filename);
     const bin=atob(item.b64_json); const bytes=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i); outBlob=new Blob([bytes],{type:'image/png'});
   } else if(item?.url){ const ur=await fetch(item.url); if(ur.ok) outBlob=await ur.blob(); }
   if(!outBlob) throw Error('AI did not return an image');
-  const chat=vaultChatId(env); if(!chat) throw Error('TELEGRAM_VAULT_CHAT_ID missing');
-  const upload=new FormData(); upload.append('chat_id',chat); upload.append('photo',outBlob,'ai-edit.png'); upload.append('caption',`AI EDIT | parent:${sourceId}`);
+  const chat=vaultChatId(env); if(!chat) throw Error('TELEGRAM_VAULT_CHAT_ID missing');const upload=new FormData();
+upload.append('chat_id',chat);
+upload.append('photo',outBlob,'ai-edit.png');
+upload.append(
+  'caption',
+  String(meta.caption||`AI EDIT | parent:${sourceId}`).slice(0,1024)
+);
   const tr=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:'POST',body:upload});
   const td=await tr.json().catch(()=>({})); if(!tr.ok||!td.ok) throw Error(td.description||'Failed to store AI image in vault');
   const tm=td.result,photo=tm.photo?.at(-1); if(!photo?.file_id) throw Error('Vault did not return AI file_id');
@@ -1577,7 +1582,55 @@ for(;;){
 
 const sceneIndex=Number(usageCount?.n||0)%scenes.length;
 const scene=scenes[sceneIndex];
+let caption="";
 
+try{
+  const captionPrompt=
+    "Write one original luxury advertising caption for a premium product photo. " +
+    "The caption must be based on the actual product context and the exact advertising scene. " +
+    "Do not mention AI, image generation, editing, parent IDs, source IDs, cycles or internal systems. " +
+    "Do not repeat generic wording. " +
+    "Keep it elegant, premium and suitable for Telegram. " +
+    "Include a natural call to action. " +
+    `Advertising scene: ${scene}. ` +
+    "Return only the final caption.";
+
+  const cr=await fetch(
+    "https://api.openai.com/v1/responses",
+    {
+      method:"POST",
+      headers:{
+        Authorization:`Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type":"application/json"
+      },
+      body:JSON.stringify({
+        model:String(env.OPENAI_MODEL||"gpt-5.6-luna"),
+        input:captionPrompt
+      })
+    }
+  );
+
+  const cd=await cr.json().catch(()=>({}));
+
+  if(!cr.ok){
+    throw Error(
+      cd?.error?.message||
+      `Caption generation failed (HTTP ${cr.status})`
+    );
+  }
+
+  caption=String(
+    cd?.output_text||
+    cd?.output?.[0]?.content?.[0]?.text||
+    ""
+  ).trim();
+
+  if(!caption){
+    throw Error("Caption generation returned empty text");
+  }
+}catch(e){
+  throw Error(`Photo caption generation failed: ${e.message||e}`);
+}
   const prompt=
     "Preserve the exact identity, shape, proportions, materials, colors and details of the original product photo. " +
     "Do not redesign, replace, deform or invent the product. " +
