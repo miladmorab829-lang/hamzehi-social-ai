@@ -1661,59 +1661,6 @@ for(;;){
 
 const sceneIndex=Number(usageCount?.n||0)%scenes.length;
 const scene=scenes[sceneIndex];
-let caption="";
-
-try{
-  const captionPrompt=
-  "Write one original luxury advertising caption for a premium product photo. " +
-  "Write the final caption entirely in Persian (Farsi). " +
-  "The caption must be based on the actual product context and the exact advertising scene. " +
-  "Do not mention AI, image generation, editing, parent IDs, source IDs, cycles or internal systems. " +
-  "Do not repeat generic wording. " +
-  "Keep it elegant, premium and suitable for Telegram. " +
-  "Include useful product information when it is verified. " +
-  "Include a natural call to action. " +
-  `Advertising scene: ${scene}. ` +
-  `Verified product information from the original Telegram photo: ${String(source.caption||"No verified product information available.")}. ` +
-  "Use only information that is visible in the image or explicitly provided above. " +
-  "Never invent materials, dimensions, colors, features, prices or specifications. " +
-  "Return only the final caption.";
-  const cr=await fetch(
-    "https://api.openai.com/v1/responses",
-    {
-      method:"POST",
-      headers:{
-        Authorization:`Bearer ${env.OPENAI_API_KEY}`,
-        "Content-Type":"application/json"
-      },
-      body:JSON.stringify({
-        model:String(env.OPENAI_MODEL||"gpt-5.6-luna"),
-        input:captionPrompt
-      })
-    }
-  );
-
-  const cd=await cr.json().catch(()=>({}));
-
-  if(!cr.ok){
-    throw Error(
-      cd?.error?.message||
-      `Caption generation failed (HTTP ${cr.status})`
-    );
-  }
-
-  caption=String(
-    cd?.output_text||
-    cd?.output?.[0]?.content?.[0]?.text||
-    ""
-  ).trim();
-
-  if(!caption){
-    throw Error("Caption generation returned empty text");
-  }
-}catch(e){
-  throw Error(`Photo caption generation failed: ${e.message||e}`);
-}
   const prompt=
     "Preserve the exact identity, shape, proportions, materials, colors and details of the original product photo. " +
     "Do not redesign, replace, deform or invent the product. " +
