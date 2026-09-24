@@ -1444,7 +1444,140 @@ async function aiEditVaultImage(env,req){
   try { const result=await aiEditVaultImageCore(env,sourceId,prompt,{content_id:b?.content_id||null,tags:b?.tags||''}); return json({ok:true,...result}); }
   catch(e){ return json({ok:false,error:e.message||'AI edit failed'},500); }
 }
+async function runPhotoAutopilot(env){
+  await ensureMediaVaultStore(env);
 
+  const today=new Date().toISOString().slice(0,10);
+
+  const alreadyToday=await env.DB.prepare(
+    "SELECT id FROM photo_autopilot_usage WHERE substr(used_at,1,10)=? LIMIT 1"
+  ).bind(today).first();
+
+  if(alreadyToday){
+    return {
+      ok:true,
+      skipped:true,
+      reason:"already_generated_today",
+      date:today
+    };
+  }
+
+  const sources=await env.DB.prepare(`
+    SELECT m.id,m.created_at
+    FROM telegram_media_sources m
+    LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id
+    WHERE m.source_kind='vault'
+      AND m.media_type='photo'
+      AND (v.parent_media_id IS NULL OR v.parent_media_id='')
+    ORDER BY m.created_at ASC
+  `).all();
+
+  const sourceRows=sources.results||[];
+
+  if(!sourceRows.length){
+    return {
+      ok:false,
+      error:"No original Telegram Vault photos available"
+    };
+  }
+
+  const latestCycle=await env.DB.prepare(
+    "SELECT MAX(cycle) cycle FROM photo_autopilot_usage"
+  ).first();
+
+  let cycle=Number(latestCycle?.cycle||1);
+  if(cycle<1)cycle=1;
+
+  let used=await env.DB.prepare(
+    "SELECT source_media_id FROM photo_autopilot_usage WHERE cycle=?"
+  ).bind(cycle).all();
+
+  let usedSet=new Set(
+    (used.results||[]).map(x=>String(x.source_media_id))
+  );
+
+  if(usedSet.size>=sourceRows.length){
+    cycle++;
+    usedSet=new Set();
+  }
+
+  let source=sourceRows.find(
+    x=>!usedSet.has(String(x.id))
+  );
+
+  if(!source){
+    cycle++;
+    usedSet=new Set();
+    source=sourceRows[0];
+  }
+
+  const scenes=[
+    "luxury black marble studio, dramatic cinematic lighting, premium jewelry advertising",
+    "deep navy velvet luxury setting, elegant warm spotlight, high-end product campaign",
+    "minimal champagne-gold luxury interior, soft cinematic reflections, premium advertising",
+    "dark glossy stone surface, sophisticated architectural background, controlled studio lighting",
+    "exclusive luxury boutique environment, refined shadows, cinematic commercial photography",
+    "premium dark wood and satin setting, elegant highlights, luxury campaign aesthetic",
+    "modern black-and-gold showroom, dramatic soft lighting, sophisticated advertising scene"
+  ];
+
+  const sceneIndex=(cycle-1)%scenes.length;
+  const scene=scenes[sceneIndex];
+
+  const prompt=
+    "Preserve the exact identity, shape, proportions, materials, colors and details of the original product photo. " +
+    "Do not redesign, replace, deform or invent the product. " +
+    "Create a completely new luxury advertising environment around the real product. " +
+    `Scene: ${scene}. ` +
+    "Photorealistic, premium commercial photography, refined composition, realistic shadows and reflections.";
+
+  const result=await aiEditVaultImageCore(
+    env,
+    String(source.id),
+    prompt,
+    {
+      tags:"photo_autopilot",
+      content_id:null
+    }
+  );
+
+  const t=now();
+
+  await env.DB.prepare(`
+    INSERT INTO photo_autopilot_usage
+    (id,source_media_id,cycle,used_at,output_media_id,scene_prompt,status)
+    VALUES(?,?,?,?,?,?,?)
+  `).bind(
+    uid(),
+    String(source.id),
+    cycle,
+    t,
+    String(result.media_id||""),
+    prompt,
+    "completed"
+  ).run();
+
+  await audit(
+    env,
+    "photo_autopilot_completed",
+    "Photo Autopilot generated one new luxury product image",
+    {
+      source_media_id:String(source.id),
+      output_media_id:String(result.media_id||""),
+      cycle,
+      scene
+    }
+  );
+
+  return {
+    ok:true,
+    date:today,
+    cycle,
+    source_media_id:String(source.id),
+    output_media_id:String(result.media_id||""),
+    scene
+  };
+}
 async function autoProcessContentMedia(env, contentId, attached){
   const enabled=String(env.AUTO_AI_MEDIA_ENABLED||'true').toLowerCase()!=='false';
   if(!enabled) return {processed:false,reason:'auto_ai_media_disabled'};
