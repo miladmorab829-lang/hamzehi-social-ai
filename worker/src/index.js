@@ -94,13 +94,30 @@ function extractSearchLinks(html, limit = 12) {
         href = "https:" + href;
       }
 
+      let parsed = new URL(href, "https://www.bing.com");
+
+      if (/bing\.com$/i.test(parsed.hostname) && /^\/ck\/a/i.test(parsed.pathname)) {
+        const encoded = parsed.searchParams.get("u") || "";
+        if (encoded) {
+          let value = decodeURIComponent(encoded);
+          if (value.startsWith("a1")) value = value.slice(2);
+
+          try {
+            const decoded = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+            if (/^https?:\/\//i.test(decoded)) href = decoded;
+          } catch {}
+        }
+      }
+
       const safe = safeHttpUrl(href);
       if (!safe) continue;
 
       const u = new URL(safe);
+
       if (/google\./i.test(u.hostname) ||
           /youtube\./i.test(u.hostname) ||
-          /bing\./i.test(u.hostname)) continue;
+          /bing\./i.test(u.hostname) ||
+          /microsoft\.com$/i.test(u.hostname)) continue;
 
       const key = u.origin;
       if (seen.has(key)) continue;
@@ -112,7 +129,6 @@ function extractSearchLinks(html, limit = 12) {
 
   return out;
 }
-
 async function discoverWebLinks(query, limit = 8) {
   const providers = [
     `https://www.google.com/search?q=${encodeURIComponent(query)}&num=12`,
