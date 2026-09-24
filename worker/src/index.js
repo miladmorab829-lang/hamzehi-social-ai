@@ -1586,15 +1586,20 @@ let caption="";
 
 try{
   const captionPrompt=
-    "Write one original luxury advertising caption for a premium product photo. " +
-    "The caption must be based on the actual product context and the exact advertising scene. " +
-    "Do not mention AI, image generation, editing, parent IDs, source IDs, cycles or internal systems. " +
-    "Do not repeat generic wording. " +
-    "Keep it elegant, premium and suitable for Telegram. " +
-    "Include a natural call to action. " +
-    `Advertising scene: ${scene}. ` +
-    "Return only the final caption.";
-
+    "const captionPrompt=
+  "Write one original luxury advertising caption for a premium product photo. " +
+  "Write the final caption entirely in Persian (Farsi). " +
+  "The caption must be based on the actual product context and the exact advertising scene. " +
+  "Do not mention AI, image generation, editing, parent IDs, source IDs, cycles or internal systems. " +
+  "Do not repeat generic wording. " +
+  "Keep it elegant, premium and suitable for Telegram. " +
+  "Include useful product information when it is verified. " +
+  "Include a natural call to action. " +
+  `Advertising scene: ${scene}. ` +
+  `Verified product information from the original Telegram photo: ${String(source.caption||"No verified product information available.")}. ` +
+  "Use only information that is visible in the image or explicitly provided above. " +
+  "Never invent materials, dimensions, colors, features, prices or specifications. " +
+  "Return only the final caption.";
   const cr=await fetch(
     "https://api.openai.com/v1/responses",
     {
