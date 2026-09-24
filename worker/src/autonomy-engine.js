@@ -403,7 +403,20 @@ export async function runAutonomyScheduled(env,req){
    ){
     add("revenue","funnel_snapshot",90);
    }
+if(
+  c.modules.photo!==false &&
+  await actionEnabled(env,"photo","photo_generate")
+){
+  const today=new Date().toISOString().slice(0,10);
 
+  const usedToday=await env.DB.prepare(
+    "SELECT id FROM photo_autopilot_usage WHERE substr(used_at,1,10)=? LIMIT 1"
+  ).bind(today).first();
+
+  if(!usedToday){
+    add("photo","photo_generate",85);
+  }
+}
    for(const m of MODULES){
 
     if(m==="revenue" || c.modules[m]===false)
