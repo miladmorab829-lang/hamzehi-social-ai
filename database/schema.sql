@@ -96,7 +96,11 @@ CREATE TABLE IF NOT EXISTS production_runs (
 CREATE INDEX IF NOT EXISTS idx_release_checks_time ON release_checks(checked_at);
 CREATE INDEX IF NOT EXISTS idx_retry_next ON retry_queue(status,next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_prod_runs_time ON production_runs(created_at);
-
+CREATE INDEX IF NOT EXISTS idx_leads_updated ON leads(updated_at);
+CREATE INDEX IF NOT EXISTS idx_system_events_created ON system_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_approval_content_updated ON approval_queue(content_id,updated_at);
+CREATE INDEX IF NOT EXISTS idx_contents_created ON contents(created_at);
+CREATE INDEX IF NOT EXISTS idx_calendar_status_planned ON calendar(status,planned_at);
 CREATE TABLE IF NOT EXISTS recovery_snapshots (
  id TEXT PRIMARY KEY,
  snapshot_type TEXT NOT NULL,
