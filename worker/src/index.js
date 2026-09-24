@@ -1536,6 +1536,110 @@ async function aiEditVaultImage(env,req){
   try { const result=await aiEditVaultImageCore(env,sourceId,prompt,{content_id:b?.content_id||null,tags:b?.tags||''}); return json({ok:true,...result}); }
   catch(e){ return json({ok:false,error:e.message||'AI edit failed'},500); }
 }
+async function createKlingWeeklyVideoTask(env,brief,imageUrls){
+  const apiKey=String(env.KLING_API_KEY||'').trim();
+  if(!apiKey) throw Error('KLING_API_KEY missing');
+
+  if(!brief?.ok) throw Error('Weekly creative brief is invalid');
+
+  const urls=Array.isArray(imageUrls)
+    ? imageUrls.filter(Boolean).slice(0,7)
+    : [];
+
+  if(!urls.length){
+    throw Error('No source images available for Kling');
+  }
+
+  const shots=Array.isArray(brief.shots)
+    ? brief.shots.slice(0,6)
+    : [];
+
+  if(!shots.length){
+    throw Error('No weekly shots available');
+  }
+
+  const duration=Math.max(
+    3,
+    Math.min(
+      15,
+      shots.reduce(
+        (sum)=>sum+3,
+        0
+      )
+    )
+  );
+
+  const multiPrompt=shots.map((shot,index)=>({
+    index:index+1,
+    prompt:[
+      String(shot.direction||''),
+      String(brief.story||''),
+      'Preserve the exact real HAMZEHI BOX product identity from the referenced image.',
+      'Preserve proportions, colors, materials and recognizable product details.',
+      'Premium luxury commercial cinematography.',
+      'Elegant controlled camera movement and refined lighting.',
+      'No voice-over, no dialogue, no subtitles.',
+      'End-card text is handled separately; do not generate text inside the scene.'
+    ].filter(Boolean).join(' '),
+    duration:String(
+      index===shots.length-1
+        ? Math.max(1,duration-(shots.length-1)*3)
+        : 3
+    )
+  }));
+
+  const payload={
+    model_name:'kling-v3-omni',
+    multi_shot:true,
+    shot_type:'customize',
+    prompt:'',
+    multi_prompt:multiPrompt,
+    image_list:urls.map(image_url=>({image_url})),
+    element_list:[],
+    video_list:[],
+    mode:'pro',
+    sound:'on',
+    aspect_ratio:'16:9',
+    duration:String(duration),
+    callback_url:'',
+    external_task_id:`weekly-video-${String(brief.week_id||'').replace(/[^a-zA-Z0-9_-]/g,'-')}`
+  };
+
+  const response=await fetch(
+    'https://api-singapore.klingai.com/v1/videos/omni-video',
+    {
+      method:'POST',
+      headers:{
+        Authorization:`Bearer ${apiKey}`,
+        'Content-Type':'application/json'
+      },
+      body:JSON.stringify(payload)
+    }
+  );
+
+  const data=await response.json().catch(()=>({}));
+
+  if(!response.ok||Number(data?.code||0)!==0){
+    throw Error(
+      data?.message||
+      `Kling API request failed (HTTP ${response.status})`
+    );
+  }
+
+  const taskId=String(data?.data?.task_id||'').trim();
+
+  if(!taskId){
+    throw Error('Kling API did not return task_id');
+  }
+
+  return {
+    ok:true,
+    task_id:taskId,
+    model:'kling-v3-omni',
+    duration,
+    image_count:urls.length
+  };
+}
 async function reserveWeeklyVideoLock(env, weekId){
   await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS weekly_video_autopilot (
