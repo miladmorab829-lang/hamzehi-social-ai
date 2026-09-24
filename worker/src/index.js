@@ -1899,7 +1899,7 @@ const caption=await generateWeeklyVideoCaption(
         env,
         task.video_url,
         row.week_id,
-        `HAMZEHIBOX | Weekly Video | ${row.week_id}`
+        caption
       );
 
       await env.DB.prepare(`
