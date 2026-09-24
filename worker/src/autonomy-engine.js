@@ -3,7 +3,7 @@ const uid=()=>crypto.randomUUID();
 
 export const MODULES=[
   "telegram","whatsapp","instagram","website","crm",
-  "ads","content","media","learning","revenue"
+ "ads","content","media","photo","learning","revenue"
 ];
 const DEFAULTS=Object.fromEntries(MODULES.map(x=>[x,true]));
 
@@ -16,7 +16,12 @@ const ACTIONS={
  ads:["status","discover_opportunities"],
  content:["status","generate_and_queue"],
  media:["status","video_generate"],
- learning:["status","run"],
+ content:["status","generate_and_queue"],
+media:["status","video_generate"],
+photo:["status","photo_generate"],
+learning:["status","run"],
+revenue:["status","funnel_snapshot"]
+  learning:["status","run"],
  revenue:["status","funnel_snapshot"]
 };
 
