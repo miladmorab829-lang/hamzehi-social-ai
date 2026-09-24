@@ -419,10 +419,35 @@ async function loadVideoAutopilot(){
       ? "<span class='ok'>READY</span>"
       : "<span class='muted'>NOT READY</span>";
 
-  $("videoActivity").innerHTML=
-    "<span class='ok'>✓ WEEK</span>"+
-    " · "+esc(d.week_id||"—")+
-    " · status: "+esc(d.status||"idle");
+  const activity=await api("/api/video-autopilot/activity");
+
+  if(activity.ok && Array.isArray(activity.activities) && activity.activities.length){
+    const latest=activity.activities[0];
+
+    let details={};
+
+    try{
+      details=JSON.parse(latest.details||"{}");
+    }catch{}
+
+    const error=details.error
+      ? "<br><span class='bad'>ERROR: "+esc(details.error)+"</span>"
+      : "";
+
+    $("videoActivity").innerHTML=
+      "<span class='ok'>✓ WEEK</span>"+
+      " · "+esc(d.week_id||"—")+
+      " · status: "+esc(d.status||"idle")+
+      "<br><span class='muted'>"+
+      esc(latest.message||latest.type||"Latest activity")+
+      "</span>"+
+      error;
+  }else{
+    $("videoActivity").innerHTML=
+      "<span class='ok'>✓ WEEK</span>"+
+      " · "+esc(d.week_id||"—")+
+      " · status: "+esc(d.status||"idle");
+  }
 }
 
 async function videoToggle(enabled){
