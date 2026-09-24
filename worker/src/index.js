@@ -2010,108 +2010,245 @@ async function getShotstackWeeklyRender(env,renderId){
 async function pollWeeklyVideoAutopilot(env){
   const row=await env.DB.prepare(`
     SELECT
-  week_id,
-  task_id,
-  status,
-  scenario_json
+      week_id,
+      task_id,
+      shotstack_task_id,
+      status,
+      scenario_json
     FROM weekly_video_autopilot
-    WHERE status='generating'
+    WHERE (
+      status='generating'
       AND task_id IS NOT NULL
       AND task_id!=''
+    )
+    OR (
+      status='compositing'
+      AND shotstack_task_id IS NOT NULL
+      AND shotstack_task_id!=''
+    )
     ORDER BY updated_at ASC
     LIMIT 1
   `).first();
 
-  if(!row?.task_id){
+  if(!row){
     return {
       ok:true,
       skipped:true,
-      reason:"no_generating_weekly_video"
+      reason:"no_active_weekly_video"
     };
   }
 
   try{
-    const task=await getKlingWeeklyVideoTask(
-      env,
-      row.task_id
-    );
-
-    const klingStatus=String(task.status||'').toLowerCase();
-
-        if(klingStatus==='succeed' || klingStatus==='completed'){
-  if(!task.video_url){
-    throw Error('Kling completed but video_url is missing');
-  }
-
-  const videoDuration=Number(task.duration);
-
-  if(!Number.isFinite(videoDuration)||videoDuration<=0){
-    throw Error('Kling completed but video duration is missing');
-  }
-
-  const shotstack=await createShotstackWeeklyEndCardTask(
-    env,
-    task.video_url,
-    row.week_id,
-    videoDuration
-  );
-
-  await env.DB.prepare(`
-    UPDATE weekly_video_autopilot
-    SET status=?,
-        shotstack_task_id=?,
-        updated_at=?
-    WHERE week_id=? AND task_id=? AND status='generating'
-  `).bind(
-    "compositing",
-    shotstack.render_id,
-    now(),
-    row.week_id,
-    row.task_id
-  ).run();
-
-  return {
-    ok:true,
-    status:"compositing",
-    week_id:row.week_id,
-    task_id:row.task_id,
-    shotstack_task_id:shotstack.render_id
-  };
-}
-    if(klingStatus==='failed'){
-      await env.DB.prepare(`
-        UPDATE weekly_video_autopilot
-        SET status=?,
-            updated_at=?
-        WHERE week_id=? AND task_id=? AND status='generating'
-      `).bind(
-        "failed",
-        now(),
-        row.week_id,
+    if(String(row.status)==='generating'){
+      const task=await getKlingWeeklyVideoTask(
+        env,
         row.task_id
-      ).run();
+      );
+
+      const klingStatus=String(
+        task.status||''
+      ).toLowerCase();
+
+      if(
+        klingStatus==='succeed' ||
+        klingStatus==='completed'
+      ){
+        if(!task.video_url){
+          throw Error(
+            'Kling completed but video_url is missing'
+          );
+        }
+
+        const videoDuration=Number(task.duration);
+
+        if(
+          !Number.isFinite(videoDuration) ||
+          videoDuration<=0
+        ){
+          throw Error(
+            'Kling completed but video duration is missing'
+          );
+        }
+
+        const shotstack=
+          await createShotstackWeeklyEndCardTask(
+            env,
+            task.video_url,
+            row.week_id,
+            videoDuration
+          );
+
+        await env.DB.prepare(`
+          UPDATE weekly_video_autopilot
+          SET status=?,
+              shotstack_task_id=?,
+              updated_at=?
+          WHERE week_id=?
+            AND task_id=?
+            AND status='generating'
+        `).bind(
+          "compositing",
+          shotstack.render_id,
+          now(),
+          row.week_id,
+          row.task_id
+        ).run();
+
+        return {
+          ok:true,
+          status:"compositing",
+          week_id:row.week_id,
+          task_id:row.task_id,
+          shotstack_task_id:shotstack.render_id
+        };
+      }
+
+      if(klingStatus==='failed'){
+        await env.DB.prepare(`
+          UPDATE weekly_video_autopilot
+          SET status=?,
+              updated_at=?
+          WHERE week_id=?
+            AND task_id=?
+            AND status='generating'
+        `).bind(
+          "failed",
+          now(),
+          row.week_id,
+          row.task_id
+        ).run();
+
+        return {
+          ok:false,
+          status:"failed",
+          week_id:row.week_id,
+          task_id:row.task_id
+        };
+      }
 
       return {
-        ok:false,
-        status:"failed",
+        ok:true,
+        status:"generating",
         week_id:row.week_id,
-        task_id:row.task_id
+        task_id:row.task_id,
+        kling_status:klingStatus
+      };
+    }
+
+    if(String(row.status)==='compositing'){
+      const render=
+        await getShotstackWeeklyRender(
+          env,
+          row.shotstack_task_id
+        );
+
+      const shotstackStatus=
+        String(render.status||'').toLowerCase();
+
+      if(
+        shotstackStatus==='done' ||
+        shotstackStatus==='completed'
+      ){
+        if(!render.url){
+          throw Error(
+            'Shotstack completed but output URL is missing'
+          );
+        }
+
+        const brief=JSON.parse(
+          String(row.scenario_json||'{}')
+        );
+
+        const caption=
+          await generateWeeklyVideoCaption(
+            env,
+            brief
+          );
+
+        const stored=
+          await storeWeeklyVideoInVault(
+            env,
+            render.url,
+            row.week_id,
+            caption
+          );
+
+        await env.DB.prepare(`
+          UPDATE weekly_video_autopilot
+          SET status=?,
+              output_media_id=?,
+              caption=?,
+              updated_at=?
+          WHERE week_id=?
+            AND shotstack_task_id=?
+            AND status='compositing'
+        `).bind(
+          "video_ready",
+          stored.media_id,
+          caption,
+          now(),
+          row.week_id,
+          row.shotstack_task_id
+        ).run();
+
+        return {
+          ok:true,
+          status:"video_ready",
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id,
+          output_media_id:stored.media_id
+        };
+      }
+
+      if(
+        shotstackStatus==='failed' ||
+        shotstackStatus==='error'
+      ){
+        await env.DB.prepare(`
+          UPDATE weekly_video_autopilot
+          SET status=?,
+              updated_at=?
+          WHERE week_id=?
+            AND shotstack_task_id=?
+            AND status='compositing'
+        `).bind(
+          "failed",
+          now(),
+          row.week_id,
+          row.shotstack_task_id
+        ).run();
+
+        return {
+          ok:false,
+          status:"failed",
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id
+        };
+      }
+
+      return {
+        ok:true,
+        status:"compositing",
+        week_id:row.week_id,
+        shotstack_task_id:row.shotstack_task_id,
+        shotstack_status:shotstackStatus
       };
     }
 
     return {
       ok:true,
-      status:"generating",
-      week_id:row.week_id,
-      task_id:row.task_id,
-      kling_status:klingStatus
+      skipped:true,
+      reason:"unknown_weekly_video_status",
+      status:String(row.status||'')
     };
+
   }catch(e){
     return {
       ok:false,
       status:"poll_error",
       week_id:row.week_id,
-      task_id:row.task_id,
+      task_id:row.task_id||'',
+      shotstack_task_id:row.shotstack_task_id||'',
       error:e.message||String(e)
     };
   }
