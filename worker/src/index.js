@@ -1977,7 +1977,7 @@ async function prepareWeeklyVideoAutopilot(env){
   }
   return {
     ok:true,
-    status:"prepared",
+    status:"generating",
     week_id:pool.weekId,
     photo_count:pool.photos.length,
     brief
