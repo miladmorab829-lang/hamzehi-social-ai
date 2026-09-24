@@ -1901,6 +1901,13 @@ async function prepareWeeklyVideoAutopilot(env){
       reason:"no_weekly_image_urls"
     };
   }
+   if(imageUrls.some(url=>!/^https?:\/\//i.test(url))){
+    return {
+      ok:false,
+      skipped:true,
+      reason:"invalid_weekly_image_url"
+    };
+  }
   const reserved=await reserveWeeklyVideoLock(
     env,
     pool.weekId
