@@ -2104,6 +2104,21 @@ async function pollWeeklyVideoAutopilot(env){
       }
 
       if(klingStatus==='failed'){
+               const klingError=String(
+          task.task_status_msg||"Kling task failed without error message"
+        );
+
+        await audit(
+          env,
+          "weekly_video_autopilot_failed",
+          "Weekly Video Autopilot failed at Kling",
+          {
+            week_id:row.week_id,
+            task_id:row.task_id,
+            stage:"kling",
+            error:klingError
+          }
+        );
         await env.DB.prepare(`
           UPDATE weekly_video_autopilot
           SET status=?,
