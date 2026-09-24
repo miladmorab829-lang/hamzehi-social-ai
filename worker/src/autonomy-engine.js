@@ -199,6 +199,27 @@ async function executeTask(env,req,t){
     result:r.data?.result||r.data
   };
 }
+if(t.module==="photo"&&t.action==="photo_generate"){
+  const r=await callSelf(
+    req,
+    env,
+    "/api/photo-autopilot/run",
+    "POST",
+    {}
+  );
+
+  if(r.status>=300||r.data?.ok===false){
+    throw new Error(
+      r.data?.error||
+      `Photo Autopilot request failed (HTTP ${r.status})`
+    );
+  }
+
+  return {
+    ok:true,
+    result:r.data
+  };
+}
   if(t.module==="telegram"&&t.action==="inbox_scan")return (await callSelf(req,env,"/api/inbox")).data;
  if(t.module==="telegram"&&t.action==="inbox_reply"){const r=await callSelf(req,env,"/api/inbox");return {ok:r.status<300,mode:"reply_queue",items:r.data.items||[],note:"Reply drafts are queued; no external send is performed by this action."}}
  if(t.module==="content"&&t.action==="generate_and_queue")return (await callSelf(req,env,"/api/content/automation/run","POST",{platform:p.platform||"telegram",market:p.market||"iran_iraq"})).data;
