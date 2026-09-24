@@ -118,18 +118,57 @@ async function discoverWebLinks(query, limit = 8) {
     `https://www.google.com/search?q=${encodeURIComponent(query)}&num=12`,
     `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=12`
   ];
+  const diagnostics = [];
+
   for (const searchUrl of providers) {
+    const host = new URL(searchUrl).hostname;
     try {
-      const r = await fetchWithRetry(searchUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)' } }, 2, AD_SEARCH_TIMEOUT_MS);
-      if (!r.ok) continue;
+      const r = await fetchWithRetry(
+        searchUrl,
+        { headers: { "User-Agent": "Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)" } },
+        2,
+        AD_SEARCH_TIMEOUT_MS
+      );
+
+      if (!r.ok) {
+        diagnostics.push({
+          provider: host,
+          status: r.status,
+          ok: false,
+          html_length: 0,
+          extracted_links: 0
+        });
+        continue;
+      }
+
       const html = await r.text();
       const links = extractSearchLinks(html, limit);
-      if (links.length) return { links, provider: new URL(searchUrl).hostname };
-    } catch {}
-  }
-  return { links: [], provider: null };
-}
 
+      diagnostics.push({
+        provider: host,
+        status: r.status,
+        ok: true,
+        html_length: html.length,
+        extracted_links: links.length
+      });
+
+      if (links.length) {
+        return { links, provider: host, diagnostics };
+      }
+    } catch (e) {
+      diagnostics.push({
+        provider: host,
+        status: null,
+        ok: false,
+        html_length: 0,
+        extracted_links: 0,
+        error: String(e?.message || e).slice(0, 180)
+      });
+    }
+  }
+
+  return { links: [], provider: null, diagnostics };
+}
 class PublishOutcomeUnknown extends Error {
   constructor(message) { super(message); this.name = "PublishOutcomeUnknown"; }
 }
@@ -3383,12 +3422,13 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   const groups=type==="all"
   ?allGroups
   :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`);
-  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0};
+  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,provider_checks:[]};
   const items=[],seen=new Set(),started=now();
   for(const [type,term] of groups){
     const q=[term,city,extra].filter(Boolean).join(" ");
     try{
       const discovery=await discoverWebLinks(q,6);
+      if(discovery.diagnostics?.length) summary.provider_checks.push({query:q,checks:discovery.diagnostics});
       for(const href of discovery.links){
         if(items.length>=30) break;
         const safeHref=safeHttpUrl(href); if(!safeHref) continue;
