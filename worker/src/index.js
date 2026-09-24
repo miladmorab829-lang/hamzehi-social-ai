@@ -1855,9 +1855,10 @@ async function generateWeeklyVideoCaption(env,brief){
 async function pollWeeklyVideoAutopilot(env){
   const row=await env.DB.prepare(`
     SELECT
-      week_id,
-      task_id,
-      status
+  week_id,
+  task_id,
+  status,
+  scenario_json
     FROM weekly_video_autopilot
     WHERE status='generating'
       AND task_id IS NOT NULL
@@ -1886,7 +1887,14 @@ async function pollWeeklyVideoAutopilot(env){
       if(!task.video_url){
         throw Error('Kling completed but video_url is missing');
       }
+const brief=JSON.parse(
+  String(row.scenario_json||'{}')
+);
 
+const caption=await generateWeeklyVideoCaption(
+  env,
+  brief
+);
       const stored=await storeWeeklyVideoInVault(
         env,
         task.video_url,
@@ -1897,15 +1905,16 @@ async function pollWeeklyVideoAutopilot(env){
       await env.DB.prepare(`
         UPDATE weekly_video_autopilot
         SET status=?,
-            output_media_id=?,
-            updated_at=?
+    output_media_id=?,
+    caption=?,
+    updated_at=?
         WHERE week_id=? AND task_id=? AND status='generating'
-      `).bind(
-        "video_ready",
-        stored.media_id,
-        now(),
-        row.week_id,
-        row.task_id
+      `).bind("video_ready",
+stored.media_id,
+caption,
+now(),
+row.week_id,
+row.task_id
       ).run();
 
       return {
