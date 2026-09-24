@@ -120,6 +120,50 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </section>
 </div>
 </section>
+<section class="card section">
+  <div class="title">
+    <div>
+      <h2>🎬 VIDEO AUTOPILOT</h2>
+      <div class="hint">
+        تولید هفتگی یک ویدیوی تبلیغاتی از عکس‌های واقعی همان هفته، با سناریوی خودکار.
+      </div>
+    </div>
+    <span id="videoAutoState" class="tag">—</span>
+  </div>
+
+  <div class="grid4" style="margin-top:10px">
+    <div class="row">
+      <b>STATUS</b>
+      <div id="videoStatus" class="muted">—</div>
+    </div>
+
+    <div class="row">
+      <b>CYCLE</b>
+      <div id="videoCycle" class="muted">—</div>
+    </div>
+
+    <div class="row">
+      <b>USED / TOTAL</b>
+      <div id="videoProgress" class="muted">—</div>
+    </div>
+
+    <div class="row">
+      <b>TODAY</b>
+      <div id="videoToday" class="muted">—</div>
+    </div>
+  </div>
+
+  <div class="tools" style="margin-top:10px">
+    <button class="btn primary" onclick="videoToggle(true)">▶ VIDEO ON</button>
+    <button class="btn danger" onclick="videoToggle(false)">■ VIDEO OFF</button>
+    <button class="btn" onclick="videoRunNow()">⚙ RUN NOW</button>
+    <button class="btn" onclick="loadVideoAutopilot()">↻ REFRESH</button>
+  </div>
+
+  <div id="videoActivity" class="hint" style="margin-top:10px">
+    در انتظار وضعیت…
+  </div>
+</section>
 <section class="grid2 section">
 <div class="card">
 <div class="title">
