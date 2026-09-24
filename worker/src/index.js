@@ -1678,6 +1678,7 @@ async function reserveWeeklyVideoLock(env, weekId){
   await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS weekly_video_autopilot (
       week_id TEXT PRIMARY KEY,
+      task_id TEXT,
       status TEXT NOT NULL,
       source_media_ids TEXT,
       scenario_json TEXT,
@@ -1688,7 +1689,11 @@ async function reserveWeeklyVideoLock(env, weekId){
       updated_at TEXT NOT NULL
     )
   `).run();
-
+try{
+  await env.DB.prepare(
+    "ALTER TABLE weekly_video_autopilot ADD COLUMN task_id TEXT"
+  ).run();
+}catch{}
   const result=await env.DB.prepare(`
     INSERT OR IGNORE INTO weekly_video_autopilot
     (week_id,status,source_media_ids,scenario_json,music_id,output_media_id,caption,created_at,updated_at)
