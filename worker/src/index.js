@@ -1553,7 +1553,10 @@ const scene=scenes[sceneIndex];
     `Scene: ${scene}. ` +
     "Photorealistic, premium commercial photography, refined composition, realistic shadows and reflections.";
 
-  const result=await aiEditVaultImageCore(
+  let result;
+
+try {
+  result=await aiEditVaultImageCore(
     env,
     String(source.id),
     prompt,
@@ -1562,7 +1565,24 @@ const scene=scenes[sceneIndex];
       content_id:null
     }
   );
+} catch(e) {
+  await env.DB.prepare(
+    "DELETE FROM photo_autopilot_daily_lock WHERE date=?"
+  ).bind(today).run();
 
+  await audit(
+    env,
+    "photo_autopilot_error",
+    "Photo Autopilot generation failed; daily lock released",
+    {
+      source_media_id:String(source.id),
+      cycle,
+      error:String(e.message||e)
+    }
+  );
+
+  throw e;
+}
   const t=now();
 
   await env.DB.prepare(`
