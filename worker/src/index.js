@@ -4149,6 +4149,25 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
     mode:'wan-2.7-i2v'
   },202);
 }
+     if (u.pathname === "/api/video-autopilot/activity" && req.method === "GET") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
+
+  const rows = await env.DB.prepare(`
+    SELECT id,type,level,message,details,created_at
+    FROM system_events
+    WHERE type IN (
+      'weekly_video_autopilot_failed',
+      'video_autopilot_toggle'
+    )
+    ORDER BY created_at DESC
+    LIMIT 20
+  `).all();
+
+  return json({
+    ok:true,
+    activities: rows.results || []
+  });
+}
       if (u.pathname === "/media/telegram" && req.method === "GET") return await publicTelegramMediaProxy(env,req);
 
       if (u.pathname === "/api/website/track" && req.method === "POST") {
