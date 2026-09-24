@@ -1505,11 +1505,24 @@ if(!lock.meta?.changes){
   const sourceRows=sources.results||[];
 
   if(!sourceRows.length){
-    return {
-      ok:false,
-      error:"No original Telegram Vault photos available"
-    };
-  }
+  await env.DB.prepare(
+    "DELETE FROM photo_autopilot_daily_lock WHERE date=?"
+  ).bind(today).run();
+
+  await audit(
+    env,
+    "photo_autopilot_error",
+    "Photo Autopilot found no original Telegram Vault photos; daily lock released",
+    {
+      date:today
+    }
+  );
+
+  return {
+    ok:false,
+    error:"No original Telegram Vault photos available"
+  };
+}
 
   const latestCycle=await env.DB.prepare(
     "SELECT MAX(cycle) cycle FROM photo_autopilot_usage"
