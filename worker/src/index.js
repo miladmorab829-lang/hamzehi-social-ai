@@ -3503,7 +3503,20 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
           const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
 const relevanceText=`${title} ${uu.hostname} ${uu.pathname} ${plain}`;
-if(!/طلا|جواهر|ساعت|بدلی|زیورآلات|ذهب|مجوهرات|ساعات|صياغ|صائغ|اكسسوارات|حلي/i.test(relevanceText)) continue;
+
+const marketPattern=type.startsWith("gold_")
+  ? /طلا|جواهر|زرگر|گالری|مجوهرات|ذهب|صياغ|صائغ/i
+  : type.startsWith("watch_")
+    ? /ساعت|ساعات|watch/i
+    : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
+
+const strongRelevance=`${title} ${uu.hostname} ${uu.pathname}`.match(marketPattern);
+const marketHits=(plain.match(marketPattern)||[]).length;
+
+const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
+
+if(spamPattern.test(relevanceText)) continue;
+if(!strongRelevance && marketHits<2) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا/i.test(plain);
 const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
           const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية)[^<]*</i);
