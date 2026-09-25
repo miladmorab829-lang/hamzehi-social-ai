@@ -236,7 +236,34 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 <div class="card"><div class="title"><h2>🎯 OPPORTUNITIES</h2><span class="tag">LEADS</span></div><div id="opportunities" class="rows">—</div></div>
 <div class="card dangerbox"><div class="title"><h2>🚨 ERRORS & RECOVERY</h2><button class="btn" onclick="loadErrors()">↻</button></div><div id="errors" class="rows">—</div></div>
 </section>
+<section class="card section" id="websiteMonitor">
+  <div class="title">
+    <div>
+      <h2>🌐 WEBSITE LIVE MONITOR</h2>
+      <div class="hint">تمام فعالیت‌های واقعی سایت، مشتری‌ها، فرصت‌ها، مذاکرات و خطاها</div>
+    </div>
+    <button class="btn" onclick="loadWebsiteMonitor()">↻ REFRESH</button>
+  </div>
 
+  <div class="grid4" style="margin-top:10px">
+    <div class="row"><b>ACTIVITY</b><div id="wmActivity" class="num">—</div></div>
+    <div class="row"><b>LEADS</b><div id="wmLeads" class="num">—</div></div>
+    <div class="row"><b>OPPORTUNITIES</b><div id="wmOpportunities" class="num">—</div></div>
+    <div class="row"><b>NEGOTIATIONS</b><div id="wmNegotiations" class="num">—</div></div>
+  </div>
+
+  <div class="tools" style="margin-top:10px">
+    <button class="btn" onclick="wmFilter('all')">ALL</button>
+    <button class="btn" onclick="wmFilter('customer')">CUSTOMERS</button>
+    <button class="btn" onclick="wmFilter('opportunity')">OPPORTUNITIES</button>
+    <button class="btn" onclick="wmFilter('negotiation')">NEGOTIATIONS</button>
+    <button class="btn danger" onclick="wmFilter('error')">ERRORS</button>
+  </div>
+
+  <div id="websiteMonitorRows" class="rows" style="margin-top:10px">
+    <div class="hint">در انتظار داده واقعی…</div>
+  </div>
+</section>
 <section class="card section">
 <div class="title"><h2>🛡️ SAFETY GATE</h2><span class="tag ok">ACTIVE</span></div>
 <div class="hint" style="margin-top:8px">این پنل وضعیت و کنترل‌های واقعی V10 را نمایش می‌دهد. پرداخت، قرارداد، Secret، DNS، R2 و Deploy از این UI قابل دستکاری نیستند. عملیات بیرونی نیازمند مجوز باید همچنان Gate داشته باشند.</div>
