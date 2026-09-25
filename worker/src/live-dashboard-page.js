@@ -412,6 +412,7 @@ async function loadVideoAutopilot(){
   $("videoCycle").textContent=d.week_id||"—";
 
   $("videoProgress").textContent=
+    
     String(d.status||"idle");
 
   $("videoToday").innerHTML=
