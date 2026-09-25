@@ -586,7 +586,149 @@ async function loadRevenue(){const d=await api(A+"/revenue");$("revenue").innerH
 async function loadOpp(){const d=await api(A+"/opportunities");$("opportunities").innerHTML=d.ok?rows(d.items,x=>esc(x.name||x.contact||x.id)+" · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal")):"—"}
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
 async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
-async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety()])}
+let wmMode="all";
+let wmLeads=[];
+
+function wmNotes(x){
+  try{return JSON.parse(x?.notes||"{}")}catch{return{}}
+}
+
+function wmCustomer(x){
+  return ["customer","converted"].includes(String(x.stage||""));
+}
+
+function wmOpportunity(x){
+  const n=wmNotes(x);
+  return !!(n.ad_opportunity||n.contact_url||n.ad_target);
+}
+
+function wmNegotiation(x){
+  const n=wmNotes(x);
+  return x.stage==="negotiation"||!!n.negotiation_draft;
+}
+
+function wmError(x){
+  const s=String(x.severity||"").toLowerCase();
+  const t=String(x.type||"").toLowerCase();
+  return ["error","critical","warning","warn"].includes(s)||/error|failed|failure/.test(t);
+}
+
+function wmFilter(mode){
+  wmMode=mode;
+  loadWebsiteMonitor();
+}
+
+function wmShowLead(id){
+  const x=wmLeads.find(v=>String(v.id)===String(id));
+  if(!x)return;
+
+  const n=wmNotes(x);
+  const box=document.createElement("div");
+
+  box.style.cssText=
+    "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);padding:18px;overflow:auto";
+
+  box.innerHTML=
+    "<div class='card' style='max-width:850px;margin:30px auto'>"+
+    "<div class='title'><h2>👤 "+esc(x.name||x.contact||x.id)+"</h2>"+
+    "<button class='btn' onclick='this.closest(\"div[style*=fixed]\").remove()'>✕</button></div>"+
+
+    "<div class='row'><b>STATUS</b><div>"+esc(x.stage||"—")+"</div></div>"+
+    "<div class='row'><b>PRIORITY</b><div>"+esc(x.priority||"—")+"</div></div>"+
+    "<div class='row'><b>SCORE</b><div>"+esc(n.score??x.score??"—")+"</div></div>"+
+    "<div class='row'><b>WEBSITE</b><div style='overflow-wrap:anywhere'>"+esc(x.contact||n.url||"—")+"</div></div>"+
+    "<div class='row'><b>CONTACT URL</b><div style='overflow-wrap:anywhere'>"+esc(n.contact_url||"—")+"</div></div>"+
+    "<div class='row'><b>OPPORTUNITY</b><div>"+(wmOpportunity(x)?"YES":"NO")+"</div></div>"+
+    "<div class='row'><b>EVIDENCE</b><div>"+esc(n.evidence||"—")+"</div></div>"+
+    "<div class='row'><b>NEGOTIATION</b><div style='white-space:pre-wrap'>"+esc(n.negotiation_draft||"—")+"</div></div>"+
+    "<div class='row'><b>FOLLOW-UP</b><div style='white-space:pre-wrap'>"+esc(n.followup_draft||"—")+"</div></div>"+
+    "<div class='row'><b>NEXT FOLLOW-UP</b><div>"+esc(n.next_followup_at||n.followup_at||"—")+"</div></div>"+
+    "<div class='row'><b>CREATED</b><div>"+esc(x.created_at||"—")+"</div></div>"+
+    "<div class='row'><b>UPDATED</b><div>"+esc(x.updated_at||"—")+"</div></div>"+
+    "</div>";
+
+  document.body.appendChild(box);
+}
+
+async function loadWebsiteMonitor(){
+  const box=$("websiteMonitorRows");
+  if(!box)return;
+
+  box.innerHTML="<div class='hint'>در حال دریافت اطلاعات واقعی…</div>";
+
+  try{
+    const [l,e,g,o]=await Promise.all([
+      api("/api/leads"),
+      api("/api/system/events"),
+      api("/api/website/growth"),
+      api("/api/ads/overview")
+    ]);
+
+    wmLeads=l.items||[];
+    const events=(e.items||[]).filter(x=>{
+      const s=(String(x.type||"")+" "+String(x.message||"")).toLowerCase();
+      return /website|lead|ad_|negotiat|followup|customer|discovery|outreach|campaign|error|failed/.test(s);
+    });
+
+    $("wmLeads").textContent=wmLeads.length;
+    $("wmOpportunities").textContent=o.metrics?.ad_opportunities??wmLeads.filter(wmOpportunity).length;
+    $("wmNegotiations").textContent=o.metrics?.negotiation??wmLeads.filter(wmNegotiation).length;
+    $("wmActivity").textContent=events.length;
+
+    let html="";
+
+    if(wmMode==="error"){
+      html=events.filter(wmError).map(x=>
+        "<div class='row'>"+
+        "<div class='title'><b>🚨 "+esc(x.message||x.type||"ERROR")+"</b>"+
+        "<span class='tag bad'>"+esc(x.severity||"ERROR")+"</span></div>"+
+        "<div class='mini'>"+esc(x.type||"")+"</div>"+
+        "<small>"+esc(x.created_at||"")+"</small>"+
+        "</div>"
+      ).join("");
+    }else{
+      const leads=wmLeads.filter(x=>
+        wmMode==="customer"?wmCustomer(x):
+        wmMode==="opportunity"?wmOpportunity(x):
+        wmMode==="negotiation"?wmNegotiation(x):
+        true
+      );
+
+      html=
+        leads.slice(0,30).map(x=>
+          "<div class='row' onclick='wmShowLead(\""+esc(x.id)+"\")' style='cursor:pointer'>"+
+          "<div class='title'><b>👤 "+esc(x.name||x.contact||x.id)+"</b>"+
+          "<span class='tag'>"+esc(x.stage||"new")+"</span></div>"+
+          "<div class='mini'>"+
+          "Score: "+esc(wmNotes(x).score??x.score??"—")+
+          " · "+esc(x.priority||"normal")+
+          (wmOpportunity(x)?" · Opportunity":"")+
+          (wmNegotiation(x)?" · Negotiation":"")+
+          (wmCustomer(x)?" · Customer":"")+
+          "</div>"+
+          "<small>"+esc(x.updated_at||"")+"</small>"+
+          "</div>"
+        ).join("");
+
+      if(wmMode==="all"){
+        html+=events.slice(0,20).map(x=>
+          "<div class='row'>"+
+          "<div class='title'><b>⚙️ "+esc(x.message||x.type||"EVENT")+"</b>"+
+          "<span class='tag "+(wmError(x)?"bad":"")+"'>"+esc(x.severity||"INFO")+"</span></div>"+
+          "<div class='mini'>"+esc(x.type||"")+"</div>"+
+          "<small>"+esc(x.created_at||"")+"</small>"+
+          "</div>"
+        ).join("");
+      }
+    }
+
+    box.innerHTML=html||"<div class='hint'>موردی برای نمایش وجود ندارد.</div>";
+
+  }catch(err){
+    box.innerHTML="<div class='bad'>✕ "+esc(err.message||"Monitor error")+"</div>";
+  }
+}
+async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadWebsiteMonitor()])}
 updateTokenUI();refreshAll();loadDiagnostic();setInterval(refreshAll,15000);
 </script></body></html>`;
 }
