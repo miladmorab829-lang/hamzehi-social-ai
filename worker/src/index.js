@@ -179,8 +179,7 @@ if (/bing\.com$/i.test(parsed.hostname) && /^\/ck\/a/i.test(parsed.pathname)) {
     while ((m = bingRe.exec(source)) && out.length < limit) {
       addLink(m[1]);
     }
-
-    fix: allow ad opportunities without direct contact url
+    
   }
 
   const re =
