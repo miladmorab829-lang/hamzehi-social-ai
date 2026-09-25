@@ -3844,7 +3844,7 @@ await pollWeeklyVideoAutopilot(env);
       }
 
       if (req.method === "GET" && u.pathname === "/dashboard.js") {
-        return new Response(dashboardScript(), {
+        return new Response(repairMojibake(dashboardScript()), {
           status: 200,
           headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store" }
         });
