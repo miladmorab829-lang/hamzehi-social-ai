@@ -233,7 +233,19 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </section>
 <section class="grid3 section">
 <div class="card"><div class="title"><h2>💰 REVENUE</h2><span class="tag">REAL CRM</span></div><div id="revenue" class="rows">—</div></div>
-<div class="card"><div class="title"><h2>🎯 OPPORTUNITIES</h2><span class="tag">LEADS</span></div><div id="opportunities" class="rows">—</div></div>
+<div class="card">
+<div class="title">
+<div><h2>🎯 OPPORTUNITIES</h2><span class="tag">LEADS</span></div>
+<span class="tag">AD AUTOPILOT</span>
+</div>
+<div class="tools" style="margin-top:9px">
+<button class="btn" onclick="previewAdAutopilot()">🔎 PREVIEW</button>
+<button class="btn danger" onclick="deleteSelectedAdAutopilot()">🗑️ DELETE SELECTED</button>
+<button class="btn danger" onclick="deleteAllAdAutopilot()">🗑️ DELETE ALL</button>
+</div>
+<div id="adCleanupStatus" class="hint" style="margin-top:8px">برای بررسی رکوردهای Ads Autopilot روی PREVIEW بزن.</div>
+<div id="opportunities" class="rows">—</div>
+</div>
 <div class="card dangerbox"><div class="title"><h2>🚨 ERRORS & RECOVERY</h2><button class="btn" onclick="loadErrors()">↻</button></div><div id="errors" class="rows">—</div></div>
 </section>
 
@@ -556,7 +568,120 @@ async function loadBrain(){
   );
 }
 async function loadRevenue(){const d=await api(A+"/revenue");$("revenue").innerHTML=d.ok?rows(Object.entries(d.funnel||{}).map(([k,v])=>({k,v})),x=>esc(x.k)+" · "+esc(x.v)):"—"}
-async function loadOpp(){const d=await api(A+"/opportunities");$("opportunities").innerHTML=d.ok?rows(d.items,x=>esc(x.name||x.contact||x.id)+" · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal")):"—"}
+let adAutopilotItems=[];
+
+function renderAdAutopilotItems(items){
+ adAutopilotItems=Array.isArray(items)?items:[];
+ $("opportunities").innerHTML=adAutopilotItems.length
+  ?adAutopilotItems.map((x,i)=>
+    "<div class='row'>"+
+    "<label style='display:flex;gap:8px;align-items:flex-start'>"+
+    "<input type='checkbox' class='adCleanupCheck' data-id='"+esc(x.id||"")+"' style='margin-top:5px'>"+
+    "<span>"+
+    "<b>"+esc(x.name||x.contact||x.id||"—")+"</b>"+
+    " · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal")+
+    "<small>"+esc(x.type||"")+" · "+esc(x.city||"")+" · "+esc(x.id||"")+"</small>"+
+    "</span></label></div>"
+   ).join("")
+  :"—";
+}
+
+async function previewAdAutopilot(){
+ $("adCleanupStatus").textContent="در حال بررسی رکوردهای Ads Autopilot…";
+ const d=await api(A+"/ad-autopilot-cleanup",{
+  method:"POST",
+  body:JSON.stringify({mode:"preview"})
+ });
+ if(!d.ok){
+  $("adCleanupStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Preview failed")+"</span>";
+  return;
+ }
+ renderAdAutopilotItems(d.items||[]);
+ $("adCleanupStatus").innerHTML="<span class='ok'>✓ "+esc(d.count||0)+" رکورد قابل حذف پیدا شد.</span>";
+}
+
+async function deleteSelectedAdAutopilot(){
+ const ids=[...document.querySelectorAll(".adCleanupCheck:checked")]
+  .map(x=>x.dataset.id)
+  .filter(Boolean);
+
+ if(!ids.length){
+  $("adCleanupStatus").innerHTML="<span class='warn'>اول رکوردهای موردنظر را انتخاب کن.</span>";
+  return;
+ }
+
+ if(!confirm("آیا "+ids.length+" رکورد انتخاب‌شده Ads Autopilot حذف شود؟"))return;
+
+ $("adCleanupStatus").textContent="در حال حذف رکوردهای انتخاب‌شده…";
+
+ const d=await api(A+"/ad-autopilot-cleanup",{
+  method:"POST",
+  body:JSON.stringify({
+   mode:"delete",
+   ids,
+   confirm:"DELETE_AD_AUTOPILOT"
+  })
+ });
+
+ if(!d.ok){
+  $("adCleanupStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Delete failed")+"</span>";
+  return;
+ }
+
+ $("adCleanupStatus").innerHTML="<span class='ok'>✓ "+esc(d.deleted||0)+" رکورد حذف شد.</span>";
+ await loadOpp();
+}
+
+async function deleteAllAdAutopilot(){
+ const preview=await api(A+"/ad-autopilot-cleanup",{
+  method:"POST",
+  body:JSON.stringify({mode:"preview"})
+ });
+
+ if(!preview.ok){
+  $("adCleanupStatus").innerHTML="<span class='bad'>✕ "+esc(preview.error||"Preview failed")+"</span>";
+  return;
+ }
+
+ const count=Number(preview.count||0);
+
+ if(!count){
+  $("adCleanupStatus").innerHTML="<span class='warn'>رکورد قابل حذف وجود ندارد.</span>";
+  renderAdAutopilotItems([]);
+  return;
+ }
+
+ if(!confirm("⚠️ تعداد "+count+" رکورد Ads Autopilot قابل حذف است. همه حذف شوند؟"))return;
+
+ $("adCleanupStatus").textContent="در حال حذف همه رکوردهای Ads Autopilot…";
+
+ const d=await api(A+"/ad-autopilot-cleanup",{
+  method:"POST",
+  body:JSON.stringify({
+   mode:"delete",
+   all:true,
+   confirm:"DELETE_AD_AUTOPILOT"
+  })
+ });
+
+ if(!d.ok){
+  $("adCleanupStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Delete failed")+"</span>";
+  return;
+ }
+
+ $("adCleanupStatus").innerHTML="<span class='ok'>✓ "+esc(d.deleted||0)+" رکورد حذف شد.</span>";
+ renderAdAutopilotItems([]);
+ await loadOpp();
+}
+
+async function loadOpp(){
+ const d=await api(A+"/opportunities");
+ if(!d.ok){
+  $("opportunities").innerHTML="—";
+  return;
+ }
+ renderAdAutopilotItems(d.items||[]);
+}
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
 async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
 async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety()])}
