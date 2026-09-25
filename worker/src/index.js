@@ -3540,6 +3540,9 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
         let uu; try{uu=new URL(safeHref); const key=uu.origin; if(seen.has(key))continue; seen.add(key);}catch{continue}
         try{
           const rr=await fetchWithRetry(safeHref,{headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}},2,AD_FETCH_TIMEOUT_MS);
+          if(!rr.ok) continue;
+          const contentType=String(rr.headers.get("content-type")||"").toLowerCase();
+if(contentType && !contentType.includes("text/html")) continue;
           const tx=(await rr.text()).slice(0,100000);
           const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
@@ -3558,9 +3561,14 @@ if(spamPattern.test(relevanceText)) continue;
 if(!localDomain && !countryPattern.test(relevanceText)) continue;
           if(!strongRelevance && marketHits<2) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
-if(!adHit) continue;
+if(!adHit && !/(\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?)/i.test(uu.pathname)) continue;
           const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية|contact|contact us|advertis|advertising|media kit|sponsor|sponsorship|collaboration|partnership)[^<]*</i);
-          let contactUrl=null; if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
+let contactUrl=null;
+if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
+if(!contactUrl){
+  const fallback=tx.match(/href=["']([^"']*(?:contact|advertis|media-kit|sponsor|collab)[^"']*)["']/i);
+  if(fallback){try{contactUrl=new URL(fallback[1],href).toString()}catch{}}
+}
         if(!contactUrl) continue; 
           const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
