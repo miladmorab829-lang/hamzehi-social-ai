@@ -180,7 +180,7 @@ if (/bing\.com$/i.test(parsed.hostname) && /^\/ck\/a/i.test(parsed.pathname)) {
       addLink(m[1]);
     }
 
-    if (out.length) return out;
+    fix: allow ad opportunities without direct contact url
   }
 
   const re =
