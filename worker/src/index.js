@@ -3576,7 +3576,13 @@ const localDomain=groupType.endsWith("_ar")
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
 if(spamPattern.test(relevanceText)) continue;
 if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.test(relevanceText)) continue;
-          if(!strongRelevance && marketHits<1) continue;
+          const businessSignal=/فروشگاه|فروشنده|فروشی|طلافروشی|زرگری|جواهرفروشی|گالری|عطرفروشی|عطر فروشی|عطر و ادکلن|ساعت فروشی|ساعت مچی|بدلیجات|بدلی فروشی|محل ذهب|محل عطور|محل ساعات|مجوهرات|صياغة|صائغ|عطور|ساعات|اكسسوارات|shop|store|jewelry|jewellery|goldsmith|perfume|parfum|fragrance|watch shop|watch store|accessories/i;
+
+const titleBusiness=businessSignal.test(`${title} ${uu.hostname} ${uu.pathname}`);
+const titleMarket=strongRelevance;
+
+if(!titleMarket && !titleBusiness) continue;
+if(!titleBusiness && marketHits<2) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
 const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?/i.test(uu.pathname);    
           let contactUrl=null;
