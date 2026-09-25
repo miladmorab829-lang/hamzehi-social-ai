@@ -3503,7 +3503,7 @@ function validateAdsInput(body){
   const type=String(b.type||"all").trim();
   const city=String(b.city||"").trim();
   const extra=String(b.extra||"").trim();
-  const allowed=["gold","watch","fashion_jewelry","all"];
+  const allowed=["gold","perfume","watch","fashion_jewelry","all"];
   if(!allowed.includes(type)) return {ok:false,error:"ÙÙØ¹ ÙØ´ØªØ±Û ÙØ§ÙØ¹ØªØ¨Ø± Ø§Ø³Øª"};
   if(city.length>100) return {ok:false,error:"Ø´ÙØ±/Ø¨Ø§Ø²Ø§Ø± ÙØ¨Ø§ÛØ¯ Ø¨ÛØ´ØªØ± Ø§Ø² 100 Ú©Ø§Ø±Ø§Ú©ØªØ± Ø¨Ø§Ø´Ø¯"};
   if(extra.length>300) return {ok:false,error:"Ø¬Ø²Ø¦ÛØ§Øª ÙØ¨Ø§ÛØ¯ Ø¨ÛØ´ØªØ± Ø§Ø² 300 Ú©Ø§Ø±Ø§Ú©ØªØ± Ø¨Ø§Ø´Ø¯"};
@@ -3514,13 +3514,15 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   const {type,city,extra}=input;
   const sourceSite="https://www.hamzehibox.com";
   const allGroups=[
-  ["gold_fa","طلافروشی طلا جواهر زرگری گالری طلا"],
-  ["watch_fa","فروشگاه ساعت ساعت فروشی ساعت مچی"],
-  ["fashion_jewelry_fa","بدلیجات بدلی فروشی زیورآلات اکسسوری"],
+  ["gold_fa","طلافروشی طلا جواهر زرگری گالری طلا ایران تهران اصفهان شیراز مشهد تبریز"],
+  ["perfume_fa","عطر ادکلن عطر فروشی فروشگاه عطر و ادکلن ایران تهران اصفهان شیراز مشهد تبریز"],
+  ["watch_fa","فروشگاه ساعت ساعت فروشی ساعت مچی ایران"],
+  ["fashion_jewelry_fa","بدلیجات بدلی فروشی زیورآلات اکسسوری ایران"],
 
-  ["gold_ar","ذهب مجوهرات محل ذهب صياغ صائغ محلات ذهب"],
-["watch_ar","ساعات محل ساعات ساعات رجالية ساعات نسائية"],
-["fashion_jewelry_ar","اكسسوارات اكسسوارات نسائية حلي"]
+  ["gold_ar","ذهب مجوهرات صياغة صائغ محل ذهب مجوهرات عراق بغداد اربيل البصرة النجف كربلاء"],
+  ["perfume_ar","عطور عطر محل عطور عطور عراق عطور بغداد عطور اربيل عطور البصرة عطور النجف عطور كربلاء برفانات"],
+  ["watch_ar","ساعات محل ساعات ساعات رجالية ساعات نسائية العراق بغداد اربيل"],
+  ["fashion_jewelry_ar","اكسسوارات حلي مجوهرات اكسسوارات نسائية العراق بغداد اربيل"]
 ];
   const groups=type==="all"
   ?allGroups
@@ -3530,7 +3532,11 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
  
   for(const [groupType,term] of groups){
    let groupItems=0;
-    const q=[term,"ایران عراق Iran Iraq",city,extra].filter(Boolean).join(" ");
+    const regionTerms=groupType.endsWith("_ar")
+  ?"العراق عراق Iraqi Iraq بغداد بغداد اربيل أربيل البصرة النجف كربلاء"
+  :"ایران ایرانی Iran Iranian تهران اصفهان شیراز مشهد تبریز";
+
+const q=[term,regionTerms,city,extra].filter(Boolean).join(" ");
     try{
       const discovery=await discoverWebLinks(q,6);
       if(discovery.diagnostics?.length) summary.provider_checks.push({query:q,checks:discovery.diagnostics});
@@ -3548,18 +3554,28 @@ if(contentType && !contentType.includes("text/html")) continue;
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
 const relevanceText=`${title} ${uu.hostname} ${uu.pathname} ${plain}`;
 const marketPattern=groupType.startsWith("gold_")
-  ? /طلا|جواهر|زرگر|گالری|مجوهرات|ذهب|صياغ|صائغ/i
-  : groupType.startsWith("watch_")
-    ? /ساعت|ساعات|watch/i
-    : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
+  ? /طلا|جواهر|زرگر|گالری|مجوهرات|ذهب|صياغ|صياغة|صائغ|محل ذهب|gold|jewel/i
+  : groupType.startsWith("perfume_")
+    ? /عطر|عطور|ادکلن|عطر فروشی|محل عطور|برفان|perfume|parfum/i
+    : groupType.startsWith("watch_")
+      ? /ساعت|ساعات|watch/i
+      : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
 const strongRelevance=`${title} ${uu.hostname} ${uu.pathname}`.match(marketPattern);
 const marketHits=(plain.match(new RegExp(marketPattern.source,"gi"))||[]).length;
-const countryPattern=/ایران|ایرانی|Iran|Iranian|عراق|عراقي|العراق|Iraq|Iraqi|\+98|\+964/i;
-const localLanguagePattern=/[\u0600-\u06FF]/;
-const localDomain=/(\.ir|\.iq)$/i.test(uu.hostname);
+const countryPattern=groupType.endsWith("_ar")
+  ? /عراق|عراقي|العراق|Iraq|Iraqi|بغداد|بغداد|أربيل|اربيل|البصرة|النجف|كربلاء|\+964/i
+  : /ایران|ایرانی|Iran|Iranian|تهران|اصفهان|شیراز|مشهد|تبریز|\+98/i;
+
+const localLanguagePattern=groupType.endsWith("_ar")
+  ? /[\u0600-\u06FF]/
+  : /[\u0600-\u06FF]/;
+
+const localDomain=groupType.endsWith("_ar")
+  ? /\.iq$/i.test(uu.hostname)
+  : /\.ir$/i.test(uu.hostname);
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
 if(spamPattern.test(relevanceText)) continue;
-if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.test(relevanceText)) continue;
+if(!localDomain && !countryPattern.test(relevanceText)) continue;
           if(!strongRelevance && marketHits<1) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
 const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?/i.test(uu.pathname);    
