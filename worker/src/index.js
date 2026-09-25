@@ -3555,13 +3555,15 @@ const marketPattern=groupType.startsWith("gold_")
 const strongRelevance=`${title} ${uu.hostname} ${uu.pathname}`.match(marketPattern);
 const marketHits=(plain.match(new RegExp(marketPattern.source,"gi"))||[]).length;
 const countryPattern=/ایران|ایرانی|Iran|Iranian|عراق|عراقي|العراق|Iraq|Iraqi|\+98|\+964/i;
+const localLanguagePattern=/[\u0600-\u06FF]/;
 const localDomain=/(\.ir|\.iq)$/i.test(uu.hostname);
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
 if(spamPattern.test(relevanceText)) continue;
-if(!localDomain && !countryPattern.test(relevanceText)) continue;
-          if(!strongRelevance && marketHits<2) continue;
+if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.test(relevanceText)) continue;
+          if(!strongRelevance && marketHits<1) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
-if(!adHit && !/(\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?)/i.test(uu.pathname)) continue;
+const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?/i.test(uu.pathname);
+if(!adHit && !contactPath) continue;
           const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية|contact|contact us|advertis|advertising|media kit|sponsor|sponsorship|collaboration|partnership)[^<]*</i);
 let contactUrl=null;
 if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
@@ -3569,7 +3571,11 @@ if(!contactUrl){
   const fallback=tx.match(/href=["']([^"']*(?:contact|advertis|media-kit|sponsor|collab)[^"']*)["']/i);
   if(fallback){try{contactUrl=new URL(fallback[1],href).toString()}catch{}}
 }
-        if(!contactUrl) continue; 
+ if(!contactUrl){
+  const mail=tx.match(/href=["'](mailto:[^"']+)["']/i);
+  if(mail) contactUrl=mail[1];
+}
+          if(!contactUrl) continue; 
           const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
           const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
