@@ -3635,9 +3635,7 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
               }catch{}
             }
           }
-
-          if(!contactUrl && !adHit && !contactPath) continue;
-          if(!contactUrl) continue; 
+          if(!contactUrl && !adHit && !contactPath) continue; 
           const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
           const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
