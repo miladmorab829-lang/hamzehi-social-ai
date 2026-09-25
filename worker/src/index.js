@@ -3548,10 +3548,11 @@ if(!localDomain && !countryPattern.test(relevanceText)) continue;
           if(!strongRelevance && marketHits<2) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
 if(!adHit) continue;
-          const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
+          
           const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية|contact|contact us|advertis|advertising|media kit|sponsor|sponsorship|collaboration|partnership)[^<]*</i);
           let contactUrl=null; if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
         if(!contactUrl) continue; 
+          const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
           const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1000),contact_url:contactUrl,score,updated_by:"autopilot"};
           let id;
@@ -3568,7 +3569,7 @@ if(!adHit) continue;
         const lead=await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(item.id).first(); if(!lead)continue;
         let meta={};try{meta=JSON.parse(lead.notes||"{}")}catch{}
         if(meta.negotiation_draft)continue;
-        const prompt=`Create a concise ${String(item.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B advertising/collaboration outreach draft for HAMZEHI BOX. Source: ${sourceSite}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Audience: jewelry shops, watch stores, fashion-jewelry sellers. Do not invent facts. Ask about ad formats, audience, placement, duration, price and contact person. Draft only, under 700 characters.`;
+        const prompt=`Create a concise ${String(item.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B advertising/collaboration outreach draft for HAMZEHI BOX. Source: ${sourceSite}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Advertising contact page: ${meta.contact_url||"available"}. Audience: jewelry shops, watch stores, fashion-jewelry sellers in Iran and Iraq. Do not invent facts. Ask about available ad formats, audience, placement, duration, price and contact person. Draft only, under 700 characters.`;
         const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
         const d=await r.json().catch(()=>({})); if(!r.ok)continue; const draft=responseText(d).trim(); if(!draft)continue;
         meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="authorized_channel_only";meta.next_followup_at=new Date(Date.now()+48*60*60*1000).toISOString();meta.followup_status="scheduled";
