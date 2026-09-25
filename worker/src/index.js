@@ -3546,9 +3546,9 @@ const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قما
 if(spamPattern.test(relevanceText)) continue;
 if(!localDomain && !countryPattern.test(relevanceText)) continue;
           if(!strongRelevance && marketHits<2) continue;
-          const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا/i.test(plain);
+          const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
 const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
-          const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية)[^<]*</i);
+          const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية|contact|contact us|advertis|advertising|media kit|sponsor|sponsorship|collaboration|partnership)[^<]*</i);
           let contactUrl=null; if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
           const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1000),contact_url:contactUrl,score,updated_by:"autopilot"};
@@ -3806,7 +3806,7 @@ await pollWeeklyVideoAutopilot(env);
             const meta=parseLeadNotes(lead),at=meta.next_followup_at||meta.followup_at;
             if(!at||!Date.parse(at)||Date.parse(at)>nowMs||meta.followup_draft||!env.OPENAI_API_KEY) continue;
             try{
-              const prompt=`Write a short polite Persian B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;
+             const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;
               const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);
               const d=await r.json().catch(()=>({})); if(!r.ok) continue; const draft=responseText(d).trim(); if(!draft) continue;
               meta.followup_draft=draft; meta.followup_prepared_at=now(); meta.next_followup_at=null; meta.followup_at=at; meta.followup_status="prepared";
@@ -3826,7 +3826,7 @@ await pollWeeklyVideoAutopilot(env);
           for(const lead of (rows.results||[])){const meta=parseLeadNotes(lead);const at=meta.next_followup_at||meta.followup_at;if(at&&Date.parse(at)&&Date.parse(at)<=nowMs&&!meta.followup_draft&&! ["customer","converted","rejected","archived"].includes(lead.stage)) due.push({lead,meta});}
           for(const {lead,meta} of due.slice(0,AD_MAX_DRAFTS_PER_RUN)){
             if(!env.OPENAI_API_KEY) break;
-            try{const prompt=`Write a short polite Persian B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);const d=await r.json().catch(()=>({}));if(!r.ok)continue;const draft=responseText(d).trim();if(!draft)continue;meta.followup_draft=draft;meta.followup_prepared_at=now();meta.next_followup_at=null;meta.followup_status="prepared";await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),lead.id).run();}catch{}}
+            try{const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);const d=await r.json().catch(()=>({}));if(!r.ok)continue;const draft=responseText(d).trim();if(!draft)continue;meta.followup_draft=draft;meta.followup_prepared_at=now();meta.next_followup_at=null;meta.followup_status="prepared";await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),lead.id).run();}catch{}}
           await audit(env,"ad_followups_scheduled","Daily advertising follow-up sweep completed",{due:due.length});
         } catch {}
       })());
@@ -4597,9 +4597,9 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         ];
         const groups=type==="all"?allGroups:allGroups.filter(x=>x[0]===type);
         const all = [], seen = new Set(), t = now();
-        for (const [type, term] of groups) {
-          const q = [term, city, extra].filter(Boolean).join(" ");
-          const discovery = await discoverWebLinks(q, 6);
+        for (const [groupType, term] of groups) {
+  const q = [term, "ایران عراق Iran Iraq", city, extra].filter(Boolean).join(" ");
+  const discovery = await discoverWebLinks(q, 6);
           const links = discovery.links;
           for (const url of links) {
             if (seen.has(url)) continue; seen.add(url);
@@ -4608,13 +4608,17 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
               const tx = (await rr.text()).slice(0, 140000);
               const title = (tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || url).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 140);
               const plain = tx.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+              const relevanceText=`${title} ${url} ${plain}`;
+const countryPattern=/ایران|ایرانی|Iran|Iranian|عراق|عراقي|العراق|Iraq|Iraqi|\+98|\+964/i;
+const localDomain=/(\.ir|\.iq)$/i.test(new URL(url).hostname);
+if(!localDomain&&!countryPattern.test(relevanceText)) continue;
               const hit = /Ø·ÙØ§|Ø¬ÙØ§ÙØ±|Ø³Ø§Ø¹Øª|Ø¨Ø¯ÙÛ|gold|jewel|watch|accessor/i.test(plain);
               if (!hit) continue;
               const adHit = /ØªØ¨ÙÛØº|advertis|sponsor|Ø±Ù¾ÙØ±ØªØ§Ú|ØªÙØ§Ø³ Ø¨Ø§ ÙØ§|contact us|media kit|ÙÙÚ©Ø§Ø±Û/i.test(plain);
               const score = Math.min(100, 55 + (adHit ? 25 : 0) + (city && plain.includes(city) ? 10 : 0));
               const cm = tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
               let contactUrl = null; if (cm) { try { contactUrl = new URL(cm[1], url).toString(); } catch {} }
-              const notes = { source:"ad_discovery", ad_target:true, source_site:sourceSite, type, city, query:q, url, evidence:plain.slice(0,900), contact_url:contactUrl, discovered_at:t, score, automation:"auto_campaign_v1" };
+              const notes = { source:"ad_discovery", ad_target:true, source_site:sourceSite, type:groupType, city, query:q, url, evidence:plain.slice(0,900), contact_url:contactUrl, discovered_at:t, score, automation:"auto_campaign_v1" };
               const existing = await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(url).first();
               let id;
               if (existing) {
@@ -4626,7 +4630,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
                 id = uid();
                 await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,url,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(notes),t,t).run();
               }
-              all.push({ id, name:title, type, url, contact_url:contactUrl, score });
+              all.push({ id, name:title, type:groupType, url, contact_url:contactUrl, score });
             } catch {}
           }
         }
@@ -4770,7 +4774,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
           if(meta.followup_draft){skipped++;continue;}
           if(!env.OPENAI_API_KEY){skipped++;continue;}
           try{
-            const prompt=`Write a short polite Persian B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;
+            const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;
             const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
             const d=await r.json().catch(()=>({})); if(!r.ok) {skipped++;continue;}
             const draft=responseText(d).trim(); if(!draft){skipped++;continue;}
