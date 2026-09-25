@@ -3515,12 +3515,13 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   const items=[],seen=new Set(),started=now();
  
   for(const [groupType,term] of groups){
+   let groupItems=0;
     const q=[term,"ایران عراق Iran Iraq",city,extra].filter(Boolean).join(" ");
     try{
       const discovery=await discoverWebLinks(q,6);
       if(discovery.diagnostics?.length) summary.provider_checks.push({query:q,checks:discovery.diagnostics});
       for(const href of discovery.links){
-        if(items.length>=30) break;
+        if(items.length>=30 || groupItems>=5) break;
         const safeHref=safeHttpUrl(href); if(!safeHref) continue;
         let uu; try{uu=new URL(safeHref); const key=uu.origin; if(seen.has(key))continue; seen.add(key);}catch{continue}
         try{
@@ -3554,7 +3555,7 @@ const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
           let id;
           if(old){id=old.id;let om={};try{om=JSON.parse(old.notes||"{}")}catch{};Object.assign(om,meta);await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low",JSON.stringify(om),now(),id).run();summary.updated++;}
           else{id=uid();await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,href,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(meta),now(),now()).run();summary.new_leads++;}
-          summary.found++;items.push({id,name:title,type:groupType,url:href,contact_url:contactUrl,score,ad_opportunity:adHit});
+          summary.found++;groupItems++;items.push({id,name:title,type:groupType,url:href,contact_url:contactUrl,score,ad_opportunity:adHit});
         }catch{summary.errors++;}
       }
     }catch{summary.errors++;}
