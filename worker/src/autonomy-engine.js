@@ -344,7 +344,17 @@ export async function handleAutonomy(env,req){
   const c=await controls(env),events=await env.DB.prepare("SELECT * FROM autonomy_events ORDER BY created_at DESC LIMIT 30").all(),tasks=await env.DB.prepare("SELECT module,action,status,priority,error,updated_at FROM autonomy_tasks ORDER BY updated_at DESC LIMIT 30").all();
   return Response.json({ok:true,brain:{mission:"Operate independently until MASTER OFF; observe, plan, execute allowed work, verify results and learn.",controls:c,revenue:await revenue(env),active_tasks:tasks.results||[],timeline:events.results||[]}});
  }
- if(u.pathname==="/api/autonomy/opportunities")return Response.json({ok:true,items:(await env.DB.prepare("SELECT id,name,contact,stage,priority,notes,updated_at FROM leads WHERE stage NOT IN ('customer','converted','rejected','archived') AND (notes LIKE '%\"source\":\"ad_autopilot\"%' OR notes LIKE '%\"source\":\"instagram_hashtag_discovery\"%' OR notes LIKE '%\"ad_opportunity\":true%' OR notes LIKE '%\"contact_url\":\"http%') ORDER BY updated_at DESC LIMIT 50").all()).results||[]});
+ if(u.pathname==="/api/autonomy/opportunities"){
+ const r=await env.DB.prepare("SELECT id,name,contact,stage,priority,notes,updated_at FROM leads WHERE stage NOT IN ('customer','converted','rejected','archived') AND (notes LIKE '%\"source\":\"ad_autopilot\"%' OR notes LIKE '%\"source\":\"instagram_hashtag_discovery\"%' OR notes LIKE '%\"ad_opportunity\":true%' OR notes LIKE '%\"contact_url\":\"http%') ORDER BY updated_at DESC LIMIT 200").all();
+ const spam=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
+ const market=/طلا|جواهر|زرگر|گالری|مجوهرات|ذهب|صياغ|صائغ|ساعت|ساعات|watch|بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
+ const items=(r.results||[]).filter(x=>{
+  let m={};try{m=JSON.parse(x.notes||"{}")}catch{}
+  const text=[x.name,x.contact,m.type,m.evidence,m.url].filter(Boolean).join(" ");
+  return !spam.test(text)&&market.test(text);
+ }).slice(0,50);
+ return Response.json({ok:true,items});
+}
  if(u.pathname==="/api/autonomy/revenue")return Response.json(await revenue(env));
  if(u.pathname==="/api/autonomy/errors"){
   const r=await env.DB.prepare("SELECT * FROM retry_queue ORDER BY updated_at DESC LIMIT 50").all(),t=await env.DB.prepare("SELECT * FROM autonomy_tasks WHERE status='failed' ORDER BY updated_at DESC LIMIT 50").all();return Response.json({ok:true,retries:r.results||[],tasks:t.results||[]});
