@@ -3563,18 +3563,65 @@ if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.
           if(!strongRelevance && marketHits<1) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
 const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?/i.test(uu.pathname);
-if(!adHit && !contactPath) continue;
+          const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
+
+          const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?/i.test(uu.pathname);
+
+          let contactUrl=null;
+
           const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية|contact|contact us|advertis|advertising|media kit|sponsor|sponsorship|collaboration|partnership)[^<]*</i);
-let contactUrl=null;
-if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
-if(!contactUrl){
-  const fallback=tx.match(/href=["']([^"']*(?:contact|advertis|media-kit|sponsor|collab)[^"']*)["']/i);
-  if(fallback){try{contactUrl=new URL(fallback[1],href).toString()}catch{}}
-}
- if(!contactUrl){
-  const mail=tx.match(/href=["'](mailto:[^"']+)["']/i);
-  if(mail) contactUrl=mail[1];
-}
+
+          if(cm){
+            try{
+              const candidate=new URL(cm[1],href).toString();
+              if(/^https?:$/i.test(new URL(candidate).protocol)) contactUrl=candidate;
+            }catch{}
+          }
+
+          if(!contactUrl){
+            const fallback=tx.match(/href=["']([^"']*(?:contact|advertis|media-kit|sponsor|collab)[^"']*)["']/i);
+            if(fallback){
+              try{
+                const candidate=new URL(fallback[1],href).toString();
+                if(/^https?:$/i.test(new URL(candidate).protocol)) contactUrl=candidate;
+              }catch{}
+            }
+          }
+
+          if(!contactUrl){
+            const mail=tx.match(/href=["'](mailto:[^"']+)["']/i);
+            if(mail) contactUrl=mail[1];
+          }
+
+          if(!contactUrl){
+            const base=new URL(href);
+            const contactPaths=[
+              "/contact",
+              "/contact-us",
+              "/advertising",
+              "/media-kit",
+              "/sponsorship"
+            ];
+
+            for(const path of contactPaths){
+              try{
+                const candidate=new URL(path,base.origin).toString();
+                const probe=await fetchWithRetry(
+                  candidate,
+                  {headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}},
+                  1,
+                  AD_FETCH_TIMEOUT_MS
+                );
+
+                if(probe.ok){
+                  contactUrl=candidate;
+                  break;
+                }
+              }catch{}
+            }
+          }
+
+          if(!contactUrl && !adHit && !contactPath) continue;
           if(!contactUrl) continue; 
           const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
