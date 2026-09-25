@@ -3514,7 +3514,7 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,provider_checks:[]};
   const items=[],seen=new Set(),started=now();
  const requestedType = type;
-  for(const [type,term] of groups){
+  for(const [groupType,term] of groups){
     const q=[term,city,extra].filter(Boolean).join(" ");
     try{
       const discovery=await discoverWebLinks(q,6);
@@ -3530,9 +3530,9 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
 const relevanceText=`${title} ${uu.hostname} ${uu.pathname} ${plain}`;
 
-const marketPattern=type.startsWith("gold_")
+const marketPattern=groupType.startsWith("gold_")
   ? /طلا|جواهر|زرگر|گالری|مجوهرات|ذهب|صياغ|صائغ/i
-  : type.startsWith("watch_")
+  : groupType.startsWith("watch_")
     ? /ساعت|ساعات|watch/i
     : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
 
@@ -3548,11 +3548,11 @@ const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
           const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية)[^<]*</i);
           let contactUrl=null; if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
-          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type,city,query:q,url:href,evidence:plain.slice(0,1000),contact_url:contactUrl,score,updated_by:"autopilot"};
+          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1000),contact_url:contactUrl,score,updated_by:"autopilot"};
           let id;
           if(old){id=old.id;let om={};try{om=JSON.parse(old.notes||"{}")}catch{};Object.assign(om,meta);await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low",JSON.stringify(om),now(),id).run();summary.updated++;}
           else{id=uid();await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,href,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(meta),now(),now()).run();summary.new_leads++;}
-          summary.found++;items.push({id,name:title,type,url:href,contact_url:contactUrl,score,ad_opportunity:adHit});
+          summary.found++;items.push({id,name:title,type:groupType,url:href,contact_url:contactUrl,score,ad_opportunity:adHit});
         }catch{summary.errors++;}
       }
     }catch{summary.errors++;}
