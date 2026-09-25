@@ -3575,7 +3575,7 @@ const localDomain=groupType.endsWith("_ar")
   : /\.ir$/i.test(uu.hostname);
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
 if(spamPattern.test(relevanceText)) continue;
-if(!localDomain && !countryPattern.test(relevanceText)) continue;
+if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.test(relevanceText)) continue;
           if(!strongRelevance && marketHits<1) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
 const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?/i.test(uu.pathname);    
