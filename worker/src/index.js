@@ -4,7 +4,37 @@ const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
 };
+function repairMojibake(value) {
+  if (typeof value !== "string") return value;
 
+  if (!/[ØÙÚÛÃÂÐÑ]/.test(value)) return value;
+
+  try {
+    const bytes = Uint8Array.from(value, ch => ch.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return value;
+  }
+}
+
+function repairMojibakeDeep(value) {
+  if (typeof value === "string") return repairMojibake(value);
+
+  if (Array.isArray(value)) {
+    return value.map(repairMojibakeDeep);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [
+        k,
+        repairMojibakeDeep(v)
+      ])
+    );
+  }
+
+  return value;
+}
 const json = (x, s = 200) => {
   return new Response(JSON.stringify(x), {
     status: s,
