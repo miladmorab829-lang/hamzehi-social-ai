@@ -588,7 +588,11 @@ async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks|
 async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
 let wmMode="all";
 let wmLeads=[];
+let wmEvents=[];
 
+function wmEventDetails(x){
+  try{return JSON.parse(x?.details_json||"{}")}catch{return{}}
+}
 function wmNotes(x){
   try{return JSON.parse(x?.notes||"{}")}catch{return{}}
 }
@@ -623,6 +627,10 @@ function wmShowLead(id){
   if(!x)return;
 
   const n=wmNotes(x);
+  const history=wmEvents.filter(ev=>{
+  const d=wmEventDetails(ev);
+  return String(d.lead_id||"")===String(x.id);
+});
   const box=document.createElement("div");
 
   box.style.cssText=
@@ -645,6 +653,21 @@ function wmShowLead(id){
     "<div class='row'><b>NEXT FOLLOW-UP</b><div>"+esc(n.next_followup_at||n.followup_at||"—")+"</div></div>"+
     "<div class='row'><b>CREATED</b><div>"+esc(x.created_at||"—")+"</div></div>"+
     "<div class='row'><b>UPDATED</b><div>"+esc(x.updated_at||"—")+"</div></div>"+
+    "<div class='row' style='margin-top:12px'>"+
+"<b>ACTIVITY HISTORY</b>"+
+"<div style='margin-top:8px'>"+
+(
+history.length
+? history.map(ev=>
+  "<div class='row'>"+
+  "<b>"+esc(ev.type||"EVENT")+"</b>"+
+  "<div class='mini'>"+esc(ev.message||"")+"</div>"+
+  "<small>"+esc(ev.created_at||"")+"</small>"+
+  "</div>"
+).join("")
+: "<div class='hint'>برای این مشتری هنوز فعالیت مستقیمی در Event Log ثبت نشده است.</div>"
+)+
+"</div></div>"+
     "</div>";
 
   document.body.appendChild(box);
@@ -664,12 +687,12 @@ async function loadWebsiteMonitor(){
       api("/api/ads/overview")
     ]);
 
-    wmLeads=l.items||[];
-    const events=(e.items||[]).filter(x=>{
-      const s=(String(x.type||"")+" "+String(x.message||"")).toLowerCase();
-      return /website|lead|ad_|negotiat|followup|customer|discovery|outreach|campaign|error|failed/.test(s);
-    });
+  wmEvents=e.items||[];
 
+const events=wmEvents.filter(x=>{
+  const s=(String(x.type||"")+" "+String(x.message||"")).toLowerCase();
+  return /website|lead|ad_|negotiat|followup|customer|discovery|outreach|campaign|error|failed/.test(s);
+});
     $("wmLeads").textContent=wmLeads.length;
     $("wmOpportunities").textContent=o.metrics?.ad_opportunities??wmLeads.filter(wmOpportunity).length;
     $("wmNegotiations").textContent=o.metrics?.negotiation??wmLeads.filter(wmNegotiation).length;
