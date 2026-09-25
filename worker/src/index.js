@@ -3525,7 +3525,7 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   const groups=type==="all"
   ?allGroups
   :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`);
-  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,provider_checks:[]};
+  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,provider_checks:[],error_details:[]};
   const items=[],seen=new Set(),started=now();
  
   for(const [groupType,term] of groups){
@@ -3577,9 +3577,9 @@ if(!contactUrl){
           if(old){id=old.id;let om={};try{om=JSON.parse(old.notes||"{}")}catch{};Object.assign(om,meta);await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low",JSON.stringify(om),now(),id).run();summary.updated++;}
           else{id=uid();await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,href,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(meta),now(),now()).run();summary.new_leads++;}
           summary.found++;groupItems++;items.push({id,name:title,type:groupType,url:href,contact_url:contactUrl,score,ad_opportunity:adHit});
-        }catch{summary.errors++;}
+        }catch(e){summary.errors++;if(summary.error_details.length<20)summary.error_details.push({group:groupType,url:href,error:String(e?.message||e).slice(0,300)});}
       }
-    }catch{summary.errors++;}
+   }catch(e){summary.errors++;if(summary.error_details.length<20)summary.error_details.push({group:groupType,query:q,error:String(e?.message||e).slice(0,300)});}
   }
   if(env.OPENAI_API_KEY){
     for(const item of items.slice(0,AD_MAX_DRAFTS_PER_RUN)){
