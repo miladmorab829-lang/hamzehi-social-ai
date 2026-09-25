@@ -5,19 +5,46 @@ const H = {
   "Cache-Control": "no-store"
 };
 
-const json = (x, s = 200) => {
-  const text = JSON.stringify(x).replace(/[^\x00-\x7F]/g, c => {
-    const cp = c.codePointAt(0);
-    if (cp <= 0xFFFF) return "\\u" + cp.toString(16).padStart(4, "0");
-    const n = cp - 0x10000;
-    const hi = 0xD800 + (n >> 10);
-    const lo = 0xDC00 + (n & 0x3FF);
-    return "\\u" + hi.toString(16).padStart(4, "0") +
-           "\\u" + lo.toString(16).padStart(4, "0");
-  });
-  return new Response(text, { status: s, headers: H });
-};
+function repairMojibake(value) {
+  if (typeof value !== "string") return value;
 
+  if (!/[ØÙÚÛÃÂÐÑ]/.test(value)) return value;
+
+  try {
+    const bytes = Uint8Array.from(value, ch => ch.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return value;
+  }
+}
+
+function repairMojibakeDeep(value) {
+  if (typeof value === "string") return repairMojibake(value);
+
+  if (Array.isArray(value)) {
+    return value.map(repairMojibakeDeep);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [
+        k,
+        repairMojibakeDeep(v)
+      ])
+    );
+  }
+
+  return value;
+}
+
+const json = (x, s = 200) => {
+  const clean = repairMojibakeDeep(x);
+
+  return new Response(JSON.stringify(clean), {
+    status: s,
+    headers: H
+  });
+};
 const uid = () => crypto.randomUUID();
 const now = () => new Date().toISOString();
 
@@ -3810,7 +3837,7 @@ await pollWeeklyVideoAutopilot(env);
 
     try {
       if (req.method === "GET" && u.pathname === "/dashboard") {
-        return new Response(liveDashboardHtml(), {
+        return new Response(repairMojibake(liveDashboardHtml()), {
           status: 200,
           headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
         });
