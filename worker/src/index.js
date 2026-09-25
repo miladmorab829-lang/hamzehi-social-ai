@@ -3515,7 +3515,7 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   const items=[],seen=new Set(),started=now();
  
   for(const [groupType,term] of groups){
-    const q=[term,city,extra].filter(Boolean).join(" ");
+    const q=[term,"ایران عراق Iran Iraq",city,extra].filter(Boolean).join(" ");
     try{
       const discovery=await discoverWebLinks(q,6);
       if(discovery.diagnostics?.length) summary.provider_checks.push({query:q,checks:discovery.diagnostics});
@@ -3538,11 +3538,13 @@ const marketPattern=groupType.startsWith("gold_")
 
 const strongRelevance=`${title} ${uu.hostname} ${uu.pathname}`.match(marketPattern);
 const marketHits=(plain.match(marketPattern)||[]).length;
-
+const countryPattern=/ایران|ایرانی|Iran|Iranian|عراق|عراقي|العراق|Iraq|Iraqi|\+98|\+964/i;
+const localDomain=/(\.ir|\.iq)$/i.test(uu.hostname);ج
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
 
 if(spamPattern.test(relevanceText)) continue;
-if(!strongRelevance && marketHits<2) continue;
+if(!localDomain && !countryPattern.test(relevanceText)) continue;
+          if(!strongRelevance && marketHits<2) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا/i.test(plain);
 const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
           const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية)[^<]*</i);
