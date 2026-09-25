@@ -3553,7 +3553,7 @@ const marketPattern=groupType.startsWith("gold_")
     ? /ساعت|ساعات|watch/i
     : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
 const strongRelevance=`${title} ${uu.hostname} ${uu.pathname}`.match(marketPattern);
-const marketHits=(plain.match(marketPattern)||[]).length;
+const marketHits=(plain.match(new RegExp(marketPattern.source,"gi"))||[]).length;
 const countryPattern=/ایران|ایرانی|Iran|Iranian|عراق|عراقي|العراق|Iraq|Iraqi|\+98|\+964/i;
 const localDomain=/(\.ir|\.iq)$/i.test(uu.hostname);
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
