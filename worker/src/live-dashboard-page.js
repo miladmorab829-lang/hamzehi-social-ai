@@ -751,7 +751,7 @@ const events=wmEvents.filter(x=>{
     box.innerHTML="<div class='bad'>✕ "+esc(err.message||"Monitor error")+"</div>";
   }
 }
-async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadWebsiteMonitor()])}
+async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety()])}
 updateTokenUI();refreshAll();loadDiagnostic();setInterval(refreshAll,15000);
 </script></body></html>`;
 }
