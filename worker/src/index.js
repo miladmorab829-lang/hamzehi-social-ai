@@ -3393,18 +3393,26 @@ function leadIntelligence(lead) {
   const stage=String(lead?.stage||'new');
   const text=[lead?.name,lead?.contact,meta.evidence,meta.type,meta.city].filter(Boolean).join(' ').toLowerCase();
   const factors=[]; let score=0;
-  if(meta.ad_target){score+=20;factors.push('ÙØ¯Ù ØªØ¨ÙÛØºØ§ØªÛ')}
-  if(meta.ad_opportunity || meta.contact_url){score+=20;factors.push('ÙØ±ØµØª/Ø±Ø§Ù ØªÙØ§Ø³')}
-  if(meta.negotiation_draft){score+=15;factors.push('Ù¾ÛØ´âÙÙÛØ³ ÙØ°Ø§Ú©Ø±Ù')}
-  if(meta.followup_draft){score+=10;factors.push('Ù¾ÛÚ¯ÛØ±Û Ø¢ÙØ§Ø¯Ù')}
-  if(['replied','negotiation'].includes(stage)){score+=15;factors.push('ØªØ¹Ø§ÙÙ ÙØ¹Ø§Ù')}
-  if(meta.evidence){score+=Math.min(10,Math.ceil(String(meta.evidence).length/100));factors.push('Ø´ÙØ§ÙØ¯ Ø³Ø§ÛØª')}
-  if(/Ø·ÙØ§|Ø¬ÙØ§ÙØ±|gold|jewel/.test(text)){score+=5;factors.push('ØªÙØ§Ø³Ø¨ Ø·ÙØ§/Ø¬ÙØ§ÙØ±')}
-  if(/Ø³Ø§Ø¹Øª|watch/.test(text)){score+=5;factors.push('ØªÙØ§Ø³Ø¨ Ø³Ø§Ø¹Øª')}
-  if(/Ø¨Ø¯ÙÛ|Ø§Ú©Ø³Ø³ÙØ±Û|fashion|accessor/.test(text)){score+=5;factors.push('ØªÙØ§Ø³Ø¨ Ø¨Ø¯ÙÛØ¬Ø§Øª')}
-  if(stage==='customer'||stage==='converted')score=100;
-  score=Math.max(0,Math.min(100,Math.round(score)));
-  const action=stage==='customer'||stage==='converted'?'ÙØ´ØªØ±Û Ø­ÙØ¸ Ø´ÙØ¯':(meta.followup_draft?'Ø§Ø±Ø³Ø§Ù/Ø¨Ø±Ø±Ø³Û Ù¾ÛÚ¯ÛØ±Û Ø¨Ø§ ØªØ£ÛÛØ¯':(meta.negotiation_draft?'Ø¨Ø±Ø±Ø³Û Ù Ø§Ø±Ø³Ø§Ù ÙØ°Ø§Ú©Ø±Ù Ø¨Ø§ ØªØ£ÛÛØ¯':(meta.contact_url?'Ø¨Ø±Ø±Ø³Û ÙØ³ÛØ± ØªÙØ§Ø³':'Ø¨Ø±Ø±Ø³Û Lead')));
+if(meta.ad_target){score+=20;factors.push("\u0647\u062f\u0641 \u062a\u0628\u0644\u06cc\u063a\u0627\u062a\u06cc")}
+if(meta.ad_opportunity || meta.contact_url){score+=20;factors.push("\u0641\u0631\u0635\u062a/\u0631\u0627\u0647 \u062a\u0645\u0627\u0633")}
+if(meta.negotiation_draft){score+=15;factors.push("\u067e\u06cc\u0634\u200c\u0646\u0648\u06cc\u0633 \u0645\u0630\u0627\u06a9\u0631\u0647")}
+if(meta.followup_draft){score+=10;factors.push("\u067e\u06cc\u06af\u06cc\u0631\u06cc \u0622\u0645\u0627\u062f\u0647")}
+if(['replied','negotiation'].includes(stage)){score+=15;factors.push("\u062a\u0639\u0627\u0645\u0644 \u0641\u0639\u0627\u0644")}
+if(meta.evidence){score+=Math.min(10,Math.ceil(String(meta.evidence).length/100));factors.push("\u0634\u0648\u0627\u0647\u062f \u0633\u0627\u06cc\u062a")}
+if(/\u0637\u0644\u0627|\u062c\u0648\u0627\u0647\u0631|gold|jewel/.test(text)){score+=5;factors.push("\u062a\u0646\u0627\u0633\u0628 \u0637\u0644\u0627/\u062c\u0648\u0627\u0647\u0631")}
+if(/\u0633\u0627\u0639\u062a|watch/.test(text)){score+=5;factors.push("\u062a\u0646\u0627\u0633\u0628 \u0633\u0627\u0639\u062a")}
+if(/\u0628\u062f\u0644\u06cc|\u0627\u06a9\u0633\u0633\u0648\u0631\u06cc|fashion|accessor/.test(text)){score+=5;factors.push("\u062a\u0646\u0627\u0633\u0628 \u0628\u062f\u0644\u06cc\u062c\u0627\u062a")}
+if(stage==='customer'||stage==='converted')score=100;
+score=Math.max(0,Math.min(100,Math.round(score)));
+const action=stage==='customer'||stage==='converted'
+  ?"\u0645\u0634\u062a\u0631\u06cc \u062d\u0641\u0638 \u0634\u0648\u062f"
+  :(meta.followup_draft
+    ?"\u0627\u0631\u0633\u0627\u0644/\u0628\u0631\u0631\u0633\u06cc \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0628\u0627 \u062a\u0623\u06cc\u06cc\u062f"
+    :(meta.negotiation_draft
+      ?"\u0628\u0631\u0631\u0633\u06cc \u0648 \u0627\u0631\u0633\u0627\u0644 \u0645\u0630\u0627\u06a9\u0631\u0647 \u0628\u0627 \u062a\u0623\u06cc\u06cc\u062f"
+      :(meta.contact_url
+        ?"\u0628\u0631\u0631\u0633\u06cc \u0645\u0633\u06cc\u0631 \u062a\u0645\u0627\u0633"
+        :"\u0628\u0631\u0631\u0633\u06cc Lead")));
   return {score,factors,action,type:meta.type||null,ad_opportunity:!!(meta.ad_opportunity||meta.contact_url),contact_url:meta.contact_url||null,domain:meta.url?(()=>{try{return new URL(meta.url).hostname.replace(/^www\./,'')}catch{return null}})():null};
 }
 
@@ -3494,7 +3502,7 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
           const tx=(await rr.text()).slice(0,100000);
           const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
-const relevanceText=`${title} ${uu.hostname} ${q} ${plain}`;
+const relevanceText=`${title} ${uu.hostname} ${uu.pathname} ${plain}`;
 if(!/طلا|جواهر|ساعت|بدلی|زیورآلات|ذهب|مجوهرات|ساعات|صياغ|صائغ|اكسسوارات|حلي/i.test(relevanceText)) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا/i.test(plain);
 const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
