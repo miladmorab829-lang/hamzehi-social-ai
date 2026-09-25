@@ -362,48 +362,66 @@ export async function handleAutonomy(env,req){
   }
 
   if(mode!=="delete"){
-   return Response.json({
-    ok:false,
-    error:"mode must be preview or delete"
-   },{status:400});
-  }
+ return Response.json({
+  ok:false,
+  error:"mode must be preview or delete"
+ },{status:400});
+}
 
-  if(b.confirm!=="DELETE_AD_AUTOPILOT"){
-   return Response.json({
-    ok:false,
-    error:"Explicit confirmation required",
-    required:"DELETE_AD_AUTOPILOT",
-    count:candidates.length
-   },{status:400});
-  }
+if(b.confirm!=="DELETE_AD_AUTOPILOT"){
+ return Response.json({
+  ok:false,
+  error:"Explicit confirmation required",
+  required:"DELETE_AD_AUTOPILOT",
+  count:candidates.length
+ },{status:400});
+}
 
-  let deleted=0;
+const ids=Array.isArray(b.ids)
+ ?b.ids.map(x=>String(x||"").trim()).filter(Boolean)
+ :[];
 
-  for(const x of candidates){
-   const r=await env.DB.prepare(
-    "DELETE FROM leads WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')"
-   ).bind(x.id).run();
+const deleteAll=b.all===true;
 
-   deleted+=Number(r.meta?.changes||0);
-  }
+if(!deleteAll&&!ids.length){
+ return Response.json({
+  ok:false,
+  error:"No records selected"
+ },{status:400});
+}
 
-  await event(
-   env,
-   "ad_autopilot_cleanup",
-   "ads",
-   "Deleted Ads Autopilot opportunity records",
-   {
-    requested:candidates.length,
-    deleted
-   }
-  );
+const target=deleteAll
+ ?candidates
+ :candidates.filter(x=>ids.includes(String(x.id)));
 
-  return Response.json({
-   ok:true,
-   mode:"delete",
-   requested:candidates.length,
-   deleted
-  });
+let deleted=0;
+
+for(const x of target){
+ const r=await env.DB.prepare(
+  "DELETE FROM leads WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')"
+ ).bind(x.id).run();
+
+ deleted+=Number(r.meta?.changes||0);
+}
+
+await event(
+ env,
+ "ad_autopilot_cleanup",
+ "ads",
+ "Deleted Ads Autopilot opportunity records",
+ {
+  requested:target.length,
+  deleted,
+  mode:deleteAll?"all":"selected"
+ }
+);
+
+return Response.json({
+ ok:true,
+ mode:deleteAll?"all":"selected",
+ requested:target.length,
+ deleted
+});
  }
   if(u.pathname==="/api/autonomy/module"&&req.method==="POST"){
   const b=await req.json().catch(()=>({})),m=String(b.module||"");if(!MODULES.includes(m))return Response.json({ok:false,error:"Unknown module"},{status:400});
