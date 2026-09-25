@@ -3494,7 +3494,7 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
           const tx=(await rr.text()).slice(0,100000);
           const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
-const relevanceText=`${title} ${uu.hostname} ${plain}`;
+const relevanceText=`${title} ${uu.hostname} ${q} ${plain}`;
 if(!/طلا|جواهر|ساعت|بدلی|زیورآلات|ذهب|مجوهرات|ساعات|صياغ|صائغ|اكسسوارات|حلي/i.test(relevanceText)) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا/i.test(plain);
 const score=Math.min(100,55+(adHit?25:0)+(city&&plain.includes(city)?10:0));
