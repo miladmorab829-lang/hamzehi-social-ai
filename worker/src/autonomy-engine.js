@@ -311,7 +311,7 @@ export async function handleAutonomy(env,req){
  if(!env.ADMIN_TOKEN||req.headers.get("Authorization")!==`Bearer ${env.ADMIN_TOKEN}`)return Response.json({ok:false,error:"Unauthorized"},{status:401});
  const u=new URL(req.url);await ensure(env);
  if(u.pathname==="/api/autonomy/status"){
-  const c=await controls(env),counts=await env.DB.prepare("SELECT status,COUNT(*) n FROM autonomy_tasks GROUP BY status").all(),tasks={};
+   const c=await controls(env),counts=await env.DB.prepare("SELECT status,COUNT(*) n FROM autonomy_tasks GROUP BY status").all(),tasks={};
   for(const x of counts.results||[])tasks[x.status]=Number(x.n||0);
   const locks=await env.DB.prepare("SELECT module,task_id,locked_at FROM autonomy_locks").all();
   return Response.json({ok:true,controls:c,tasks,revenue:await revenue(env),active_locks:locks.results||[],fresh_at:now(),architecture:{global_master_gate:true,independent_module_queues:true,independent_module_locks:true,action_gates:true}});
@@ -321,7 +321,91 @@ export async function handleAutonomy(env,req){
   await setKV(env,"master",a==="on"?"on":a==="pause"?"paused":"off");await event(env,"master_changed",null,`Master changed to ${a}`);
   return Response.json({ok:true,master:a==="on"?"on":a==="pause"?"paused":"off",action:a});
  }
- if(u.pathname==="/api/autonomy/module"&&req.method==="POST"){
+ if(u.pathname==="/api/autonomy/ad-autopilot-cleanup"&&req.method==="POST"){
+  const b=await req.json().catch(()=>({}));
+  const mode=String(b.mode||"preview");
+
+  const rows=await env.DB.prepare(
+   "SELECT id,name,contact,stage,priority,notes,created_at,updated_at FROM leads WHERE stage NOT IN ('customer','converted','rejected','archived') AND notes LIKE '%\"source\":\"ad_autopilot\"%' ORDER BY updated_at DESC"
+  ).all();
+
+  const candidates=[];
+
+  for(const x of rows.results||[]){
+   let m=null;
+   try{m=JSON.parse(x.notes||"{}")}catch{}
+
+   if(m?.source!=="ad_autopilot")continue;
+
+   candidates.push({
+    id:x.id,
+    name:x.name,
+    contact:x.contact,
+    stage:x.stage,
+    priority:x.priority,
+    source:m.source,
+    type:m.type||null,
+    city:m.city||null,
+    url:m.url||null,
+    created_at:x.created_at,
+    updated_at:x.updated_at
+   });
+  }
+
+  if(mode==="preview"){
+   return Response.json({
+    ok:true,
+    mode:"preview",
+    count:candidates.length,
+    items:candidates.slice(0,200)
+   });
+  }
+
+  if(mode!=="delete"){
+   return Response.json({
+    ok:false,
+    error:"mode must be preview or delete"
+   },{status:400});
+  }
+
+  if(b.confirm!=="DELETE_AD_AUTOPILOT"){
+   return Response.json({
+    ok:false,
+    error:"Explicit confirmation required",
+    required:"DELETE_AD_AUTOPILOT",
+    count:candidates.length
+   },{status:400});
+  }
+
+  let deleted=0;
+
+  for(const x of candidates){
+   const r=await env.DB.prepare(
+    "DELETE FROM leads WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')"
+   ).bind(x.id).run();
+
+   deleted+=Number(r.meta?.changes||0);
+  }
+
+  await event(
+   env,
+   "ad_autopilot_cleanup",
+   "ads",
+   "Deleted Ads Autopilot opportunity records",
+   {
+    requested:candidates.length,
+    deleted
+   }
+  );
+
+  return Response.json({
+   ok:true,
+   mode:"delete",
+   requested:candidates.length,
+   deleted
+  });
+ }
+  if(u.pathname==="/api/autonomy/module"&&req.method==="POST"){
   const b=await req.json().catch(()=>({})),m=String(b.module||"");if(!MODULES.includes(m))return Response.json({ok:false,error:"Unknown module"},{status:400});
   const c=await controls(env);c.modules[m]=!!b.enabled;await setKV(env,"modules",JSON.stringify(c.modules));await event(env,"module_changed",m,`${m} ${b.enabled?"enabled":"disabled"}`);
   return Response.json({ok:true,module:m,enabled:c.modules[m]});
