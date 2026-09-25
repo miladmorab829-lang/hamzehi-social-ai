@@ -93,12 +93,15 @@ function extractSearchLinks(html, limit = 12, providerHost = "") {
         href = "https:" + href;
       }
 
-      const parsed = new URL(href, "https://www.bing.com");
+      href = href
+  .replace(/&amp;/g, "&")
+  .replace(/&#38;/g, "&")
+  .replace(/&#x26;/gi, "&");
 
-      if (/bing\.com$/i.test(parsed.hostname) && /^\/ck\/a/i.test(parsed.pathname)) {
-        let encoded = parsed.searchParams.get("u") || "";
-        encoded = encoded.replace(/&amp;/g, "&");
+const parsed = new URL(href, "https://www.bing.com");
 
+if (/bing\.com$/i.test(parsed.hostname) && /^\/ck\/a/i.test(parsed.pathname)) {
+  const encoded = parsed.searchParams.get("u") || "";
         if (encoded) {
           let value = decodeURIComponent(encoded);
           if (value.startsWith("a1")) value = value.slice(2);
