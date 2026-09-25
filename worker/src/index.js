@@ -200,9 +200,12 @@ async function discoverWebLinks(query, limit = 8) {
     `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=12`
   ];
   const diagnostics = [];
+  const merged = [];
+  const seen = new Set();
 
   for (const searchUrl of providers) {
     const host = new URL(searchUrl).hostname;
+
     try {
       const r = await fetchWithRetry(
         searchUrl,
@@ -225,17 +228,31 @@ async function discoverWebLinks(query, limit = 8) {
       const html = await r.text();
       const links = extractSearchLinks(html, limit, host);
 
+      let added = 0;
+
+      for (const link of links) {
+        try {
+          const u = new URL(link);
+          const key = u.origin;
+
+          if (seen.has(key)) continue;
+
+          seen.add(key);
+          merged.push(link);
+          added++;
+
+          if (merged.length >= limit) break;
+        } catch {}
+      }
+
       diagnostics.push({
         provider: host,
         status: r.status,
         ok: true,
         html_length: html.length,
-        extracted_links: links.length
+        extracted_links: links.length,
+        added_links: added
       });
-
-      if (links.length) {
-        return { links, provider: host, diagnostics };
-      }
     } catch (e) {
       diagnostics.push({
         provider: host,
@@ -243,19 +260,18 @@ async function discoverWebLinks(query, limit = 8) {
         ok: false,
         html_length: 0,
         extracted_links: 0,
+        added_links: 0,
         error: String(e?.message || e).slice(0, 180)
       });
     }
   }
-
-  return { links: [], provider: null, diagnostics };
+  return {
+    links: merged.slice(0, limit),
+    provider: diagnostics.filter(x => x.ok && x.added_links > 0).map(x => x.provider),
+    diagnostics
+  };
 }
-class PublishOutcomeUnknown extends Error {
-  constructor(message) { super(message); this.name = "PublishOutcomeUnknown"; }
-}
-
 const UNKNOWN_PUBLISH_AFTER_MS = 10 * 60 * 1000;
-
 // Explicit pipeline contract used by the final audit and health checks.
 // This is metadata only; execution order remains implemented by the existing functions.
 const CONTENT_PIPELINE_STAGES = Object.freeze([
@@ -3349,7 +3365,6 @@ else if(x.operation==='video_generation'){
   if(!media){
     throw Error('Video generation media not found');
   }
-
   if(
     String(media.media_type)==='video' &&
     String(media.status)==='ready'
@@ -3359,7 +3374,6 @@ else if(x.operation==='video_generation'){
     ).bind(now(),x.id).run();
     continue;
   }
-
   const result=await autoProcessContentMedia(
     env,
     contentId,
@@ -3530,31 +3544,27 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
           const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
 const relevanceText=`${title} ${uu.hostname} ${uu.pathname} ${plain}`;
-
 const marketPattern=groupType.startsWith("gold_")
   ? /طلا|جواهر|زرگر|گالری|مجوهرات|ذهب|صياغ|صائغ/i
   : groupType.startsWith("watch_")
     ? /ساعت|ساعات|watch/i
     : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
-
 const strongRelevance=`${title} ${uu.hostname} ${uu.pathname}`.match(marketPattern);
 const marketHits=(plain.match(marketPattern)||[]).length;
 const countryPattern=/ایران|ایرانی|Iran|Iranian|عراق|عراقي|العراق|Iraq|Iraqi|\+98|\+964/i;
 const localDomain=/(\.ir|\.iq)$/i.test(uu.hostname);
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
-
 if(spamPattern.test(relevanceText)) continue;
 if(!localDomain && !countryPattern.test(relevanceText)) continue;
           if(!strongRelevance && marketHits<2) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
 if(!adHit) continue;
-          
           const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:تماس|تماس با ما|تبلیغ|همکاری|تواصل|راسلنا|اتصل|إعلان|دعاية|contact|contact us|advertis|advertising|media kit|sponsor|sponsorship|collaboration|partnership)[^<]*</i);
           let contactUrl=null; if(cm){try{contactUrl=new URL(cm[1],href).toString()}catch{}}
         if(!contactUrl) continue; 
           const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
           const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
-          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1000),contact_url:contactUrl,score,updated_by:"autopilot"};
+          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
           let id;
           if(old){id=old.id;let om={};try{om=JSON.parse(old.notes||"{}")}catch{};Object.assign(om,meta);await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low",JSON.stringify(om),now(),id).run();summary.updated++;}
           else{id=uid();await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,href,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(meta),now(),now()).run();summary.new_leads++;}
