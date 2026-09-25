@@ -36,7 +36,9 @@ function repairMojibakeDeep(value) {
   return value;
 }
 const json = (x, s = 200) => {
-  return new Response(JSON.stringify(x), {
+  const clean = repairMojibakeDeep(x);
+
+  return new Response(JSON.stringify(clean), {
     status: s,
     headers: H
   });
