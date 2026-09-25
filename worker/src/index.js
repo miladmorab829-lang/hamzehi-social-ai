@@ -3513,7 +3513,7 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`);
   const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,provider_checks:[]};
   const items=[],seen=new Set(),started=now();
- const requestedType = type;
+ 
   for(const [groupType,term] of groups){
     const q=[term,city,extra].filter(Boolean).join(" ");
     try{
