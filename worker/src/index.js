@@ -3664,8 +3664,7 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
   await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,found:summary.found,drafted:summary.drafted,errors:summary.errors,started});
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
-async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
-async function discoverGooglePlaces(env, textQuery, limit = 10) {
+async function discoverGooglePlaces(env, textQuery, languageCode = "fa", limit = 10) {
   if (!env.GOOGLE_PLACES_API_KEY) {
     return {
       ok: false,
@@ -3697,7 +3696,7 @@ async function discoverGooglePlaces(env, textQuery, limit = 10) {
     },
     body: JSON.stringify({
       textQuery: textQuery,
-      languageCode: /_ar$/.test(textQuery) ? "ar" : "fa",
+      languageCode,
       pageSize: Math.min(Math.max(Number(limit) || 10, 1), 20)
     }),
     signal: AbortSignal.timeout(12000)
@@ -3736,7 +3735,8 @@ async function discoverGooglePlaces(env, textQuery, limit = 10) {
     items
   };
 } 
-  const source="customer_discovery";
+async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
+const source="customer_discovery";
   const groups=[
     ["gold_fa","طلافروشی طلا جواهر زرگری گالری طلا","ایران"],
     ["perfume_fa","عطر ادکلن عطر فروشی فروشگاه عطر","ایران"],
@@ -3812,6 +3812,7 @@ const q=[
 const googlePlaces = await discoverGooglePlaces(
   env,
   placesQuery,
+  groupType.endsWith("_ar") ? "ar" : "fa",
   10
 );
 
