@@ -3685,12 +3685,13 @@ async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
     :groups.filter(x=>x[0]===type||x[0]===`${type}_fa`||x[0]===`${type}_ar`);
 
   const summary={
-    found:0,
-    new_leads:0,
-    updated:0,
-    skipped:0,
-    errors:0
-  };
+  found:0,
+  new_leads:0,
+  updated:0,
+  skipped:0,
+  errors:0,
+  discovery_diagnostics:[]
+};
   const items=[];
   const seen=new Set();
 
@@ -3703,6 +3704,12 @@ async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
 
     try{
       const discovery=await discoverWebLinks(q,6);
+summary.discovery_diagnostics.push({
+  group:groupType,
+  query:q,
+  providers:discovery.provider||[],
+  diagnostics:discovery.diagnostics||[]
+});
 
       for(const href of discovery.links){
         if(items.length>=40)break;
