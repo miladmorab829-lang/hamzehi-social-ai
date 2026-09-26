@@ -3690,7 +3690,16 @@ async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
   updated:0,
   skipped:0,
   errors:0,
-  discovery_diagnostics:[]
+  discovery_diagnostics:[],
+  filter_diagnostics:{
+    spam:0,
+    marketplace:0,
+    market:0,
+    business:0,
+    country:0,
+    fetch_failed:0,
+    non_html:0
+  }
 };
   const items=[];
   const seen=new Set();
@@ -3734,13 +3743,19 @@ summary.discovery_diagnostics.push({
             AD_FETCH_TIMEOUT_MS
           );
 
-          if(!rr.ok)continue;
+          if(!rr.ok){
+  summary.filter_diagnostics.fetch_failed++;
+  continue;
+}
 
           const contentType=String(
             rr.headers.get("content-type")||""
           ).toLowerCase();
 
-          if(contentType&&!contentType.includes("text/html"))continue;
+          if(contentType&&!contentType.includes("text/html")){
+  summary.filter_diagnostics.non_html++;
+  continue;
+}
 
           const tx=(await rr.text()).slice(0,100000);
           const plain=tx
@@ -3781,12 +3796,26 @@ summary.discovery_diagnostics.push({
           const marketplacePattern=
             /digikala|okala|jetamooz|amazon|torob|snapp|basalam|marketplace|فروشگاه اینترنتی|فروشگاه آنلاین|خرید آنلاین|فروش آنلاین/i;
 
-          if(spamPattern.test(text))continue;
-          if(marketplacePattern.test(text))continue;
-          if(!marketPattern.test(text))continue;
-          if(!businessPattern.test(text))continue;
-          if(!countryPattern.test(text))continue;
-
+          if(spamPattern.test(text)){
+  summary.filter_diagnostics.spam++;
+  continue;
+}
+if(marketplacePattern.test(text)){
+  summary.filter_diagnostics.marketplace++;
+  continue;
+}
+if(!marketPattern.test(text)){
+  summary.filter_diagnostics.market++;
+  continue;
+}
+if(!businessPattern.test(text)){
+  summary.filter_diagnostics.business++;
+  continue;
+}
+if(!countryPattern.test(text)){
+  summary.filter_diagnostics.country++;
+  continue;
+}
           let contact=null;
 
           const mail=tx.match(/href=["'](mailto:[^"']+)["']/i);
