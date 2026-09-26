@@ -245,6 +245,7 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </div>
 <div id="adCleanupStatus" class="hint" style="margin-top:8px">برای بررسی رکوردهای Ads Autopilot روی PREVIEW بزن.</div>
 <div id="opportunities" class="rows">—</div>
+<div id="adAutopilotPreview" class="rows" style="margin-top:9px">—</div>
 </div>
 <div class="card dangerbox"><div class="title"><h2>🚨 ERRORS & RECOVERY</h2><button class="btn" onclick="loadErrors()">↻</button></div><div id="errors" class="rows">—</div></div>
 </section>
@@ -573,7 +574,7 @@ let adAutopilotItems=[];
 function renderAdAutopilotItems(items){
  adAutopilotItems=Array.isArray(items)?items:[];
 
- $("opportunities").innerHTML=adAutopilotItems.length
+ $("adAutopilotPreview").innerHTML=adAutopilotItems.length
   ?adAutopilotItems.map((x,i)=>{
     let meta={};
 
@@ -707,10 +708,10 @@ async function deleteAllAdAutopilot(){
 
 async function loadOpp(){
  const d=await api(A+"/opportunities");
- if(!d.ok){
-  $("opportunities").innerHTML="—";
-  return;
- }
+ $("opportunities").innerHTML=d.ok
+  ?rows(d.items,x=>esc(x.name||x.contact||x.id)+" · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal"))
+  :"—";
+}
  renderAdAutopilotItems(d.items||[]);
 }
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
