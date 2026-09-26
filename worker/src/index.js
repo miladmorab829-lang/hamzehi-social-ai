@@ -1149,6 +1149,10 @@ async function processContentDistribution(env){
     if(!claimed.meta?.changes) continue;
     const d={...candidate,status:'processing'};
     try{
+      if(!await approved(env,d.content_id)){
+        await env.DB.prepare("UPDATE content_distribution SET status='awaiting_approval',error='Approval is no longer active',updated_at=? WHERE id=? AND status='processing'").bind(now(),d.id).run();
+        continue;
+      }
       if(d.target==='telegram'){
         const result=await sendTelegramDistribution(env,d.content_id);
         await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(result.external_id||null,now(),d.id).run();
@@ -2886,8 +2890,20 @@ for(;;){
       AND NOT EXISTS (
         SELECT 1
         FROM photo_autopilot_usage u
-        WHERE u.source_media_id=m.id
-          AND u.cycle=?
+        JOIN telegram_media_sources used_source
+          ON used_source.id=u.source_media_id
+        WHERE u.cycle=?
+          AND (
+            (
+              m.file_unique_id IS NOT NULL
+              AND m.file_unique_id!=''
+              AND used_source.file_unique_id=m.file_unique_id
+            )
+            OR (
+              (m.file_unique_id IS NULL OR m.file_unique_id='')
+              AND used_source.id=m.id
+            )
+          )
       )
     ORDER BY m.created_at ASC
     LIMIT 1
@@ -2998,7 +3014,11 @@ async function getPhotoAutopilotStatus(env){
   const today=new Date().toISOString().slice(0,10);
 
   const sources=await env.DB.prepare(`
-    SELECT COUNT(*) n
+    SELECT COUNT(DISTINCT CASE
+      WHEN m.file_unique_id IS NOT NULL AND m.file_unique_id!=''
+        THEN 'file:' || m.file_unique_id
+      ELSE 'id:' || m.id
+    END) n
     FROM telegram_media_sources m
     LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id
     WHERE m.source_kind='vault'
@@ -3014,9 +3034,16 @@ async function getPhotoAutopilotStatus(env){
 
   const cycle=Number(cycleRow?.cycle||1);
 
-  const used=await env.DB.prepare(
-    "SELECT COUNT(*) n FROM photo_autopilot_usage WHERE cycle=?"
-  ).bind(cycle).first();
+  const used=await env.DB.prepare(`
+    SELECT COUNT(DISTINCT CASE
+      WHEN m.file_unique_id IS NOT NULL AND m.file_unique_id!=''
+        THEN 'file:' || m.file_unique_id
+      ELSE 'id:' || m.id
+    END) n
+    FROM photo_autopilot_usage u
+    JOIN telegram_media_sources m ON m.id=u.source_media_id
+    WHERE u.cycle=?
+  `).bind(cycle).first();
 
   const usedCount=Number(used?.n||0);
 
@@ -3339,6 +3366,14 @@ async function verifyInstagramSignature(env,req,raw){if(env.INSTAGRAM_APP_SECRET
 
 async function handleInstagramWebhook(env,req){if(req.method==='GET'){const u=new URL(req.url);if(u.searchParams.get('hub.mode')==='subscribe'&&u.searchParams.get('hub.verify_token')&&env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&u.searchParams.get('hub.verify_token')===env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN)return new Response(u.searchParams.get('hub.challenge'),{status:200,headers:{'Content-Type':'text/plain'}});return json({ok:false,error:'Webhook verification failed'},403)}if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN||(!env.INSTAGRAM_APP_SECRET&&!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Instagram webhook secrets not configured'},503);const raw=await req.text();if(!(await verifyInstagramSignature(env,req,raw)))return json({ok:false,error:'Unauthorized webhook'},401);let body;try{body=JSON.parse(raw)}catch{return json({ok:false,error:'Invalid JSON'},400)}for(const entry of body.entry||[])for(const change of entry.changes||[]){const value=change.value||{},externalId=String(value.mid||value.message_id||`${entry.id||uid()}:${change.field||'change'}:${value.timestamp||Date.now()}`),ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='instagram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)continue;const text=String(value.text||value.message||'').trim();if(!text)continue;const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'instagram',externalId,String(value.from?.username||value.from?.id||entry.id||'unknown'),text,'unclassified','normal',null,'new',t,t).run()}return json({ok:true})}
 
+async function deferUnapprovedDistributionRetry(env,retryId,distribution){
+  if(!["telegram","whatsapp"].includes(distribution.target)||await approved(env,distribution.content_id))return false;
+  const message="Approval is no longer active";
+  await env.DB.prepare("UPDATE content_distribution SET status='awaiting_approval',error=?,updated_at=? WHERE id=? AND status='failed'").bind(message,now(),distribution.id).run();
+  await env.DB.prepare("UPDATE retry_queue SET status='completed',last_error=?,next_attempt_at=NULL,updated_at=? WHERE id=? AND status='running'").bind(message,now(),retryId).run();
+  return true;
+}
+
 async function recovery(env){await reconcileStalePublishes(env);await reconcileStaleContentDistributions(env);await publishScheduled(env);await processContentDistribution(env);const r=await env.DB.prepare("SELECT * FROM retry_queue WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 10").bind(now()).all();for(const x of r.results||[])try{const claim=await env.DB.prepare("UPDATE retry_queue SET status='running',attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'").bind(now(),x.id).run();if(!claim.meta?.changes)continue;const p=JSON.parse(x.payload_json);if(x.operation==='publish')await publish(env,p);else if(x.operation==='content_distribution'){
         const d=await env.DB.prepare("SELECT * FROM content_distribution WHERE id=?").bind(p.distribution_id).first();
         if(!d||d.status==='published'||d.status==='ready'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue;}
@@ -3351,6 +3386,7 @@ async function recovery(env){await reconcileStalePublishes(env);await reconcileS
           const c=await env.DB.prepare("SELECT caption,body,cta FROM contents WHERE id=?").bind(d.content_id).first();
           if(!c)throw Error('Content not found');
           const text=[c.caption||c.body||'',c.cta||''].filter(Boolean).join("\n\n").trim();
+          if(await deferUnapprovedDistributionRetry(env,x.id,d))continue;
           const result=await sendWhatsAppText(env,text);
           if(result.status==='manual_required'){
             await env.DB.prepare("UPDATE content_distribution SET status='manual_required',error=?,updated_at=? WHERE id=? AND status!='published'").bind(result.error,now(),d.id).run();
@@ -3361,6 +3397,7 @@ async function recovery(env){await reconcileStalePublishes(env);await reconcileS
           await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=?").bind(result.external_id||null,now(),d.id).run();
           await audit(env,'whatsapp_content_published_retry','Failed WhatsApp content distribution retried successfully',{content_id:d.content_id,external_id:result.external_id||null});
         } else if(d.target==='telegram'){
+          if(await deferUnapprovedDistributionRetry(env,x.id,d))continue;
           const result=await sendTelegramDistribution(env,d.content_id);
           await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=?").bind(result.external_id||null,now(),d.id).run();
           await audit(env,'telegram_content_published_retry','Failed Telegram content distribution retried successfully',{content_id:d.content_id,external_id:result.external_id||null});

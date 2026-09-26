@@ -295,8 +295,9 @@ async function loadApprovals(){
  const status=$("approvalStatus"),list=$("approvalItems");
  status.textContent="در حال دریافت صف تأیید…";
  try{
-  const d=await api("/api/content?status=generated");
-  if(!d.ok)throw Error(d.error||"Approval queue unavailable");
+  const response=await fetch("/api/content?status=generated",{headers:hdr(),cache:"no-store"});
+  const d=await response.json().catch(()=>({ok:false,error:"Invalid JSON"}));
+  if(!response.ok||!d||d.ok===false)throw Error(d?.error||("Approval queue unavailable (HTTP "+response.status+")"));
   const items=(d.items||[]).filter(x=>x.approval_status==="pending");
   status.textContent=items.length+" مورد در انتظار بررسی انسانی است.";
   list.innerHTML=items.length?items.map(x=>"<div class='row'><b>"+esc(x.topic||x.id)+"</b><div class='mini'>"+esc(x.language||"")+" · "+esc(x.market||"")+" · "+esc(x.platform||"")+"</div><div style='margin-top:6px;white-space:pre-wrap'>"+esc(x.caption||x.body||"(محتوا خالی است)")+"</div><div class='tools' style='margin-top:8px'><button class='btn primary' onclick='setContentApproval(&quot;"+esc(x.id)+"&quot;,&quot;approved&quot;)'>APPROVE</button><button class='btn danger' onclick='setContentApproval(&quot;"+esc(x.id)+"&quot;,&quot;rejected&quot;)'>REJECT</button></div></div>").join(""):"<div class='hint'>محتوای در انتظار تأیید وجود ندارد.</div>";

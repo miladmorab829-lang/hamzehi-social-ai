@@ -20,6 +20,89 @@ const ACTIONS={
   learning:["status","run"],
   revenue:["status","funnel_snapshot"]
 };
+const OBSERVE_ALLOWED_ACTIONS=new Set([
+  ...MODULES.map(module=>`${module}:status`),
+  "telegram:inbox_scan",
+  "whatsapp:inbox_scan",
+  "instagram:health_and_leads",
+  "website:growth_scan",
+  "crm:lead_intelligence",
+  "revenue:funnel_snapshot"
+]);
+const DRAFT_ALLOWED_ACTIONS=new Set([
+  ...OBSERVE_ALLOWED_ACTIONS,
+  "telegram:inbox_reply",
+  "crm:lead_discovery",
+  "ads:discover_opportunities",
+  "content:generate_and_queue",
+  "media:video_generate",
+  "photo:photo_generate"
+]);
+// Keep publishing outside the no-publish action policy, including future actions.
+const PUBLISH_ACTIONS=new Set([
+  "telegram:publish",
+  "whatsapp:publish",
+  "instagram:publish",
+  "content:publish"
+]);
+const NO_PUBLISH_ALLOWED_ACTIONS=new Set(
+  MODULES.flatMap(module=>ACTIONS[module].map(action=>`${module}:${action}`))
+    .filter(action=>!PUBLISH_ACTIONS.has(action))
+);
+
+function explicitPlanConstraints(raw){
+ const text=String(raw||"").toLowerCase();
+ let mode=null;
+ if(/\b(?:only\s+observe|observe\s+only|read[- ]only)\b|(?:فقط|صرفا|صرفاً)\s*(?:مشاهده|بررسی|نظارت)/i.test(text))mode="observe";
+ else if(/\b(?:draft\s+only|only\s+draft)\b|(?:فقط|صرفا|صرفاً)\s*پیش[\u200c ]?نویس/i.test(text))mode="draft";
+ const noPublish=/\b(?:no\s+publish(?:ing)?|(?:do\s+not|don['’]?t|dont|never)\s+publish(?:ing)?|publish\s+nothing)\b|(?:بدون\s+انتشار|عدم\s+انتشار|منتشر\s+نکن|انتشار\s+نده)/i.test(text);
+ return {mode,noPublish};
+}
+
+function applyPlanSafety(plan,raw){
+ const constraints=explicitPlanConstraints(raw);
+ const planMode=plan.mode==="no_publish"?"execute":plan.mode;
+ const mode=constraints.mode||(["observe","draft","execute"].includes(planMode)?planMode:"execute");
+ const noPublish=constraints.noPublish||plan.no_publish===true||plan.mode==="no_publish"||mode==="draft";
+ const blockedModules=new Set();
+ const addBlockedModule=value=>{
+  const module=String(value||"").trim().toLowerCase();
+  if(MODULES.includes(module))blockedModules.add(module);
+ };
+ for(const item of Array.isArray(plan.blocked_modules)?plan.blocked_modules:[]){
+  addBlockedModule(typeof item==="string"?item:item?.module);
+ }
+ const blockedActions=new Set();
+ const addBlockedAction=(module,action)=>{
+  const m=String(module||"").trim().toLowerCase();
+  const a=String(action||"").trim().toLowerCase();
+  if(ACTIONS[m]?.includes(a))blockedActions.add(`${m}:${a}`);
+  else if(MODULES.includes(m))blockedModules.add(m);
+ };
+ for(const item of Array.isArray(plan.blocked_actions)?plan.blocked_actions:[]){
+  if(typeof item==="string"){
+   const match=item.trim().match(/^([a-z_]+)\s*[:/.]\s*([a-z_]+)$/i);
+   if(match){addBlockedAction(match[1],match[2]);continue;}
+   for(const module of MODULES)if(ACTIONS[module].includes(item.trim()))addBlockedAction(module,item.trim());
+   continue;
+  }
+  if(!item||typeof item!=="object")continue;
+  const module=String(item.module||"").trim().toLowerCase();
+  const actions=Array.isArray(item.actions)?item.actions:[item.action];
+  if(!actions.some(action=>String(action||"").trim()))addBlockedModule(module);
+  for(const action of actions)if(action)addBlockedAction(module,action);
+ }
+ const tasks=(Array.isArray(plan.tasks)?plan.tasks:[]).filter(task=>{
+  if(!task||!MODULES.includes(task.module)||!ACTIONS[task.module]?.includes(task.action))return false;
+  const key=`${task.module}:${task.action}`;
+  if(blockedModules.has(task.module)||blockedActions.has(key)||noPublish&&!NO_PUBLISH_ALLOWED_ACTIONS.has(key))return false;
+  if(mode==="observe"&&!OBSERVE_ALLOWED_ACTIONS.has(key))return false;
+  if(mode==="draft"&&!DRAFT_ALLOWED_ACTIONS.has(key))return false;
+  return true;
+ });
+ return {...plan,mode,no_publish:noPublish,blocked_modules:[...blockedModules],blocked_actions:[...blockedActions].map(key=>{const [module,action]=key.split(":");return {module,action}}),tasks};
+}
+
 async function ensure(env){
  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS autonomy_controls(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)`).run();
  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS autonomy_commands(id TEXT PRIMARY KEY,raw_command TEXT NOT NULL,plan_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`).run();
@@ -62,7 +145,7 @@ function fallbackPlan(raw){
  if(/همه|all|فعالیت|شروع|start/.test(s))for(const m of MODULES)if(!tasks.some(x=>x.module===m))add(m,m==="learning"?"run":"status",{},40);
  for(let i=tasks.length-1;i>=0;i--)if(blocked.has(tasks[i].module))tasks.splice(i,1);
  if(!tasks.length&&!blocked.size)add("revenue","funnel_snapshot",{},30);
- return {goal:"Execute the user's requested business activity with verification and learning",tasks,blocked_modules:[...blocked],source:"fallback"};
+ return applyPlanSafety({goal:"Execute the user's requested business activity with verification and learning",tasks,blocked_modules:[...blocked],source:"fallback"},raw);
 }
 function extractJson(text){
  const t=String(text||"").trim().replace(/^```(?:json)?/i,"").replace(/```$/,"").trim();
@@ -83,7 +166,7 @@ Rules:
 - If the user says a channel should not act, do not create tasks for it.
 - Keep modules independent; do not create cross-module dependencies unless the user explicitly requests analysis using another module's data.
 - Publishing or external customer replies are sensitive: prefer observation/draft unless the user explicitly asks for execution and the existing backend supports it.
-- Return JSON only: {"goal":"...","mode":"observe|draft|execute","tasks":[{"module":"...","action":"...","payload":{},"priority":50}],"blocked_modules":[],"blocked_actions":[]}
+- Return JSON only: {"goal":"...","mode":"observe|draft|execute","no_publish":false,"tasks":[{"module":"...","action":"...","payload":{},"priority":50}],"blocked_modules":["module"],"blocked_actions":[{"module":"module","action":"action"}]}
 User command: ${raw}`;
  try{
   const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})});
@@ -91,14 +174,8 @@ User command: ${raw}`;
   if(!r.ok)throw new Error(`AI planner HTTP ${r.status}`);
   const text=d.output_text||((d.output||[]).flatMap(x=>x.content||[]).map(x=>x.text||"").join(""));
   const p=extractJson(text);if(!p||!Array.isArray(p.tasks))throw new Error("AI planner returned invalid plan");
-  const inferredBlocked=new Set(fallbackPlan(raw).blocked_modules||[]);
-  const blockedModules=new Set([...(Array.isArray(p.blocked_modules)?p.blocked_modules:[]),...inferredBlocked]);
-  const blockedActions=new Set(Array.isArray(p.blocked_actions)?p.blocked_actions.map(x=>`${x.module}:${x.action}`):[]);
-  p.tasks=p.tasks.filter(t=>MODULES.includes(t.module)&&ACTIONS[t.module]?.includes(t.action)&&!blockedModules.has(t.module)&&!blockedActions.has(`${t.module}:${t.action}`));
-  p.blocked_modules=[...blockedModules];
-  p.blocked_actions=[...blockedActions].map(x=>{const [module,action]=x.split(":");return {module,action}});
-  p.source="ai";
-  return p;
+  const inferredBlocked=fallbackPlan(raw).blocked_modules||[];
+  return applyPlanSafety({...p,source:"ai",blocked_modules:[...(Array.isArray(p.blocked_modules)?p.blocked_modules:[]),...inferredBlocked]},raw);
  }catch(e){const p=fallbackPlan(raw);p.planner_error=String(e.message||e);return p}
 }
 async function actionEnabled(env,module,action){
@@ -299,12 +376,28 @@ async function recoverStaleLocks(env,maxAgeMs=15*60*1000){
 
  return recovered;
 }
+function taskAllowedByParentPlan(task){
+ let plan;
+ try{plan=JSON.parse(String(task.parent_plan_json||""))}catch{return false}
+ if(!plan||typeof plan!=="object"||!Array.isArray(plan.tasks))return false;
+ const plannedTask=plan.tasks.find(item=>item?.module===task.module&&item?.action===task.action);
+ if(!plannedTask)return false;
+ return applyPlanSafety(
+  {...plan,tasks:[plannedTask]},
+  String(task.parent_raw_command||"")
+ ).tasks.length===1;
+}
+
 export async function runTasks(env,req,limit=20){
  const c=await controls(env);if(c.master!=="on")return {ok:true,paused:true,executed:0,failed:0,blocked:0};
  await recoverStaleLocks(env);
-  const rows=await env.DB.prepare("SELECT * FROM autonomy_tasks WHERE status='queued' AND (scheduled_at IS NULL OR scheduled_at<=?) ORDER BY priority DESC,created_at ASC LIMIT ?").bind(now(),limit).all();
+  const rows=await env.DB.prepare("SELECT t.*,c.plan_json AS parent_plan_json,c.raw_command AS parent_raw_command FROM autonomy_tasks t LEFT JOIN autonomy_commands c ON c.id=t.command_id WHERE t.status='queued' AND (t.scheduled_at IS NULL OR t.scheduled_at<=?) ORDER BY t.priority DESC,t.created_at ASC LIMIT ?").bind(now(),limit).all();
  let executed=0,failed=0,blocked=0;
  for(const t of rows.results||[]){
+  if(!taskAllowedByParentPlan(t)){
+   await env.DB.prepare("UPDATE autonomy_tasks SET status='blocked',error=?,updated_at=? WHERE id=? AND status='queued'").bind("Blocked by parent plan policy",now(),t.id).run();
+   blocked++;await event(env,"task_blocked",t.module,`Task blocked by parent plan: ${t.action}`,{task_id:t.id});continue;
+  }
   if(c.modules[t.module]===false||!(await actionEnabled(env,t.module,t.action))){
    await env.DB.prepare("UPDATE autonomy_tasks SET status='blocked',error=?,updated_at=? WHERE id=?").bind("Blocked by module/action control",now(),t.id).run();blocked++;await event(env,"task_blocked",t.module,`Task blocked: ${t.action}`);continue;
   }
@@ -505,7 +598,7 @@ export async function runAutonomyScheduled(env,req){
 
    const plan={
     goal:"Run a safe scheduled autonomy check using only enabled modules",
-    mode:"observe",
+    mode:"execute",
     source:"scheduled",
     tasks:[]
    };
