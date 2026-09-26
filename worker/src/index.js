@@ -760,8 +760,9 @@ async function getAutoContentConfig(env) {
 
 async function chooseAutoContentTopic(env) {
   const recent = await env.DB.prepare("SELECT topic FROM contents ORDER BY created_at DESC LIMIT 20").all();
-  const used = new Set((recent.results || []).map(x => String(x.topic || '').trim()));
-  return AUTO_CONTENT_TOPICS_FA.find(x => !used.has(x)) || AUTO_CONTENT_TOPICS_FA[Math.floor(Date.now()/3600000) % AUTO_CONTENT_TOPICS_FA.length];
+  const used = new Set((recent.results || []).map(x => repairMojibake(String(x.topic || '').trim())));
+  const topics=AUTO_CONTENT_TOPICS_FA.map(repairMojibake);
+  return topics.find(x => !used.has(x)) || topics[Math.floor(Date.now()/3600000) % topics.length];
 }
 
 
@@ -807,6 +808,23 @@ async function ensureLearningStore(env){
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
 }
 
+async function saveLearningReport(env,reportType,periodStart,periodEnd,summary,createdAt){
+  const info=await env.DB.prepare("PRAGMA table_info(learning_reports)").all();
+  const columns=new Set((info.results||[]).map(row=>String(row.name)));
+  if(columns.has("report_type")){
+    await env.DB.prepare("INSERT INTO learning_reports(id,report_type,period_start,period_end,summary_json,created_at) VALUES(?,?,?,?,?,?)")
+      .bind(uid(),reportType,periodStart,periodEnd,JSON.stringify(summary),createdAt).run();
+    return;
+  }
+  if(columns.has("report_date")&&columns.has("report_json")){
+    const report={report_type:reportType,period_start:periodStart,period_end:periodEnd,...summary};
+    await env.DB.prepare("INSERT INTO learning_reports(id,report_date,market,language,report_json,created_at) VALUES(?,?,?,?,?,?)")
+      .bind(uid(),periodEnd,"all","all",JSON.stringify(report),createdAt).run();
+    return;
+  }
+  throw new Error("Unsupported learning_reports schema");
+}
+
 async function getLearningConfig(env){
   await ensureLearningStore(env);
   const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='learning_config'").first();
@@ -843,7 +861,7 @@ async function analyzePerformance(env){
   const ranked=Object.values(byContent).sort((a,b)=>b.score_sum/b.samples-a.score_sum/a.samples).slice(0,10).map(x=>({...x,avg_score:x.samples?Math.round(x.score_sum/x.samples*100)/100:0}));
   const periodEnd=now(), periodStart=new Date(Date.now()-7*86400000).toISOString();
   const summary={period_start:periodStart,period_end:periodEnd,samples:items.length,platforms:byPlatform,top_content:ranked};
-  await env.DB.prepare("INSERT INTO learning_reports VALUES(?,?,?,?,?,?)").bind(uid(),'performance',periodStart,periodEnd,JSON.stringify(summary),periodEnd).run();
+  await saveLearningReport(env,'performance',periodStart,periodEnd,summary,periodEnd);
   return summary;
 }
 
@@ -860,7 +878,7 @@ async function optimizeFromPerformance(env, summary){
     next_action: platformRanking.length ? `Prioritize content patterns with measured engagement on ${platformRanking[0].platform} while retaining other enabled destinations.` : "Collect more performance data before changing content strategy."
   };
   await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind('auto_optimization_profile',JSON.stringify(profile),now()).run();
-  await env.DB.prepare("INSERT INTO learning_reports VALUES(?,?,?,?,?,?)").bind(uid(),'optimization',summary.period_start,summary.period_end,JSON.stringify(profile),now()).run();
+  await saveLearningReport(env,'optimization',summary.period_start,summary.period_end,profile,now());
   return profile;
 }
 
@@ -2151,6 +2169,7 @@ async function getShotstackWeeklyRender(env,renderId){
   };
 }
 async function pollWeeklyVideoAutopilot(env){
+  await ensureWeeklyVideoAutopilotStore(env);
   const row=await env.DB.prepare(`
     SELECT
       week_id,
@@ -2426,7 +2445,7 @@ async function pollWeeklyVideoAutopilot(env){
     };
   }
 }
-async function reserveWeeklyVideoLock(env, weekId){
+async function ensureWeeklyVideoAutopilotStore(env){
   await env.DB.prepare(`
     CREATE TABLE IF NOT EXISTS weekly_video_autopilot (
       week_id TEXT PRIMARY KEY,
@@ -2453,6 +2472,10 @@ try{
     "ALTER TABLE weekly_video_autopilot ADD COLUMN shotstack_task_id TEXT"
   ).run();
 }catch{}
+}
+
+async function reserveWeeklyVideoLock(env, weekId){
+  await ensureWeeklyVideoAutopilotStore(env);
   const result=await env.DB.prepare(`
     INSERT OR IGNORE INTO weekly_video_autopilot
     (week_id,status,source_media_ids,scenario_json,music_id,output_media_id,caption,created_at,updated_at)
@@ -2629,6 +2652,8 @@ async function buildWeeklyVideoCreativeBrief(env,weekId,photos){
 }
 
 async function prepareWeeklyVideoAutopilot(env){
+  await ensureMediaVaultStore(env);
+  await ensureWeeklyVideoAutopilotStore(env);
    const modulesRow=await env.DB.prepare(
     "SELECT value FROM autonomy_controls WHERE key='modules'"
   ).first();
@@ -4658,7 +4683,7 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
   if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
 
   const rows = await env.DB.prepare(`
-    SELECT id,type,level,message,details,created_at
+    SELECT id,type,severity AS level,message,details_json AS details,created_at
     FROM system_events
     WHERE type IN (
       'photo_autopilot_completed',
@@ -4677,6 +4702,7 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
   if (u.pathname === "/api/video-autopilot/status" && req.method === "GET") {
   if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
 
+  await ensureWeeklyVideoAutopilotStore(env);
   const row = await env.DB.prepare(`
     SELECT
       week_id,

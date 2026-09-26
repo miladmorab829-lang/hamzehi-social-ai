@@ -43,8 +43,12 @@ async function event(env,type,module,message,meta={}){try{await env.DB.prepare("
 function fallbackPlan(raw){
  const s=String(raw||"").toLowerCase(),tasks=[];
  const add=(module,action,payload={},priority=50)=>tasks.push({module,action,payload,priority});
+ const aliases={telegram:["telegram","تلگرام"],whatsapp:["whatsapp","واتساپ"],instagram:["instagram","اینستاگرام","اینستا"],website:["website","وبسایت","سایت"],crm:["crm","مشتری","لید"],ads:["ads","تبلیغ","اسپانسر","رپورتاژ"],content:["content","محتوا","پست","استوری"],media:["media","ویدیو","ویدیوی","video"],photo:["photo","عکس","تصویر"],learning:["learning","یادگیری"],revenue:["revenue","درآمد","فروش"]};
  const blocked=new Set();
- for(const m of MODULES)if(new RegExp(`(?:نه|بدون|نکن|متوقف|off|block)[^\\n]{0,40}(?:${m})`).test(s))blocked.add(m);
+ for(const [module,names] of Object.entries(aliases))for(const name of names){
+   const escaped=name;
+   if(new RegExp(`(?:نه|بدون|نکن|متوقف|غیرفعال|لغو|نمی\\s*خواهم|don['’]?t|do not|no|off|block|stop)[^\\n]{0,50}${escaped}|${escaped}[^\\n]{0,35}(?:نه|نکن|متوقف|غیرفعال|لغو|نمی\\s*خواهم|don['’]?t|do not|off|block|stop)`).test(s))blocked.add(module);
+ }
  if(/تلگرام|telegram/.test(s))add("telegram",/جواب|پاسخ|reply/.test(s)?"inbox_reply":"inbox_scan",{},90);
  if(/واتساپ|whatsapp/.test(s))add("whatsapp","inbox_scan",{},85);
  if(/اینستاگرام|instagram|اینستا/.test(s))add("instagram","health_and_leads",{},70);
@@ -57,8 +61,8 @@ function fallbackPlan(raw){
  if(/درآمد|فروش|revenue|پول/.test(s))add("revenue","funnel_snapshot",{},90);
  if(/همه|all|فعالیت|شروع|start/.test(s))for(const m of MODULES)if(!tasks.some(x=>x.module===m))add(m,m==="learning"?"run":"status",{},40);
  for(let i=tasks.length-1;i>=0;i--)if(blocked.has(tasks[i].module))tasks.splice(i,1);
- if(!tasks.length)add("revenue","funnel_snapshot",{},30);
- return {goal:"Execute the user's requested business activity with verification and learning",tasks,source:"fallback"};
+ if(!tasks.length&&!blocked.size)add("revenue","funnel_snapshot",{},30);
+ return {goal:"Execute the user's requested business activity with verification and learning",tasks,blocked_modules:[...blocked],source:"fallback"};
 }
 function extractJson(text){
  const t=String(text||"").trim().replace(/^```(?:json)?/i,"").replace(/```$/,"").trim();
@@ -87,7 +91,12 @@ User command: ${raw}`;
   if(!r.ok)throw new Error(`AI planner HTTP ${r.status}`);
   const text=d.output_text||((d.output||[]).flatMap(x=>x.content||[]).map(x=>x.text||"").join(""));
   const p=extractJson(text);if(!p||!Array.isArray(p.tasks))throw new Error("AI planner returned invalid plan");
-  p.tasks=p.tasks.filter(t=>MODULES.includes(t.module)&&ACTIONS[t.module]?.includes(t.action));
+  const inferredBlocked=new Set(fallbackPlan(raw).blocked_modules||[]);
+  const blockedModules=new Set([...(Array.isArray(p.blocked_modules)?p.blocked_modules:[]),...inferredBlocked]);
+  const blockedActions=new Set(Array.isArray(p.blocked_actions)?p.blocked_actions.map(x=>`${x.module}:${x.action}`):[]);
+  p.tasks=p.tasks.filter(t=>MODULES.includes(t.module)&&ACTIONS[t.module]?.includes(t.action)&&!blockedModules.has(t.module)&&!blockedActions.has(`${t.module}:${t.action}`));
+  p.blocked_modules=[...blockedModules];
+  p.blocked_actions=[...blockedActions].map(x=>{const [module,action]=x.split(":");return {module,action}});
   p.source="ai";
   return p;
  }catch(e){const p=fallbackPlan(raw);p.planner_error=String(e.message||e);return p}
@@ -146,6 +155,11 @@ async function callSelf(req,env,path,method="GET",body){
     status:r.status,
     data
   };
+}
+async function checkedSelfCall(req,env,path,method="GET",body){
+ const r=await callSelf(req,env,path,method,body);
+ if(r.status>=300||r.data?.ok===false)throw new Error(r.data?.error||`Self-call failed (HTTP ${r.status})`);
+ return r.data;
 }
 async function revenue(env){
  const r=await env.DB.prepare("SELECT stage,COUNT(*) n FROM leads GROUP BY stage").all(),f={};
@@ -215,17 +229,17 @@ if(t.module==="photo"&&t.action==="photo_generate"){
     result:r.data
   };
 }
-  if(t.module==="telegram"&&t.action==="inbox_scan")return (await callSelf(req,env,"/api/inbox")).data;
- if(t.module==="telegram"&&t.action==="inbox_reply"){const r=await callSelf(req,env,"/api/inbox");return {ok:r.status<300,mode:"reply_queue",items:r.data.items||[],note:"Reply drafts are queued; no external send is performed by this action."}}
- if(t.module==="content"&&t.action==="generate_and_queue")return (await callSelf(req,env,"/api/content/automation/run","POST",{platform:p.platform||"telegram",market:p.market||"iran_iraq"})).data;
- if(t.module==="ads"&&t.action==="discover_opportunities")return (await callSelf(req,env,"/api/ads/autopilot","POST",p)).data;
- if(t.module==="learning"&&t.action==="run")return (await callSelf(req,env,"/api/learning/run","POST",{})).data;
- if(t.module==="crm"&&t.action==="lead_intelligence")return (await callSelf(req,env,"/api/ads/intelligence")).data;
- if(t.module==="crm"&&t.action==="lead_discovery")return (await callSelf(req,env,"/api/crm/lead-discovery","POST",p)).data;
-  if(t.module==="website"&&t.action==="growth_scan")return (await callSelf(req,env,"/api/website/growth")).data;
+  if(t.module==="telegram"&&t.action==="inbox_scan")return await checkedSelfCall(req,env,"/api/inbox");
+ if(t.module==="telegram"&&t.action==="inbox_reply"){const data=await checkedSelfCall(req,env,"/api/inbox");return {ok:true,mode:"reply_queue",items:data.items||[],note:"Reply drafts are queued; no external send is performed by this action."}}
+ if(t.module==="content"&&t.action==="generate_and_queue")return await checkedSelfCall(req,env,"/api/content/automation/run","POST",{platform:p.platform||"telegram",market:p.market||"iran_iraq"});
+ if(t.module==="ads"&&t.action==="discover_opportunities")return await checkedSelfCall(req,env,"/api/ads/autopilot","POST",p);
+ if(t.module==="learning"&&t.action==="run")return await checkedSelfCall(req,env,"/api/learning/run","POST",{});
+ if(t.module==="crm"&&t.action==="lead_intelligence")return await checkedSelfCall(req,env,"/api/ads/intelligence");
+ if(t.module==="crm"&&t.action==="lead_discovery")return await checkedSelfCall(req,env,"/api/crm/lead-discovery","POST",p);
+  if(t.module==="website"&&t.action==="growth_scan")return await checkedSelfCall(req,env,"/api/website/growth");
  if(t.module==="revenue"&&t.action==="funnel_snapshot")return await revenue(env);
- if(t.module==="instagram"&&t.action==="health_and_leads")return (await callSelf(req,env,"/api/settings")).data;
- if(t.module==="whatsapp"&&t.action==="inbox_scan")return (await callSelf(req,env,"/api/inbox")).data;
+ if(t.module==="instagram"&&t.action==="health_and_leads")return await checkedSelfCall(req,env,"/api/settings");
+ if(t.module==="whatsapp"&&t.action==="inbox_scan")return await checkedSelfCall(req,env,"/api/inbox");
  throw new Error("Unsupported autonomous action");
 }
 async function acquire(env,module,taskId){
