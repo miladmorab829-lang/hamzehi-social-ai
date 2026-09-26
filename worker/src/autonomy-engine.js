@@ -448,7 +448,7 @@ return Response.json({
   return Response.json({ok:true,brain:{mission:"Operate independently until MASTER OFF; observe, plan, execute allowed work, verify results and learn.",controls:c,revenue:await revenue(env),active_tasks:tasks.results||[],timeline:events.results||[]}});
  }
  if(u.pathname==="/api/autonomy/opportunities"){
- const r=await env.DB.prepare("SELECT id,name,contact,stage,priority,notes,updated_at FROM leads WHERE stage NOT IN ('customer','converted','rejected','archived') AND (notes LIKE '%\"source\":\"ad_autopilot\"%' OR notes LIKE '%\"source\":\"instagram_hashtag_discovery\"%' OR notes LIKE '%\"ad_opportunity\":true%' OR notes LIKE '%\"contact_url\":\"http%') ORDER BY updated_at DESC LIMIT 200").all();
+ const r=await env.DB.prepare("SELECT id,name,contact,stage,priority,notes,updated_at FROM leads WHERE stage NOT IN ('customer','converted','rejected','archived') AND (notes LIKE '%\"source\":\"ad_autopilot\"%'OR notes LIKE '%"source":"customer_discovery"%' OR notes LIKE '%\"source\":\"instagram_hashtag_discovery\"%' OR notes LIKE '%\"ad_opportunity\":true%' OR notes LIKE '%\"contact_url\":\"http%') ORDER BY updated_at DESC LIMIT 200").all();
  const spam=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
  const market=/طلا|جواهر|زرگر|گالری|مجوهرات|ذهب|صياغ|صائغ|ساعت|ساعات|watch|بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
  const items=(r.results||[]).filter(x=>{
