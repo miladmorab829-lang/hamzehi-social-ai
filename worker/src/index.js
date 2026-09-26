@@ -5514,10 +5514,23 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         const lead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(leadId).first();
         if (!lead) return json({ ok: false, error: "Lead not found" }, 404);
         let meta = parseLeadNotes(lead);
-        const context = `Instagram page ${lead.name || ""}. Discovery query: ${meta.query || "unknown"}. Evidence: ${meta.evidence || ""}. Current stage: ${lead.stage || "new"}.`;
+        const sourceLabel = meta.source === "customer_discovery" ? "Google Maps/Places business" : meta.source === "instagram_hashtag_discovery" ? "Instagram business/page" : "business lead";
+const language = String(meta.type || "").endsWith("_ar") ? "Iraqi Arabic" : "Persian";
+const context = `${sourceLabel}: ${lead.name || ""}. Contact: ${lead.contact || "unknown"}. Website: ${meta.url || "unknown"}. City: ${meta.city || "unknown"}. Discovery query: ${meta.query || "unknown"}. Evidence: ${meta.evidence || ""}. Current stage: ${lead.stage || "new"}.`;
         if (!env.OPENAI_API_KEY) return json({ ok: false, error: "OPENAI_API_KEY not configured" }, 503);
-        const task = mode === "followup" ? "Write a short, polite Persian follow-up DM that adds value and does not pressure the recipient." : "Write one short, respectful Persian collaboration/outreach DM draft for a relevant Instagram business/page.";
-        const prompt = `${task} Do not claim facts not provided. Do not use spam, pressure, bulk language, fake scarcity, or misleading claims. Keep it under 500 characters. It is a draft for human review only. Context: ${context}`;
+        const task =
+  mode === "followup"
+    ? `Write a short, polite ${language} follow-up message for this business lead. Add value and do not pressure the recipient.`
+    : mode === "collaboration"
+      ? `Write one short, respectful ${language} collaboration/outreach message for this relevant business lead.`
+      : `Write one short, respectful ${language} initial outreach message for this business lead.`;
+        const prompt = `${task}
+Do not claim facts not provided.
+Do not use spam, pressure, bulk language, fake scarcity, or misleading claims.
+Keep it under 500 characters.
+It is a draft for human review only.
+Use the business information provided in the context.
+Context: ${context}`;
         const r = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { "Authorization": `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: env.OPENAI_MODEL || "gpt-5.6-luna", input: prompt }), signal: AbortSignal.timeout(15000) });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) return json({ ok: false, error: d.error?.message || `OpenAI returned ${r.status}` }, 502);
