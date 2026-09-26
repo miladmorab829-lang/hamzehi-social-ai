@@ -3709,7 +3709,27 @@ async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
       ?"العراق عراق Iraq بغداد اربيل البصرة النجف كربلاء"
       :"ایران ایرانی Iran تهران اصفهان شیراز مشهد تبریز";
 
-    const q=[term,region,city,extra].filter(Boolean).join(" ");
+    const intent=groupType.startsWith("gold_")
+  ?"business shop gallery"
+  :groupType.startsWith("perfume_")
+    ?"business shop store"
+    :groupType.startsWith("watch_")
+      ?"business shop store"
+      :"business shop store";
+
+const q=[
+  term,
+  region,
+  city,
+  intent,
+  extra,
+  "-wikipedia",
+  "-dictionary",
+  "-outlook",
+  "-enterprise",
+  "-amazon",
+  "-digikala"
+].filter(Boolean).join(" ");
 
     try{
       const discovery=await discoverWebLinks(q,6);
