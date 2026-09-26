@@ -3579,7 +3579,8 @@ if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.
 
 const titleBusiness=businessSignal.test(`${title} ${uu.hostname} ${uu.pathname}`);
 const titleMarket=strongRelevance;
-
+const genericMarketplacePattern=/digikala|okala|jetamooz|amazon|torob|snapp|basalam|marketplace|فروشگاه اینترنتی|فروشگاه آنلاین|خرید آنلاین|فروش آنلاین/i;
+if(genericMarketplacePattern.test(relevanceText) && !titleMarket) continue;
 if(!titleMarket && !titleBusiness) continue;
 if(!titleBusiness && marketHits<2) continue;
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
