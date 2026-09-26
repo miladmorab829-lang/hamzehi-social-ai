@@ -3664,6 +3664,38 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
   await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,found:summary.found,drafted:summary.drafted,errors:summary.errors,started});
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
+function extractTelegramContact(text = "") {
+  const s = String(text || "");
+
+  const urlMatch = s.match(
+    /https?:\/\/(?:www\.)?t\.me\/([A-Za-z0-9_]{4,64})(?:[/?#][^\s"'<>]*)?/i
+  );
+
+  if (urlMatch) {
+    const username = urlMatch[1];
+    return {
+      telegram_username: username,
+      telegram_url: `https://t.me/${username}`
+    };
+  }
+
+  const usernameMatch = s.match(
+    /(^|[\s(])@([A-Za-z0-9_]{4,64})(?=$|[\s),.;!?])/i
+  );
+
+  if (usernameMatch) {
+    const username = usernameMatch[2];
+    return {
+      telegram_username: username,
+      telegram_url: `https://t.me/${username}`
+    };
+  }
+
+  return {
+    telegram_username: null,
+    telegram_url: null
+  };
+}
 async function discoverGooglePlaces(env, textQuery, languageCode = "fa", limit = 10) {
   if (!env.GOOGLE_PLACES_API_KEY) {
     return {
@@ -3849,7 +3881,13 @@ summary.discovery_diagnostics.push({
         const existing = await env.DB.prepare(
           "SELECT id,notes FROM leads WHERE contact=? LIMIT 1"
         ).bind(contact).first();
-
+const telegram = extractTelegramContact(
+  [
+    place.website,
+    place.name,
+    place.address
+  ].filter(Boolean).join(" ")
+);
         const meta = {
           source,
           provider: "google_places",
@@ -3859,6 +3897,8 @@ summary.discovery_diagnostics.push({
           maps_url: place.maps_url,
           website: place.website,
           phone: place.phone,
+         telegram_username: telegram.telegram_username,
+telegram_url: telegram.telegram_url,
           types: place.types || [],
           business_status: place.business_status,
           lat: place.lat,
