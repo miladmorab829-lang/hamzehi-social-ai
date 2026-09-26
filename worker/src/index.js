@@ -3867,7 +3867,40 @@ summary.discovery_diagnostics.push({
           summary.skipped++;
           continue;
         }
+        const placeText = [
+          place.name,
+          place.address,
+          ...(Array.isArray(place.types) ? place.types : [])
+        ].filter(Boolean).join(" ");
 
+        const marketPattern =
+          groupType.startsWith("gold_")
+            ? /طلا|طلافروشی|جواهر|جواهرفروشی|زرگر|زرگری|گالری طلا|مجوهرات|ذهب|صياغ|صياغة|صائغ|محل ذهب|gold|jewel/i
+            : groupType.startsWith("perfume_")
+              ? /عطر|عطور|ادکلن|عطر فروشی|برفان|محل عطور|perfume|parfum|fragrance/i
+              : groupType.startsWith("watch_")
+                ? /ساعت|ساعات|ساعت فروشی|ساعت مچی|watch/i
+                : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
+
+        const marketTypePattern =
+          groupType.startsWith("gold_")
+            ? /jewelry_store|goldsmith|jewelry/i
+            : groupType.startsWith("perfume_")
+              ? /perfume|fragrance/i
+              : groupType.startsWith("watch_")
+                ? /watch/i
+                : /jewelry|accessor|gift_shop/i;
+
+        const unrelatedPattern =
+          /car_repair|car_dealer|photographer|photography|tailor|clothing_store|restaurant|cafe|hotel|hospital|clinic|dentist|pharmacy|school|university|real_estate|lawyer|accounting|bank|insurance|auto|تعمیرگاه|عکاسی|خیاط|رستوران|کافه|هتل|بیمارستان|کلینیک|داروخانه|مدرسه|املاک/i;
+
+        if (
+          unrelatedPattern.test(placeText) ||
+          (!marketPattern.test(placeText) && !marketTypePattern.test(placeText))
+        ) {
+          summary.filter_diagnostics.market++;
+          continue;
+        }
         const name = String(place.name || "").trim();
         const contact = String(
           place.website || place.maps_url || place.phone || ""
