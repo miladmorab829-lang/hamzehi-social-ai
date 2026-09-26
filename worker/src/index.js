@@ -767,7 +767,7 @@ async function chooseAutoContentTopic(env) {
 
 const AUTO_PILOT_DEFAULT_CONFIG = {
   enabled: true,
-  auto_approve: true,
+  auto_approve: false,
   require_media: true,
   max_approvals_per_cycle: 3
 };
@@ -778,7 +778,8 @@ async function getAutoPilotConfig(env){
   let cfg={...AUTO_PILOT_DEFAULT_CONFIG};
   try{if(row?.value)cfg={...cfg,...JSON.parse(row.value)}}catch{}
   cfg.enabled=cfg.enabled!==false;
-  cfg.auto_approve=cfg.auto_approve!==false;
+  // Scheduled automation may generate drafts, but approval must remain human-controlled.
+  cfg.auto_approve=false;
   cfg.require_media=cfg.require_media!==false;
   cfg.max_approvals_per_cycle=Math.min(10,Math.max(1,Number(cfg.max_approvals_per_cycle)||3));
   return cfg;
@@ -900,18 +901,10 @@ async function runAutoPilotCycle(env, source='scheduled'){
   const cfg=await getAutoPilotConfig(env);
   if(!cfg.enabled) return {ok:true,skipped:true,reason:'disabled'};
   const generated=await runAutoContentGeneration(env,source,false);
-  const rows=await env.DB.prepare("SELECT c.id FROM contents c WHERE c.status='generated' AND EXISTS (SELECT 1 FROM approval_queue q WHERE q.content_id=c.id AND q.status='pending') ORDER BY c.created_at ASC LIMIT ?").bind(cfg.max_approvals_per_cycle).all();
-  let approved=0,held=0;
-  if(cfg.auto_approve){
-    for(const r of rows.results||[]){
-      const check=await validateAutoPilotCandidate(env,r.id,cfg.require_media);
-      if(!check.ok){held++;await audit(env,'auto_pilot_hold','Content held for human review because Auto-Pilot validation did not pass',{content_id:r.id,reason:check.reason,missing:check.missing||null});continue;}
-      await setApproval(env,r.id,'approved','Auto-Pilot validation passed; automatically approved');
-      approved++;
-    }
-  }
-  await audit(env,'auto_pilot_cycle','Auto-Pilot cycle completed',{source,generated:!!generated.generated,generated_content_id:generated.content_id||null,approved,held});
-  return {ok:true,generated,approved,held,checked:(rows.results||[]).length};
+  const pending=await env.DB.prepare("SELECT COUNT(*) n FROM contents c WHERE c.status='generated' AND EXISTS (SELECT 1 FROM approval_queue q WHERE q.content_id=c.id AND q.status='pending')").first();
+  const pendingReview=Number(pending?.n||0);
+  await audit(env,'auto_pilot_cycle','Scheduled content remains pending human approval',{source,generated:!!generated.generated,generated_content_id:generated.content_id||null,pending_review:pendingReview});
+  return {ok:true,generated,approved:0,held:0,checked:pendingReview,pending_review:pendingReview};
 }
 
 async function runAutoContentGeneration(env, source = "scheduled", force = false) {
@@ -4781,7 +4774,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if(!auth(req,env)) return json({ok:false,error:"Unauthorized"},401);
         const b=await req.json().catch(()=>({})); const cfg=await getAutoPilotConfig(env);
         if(b.enabled!==undefined)cfg.enabled=!!b.enabled;
-        if(b.auto_approve!==undefined)cfg.auto_approve=!!b.auto_approve;
+        cfg.auto_approve=false;
         if(b.require_media!==undefined)cfg.require_media=!!b.require_media;
         if(b.max_approvals_per_cycle!==undefined)cfg.max_approvals_per_cycle=Math.min(10,Math.max(1,Number(b.max_approvals_per_cycle)||3));
         const t=now(); await ensureAutoContentStore(env);

@@ -56,6 +56,12 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </section>
 
 <section class="card section">
+<div class="title"><div><h2>✅ CONTENT APPROVAL</h2><div class="hint">محتوای تولیدشده تا بررسی و تأیید انسانی منتشر نمی‌شود.</div></div><button class="btn" onclick="loadApprovals()">↻ REFRESH</button></div>
+<div id="approvalStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="approvalItems" class="rows"></div>
+</section>
+
+<section class="card section">
 <div class="title"><div><h2>🎛️ MASTER CONTROL</h2><div class="hint">کنترل فوری کل صف Autonomous. توقف، اجرای Taskهای آماده را کنترل می‌کند.</div></div><button class="btn" onclick="refreshAll()">↻ REFRESH</button></div>
 <div class="tools" style="margin-top:10px">
 <button class="btn primary" onclick="masterAction('on')">▶ START ALL</button>
@@ -285,6 +291,24 @@ function clearToken(){
 async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});return await r.json().catch(()=>({ok:false,error:"Invalid JSON"}))}
 function setCmd(x){$("command").value=x}
 function rows(a,fn){return (a||[]).slice(0,15).map(x=>"<div class='row'>"+fn(x)+"</div>").join("")||"<div class='hint'>داده‌ای وجود ندارد.</div>"}
+async function loadApprovals(){
+ const status=$("approvalStatus"),list=$("approvalItems");
+ status.textContent="در حال دریافت صف تأیید…";
+ try{
+  const d=await api("/api/content?status=generated");
+  if(!d.ok)throw Error(d.error||"Approval queue unavailable");
+  const items=(d.items||[]).filter(x=>x.approval_status==="pending");
+  status.textContent=items.length+" مورد در انتظار بررسی انسانی است.";
+  list.innerHTML=items.length?items.map(x=>"<div class='row'><b>"+esc(x.topic||x.id)+"</b><div class='mini'>"+esc(x.language||"")+" · "+esc(x.market||"")+" · "+esc(x.platform||"")+"</div><div style='margin-top:6px;white-space:pre-wrap'>"+esc(x.caption||x.body||"(محتوا خالی است)")+"</div><div class='tools' style='margin-top:8px'><button class='btn primary' onclick='setContentApproval(&quot;"+esc(x.id)+"&quot;,&quot;approved&quot;)'>APPROVE</button><button class='btn danger' onclick='setContentApproval(&quot;"+esc(x.id)+"&quot;,&quot;rejected&quot;)'>REJECT</button></div></div>").join(""):"<div class='hint'>محتوای در انتظار تأیید وجود ندارد.</div>";
+ }catch(e){status.innerHTML="<span class='bad'>✕ "+esc(e.message)+"</span>";list.innerHTML=""}
+}
+async function setContentApproval(id,status){
+ const message=status==="approved"?"Approved from live dashboard":"Rejected from live dashboard";
+ const d=await api("/api/content/approve",{method:"POST",body:JSON.stringify({content_id:id,status,reason:message})});
+ if(!d.ok){$("approvalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Approval update failed")+"</span>";return}
+ $("approvalStatus").textContent=status==="approved"?"محتوا تأیید شد و طبق تقویم انتشار صف‌بندی شد.":"محتوا رد شد.";
+ await loadApprovals();
+}
 async function loadDiagnostic(){
  const d=await api(A+"/status");
 const taskData=await api(A+"/tasks");
@@ -727,7 +751,7 @@ async function loadOpp(){
  
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
 async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
-async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety()])}
+async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals()])}
 updateTokenUI();refreshAll();loadDiagnostic();setInterval(refreshAll,15000);
 </script></body></html>`;
 }
