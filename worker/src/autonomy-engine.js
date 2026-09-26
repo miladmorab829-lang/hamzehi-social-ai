@@ -12,7 +12,7 @@ const ACTIONS={
   whatsapp:["status","inbox_scan"],
   instagram:["status","health_and_leads"],
   website:["status","growth_scan"],
-  crm:["status","lead_intelligence"],
+  crm:["status","lead_intelligence","lead_discovery"],
   ads:["status","discover_opportunities"],
   content:["status","generate_and_queue"],
   media:["status","video_generate"],
@@ -49,7 +49,7 @@ function fallbackPlan(raw){
  if(/واتساپ|whatsapp/.test(s))add("whatsapp","inbox_scan",{},85);
  if(/اینستاگرام|instagram|اینستا/.test(s))add("instagram","health_and_leads",{},70);
  if(/وبسایت|website|سایت/.test(s))add("website","growth_scan",{},70);
- if(/مشتری|lead|crm|لید/.test(s))add("crm","lead_intelligence",{},85);
+ if(/مشتری|مشتری جدید|customer|lead discovery|crm|لید/.test(s))add("crm","lead_discovery",{},90);
  if(/تبلیغ|اسپانسر|ads|advertis|رپورتاژ/.test(s))add("ads","discover_opportunities",{},85);
  if(/محتوا|content|پست|استوری|story/.test(s))add("content","generate_and_queue",{platform:"telegram",market:"iran_iraq"},70);
  if(/ویدیو|ویدیوی|video|wan\s*2\.7|i2v|image[- ]to[- ]video/.test(s))add("media","video_generate",{},95);
@@ -221,7 +221,8 @@ if(t.module==="photo"&&t.action==="photo_generate"){
  if(t.module==="ads"&&t.action==="discover_opportunities")return (await callSelf(req,env,"/api/ads/autopilot","POST",p)).data;
  if(t.module==="learning"&&t.action==="run")return (await callSelf(req,env,"/api/learning/run","POST",{})).data;
  if(t.module==="crm"&&t.action==="lead_intelligence")return (await callSelf(req,env,"/api/ads/intelligence")).data;
- if(t.module==="website"&&t.action==="growth_scan")return (await callSelf(req,env,"/api/website/growth")).data;
+ if(t.module==="crm"&&t.action==="lead_discovery")return (await callSelf(req,env,"/api/crm/lead-discovery","POST",p)).data;
+  if(t.module==="website"&&t.action==="growth_scan")return (await callSelf(req,env,"/api/website/growth")).data;
  if(t.module==="revenue"&&t.action==="funnel_snapshot")return await revenue(env);
  if(t.module==="instagram"&&t.action==="health_and_leads")return (await callSelf(req,env,"/api/settings")).data;
  if(t.module==="whatsapp"&&t.action==="inbox_scan")return (await callSelf(req,env,"/api/inbox")).data;
