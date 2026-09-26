@@ -572,18 +572,49 @@ let adAutopilotItems=[];
 
 function renderAdAutopilotItems(items){
  adAutopilotItems=Array.isArray(items)?items:[];
- $("opportunities").innerHTML=adAutopilotItems.length
-  ?adAutopilotItems.map((x,i)=>
-    "<div class='row'>"+
-    "<label style='display:flex;gap:8px;align-items:flex-start'>"+
-    "<input type='checkbox' class='adCleanupCheck' data-id='"+esc(x.id||"")+"' style='margin-top:5px'>"+
-    "<span>"+
-    "<b>"+esc(x.name||x.contact||x.id||"—")+"</b>"+
-    " · "+esc(x.stage||"new")+" · "+esc(x.priority||"normal")+
-    "<small>"+esc(x.type||"")+" · "+esc(x.city||"")+" · "+esc(x.id||"")+"</small>"+
-    "</span></label></div>"
-   ).join("")
-  :"—";
+
+ $(\"opportunities\").innerHTML=adAutopilotItems.length
+  ?adAutopilotItems.map((x,i)=>{
+    let meta={};
+
+    try{
+      meta=typeof x.notes==="string"
+        ?JSON.parse(x.notes||"{}")
+        :(x.notes||{});
+    }catch{}
+
+    const telegramUrl=String(meta.telegram_url||"").trim();
+    const telegramUsername=String(meta.telegram_username||"").trim();
+
+    const telegramButton=telegramUrl
+      ?\"<div class='tools' style='margin-top:7px'>\"+
+        \"<button class='btn' onclick='window.open(\"+
+        JSON.stringify(telegramUrl)+
+        \",\\\"_blank\\\")'>✈️ Telegram\"+
+        (telegramUsername?\" @\"+esc(telegramUsername):\"\")+
+        \"</button>\"+
+        \"</div>\"
+      :\"\";
+
+    return
+      \"<div class='row'>\"+
+      \"<label style='display:flex;gap:8px;align-items:flex-start'>\"+
+      \"<input type='checkbox' class='adCleanupCheck' data-id='\"+
+      esc(x.id||\"\")+
+      \"' style='margin-top:5px'>\"+
+      \"<span>\"+
+      \"<b>\"+esc(x.name||x.contact||x.id||\"—\")+\"</b>\"+
+      \" · \"+esc(x.stage||\"new\")+
+      \" · \"+esc(x.priority||\"normal\")+
+      \"<small>\"+
+      esc(x.type||\"\")+\" · \"+
+      esc(x.city||\"\")+\" · \"+
+      esc(x.id||\"\")+
+      \"</small>\"+
+      telegramButton+
+      \"</span></label></div>\";
+   }).join(\"\")
+  :\"—\";
 }
 
 async function previewAdAutopilot(){
