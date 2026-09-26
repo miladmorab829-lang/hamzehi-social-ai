@@ -573,7 +573,7 @@ let adAutopilotItems=[];
 function renderAdAutopilotItems(items){
  adAutopilotItems=Array.isArray(items)?items:[];
 
- $(\"opportunities\").innerHTML=adAutopilotItems.length
+ $("opportunities").innerHTML=adAutopilotItems.length
   ?adAutopilotItems.map((x,i)=>{
     let meta={};
 
@@ -587,34 +587,34 @@ function renderAdAutopilotItems(items){
     const telegramUsername=String(meta.telegram_username||"").trim();
 
     const telegramButton=telegramUrl
-      ?\"<div class='tools' style='margin-top:7px'>\"+
-        \"<button class='btn' onclick='window.open(\"+
-        JSON.stringify(telegramUrl)+
-        \",\\\"_blank\\\")'>✈️ Telegram\"+
-        (telegramUsername?\" @\"+esc(telegramUsername):\"\")+
-        \"</button>\"+
-        \"</div>\"
-      :\"\";
+      ?"<div class='tools' style='margin-top:7px'>"+
+        "<a class='btn' target='_blank' rel='noopener noreferrer' href='"+
+        esc(telegramUrl)+
+        "'>✈️ Telegram"+
+        (telegramUsername?" @"+esc(telegramUsername):"")+
+        "</a>"+
+        "</div>"
+      :"";
 
     return
-      \"<div class='row'>\"+
-      \"<label style='display:flex;gap:8px;align-items:flex-start'>\"+
-      \"<input type='checkbox' class='adCleanupCheck' data-id='\"+
-      esc(x.id||\"\")+
-      \"' style='margin-top:5px'>\"+
-      \"<span>\"+
-      \"<b>\"+esc(x.name||x.contact||x.id||\"—\")+\"</b>\"+
-      \" · \"+esc(x.stage||\"new\")+
-      \" · \"+esc(x.priority||\"normal\")+
-      \"<small>\"+
-      esc(x.type||\"\")+\" · \"+
-      esc(x.city||\"\")+\" · \"+
-      esc(x.id||\"\")+
-      \"</small>\"+
+      "<div class='row'>"+
+      "<label style='display:flex;gap:8px;align-items:flex-start'>"+
+      "<input type='checkbox' class='adCleanupCheck' data-id='"+
+      esc(x.id||"")+
+      "' style='margin-top:5px'>"+
+      "<span>"+
+      "<b>"+esc(x.name||x.contact||x.id||"—")+"</b>"+
+      " · "+esc(x.stage||"new")+
+      " · "+esc(x.priority||"normal")+
+      "<small>"+
+      esc(x.type||"")+" · "+
+      esc(x.city||"")+" · "+
+      esc(x.id||"")+
+      "</small>"+
       telegramButton+
-      \"</span></label></div>\";
-   }).join(\"\")
-  :\"—\";
+      "</span></label></div>";
+   }).join("")
+  :"—";
 }
 
 async function previewAdAutopilot(){
