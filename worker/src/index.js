@@ -3664,7 +3664,234 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
   await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,found:summary.found,drafted:summary.drafted,errors:summary.errors,started});
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
+async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
+  const source="customer_discovery";
+  const groups=[
+    ["gold_fa","طلافروشی طلا جواهر زرگری گالری طلا","ایران"],
+    ["perfume_fa","عطر ادکلن عطر فروشی فروشگاه عطر","ایران"],
+    ["watch_fa","فروشگاه ساعت ساعت فروشی ساعت مچی","ایران"],
+    ["fashion_jewelry_fa","بدلیجات زیورآلات اکسسوری بدلی فروشی","ایران"],
+    ["gold_ar","ذهب مجوهرات صياغة صائغ محل ذهب","العراق"],
+    ["perfume_ar","عطور محل عطور برفانات عطر","العراق"],
+    ["watch_ar","ساعات محل ساعات ساعة مچي","العراق"],
+    ["fashion_jewelry_ar","اكسسوارات حلي مجوهرات اكسسوارات نسائية","العراق"]
+  ];
 
+  const type=String(input.type||"all").trim();
+  const city=String(input.city||"").trim();
+  const extra=String(input.extra||"").trim();
+  const selected=type==="all"
+    ?groups
+    :groups.filter(x=>x[0]===type||x[0]===`${type}_fa`||x[0]===`${type}_ar`);
+
+  const summary={
+    found:0,
+    new_leads:0,
+    updated:0,
+    skipped:0,
+    errors:0
+  };
+  const items=[];
+  const seen=new Set();
+
+  for(const [groupType,term,country] of selected){
+    const region=groupType.endsWith("_ar")
+      ?"العراق عراق Iraq بغداد اربيل البصرة النجف كربلاء"
+      :"ایران ایرانی Iran تهران اصفهان شیراز مشهد تبریز";
+
+    const q=[term,region,city,extra].filter(Boolean).join(" ");
+
+    try{
+      const discovery=await discoverWebLinks(q,6);
+
+      for(const href of discovery.links){
+        if(items.length>=40)break;
+
+        const safeHref=safeHttpUrl(href);
+        if(!safeHref)continue;
+
+        let uu;
+        try{
+          uu=new URL(safeHref);
+          if(seen.has(uu.origin))continue;
+          seen.add(uu.origin);
+        }catch{
+          continue;
+        }
+
+        try{
+          const rr=await fetchWithRetry(
+            safeHref,
+            {headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}},
+            2,
+            AD_FETCH_TIMEOUT_MS
+          );
+
+          if(!rr.ok)continue;
+
+          const contentType=String(
+            rr.headers.get("content-type")||""
+          ).toLowerCase();
+
+          if(contentType&&!contentType.includes("text/html"))continue;
+
+          const tx=(await rr.text()).slice(0,100000);
+          const plain=tx
+            .replace(/<script[\s\S]*?<\/script>/gi," ")
+            .replace(/<style[\s\S]*?<\/style>/gi," ")
+            .replace(/<[^>]+>/g," ")
+            .replace(/\s+/g," ")
+            .trim();
+
+          const title=(
+            tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname
+          )
+            .replace(/<[^>]+>/g," ")
+            .replace(/\s+/g," ")
+            .trim()
+            .slice(0,160);
+
+          const text=`${title} ${uu.hostname} ${uu.pathname} ${plain}`;
+
+          const marketPattern=groupType.startsWith("gold_")
+            ?/طلا|جواهر|زرگر|گالری|مجوهرات|ذهب|صياغ|صياغة|صائغ|محل ذهب|gold|jewel/i
+            :groupType.startsWith("perfume_")
+              ?/عطر|عطور|ادکلن|برفان|عطر فروشی|محل عطور|perfume|parfum|fragrance/i
+              :groupType.startsWith("watch_")
+                ?/ساعت|ساعات|watch/i
+                :/بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
+
+          const countryPattern=groupType.endsWith("_ar")
+            ?/عراق|عراقي|العراق|Iraq|Iraqi|بغداد|أربيل|اربيل|البصرة|النجف|كربلاء|\+964/i
+            :/ایران|ایرانی|Iran|Iranian|تهران|اصفهان|شیراز|مشهد|تبریز|\+98/i;
+
+          const businessPattern=
+            /فروشگاه|فروشنده|فروشی|طلافروشی|زرگری|جواهرفروشی|گالری|عطرفروشی|عطر فروشی|ساعت فروشی|بدلیجات|بدلی فروشی|محل ذهب|محل عطور|محل ساعات|مجوهرات|صياغة|صائغ|عطور|ساعات|اكسسوارات|shop|store|jewelry|jewellery|goldsmith|perfume|parfum|fragrance|watch|accessories/i;
+
+          const spamPattern=
+            /porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
+
+          const marketplacePattern=
+            /digikala|okala|jetamooz|amazon|torob|snapp|basalam|marketplace|فروشگاه اینترنتی|فروشگاه آنلاین|خرید آنلاین|فروش آنلاین/i;
+
+          if(spamPattern.test(text))continue;
+          if(marketplacePattern.test(text))continue;
+          if(!marketPattern.test(text))continue;
+          if(!businessPattern.test(text))continue;
+          if(!countryPattern.test(text))continue;
+
+          let contact=null;
+
+          const mail=tx.match(/href=["'](mailto:[^"']+)["']/i);
+          if(mail)contact=mail[1];
+
+          if(!contact){
+            const phone=plain.match(
+              /(?:\+?98|0)?9\d{9}|(?:\+?964|0)?7\d{9,10}/
+            );
+            if(phone)contact=phone[0];
+          }
+
+          const score=Math.min(
+            100,
+            60+
+            (marketPattern.test(title)?15:0)+
+            (countryPattern.test(title)?10:0)+
+            (contact?15:0)
+          );
+
+          const notes=JSON.stringify({
+            source,
+            customer_target:true,
+            type:groupType,
+            country,
+            city,
+            query:q,
+            url:safeHref,
+            contact,
+            evidence:plain.slice(0,1500),
+            score,
+            discovered_at:now()
+          });
+
+          const existing=await env.DB.prepare(
+            "SELECT id,notes FROM leads WHERE contact=? OR contact=? LIMIT 1"
+          ).bind(safeHref,contact||"").first();
+
+          if(existing){
+            let oldMeta={};
+            try{oldMeta=JSON.parse(existing.notes||"{}")}catch{}
+            if(oldMeta.source==="customer_discovery"){
+              await env.DB.prepare(
+                "UPDATE leads SET notes=?,updated_at=? WHERE id=?"
+              ).bind(notes,now(),existing.id).run();
+              summary.updated++;
+            }else{
+              summary.skipped++;
+              continue;
+            }
+          }else{
+            const id=uid();
+
+            await env.DB.prepare(
+              "INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)"
+            ).bind(
+              id,
+              title||uu.hostname,
+              contact||safeHref,
+              "discovered",
+              score>=80?"high":score>=65?"normal":"low",
+              notes,
+              now(),
+              now()
+            ).run();
+
+            summary.new_leads++;
+            items.push({
+              id,
+              name:title||uu.hostname,
+              type:groupType,
+              country,
+              url:safeHref,
+              contact,
+              score
+            });
+          }
+
+          summary.found++;
+        }catch{
+          summary.errors++;
+        }
+      }
+    }catch{
+      summary.errors++;
+    }
+  }
+
+  await audit(
+    env,
+    "customer_lead_discovery",
+    "Customer lead discovery completed",
+    {
+      source,
+      reason,
+      type,
+      city,
+      found:summary.found,
+      new_leads:summary.new_leads,
+      updated:summary.updated,
+      errors:summary.errors
+    }
+  );
+
+  return {
+    ok:true,
+    mode:"customer_discovery",
+    source,
+    summary,
+    items
+  };
+}
 async function ensureWebsiteGrowthStore(env){
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS website_events (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, campaign TEXT, source TEXT, medium TEXT, page TEXT, created_at TEXT NOT NULL)`).run();
   await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_website_events_created_at ON website_events(created_at)`).run();
@@ -4773,7 +5000,18 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
         const counts={today:0,urgent:0,opportunity:0}; for(const x of items) counts[x.bucket]++;
         return json({ok:true,source_site:"https://www.hamzehibox.com",counts,items,next_actions:items.slice(0,10)});
       }
+if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
 
+  const b = await req.json().catch(() => ({}));
+  if (!b || typeof b !== "object") {
+    return json({ ok:false, error:"Invalid JSON body" },400);
+  }
+
+  return json(
+    await runCustomerLeadDiscoveryOnce(env,b,"manual")
+  );
+}
       if (u.pathname === "/api/ads/autopilot" && req.method === "POST") {
         if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
         const b=await req.json().catch(()=>null);
