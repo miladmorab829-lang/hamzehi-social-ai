@@ -3665,6 +3665,77 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
 async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
+async function discoverGooglePlaces(env, textQuery, limit = 10) {
+  if (!env.GOOGLE_PLACES_API_KEY) {
+    return {
+      ok: false,
+      skipped: true,
+      error: "GOOGLE_PLACES_API_KEY not configured",
+      items: []
+    };
+  }
+
+  const url = "https://places.googleapis.com/v1/places:searchText";
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": env.GOOGLE_PLACES_API_KEY,
+      "X-Goog-FieldMask": [
+        "places.id",
+        "places.displayName",
+        "places.formattedAddress",
+        "places.googleMapsUri",
+        "places.websiteUri",
+        "places.internationalPhoneNumber",
+        "places.nationalPhoneNumber",
+        "places.location",
+        "places.types",
+        "places.businessStatus"
+      ].join(",")
+    },
+    body: JSON.stringify({
+      textQuery: textQuery,
+      languageCode: /_ar$/.test(textQuery) ? "ar" : "fa",
+      pageSize: Math.min(Math.max(Number(limit) || 10, 1), 20)
+    }),
+    signal: AbortSignal.timeout(12000)
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || data.error) {
+    return {
+      ok: false,
+      skipped: false,
+      status: response.status,
+      error: data.error?.message || `Google Places HTTP ${response.status}`,
+      items: []
+    };
+  }
+
+  const items = (data.places || []).map(place => ({
+    provider: "google_places",
+    place_id: place.id || null,
+    name: place.displayName?.text || null,
+    address: place.formattedAddress || null,
+    maps_url: place.googleMapsUri || null,
+    website: place.websiteUri || null,
+    phone: place.internationalPhoneNumber || place.nationalPhoneNumber || null,
+    types: Array.isArray(place.types) ? place.types : [],
+    business_status: place.businessStatus || null,
+    lat: place.location?.latitude ?? null,
+    lng: place.location?.longitude ?? null
+  }));
+
+  return {
+    ok: true,
+    skipped: false,
+    status: response.status,
+    items
+  };
+} 
   const source="customer_discovery";
   const groups=[
     ["gold_fa","طلافروشی طلا جواهر زرگری گالری طلا","ایران"],
@@ -3732,14 +3803,129 @@ const q=[
 ].filter(Boolean).join(" ");
 
     try{
-      const discovery=await discoverWebLinks(q,6);
-summary.discovery_diagnostics.push({
-  group:groupType,
-  query:q,
-  providers:discovery.provider||[],
-  diagnostics:discovery.diagnostics||[]
-});
+      const placesQuery = [
+  term,
+  city,
+  country
+].filter(Boolean).join(" ");
 
+const googlePlaces = await discoverGooglePlaces(
+  env,
+  placesQuery,
+  10
+);
+
+summary.discovery_diagnostics.push({
+  group: groupType,
+  query: q,
+  places_query: placesQuery,
+  google_places: {
+    ok: googlePlaces.ok,
+    skipped: googlePlaces.skipped,
+    status: googlePlaces.status || null,
+    error: googlePlaces.error || null,
+    found: googlePlaces.items?.length || 0
+  }
+});
+      for (const place of (googlePlaces.items || [])) {
+        if (items.length >= 40) break;
+
+        if (place.business_status === "CLOSED_PERMANENTLY") {
+          summary.skipped++;
+          continue;
+        }
+
+        const name = String(place.name || "").trim();
+        const contact = String(
+          place.website || place.maps_url || place.phone || ""
+        ).trim();
+
+        if (!name || !contact) {
+          summary.skipped++;
+          continue;
+        }
+
+        const existing = await env.DB.prepare(
+          "SELECT id,notes FROM leads WHERE contact=? LIMIT 1"
+        ).bind(contact).first();
+
+        const meta = {
+          source,
+          provider: "google_places",
+          place_id: place.place_id,
+          name,
+          address: place.address,
+          maps_url: place.maps_url,
+          website: place.website,
+          phone: place.phone,
+          types: place.types || [],
+          business_status: place.business_status,
+          lat: place.lat,
+          lng: place.lng,
+          type: groupType,
+          city,
+          country,
+          query: placesQuery,
+          discovered_at: now()
+        };
+
+        if (existing) {
+          let oldMeta = {};
+          try {
+            oldMeta = JSON.parse(existing.notes || "{}");
+          } catch {}
+
+          Object.assign(oldMeta, meta);
+
+          await env.DB.prepare(
+            "UPDATE leads SET notes=?,updated_at=? WHERE id=?"
+          ).bind(
+            JSON.stringify(oldMeta),
+            now(),
+            existing.id
+          ).run();
+
+          summary.updated++;
+          continue;
+        }
+
+        const id = uid();
+
+        await env.DB.prepare(
+          "INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)"
+        ).bind(
+          id,
+          name,
+          contact,
+          "discovered",
+          "normal",
+          JSON.stringify(meta),
+          now(),
+          now()
+        ).run();
+
+        summary.found++;
+        summary.new_leads++;
+
+        items.push({
+          id,
+          name,
+          type: groupType,
+          contact,
+          maps_url: place.maps_url,
+          website: place.website,
+          phone: place.phone,
+          provider: "google_places"
+        });
+      }
+const discovery = await discoverWebLinks(q, 6);
+
+summary.discovery_diagnostics.push({
+  group: groupType,
+  query: q,
+  providers: discovery.provider || [],
+  diagnostics: discovery.diagnostics || []
+});
       for(const href of discovery.links){
         if(items.length>=40)break;
 
