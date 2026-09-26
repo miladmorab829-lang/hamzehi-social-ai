@@ -3806,6 +3806,16 @@ if(marketplacePattern.test(text)){
 }
 if(!marketPattern.test(text)){
   summary.filter_diagnostics.market++;
+  if(!summary.filter_diagnostics.market_examples){
+    summary.filter_diagnostics.market_examples=[];
+  }
+  if(summary.filter_diagnostics.market_examples.length<20){
+    summary.filter_diagnostics.market_examples.push({
+      group:groupType,
+      url:safeHref,
+      title:title
+    });
+  }
   continue;
 }
 if(!businessPattern.test(text)){
