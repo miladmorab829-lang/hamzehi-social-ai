@@ -2539,7 +2539,10 @@ function getCurrentISOWeekWindow(){
 }
 
 async function getWeeklyPhotoPool(env,limit=6){
-  const window=getCurrentISOWeekWindow();
+  const week=getCurrentISOWeekWindow();
+  const end=now();
+  const endMs=Date.parse(end);
+  const start=new Date(endMs-7*24*60*60*1000).toISOString();
 
   const rows=await env.DB.prepare(`
     SELECT
@@ -2560,8 +2563,8 @@ async function getWeeklyPhotoPool(env,limit=6){
     ORDER BY u.used_at ASC
     LIMIT ?
   `).bind(
-    window.start,
-    window.end,
+    start,
+    end,
     Math.min(6,Math.max(1,Number(limit)||6))
   ).all();
   const base=String(
@@ -2574,9 +2577,9 @@ async function getWeeklyPhotoPool(env,limit=6){
     image_url:`${base}${mediaProxyUrl(photo.output_media_id)}`
   }));
   return {
-    weekId:window.weekId,
-    start:window.start,
-    end:window.end,
+    weekId:week.weekId,
+    start,
+    end,
         photos
   };
 }
@@ -3119,212 +3122,23 @@ if(media.media_type==='video'){
 }
 
 if(media.media_type==='photo'){
-  if(!env.AI || typeof env.AI.run!=='function'){
-    await audit(
-      env,
-      'media_ai_video_skipped',
-      'Workers AI binding is unavailable; original image retained',
-      {
-        content_id:contentId,
-        media_id:media.source_id
-      }
-    );
+  await audit(
+    env,
+    'media_ai_video_skipped',
+    'Per-content video generation is disabled; photo retained for weekly Video Autopilot',
+    { content_id:contentId, media_id:media.source_id, weekly_autopilot:true }
+  );
 
-    return {
-      processed:false,
-      mode:'video_generation_unavailable',
-      reason:'workers_ai_unavailable'
-    };
-  }
+  await env.DB.prepare(
+    "UPDATE content_media SET status='ready',updated_at=? WHERE id=? AND content_id=? AND status='processing'"
+  ).bind(now(),String(media.id),String(contentId)).run();
 
-  const base=String(
-    env.PUBLIC_WORKER_BASE_URL ||
-    'https://hamzehi-social-ai.miladmorab829.workers.dev'
-  ).replace(/\/$/,'');
-
-  const sourceUrl=base+mediaProxyUrl(media.source_id);
-
-  const videoPrompt=[
-    String(content.visual_prompt||''),
-    'Create a premium cinematic luxury commercial video for HAMZEHI BOX.',
-    'Animate the jewelry box presentation naturally with elegant camera movement.',
-    'Preserve the exact product identity, proportions, colors and recognizable details from the reference image.',
-    'Use refined studio lighting, subtle premium motion and realistic materials.',
-    'Do not add logos, text, prices, specifications or invented claims.',
-    'The result must look like a polished jewelry packaging advertisement.'
-  ].filter(Boolean).join('\n');
-
-  try{
-    const result=await env.AI.run('alibaba/wan-2.7-i2v',{
-      image:sourceUrl,
-      prompt:videoPrompt,
-      duration:Math.min(
-        15,
-        Math.max(2,Number(env.AUTO_VIDEO_DURATION||8)||8)
-      ),
-      resolution:String(env.AUTO_VIDEO_RESOLUTION||'1080P'),
-      watermark:false
-},{
-  gateway:{id:'default'}
-});
-
-    const videoUrl=String(
-      result?.video ||
-      result?.result?.video ||
-      ''
-    ).trim();
-
-    if(!videoUrl){
-      throw Error('Wan 2.7 I2V returned no video URL');
-    }
-
-    const vr=await fetch(videoUrl);
-
-    if(!vr.ok){
-      throw Error(`Generated video download failed (HTTP ${vr.status})`);
-    }
-
-    const videoBlob=await vr.blob();
-
-    const chat=videoVaultChatId(env);
-
-    if(!chat){
-      throw Error(
-        'TELEGRAM_VIDEO_VAULT_CHAT_ID or TELEGRAM_VAULT_CHAT_ID missing'
-      );
-    }
-
-    const upload=new FormData();
-
-    upload.append('chat_id',chat);
-    upload.append(
-      'video',
-      videoBlob,
-      'hamzehi-ai-video.mp4'
-    );
-
-    upload.append(
-      'caption',
-      `AI VIDEO | content:${contentId} | parent:${media.source_id}`
-    );
-
-    const tr=await fetch(
-      `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,
-      {
-        method:'POST',
-        body:upload
-      }
-    );
-
-    const td=await tr.json().catch(()=>({}));
-
-    if(!tr.ok || !td.ok){
-      throw Error(
-        td.description ||
-        'Failed to store AI video in Telegram vault'
-      );
-    }
-
-    const tm=td.result;
-    const video=tm.video;
-
-    if(!video?.file_id){
-      throw Error(
-        'Telegram did not return generated video file_id'
-      );
-    }
-
-    const t=now();
-    const videoId=uid();
-
-    await env.DB.prepare(
-      "INSERT INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
-    )
-    .bind(
-      videoId,
-      chat,
-      '',
-      String(tm.message_id||''),
-      String(video.file_id),
-      String(video.file_unique_id||''),
-      'video',
-      `AI VIDEO | content:${contentId} | parent:${media.source_id}`,
-      'vault',
-      t,
-      t
-    )
-    .run();
-
-    await env.DB.prepare(
-      "INSERT INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)"
-    )
-    .bind(
-      uid(),
-      videoId,
-      String(contentId),
-      'ai_video',
-      'ready',
-      videoPrompt,
-      String(media.source_id),
-      'wan-2.7-i2v',
-      t,
-      t
-    )
-    .run();
-
-    await env.DB.prepare(
-      "UPDATE content_media SET source_id=?,source_type='telegram_ai',media_type='video',media_url=?,status='ready',updated_at=? WHERE id=?"
-    )
-    .bind(
-      videoId,
-      mediaProxyUrl(videoId),
-      t,
-      String(media.id)
-    )
-    .run();
-
-    await audit(
-      env,
-      'media_ai_video_generated',
-      'Wan 2.7 image-to-video generated and stored in Telegram Media Vault',
-      {
-        content_id:contentId,
-        source_media_id:media.source_id,
-        media_id:videoId,
-        model:'alibaba/wan-2.7-i2v',
-        duration:Number(env.AUTO_VIDEO_DURATION||8)||8,
-        resolution:String(env.AUTO_VIDEO_RESOLUTION||'1080P')
-      }
-    );
-
-    return {
-      processed:true,
-      mode:'wan-2.7-i2v',
-      media_id:videoId,
-      media_type:'video'
-    };
-
-  }catch(e){
-
-    await audit(
-      env,
-      'media_ai_video_failed',
-      'Automatic AI video generation failed; image media retained',
-      {
-        content_id:contentId,
-        media_id:media.source_id,
-        model:'alibaba/wan-2.7-i2v',
-        error:e.message
-      }
-    );
-
-    return {
-      processed:false,
-      mode:'wan-2.7-i2v',
-      fallback:'image',
-      error:e.message
-    };
-  }
+  return {
+    processed:true,
+    mode:'weekly_video_autopilot_only',
+    media_id:String(media.source_id),
+    media_type:'photo'
+  };
 }
   return {processed:false,reason:'unsupported_media_type'};
 }
@@ -3439,6 +3253,17 @@ else if(x.operation==='video_generation'){
       media_url:String(media.media_url||'')
     }
   );
+
+  if(String(media.media_type)==='photo'){
+    await env.DB.prepare(
+      "UPDATE retry_queue SET status='failed',last_error=?,next_attempt_at=NULL,updated_at=? WHERE id=? AND status='running'"
+    ).bind(
+      "Obsolete video_generation retry: per-content video generation is retired; photo retained for weekly Video Autopilot",
+      now(),
+      x.id
+    ).run();
+    continue;
+  }
 
   if(
     result?.processed!==true &&
@@ -4736,6 +4561,21 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
     activities: rows.results || []
   });
 }  
+  if (u.pathname === "/api/video-autopilot/run" && req.method === "POST") {
+  if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
+  if (!(await autonomyMasterGate(env))) {
+    return json({
+      ok:true,
+      result:{ok:true,skipped:true,reason:"MASTER_OFF"}
+    });
+  }
+
+  return json({
+    ok:true,
+    result:await prepareWeeklyVideoAutopilot(env)
+  });
+}
+
   if (u.pathname === "/api/video-autopilot/status" && req.method === "GET") {
   if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
 
@@ -4949,69 +4789,25 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
     });
   }
 
-  const pending = await env.DB.prepare(
-    "SELECT id,payload_json,status FROM retry_queue " +
-    "WHERE operation='video_generation' " +
-    "AND status IN ('queued','running') " +
-    "ORDER BY created_at DESC LIMIT 20"
-  ).all();
-
-  for (const job of pending.results || []) {
-    try {
-      const p = JSON.parse(job.payload_json || "{}");
-
-      if (
-        String(p.content_id)===contentId &&
-        String(p.content_media_id)===String(media.id)
-      ) {
-        return json({
-          ok:true,
-          queued:true,
-          job_id:job.id,
-          content_id:contentId,
-          status:job.status,
-          message:"Video generation already queued"
-        },202);
-      }
-    } catch {}
-  }
-
-  const jobId = uid();
-  const t = now();
-
-  await env.DB.prepare(
-    "UPDATE content_media SET status='processing',updated_at=? WHERE id=?"
-  ).bind(t,String(media.id)).run();
-
-  await env.DB.prepare(
-    "INSERT INTO retry_queue " +
-    "(id,operation,payload_json,attempts,max_attempts,status,next_attempt_at,last_error,created_at,updated_at) " +
-    "VALUES(?,?,?,?,?,?,?,?,?,?)"
-  ).bind(
-    jobId,
-    'video_generation',
-    JSON.stringify({
-      content_id:contentId,
-      content_media_id:String(media.id)
-    }),
-    0,
-    3,
-    'queued',
-    null,
-    null,
-    t,
-    t
-  ).run();
+  const mediaProcessing=await autoProcessContentMedia(
+    env,
+    contentId,
+    attached
+  );
 
   return json({
     ok:true,
-    queued:true,
-    job_id:jobId,
+    queued:false,
+    video_generation:{
+      status:'not_started',
+      reason:'weekly_video_autopilot_only'
+    },
     content_id:contentId,
     content_media_id:String(media.id),
-    status:'queued',
-    mode:'wan-2.7-i2v'
-  },202);
+    status:mediaProcessing?.processed ? 'media_processed' : 'media_processing_incomplete',
+    mode:mediaProcessing?.mode||'weekly_video_autopilot_only',
+    media_processing:mediaProcessing
+  });
 }
      if (u.pathname === "/api/video-autopilot/activity" && req.method === "GET") {
   if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
