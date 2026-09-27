@@ -330,6 +330,45 @@ async function audit(env, type, msg, details = {}) {
   ).bind(uid(), type, "info", msg, JSON.stringify(details), now()).run();
 }
 
+function sanitizeOperationalError(value) {
+  return String(value?.message || value || "Unknown provider error")
+    .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot[redacted]")
+    .replace(/([?&](?:key|token|api_key|access_token)=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/\b(api[_-]?key|access[_-]?token|token|secret)\s*[=:]\s*[^\s,;&]+/gi, "$1=[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+async function auditWeeklyVideoObservationOnce(env, type, msg, details = {}) {
+  try {
+    const dedupKey = String(details.dedup_key || "").trim();
+
+    if (dedupKey) {
+      const recent = await env.DB.prepare(`
+        SELECT details_json
+        FROM system_events
+        WHERE type=?
+        ORDER BY created_at DESC
+        LIMIT 100
+      `).bind(type).all();
+
+      for (const row of recent.results || []) {
+        try {
+          const prior = JSON.parse(row.details_json || "{}");
+          if (prior.dedup_key === dedupKey) return false;
+        } catch {}
+      }
+    }
+
+    await audit(env, type, msg, details);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function approved(env, id) {
   const q = await env.DB.prepare(
     "SELECT status FROM approval_queue WHERE content_id=? " +
@@ -1660,16 +1699,22 @@ async function getMediaVault(env,req){
 async function aiEditVaultImageCore(env, sourceId, prompt, meta = {}){
   await ensureMediaVaultStore(env);
   if(!env.OPENAI_API_KEY) throw Error('OPENAI_API_KEY missing');
-  const src=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=? AND source_kind='vault' AND media_type='photo'").bind(String(sourceId)).first();
+  const normalizedSourceId=String(sourceId||'').trim();
+  if(!normalizedSourceId) throw Error('Vault photo source ID missing or invalid');
+  const src=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=? AND source_kind='vault' AND media_type='photo'").bind(normalizedSourceId).first();
   if(!src) throw Error('Vault photo not found');
-  const fr=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(src.file_id)}`);
+  const sourceFileId=String(src.file_id||'').trim();
+  if(!sourceFileId) throw Error('Vault photo file ID missing or invalid');
+  const fr=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(sourceFileId)}`);
   const fd=await fr.json().catch(()=>({}));
-  if(!fr.ok||!fd.ok||!fd.result?.file_path) throw Error('Telegram source image lookup failed');
-  const img=await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fd.result.file_path}`);
+  const sourcePath=String(fd.result?.file_path||'').trim();
+  if(!fr.ok||!fd.ok||!sourcePath) throw Error('Telegram source image lookup failed');
+  const img=await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${sourcePath}`);
 if(!img.ok) throw Error('Telegram source image download failed');
 
 const rawBlob=await img.blob();
-const filePath=String(fd.result.file_path||'').toLowerCase();
+ if(!rawBlob.size) throw Error('Telegram source image download returned empty file');
+ const filePath=sourcePath.toLowerCase();
 
 let contentType=String(
   img.headers.get('content-type')||rawBlob.type||''
@@ -1686,9 +1731,6 @@ if(filePath.endsWith('.jpg')||filePath.endsWith('.jpeg')){
 }else if(filePath.endsWith('.webp')){
   contentType='image/webp';
   filename='source.webp';
-}else if(contentType==='application/octet-stream'){
-  contentType='image/jpeg';
-  filename='source.jpg';
 }
 
 if(!/^image\/(jpeg|png|webp)$/.test(contentType)){
@@ -2439,6 +2481,32 @@ async function pollWeeklyVideoAutopilot(env){
     };
 
   }catch(e){
+    const provider=String(row.status)==='generating'
+      ? 'kling'
+      : String(row.status)==='compositing'
+        ? 'shotstack'
+        : 'unknown';
+    await auditWeeklyVideoObservationOnce(
+      env,
+      "weekly_video_autopilot_poll_error",
+      "Weekly Video Autopilot provider poll failed transiently",
+      {
+        week_id:row.week_id,
+        provider,
+        stage:`${provider}_poll`,
+        task_id:row.task_id||null,
+        shotstack_task_id:row.shotstack_task_id||null,
+        error:sanitizeOperationalError(e),
+        transient:true,
+        dedup_key:[
+          row.week_id,
+          provider,
+          row.task_id||'',
+          row.shotstack_task_id||'',
+          sanitizeOperationalError(e)
+        ].join(':')
+      }
+    );
     return {
       ok:false,
       status:"poll_error",
@@ -2544,6 +2612,24 @@ async function getWeeklyPhotoPool(env,limit=6){
   const endMs=Date.parse(end);
   const start=new Date(endMs-7*24*60*60*1000).toISOString();
 
+  const historical=await env.DB.prepare(`
+    SELECT source_media_ids
+    FROM weekly_video_autopilot
+    WHERE source_media_ids IS NOT NULL
+      AND source_media_ids!=''
+  `).all();
+
+  const previouslyUsedIds=new Set();
+  for(const historicalRow of historical.results||[]){
+    try{
+      const parsed=JSON.parse(historicalRow.source_media_ids||'null');
+      if(!Array.isArray(parsed)) continue;
+      for(const id of parsed){
+        if(typeof id==='string'&&id) previouslyUsedIds.add(id);
+      }
+    }catch{}
+  }
+
   const rows=await env.DB.prepare(`
     SELECT
       u.output_media_id,
@@ -2561,21 +2647,26 @@ async function getWeeklyPhotoPool(env,limit=6){
       AND u.used_at>=?
       AND u.used_at<?
     ORDER BY u.used_at ASC
-    LIMIT ?
   `).bind(
     start,
-    end,
-    Math.min(6,Math.max(1,Number(limit)||6))
+    end
   ).all();
   const base=String(
     env.PUBLIC_WORKER_BASE_URL ||
     'https://hamzehi-social-ai.miladmorab829.workers.dev'
   ).replace(/\/$/,'');
 
-  const photos=(rows.results||[]).map(photo=>({
-    ...photo,
-    image_url:`${base}${mediaProxyUrl(photo.output_media_id)}`
-  }));
+  const photos=(rows.results||[])
+    .filter(photo=>
+      typeof photo.output_media_id==='string' &&
+      photo.output_media_id &&
+      !previouslyUsedIds.has(photo.output_media_id)
+    )
+    .slice(0,Math.min(6,Math.max(1,Number(limit)||6)))
+    .map(photo=>({
+      ...photo,
+      image_url:`${base}${mediaProxyUrl(photo.output_media_id)}`
+    }));
   return {
     weekId:week.weekId,
     start,
@@ -2682,6 +2773,16 @@ async function prepareWeeklyVideoAutopilot(env){
   const pool=await getWeeklyPhotoPool(env,6);
 
   if(!pool.photos.length){
+    await auditWeeklyVideoObservationOnce(
+      env,
+      "weekly_video_autopilot_ineligible",
+      "Weekly Video Autopilot found no eligible photos",
+      {
+        week_id:pool.weekId,
+        reason:"no_weekly_photos",
+        dedup_key:`${pool.weekId}:no_weekly_photos`
+      }
+    );
     return {
       ok:false,
       skipped:true,
@@ -2704,6 +2805,17 @@ async function prepareWeeklyVideoAutopilot(env){
     .slice(0,7);
 
   if(!imageUrls.length){
+    await auditWeeklyVideoObservationOnce(
+      env,
+      "weekly_video_autopilot_ineligible",
+      "Weekly Video Autopilot found no usable source URLs",
+      {
+        week_id:pool.weekId,
+        reason:"no_weekly_image_urls",
+        source_media_ids:brief.source_media_ids,
+        dedup_key:`${pool.weekId}:no_weekly_image_urls:${brief.source_media_ids.join(',')}`
+      }
+    );
     return {
       ok:false,
       skipped:true,
@@ -2711,6 +2823,17 @@ async function prepareWeeklyVideoAutopilot(env){
     };
   }
    if(imageUrls.some(url=>!/^https?:\/\//i.test(url))){
+    await auditWeeklyVideoObservationOnce(
+      env,
+      "weekly_video_autopilot_ineligible",
+      "Weekly Video Autopilot selected an invalid source URL",
+      {
+        week_id:pool.weekId,
+        reason:"invalid_weekly_image_url",
+        source_media_ids:brief.source_media_ids,
+        dedup_key:`${pool.weekId}:invalid_weekly_image_url:${brief.source_media_ids.join(',')}`
+      }
+    );
     return {
       ok:false,
       skipped:true,
@@ -2723,6 +2846,16 @@ async function prepareWeeklyVideoAutopilot(env){
   );
 
   if(!reserved){
+    await auditWeeklyVideoObservationOnce(
+      env,
+      "weekly_video_autopilot_reservation_conflict",
+      "Weekly Video Autopilot reservation already exists",
+      {
+        week_id:pool.weekId,
+        reason:"weekly_video_already_reserved",
+        dedup_key:`${pool.weekId}:weekly_video_already_reserved`
+      }
+    );
     return {
       ok:true,
       skipped:true,
