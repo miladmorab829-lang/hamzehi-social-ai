@@ -169,6 +169,16 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
   <div id="videoActivity" class="hint" style="margin-top:10px">
     در انتظار وضعیت…
   </div>
+  <div class="grid2" style="margin-top:10px">
+    <div class="row">
+      <b>Current Week</b>
+      <div id="videoCurrentWeek" class="muted" style="margin-top:6px">—</div>
+    </div>
+    <div class="row">
+      <b>Last Successful Week</b>
+      <div id="videoLastSuccessfulWeek" class="muted" style="margin-top:6px">—</div>
+    </div>
+  </div>
 </section>
 <section class="grid2 section">
 <div class="card">
@@ -456,6 +466,54 @@ async function loadVideoAutopilot(){
     d.status==="video_ready"
       ? "<span class='ok'>READY</span>"
       : "<span class='muted'>NOT READY</span>";
+
+  const currentWeek=d.current_week;
+  if(currentWeek && typeof currentWeek==="object"){
+    const sourceIds=Array.isArray(currentWeek.source_media_ids)
+      ? currentWeek.source_media_ids.map(esc).join(", ")
+      : "";
+    const error=currentWeek.error && typeof currentWeek.error==="object"
+      ? currentWeek.error
+      : null;
+    const errorText=error && error.message
+      ? "<div><b>Error"+(error.stage?" ("+esc(error.stage)+")":"")+":</b> "+esc(error.message)+
+        (error.created_at?" · "+esc(error.created_at):"")+"</div>"
+      : "";
+    $("videoCurrentWeek").innerHTML=
+      "<div>Week: "+esc(currentWeek.week_id||"—")+"</div>"+
+      "<div>Status: "+esc(currentWeek.exists?(currentWeek.status||"—"):"No weekly row")+"</div>"+
+      "<div>Reservation: "+(currentWeek.reservation_exists?"Present":"Not present")+"</div>"+
+      (sourceIds?"<div>Selected source IDs: "+sourceIds+"</div>":"")+
+      (currentWeek.task_id?"<div>Kling task: "+esc(currentWeek.task_id)+"</div>":"")+
+      (currentWeek.shotstack_task_id?"<div>Shotstack render: "+esc(currentWeek.shotstack_task_id)+"</div>":"")+
+      (currentWeek.output_media_id?"<div>Output: "+esc(currentWeek.output_media_id)+"</div>":"")+
+      (currentWeek.created_at?"<div>Created: "+esc(currentWeek.created_at)+"</div>":"")+
+      (currentWeek.updated_at?"<div>Updated: "+esc(currentWeek.updated_at)+"</div>":"")+
+      (currentWeek.caption?"<div>Caption: "+esc(currentWeek.caption)+"</div>":"")+
+      errorText;
+  }else{
+    $("videoCurrentWeek").textContent="Current-week details unavailable.";
+  }
+
+  const lastWeek=d.last_successful_week;
+  if(lastWeek && typeof lastWeek==="object"){
+    const sourceIds=Array.isArray(lastWeek.source_media_ids)
+      ? lastWeek.source_media_ids.map(esc).join(", ")
+      : "";
+    $("videoLastSuccessfulWeek").innerHTML=
+      "<div>Week: "+esc(lastWeek.week_id||"—")+"</div>"+
+      "<div>Status: "+esc(lastWeek.status||"—")+"</div>"+
+      (lastWeek.completed_at?"<div>Completed: "+esc(lastWeek.completed_at)+"</div>":"")+
+      (lastWeek.output_media_id?"<div>Output: "+esc(lastWeek.output_media_id)+"</div>":"")+
+      (lastWeek.caption?"<div>Caption: "+esc(lastWeek.caption)+"</div>":"")+
+      (sourceIds?"<div>Selected source IDs: "+sourceIds+"</div>":"")+
+      (lastWeek.task_id?"<div>Kling task: "+esc(lastWeek.task_id)+"</div>":"")+
+      (lastWeek.shotstack_task_id?"<div>Shotstack render: "+esc(lastWeek.shotstack_task_id)+"</div>":"")+
+      (lastWeek.created_at?"<div>Created: "+esc(lastWeek.created_at)+"</div>":"")+
+      (lastWeek.updated_at?"<div>Updated: "+esc(lastWeek.updated_at)+"</div>":"");
+  }else{
+    $("videoLastSuccessfulWeek").textContent="No successful weekly video is recorded.";
+  }
 
   const activity=await api("/api/video-autopilot/activity");
 

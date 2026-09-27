@@ -4591,6 +4591,72 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
     LIMIT 1
   `).first();
 
+  const currentWeekId = getCurrentISOWeekWindow().weekId;
+  const currentWeekRow = await env.DB.prepare(`
+    SELECT
+      week_id,
+      task_id,
+      shotstack_task_id,
+      status,
+      source_media_ids,
+      output_media_id,
+      caption,
+      created_at,
+      updated_at
+    FROM weekly_video_autopilot
+    WHERE week_id=?
+    LIMIT 1
+  `).bind(currentWeekId).first();
+
+  let currentWeekError = null;
+  if (currentWeekRow?.status === "failed") {
+    const failures = await env.DB.prepare(`
+      SELECT type,message,details_json,created_at
+      FROM system_events
+      WHERE type='weekly_video_autopilot_failed'
+      ORDER BY created_at DESC
+      LIMIT 100
+    `).all();
+
+    for (const event of failures.results || []) {
+      let details = {};
+      try { details = JSON.parse(event.details_json || "{}"); } catch {}
+      if (details.week_id !== currentWeekId || !details.error) continue;
+      currentWeekError = {
+        stage: details.stage || null,
+        message: String(details.error),
+        created_at: event.created_at || null
+      };
+      break;
+    }
+  }
+
+  const lastSuccessfulWeek = await env.DB.prepare(`
+    SELECT
+      week_id,
+      status,
+      task_id,
+      shotstack_task_id,
+      source_media_ids,
+      output_media_id,
+      caption,
+      created_at,
+      updated_at
+    FROM weekly_video_autopilot
+    WHERE status='video_ready'
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).first();
+
+  const parseSourceMediaIds = (value) => {
+    try {
+      const parsed = JSON.parse(value || "null");
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
   const modules = await env.DB.prepare(
     "SELECT value FROM autonomy_controls WHERE key='modules'"
   ).first();
@@ -4608,7 +4674,35 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
     week_id: row?.week_id || null,
     status: row?.status || "idle",
     created_at: row?.created_at || null,
-    updated_at: row?.updated_at || null
+    updated_at: row?.updated_at || null,
+    current_week: {
+      week_id: currentWeekId,
+      exists: !!currentWeekRow,
+      status: currentWeekRow?.status || null,
+      reservation_exists: !!currentWeekRow,
+      task_id: currentWeekRow?.task_id || null,
+      shotstack_task_id: currentWeekRow?.shotstack_task_id || null,
+      source_media_ids: currentWeekRow
+        ? parseSourceMediaIds(currentWeekRow.source_media_ids)
+        : null,
+      output_media_id: currentWeekRow?.output_media_id || null,
+      caption: currentWeekRow?.caption || null,
+      created_at: currentWeekRow?.created_at || null,
+      updated_at: currentWeekRow?.updated_at || null,
+      error: currentWeekError
+    },
+    last_successful_week: lastSuccessfulWeek ? {
+      week_id: lastSuccessfulWeek.week_id,
+      status: lastSuccessfulWeek.status,
+      completed_at: lastSuccessfulWeek.updated_at || null,
+      task_id: lastSuccessfulWeek.task_id || null,
+      shotstack_task_id: lastSuccessfulWeek.shotstack_task_id || null,
+      source_media_ids: parseSourceMediaIds(lastSuccessfulWeek.source_media_ids),
+      output_media_id: lastSuccessfulWeek.output_media_id || null,
+      caption: lastSuccessfulWeek.caption || null,
+      created_at: lastSuccessfulWeek.created_at || null,
+      updated_at: lastSuccessfulWeek.updated_at || null
+    } : null
   });
 }
 
