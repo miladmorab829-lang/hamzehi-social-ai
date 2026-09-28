@@ -1817,11 +1817,7 @@ try{
     );
   }
 
-  finalCaption=String(
-    cd?.output_text||
-    cd?.output?.[0]?.content?.[0]?.text||
-    ""
-  ).trim();
+  finalCaption=responseText(cd).trim();
 
   if(!finalCaption){
     throw Error("Caption generation returned empty text");
