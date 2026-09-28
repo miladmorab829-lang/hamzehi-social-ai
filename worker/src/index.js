@@ -1696,6 +1696,12 @@ async function storeWeeklyVideoInVault(env,videoUrl,weekId,caption){
 async function getMediaVault(env,req){
   if(req.method!=='GET')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);await ensureMediaVaultStore(env);const u=new URL(req.url);const limit=Math.min(50,Math.max(1,Number(u.searchParams.get('limit')||24)));const r=await env.DB.prepare("SELECT m.*,v.content_id,v.source_type,v.ai_status,v.ai_prompt,v.parent_media_id,v.tags FROM telegram_media_sources m LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id WHERE m.source_kind='vault' ORDER BY m.created_at DESC LIMIT ?").bind(limit).all();return json({ok:true,items:r.results||[],vault_configured:!!vaultChatId(env)});
 }
+function detectSupportedImageMime(bytes){
+  if(bytes.length>=3&&bytes[0]===0xff&&bytes[1]===0xd8&&bytes[2]===0xff)return 'image/jpeg';
+  if(bytes.length>=8&&bytes[0]===0x89&&bytes[1]===0x50&&bytes[2]===0x4e&&bytes[3]===0x47&&bytes[4]===0x0d&&bytes[5]===0x0a&&bytes[6]===0x1a&&bytes[7]===0x0a)return 'image/png';
+  if(bytes.length>=12&&bytes[0]===0x52&&bytes[1]===0x49&&bytes[2]===0x46&&bytes[3]===0x46&&bytes[8]===0x57&&bytes[9]===0x45&&bytes[10]===0x42&&bytes[11]===0x50)return 'image/webp';
+  return '';
+}
 async function aiEditVaultImageCore(env, sourceId, prompt, meta = {}){
   await ensureMediaVaultStore(env);
   if(!env.OPENAI_API_KEY) throw Error('OPENAI_API_KEY missing');
@@ -1714,30 +1720,21 @@ if(!img.ok) throw Error('Telegram source image download failed');
 
 const rawBlob=await img.blob();
  if(!rawBlob.size) throw Error('Telegram source image download returned empty file');
- const filePath=sourcePath.toLowerCase();
-
 let contentType=String(
   img.headers.get('content-type')||rawBlob.type||''
 ).split(';')[0].trim().toLowerCase();
 
-let filename='source.jpg';
-
-if(filePath.endsWith('.jpg')||filePath.endsWith('.jpeg')){
-  contentType='image/jpeg';
-  filename='source.jpg';
-}else if(filePath.endsWith('.png')){
-  contentType='image/png';
-  filename='source.png';
-}else if(filePath.endsWith('.webp')){
-  contentType='image/webp';
-  filename='source.webp';
+ const rawBytes=new Uint8Array(await rawBlob.arrayBuffer());
+ if(!contentType||contentType==='application/octet-stream'||contentType==='binary/octet-stream'||contentType==='application/binary'){
+   contentType=detectSupportedImageMime(rawBytes);
 }
 
 if(!/^image\/(jpeg|png|webp)$/.test(contentType)){
   throw Error(`Unsupported Telegram image MIME type: ${contentType||'unknown'}`);
 }
+ const filename=contentType==='image/png'?'source.png':contentType==='image/webp'?'source.webp':'source.jpg';
 const blob=new Blob(
-  [await rawBlob.arrayBuffer()],
+  [rawBytes],
   {type:contentType}
 );
 
