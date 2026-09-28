@@ -1575,6 +1575,33 @@ async function ingestVaultUpload(env,req){
   await audit(env,'media_vault_uploaded','Media uploaded to Telegram Media Vault',{media_id:id,media_type:type.startsWith('video/')?'video':'photo'});
   return json({ok:true,media_id:id,message_id:messageId,media_type:type.startsWith('video/')?'video':'photo'});
 }
+function finalVideoValidationError(message,details={}){
+  const error=Error(sanitizeOperationalError(message));
+  const declaredLength=Number.isSafeInteger(details.declared_content_length)
+    ? details.declared_content_length
+    : String(details.declared_content_length??'')
+        .replace(/[^\x20-\x7e]/g,'')
+        .slice(0,32)||null;
+  error.final_video_validation={
+    http_status:Number.isInteger(details.http_status)?details.http_status:null,
+    content_type:String(details.content_type||'')
+      .replace(/[^a-z0-9!#$&^_.+\-/]/gi,'')
+      .slice(0,100),
+    declared_content_length:declaredLength,
+    actual_blob_size:Number.isSafeInteger(details.actual_blob_size)
+      ? details.actual_blob_size
+      : null
+  };
+  return error;
+}
+async function hasMp4FtypSignature(blob){
+  const bytes=new Uint8Array(await blob.slice(0,12).arrayBuffer());
+  if(bytes.length<12)return false;
+  const boxSize=(bytes[0]*0x1000000)+(bytes[1]<<16)+(bytes[2]<<8)+bytes[3];
+  return boxSize>=8 && boxSize<=blob.size &&
+    bytes[4]===0x66 && bytes[5]===0x74 &&
+    bytes[6]===0x79 && bytes[7]===0x70;
+}
 async function storeWeeklyVideoInVault(env,videoUrl,weekId,caption){
   await ensureMediaVaultStore(env);
 
@@ -1591,15 +1618,94 @@ async function storeWeeklyVideoInVault(env,videoUrl,weekId,caption){
   const response=await fetch(url);
 
   if(!response.ok){
-    throw Error(
-      `Failed to download Kling video (HTTP ${response.status})`
+    throw finalVideoValidationError(
+      `Failed to download final video (HTTP ${response.status})`,
+      {http_status:response.status}
     );
+  }
+
+  const contentType=String(
+    response.headers.get('content-type')||''
+  ).split(';')[0].trim().toLowerCase()
+    .replace(/[^a-z0-9!#$&^_.+\-/]/g,'')
+    .slice(0,100);
+  const genericContentType=contentType==='application/octet-stream';
+
+  if(contentType && contentType!=='video/mp4' && !genericContentType){
+    throw finalVideoValidationError(
+      `Final video has incompatible Content-Type: ${contentType}`,
+      {http_status:response.status,content_type:contentType}
+    );
+  }
+
+  const rawContentLength=response.headers.get('content-length');
+  let declaredContentLength=null;
+
+  if(rawContentLength!==null){
+    const normalizedLength=String(rawContentLength).trim();
+    if(!/^\d+$/.test(normalizedLength)){
+      throw finalVideoValidationError(
+        'Final video has malformed Content-Length',
+        {
+          http_status:response.status,
+          content_type:contentType,
+          declared_content_length:normalizedLength
+        }
+      );
+    }
+    declaredContentLength=Number(normalizedLength);
+    if(!Number.isSafeInteger(declaredContentLength)||declaredContentLength<=0){
+      throw finalVideoValidationError(
+        declaredContentLength===0
+          ? 'Final video Content-Length is zero'
+          : 'Final video has invalid Content-Length',
+        {
+          http_status:response.status,
+          content_type:contentType,
+          declared_content_length:Number.isSafeInteger(declaredContentLength)
+            ? declaredContentLength
+            : normalizedLength
+        }
+      );
+    }
   }
 
   const videoBlob=await response.blob();
 
   if(!videoBlob.size){
-    throw Error('Kling video download returned empty file');
+    throw finalVideoValidationError(
+      'Final video download returned empty file',
+      {
+        http_status:response.status,
+        content_type:contentType,
+        declared_content_length:declaredContentLength,
+        actual_blob_size:videoBlob.size
+      }
+    );
+  }
+
+  if(declaredContentLength!==null && videoBlob.size!==declaredContentLength){
+    throw finalVideoValidationError(
+      'Final video size does not match Content-Length',
+      {
+        http_status:response.status,
+        content_type:contentType,
+        declared_content_length:declaredContentLength,
+        actual_blob_size:videoBlob.size
+      }
+    );
+  }
+
+  if(!(await hasMp4FtypSignature(videoBlob))){
+    throw finalVideoValidationError(
+      'Final video does not have a valid MP4 ftyp signature',
+      {
+        http_status:response.status,
+        content_type:contentType,
+        declared_content_length:declaredContentLength,
+        actual_blob_size:videoBlob.size
+      }
+    );
   }
 
   const upload=new FormData();
@@ -2562,6 +2668,47 @@ async function pollWeeklyVideoAutopilot(env){
     };
 
   }catch(e){
+    if(e?.final_video_validation && String(row.status)==='compositing'){
+      const validation=e.final_video_validation;
+      const validationReason=sanitizeOperationalError(e);
+      await audit(
+        env,
+        "weekly_video_autopilot_failed",
+        "Weekly Video Autopilot failed final video validation",
+        {
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id||null,
+          stage:"final_video_validation",
+          http_status:validation.http_status,
+          content_type:validation.content_type||null,
+          declared_content_length:validation.declared_content_length,
+          actual_blob_size:validation.actual_blob_size,
+          error:validationReason,
+          transient:false
+        }
+      );
+      await env.DB.prepare(`
+        UPDATE weekly_video_autopilot
+        SET status=?,
+            updated_at=?
+        WHERE week_id=?
+          AND shotstack_task_id=?
+          AND status='compositing'
+      `).bind(
+        "failed",
+        now(),
+        row.week_id,
+        row.shotstack_task_id
+      ).run();
+      return {
+        ok:false,
+        status:"failed",
+        week_id:row.week_id,
+        shotstack_task_id:row.shotstack_task_id||'',
+        stage:"final_video_validation",
+        error:validationReason
+      };
+    }
     const provider=String(row.status)==='generating'
       ? 'kling'
       : String(row.status)==='compositing'
