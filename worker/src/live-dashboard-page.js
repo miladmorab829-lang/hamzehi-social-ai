@@ -448,6 +448,13 @@ async function loadVideoAutopilot(){
   }
 
   const on=d.enabled!==false;
+  const videoStatusLabels={
+    kling_submitting:"Kling Submitting",
+    kling_rejected:"Kling Rejected",
+    kling_submission_ambiguous:"Kling Submission Ambiguous — DO NOT RETRY",
+    generating:"Generating"
+  };
+  const statusLabel=status=>videoStatusLabels[String(status||"")]||String(status||"idle");
 
   $("videoAutoState").textContent=on?"ON":"OFF";
   $("videoAutoState").className="tag "+(on?"ok":"bad");
@@ -460,7 +467,7 @@ async function loadVideoAutopilot(){
   $("videoCycle").textContent=d.week_id||"—";
 
   $("videoProgress").textContent=
-    String(d.status||"idle");
+    statusLabel(d.status);
 
   $("videoToday").innerHTML=
     d.status==="video_ready"
@@ -475,13 +482,18 @@ async function loadVideoAutopilot(){
     const error=currentWeek.error && typeof currentWeek.error==="object"
       ? currentWeek.error
       : null;
-    const errorText=error && error.message
-      ? "<div><b>Error"+(error.stage?" ("+esc(error.stage)+")":"")+":</b> "+esc(error.message)+
+    const eventText=error
+      ? "<div><b>Kling submission"+(error.stage?" ("+esc(error.stage)+")":"")+":</b> "+
+        (error.message?esc(error.message):esc(error.event_type||"Recorded"))+
+        (error.http_status!==null&&error.http_status!==undefined?" · HTTP "+esc(error.http_status):"")+
+        (error.response_category?" · "+esc(error.response_category):"")+
+        (error.external_task_id?" · external: "+esc(error.external_task_id):"")+
+        (error.retry_forbidden?" · <span class='bad'>DO NOT RETRY</span>":"")+
         (error.created_at?" · "+esc(error.created_at):"")+"</div>"
       : "";
     $("videoCurrentWeek").innerHTML=
       "<div>Week: "+esc(currentWeek.week_id||"—")+"</div>"+
-      "<div>Status: "+esc(currentWeek.exists?(currentWeek.status||"—"):"No weekly row")+"</div>"+
+      "<div>Status: "+esc(currentWeek.exists?statusLabel(currentWeek.status):"No weekly row")+"</div>"+
       "<div>Reservation: "+(currentWeek.reservation_exists?"Present":"Not present")+"</div>"+
       (sourceIds?"<div>Selected source IDs: "+sourceIds+"</div>":"")+
       (currentWeek.task_id?"<div>Kling task: "+esc(currentWeek.task_id)+"</div>":"")+
@@ -490,7 +502,7 @@ async function loadVideoAutopilot(){
       (currentWeek.created_at?"<div>Created: "+esc(currentWeek.created_at)+"</div>":"")+
       (currentWeek.updated_at?"<div>Updated: "+esc(currentWeek.updated_at)+"</div>":"")+
       (currentWeek.caption?"<div>Caption: "+esc(currentWeek.caption)+"</div>":"")+
-      errorText;
+      eventText;
   }else{
     $("videoCurrentWeek").textContent="Current-week details unavailable.";
   }

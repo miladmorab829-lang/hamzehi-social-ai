@@ -1965,6 +1965,22 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId,duration){
     duration:videoDuration
   };
 }
+function weeklyKlingExternalTaskId(weekId){
+  return `weekly-video-${String(weekId||'').replace(/[^a-zA-Z0-9_-]/g,'-')}`;
+}
+
+function klingSubmissionError(message, details={}){
+  const error=Error(sanitizeOperationalError(message));
+  error.kling_submission={
+    outcome:String(details.outcome||'ambiguous'),
+    http_status:Number.isInteger(details.http_status)?details.http_status:null,
+    response_category:String(details.response_category||'unknown'),
+    external_task_id:String(details.external_task_id||''),
+    task_id:String(details.task_id||'')
+  };
+  return error;
+}
+
 async function createKlingWeeklyVideoTask(env,brief,imageUrls){
   const apiKey=String(env.KLING_API_KEY||'').trim();
   if(!apiKey) throw Error('KLING_API_KEY missing');
@@ -2012,6 +2028,7 @@ async function createKlingWeeklyVideoTask(env,brief,imageUrls){
 )
   }));
 
+  const externalTaskId=weeklyKlingExternalTaskId(brief.week_id);
   const payload={
     model_name:'kling-v3-omni',
     multi_shot:true,
@@ -2026,44 +2043,115 @@ async function createKlingWeeklyVideoTask(env,brief,imageUrls){
     aspect_ratio:'16:9',
     duration:String(duration),
     callback_url:'',
-    external_task_id:`weekly-video-${String(brief.week_id||'').replace(/[^a-zA-Z0-9_-]/g,'-')}`
+    external_task_id:externalTaskId
   };
 
-  const response=await fetch(
-    'https://api-singapore.klingai.com/v1/videos/omni-video',
-    {
-      method:'POST',
-      headers:{
-        Authorization:`Bearer ${apiKey}`,
-        'Content-Type':'application/json'
-      },
-      body:JSON.stringify(payload)
-    }
-  );
+  let response;
+  try{
+    response=await fetch(
+      'https://api-singapore.klingai.com/v1/videos/omni-video',
+      {
+        method:'POST',
+        headers:{
+          Authorization:`Bearer ${apiKey}`,
+          'Content-Type':'application/json'
+        },
+        body:JSON.stringify(payload)
+      }
+    );
+  }catch(e){
+    throw klingSubmissionError(e,{
+      outcome:'ambiguous',
+      response_category:'network_error',
+      external_task_id:externalTaskId
+    });
+  }
 
-  const data=await response.json().catch(()=>({}));
+  const responseText=await response.text();
+  let data;
+  try{
+    data=responseText?JSON.parse(responseText):{};
+  }catch{
+    throw klingSubmissionError('Kling returned malformed JSON',{
+      outcome:response.ok?'ambiguous':'rejected',
+      http_status:response.status,
+      response_category:response.ok?'malformed_success_response':'http_rejection',
+      external_task_id:externalTaskId
+    });
+  }
 
   if(!response.ok||Number(data?.code||0)!==0){
-    throw Error(
+    throw klingSubmissionError(
       data?.message||
-      `Kling API request failed (HTTP ${response.status})`
+      `Kling API request failed (HTTP ${response.status})`,
+      {
+        outcome:'rejected',
+        http_status:response.status,
+        response_category:response.ok?'provider_rejection':'http_rejection',
+        external_task_id:externalTaskId
+      }
     );
   }
 
   const taskId=String(data?.data?.task_id||'').trim();
 
   if(!taskId){
-    throw Error('Kling API did not return task_id');
+    throw klingSubmissionError('Kling API did not return task_id',{
+      outcome:'ambiguous',
+      http_status:response.status,
+      response_category:'accepted_response_without_task_id',
+      external_task_id:externalTaskId
+    });
   }
 
   return {
     ok:true,
     task_id:taskId,
+    external_task_id:externalTaskId,
+    http_status:response.status,
     model:'kling-v3-omni',
     duration,
     image_count:urls.length
   };
 }
+
+async function persistAcceptedKlingTask(env,weekId,taskId){
+  let lastError=null;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      const updated=await env.DB.prepare(`
+        UPDATE weekly_video_autopilot
+        SET status=?, task_id=?, updated_at=?
+        WHERE week_id=? AND status='kling_submitting'
+      `).bind(
+        'generating',
+        String(taskId),
+        now(),
+        String(weekId)
+      ).run();
+      if(updated.meta?.changes===1) return;
+
+      const existing=await env.DB.prepare(`
+        SELECT status,task_id
+        FROM weekly_video_autopilot
+        WHERE week_id=?
+      `).bind(String(weekId)).first();
+      if(
+        String(existing?.status||'')==='generating' &&
+        String(existing?.task_id||'')===String(taskId)
+      ) return;
+      lastError=Error('Accepted Kling task could not be persisted in the expected weekly state');
+    }catch(e){
+      lastError=e;
+    }
+  }
+  throw klingSubmissionError(lastError||'Accepted Kling task persistence failed',{
+    outcome:'ambiguous',
+    response_category:'task_id_persistence_failed',
+    task_id:String(taskId)
+  });
+}
+
 async function getKlingWeeklyVideoTask(env,taskId){
   const apiKey=String(env.KLING_API_KEY||'').trim();
   if(!apiKey) throw Error('KLING_API_KEY missing');
@@ -2877,39 +2965,131 @@ async function prepareWeeklyVideoAutopilot(env){
     source_media_ids:brief.source_media_ids,
     brief
   };
-   try{
-    const kling=await createKlingWeeklyVideoTask(
+  const externalTaskId=weeklyKlingExternalTaskId(pool.weekId);
+  const submittingAt=now();
+  const submissionIntent=await env.DB.prepare(`
+    UPDATE weekly_video_autopilot
+    SET status=?, updated_at=?
+    WHERE week_id=? AND status='prepared'
+  `).bind(
+    'kling_submitting',
+    submittingAt,
+    pool.weekId
+  ).run();
+
+  if(submissionIntent.meta?.changes!==1){
+    throw Error('Kling submission intent could not be persisted');
+  }
+
+  await audit(
+    env,
+    'weekly_video_autopilot_kling_submitting',
+    'Weekly Video Autopilot is submitting to Kling',
+    {
+      week_id:pool.weekId,
+      external_task_id:externalTaskId,
+      stage:'kling_submission',
+      timestamp:submittingAt
+    }
+  );
+
+  let kling;
+  try{
+    kling=await createKlingWeeklyVideoTask(
       env,
       klingReady.brief,
       klingReady.image_urls
     );
-
-    await env.DB.prepare(`
-      UPDATE weekly_video_autopilot
-      SET status=?,
-          task_id=?,
-          updated_at=?
-      WHERE week_id=? AND status='prepared'
-    `).bind(
-      "generating",
-      kling.task_id,
-      now(),
-      pool.weekId
-    ).run();
   }catch(e){
+    const details=e?.kling_submission||{};
+    const rejected=details.outcome==='rejected';
+    const failureStatus=rejected
+      ? 'kling_rejected'
+      : 'kling_submission_ambiguous';
+    const failureAt=now();
     await env.DB.prepare(`
       UPDATE weekly_video_autopilot
       SET status=?,
           updated_at=?
-      WHERE week_id=? AND status='prepared'
+      WHERE week_id=? AND status='kling_submitting'
     `).bind(
-      "failed",
-      now(),
+      failureStatus,
+      failureAt,
       pool.weekId
     ).run();
-
+    await audit(
+      env,
+      rejected
+        ? 'weekly_video_autopilot_kling_rejected'
+        : 'weekly_video_autopilot_kling_submission_ambiguous',
+      rejected
+        ? 'Kling rejected the weekly video submission'
+        : 'Kling weekly video submission outcome is ambiguous; do not retry',
+      {
+        week_id:pool.weekId,
+        external_task_id:String(details.external_task_id||externalTaskId),
+        stage:'kling_submission',
+        http_status:Number.isInteger(details.http_status)?details.http_status:null,
+        response_category:String(details.response_category||'unknown'),
+        task_id:String(details.task_id||'')||null,
+        error:sanitizeOperationalError(e),
+        timestamp:failureAt,
+        retry_forbidden:!rejected
+      }
+    );
     throw e;
   }
+
+  try{
+    await persistAcceptedKlingTask(
+      env,
+      pool.weekId,
+      kling.task_id
+    );
+  }catch(e){
+    const failureAt=now();
+    await env.DB.prepare(`
+      UPDATE weekly_video_autopilot
+      SET status=?, task_id=?, updated_at=?
+      WHERE week_id=? AND status='kling_submitting'
+    `).bind(
+      'kling_submission_ambiguous',
+      String(kling.task_id||''),
+      failureAt,
+      pool.weekId
+    ).run().catch(()=>{});
+    await audit(
+      env,
+      'weekly_video_autopilot_kling_submission_ambiguous',
+      'Kling task was accepted but local task persistence is ambiguous; do not retry',
+      {
+        week_id:pool.weekId,
+        external_task_id:String(kling.external_task_id||externalTaskId),
+        stage:'kling_task_persistence',
+        http_status:Number.isInteger(kling.http_status)?kling.http_status:null,
+        response_category:'task_id_persistence_failed',
+        task_id:String(kling.task_id||'')||null,
+        error:sanitizeOperationalError(e),
+        timestamp:failureAt,
+        retry_forbidden:true
+      }
+    ).catch(()=>{});
+    throw e;
+  }
+  await audit(
+    env,
+    'weekly_video_autopilot_kling_accepted',
+    'Kling accepted the weekly video submission',
+    {
+      week_id:pool.weekId,
+      external_task_id:String(kling.external_task_id||externalTaskId),
+      stage:'kling_submission',
+      http_status:Number.isInteger(kling.http_status)?kling.http_status:null,
+      response_category:'accepted_with_task_id',
+      task_id:String(kling.task_id),
+      timestamp:now()
+    }
+  );
   return {
     ok:true,
     status:"generating",
@@ -4735,11 +4915,17 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
   `).bind(currentWeekId).first();
 
   let currentWeekError = null;
-  if (currentWeekRow?.status === "failed") {
+  if (currentWeekRow) {
     const failures = await env.DB.prepare(`
       SELECT type,message,details_json,created_at
       FROM system_events
-      WHERE type='weekly_video_autopilot_failed'
+      WHERE type IN (
+        'weekly_video_autopilot_failed',
+        'weekly_video_autopilot_kling_submitting',
+        'weekly_video_autopilot_kling_rejected',
+        'weekly_video_autopilot_kling_submission_ambiguous',
+        'weekly_video_autopilot_kling_accepted'
+      )
       ORDER BY created_at DESC
       LIMIT 100
     `).all();
@@ -4747,10 +4933,16 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
     for (const event of failures.results || []) {
       let details = {};
       try { details = JSON.parse(event.details_json || "{}"); } catch {}
-      if (details.week_id !== currentWeekId || !details.error) continue;
+      if (details.week_id !== currentWeekId) continue;
       currentWeekError = {
         stage: details.stage || null,
-        message: String(details.error),
+        message: details.error ? String(details.error) : null,
+        event_type: event.type || null,
+        http_status: Number.isInteger(details.http_status) ? details.http_status : null,
+        response_category: details.response_category || null,
+        external_task_id: details.external_task_id || null,
+        task_id: details.task_id || null,
+        retry_forbidden: details.retry_forbidden === true,
         created_at: event.created_at || null
       };
       break;
@@ -5037,6 +5229,10 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
     FROM system_events
     WHERE type IN (
       'weekly_video_autopilot_failed',
+      'weekly_video_autopilot_kling_submitting',
+      'weekly_video_autopilot_kling_rejected',
+      'weekly_video_autopilot_kling_submission_ambiguous',
+      'weekly_video_autopilot_kling_accepted',
       'video_autopilot_toggle'
     )
     ORDER BY created_at DESC
