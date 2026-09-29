@@ -4702,6 +4702,23 @@ async function ensureLeadIdentityStore(env) {
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_identities_lead ON lead_identities(lead_id)").run();
 }
 
+async function ensureLeadContactStore(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_contacts (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT NOT NULL,
+    contact_type TEXT NOT NULL,
+    raw_value TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    evidence_status TEXT NOT NULL,
+    source TEXT,
+    evidence_url TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(lead_id, contact_type, normalized_value)
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_contacts_lead ON lead_contacts(lead_id)").run();
+}
+
 function normalizePlaceId(value) {
   const normalized = String(value || "").trim();
   return normalized && normalized.length <= 300 ? normalized : null;
@@ -4784,6 +4801,159 @@ function normalizeTelegramIdentity(value) {
 function normalizeLeadEmail(value) {
   const normalized = String(value || "").trim().replace(/^mailto:/i, "").split("?")[0].toLowerCase();
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : null;
+}
+
+function normalizeLeadContact(type, value, country = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (type === "phone") return normalizeLeadPhone(raw.replace(/^tel:/i, "").split(/[?#]/)[0], country);
+  if (type === "email") return normalizeLeadEmail(raw);
+  if (type === "instagram") return normalizeInstagramIdentity(raw);
+  if (type === "telegram") return normalizeTelegramIdentity(raw);
+  if (type === "website") {
+    const safe = safeHttpUrl(raw);
+    if (!safe) return null;
+    const u = new URL(safe); u.hash = "";
+    return u.toString().replace(/\/$/, "");
+  }
+  if (type === "whatsapp") {
+    try {
+      const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+      const host = u.hostname.toLowerCase().replace(/^www\./, "");
+      if (host === "wa.me") return normalizeLeadPhone(u.pathname.split("/").filter(Boolean)[0], country);
+      if (host === "api.whatsapp.com" || host === "whatsapp.com") return normalizeLeadPhone(u.searchParams.get("phone"), country);
+    } catch {}
+    return null;
+  }
+  return null;
+}
+
+const CONTACT_EVIDENCE_RANK = { invalid:0, possible:1, conflicting:2, page_extracted:3, provider_supplied:4, owner_confirmed:5 };
+
+async function upsertLeadContact(env, leadId, contact) {
+  const type = String(contact?.contact_type || "").trim().toLowerCase();
+  const status = String(contact?.evidence_status || "").trim();
+  if (!['phone','email','website','instagram','telegram','whatsapp'].includes(type)) return null;
+  if (!(status in CONTACT_EVIDENCE_RANK)) return null;
+  const raw = String(contact.raw_value || "").trim();
+  const normalized = normalizeLeadContact(type, raw, contact.country || "");
+  if (!normalized) return null;
+  await ensureLeadContactStore(env);
+  const existing = await env.DB.prepare(
+    "SELECT id,evidence_status FROM lead_contacts WHERE lead_id=? AND contact_type=? AND normalized_value=?"
+  ).bind(leadId, type, normalized).first();
+  const t = now();
+  if (!existing) {
+    try {
+      await env.DB.prepare(`INSERT INTO lead_contacts(
+        id,lead_id,contact_type,raw_value,normalized_value,evidence_status,source,evidence_url,created_at,updated_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(
+        uid(), leadId, type, raw, normalized, status,
+        String(contact.source || "discovery").slice(0,100), safeHttpUrl(contact.evidence_url) || null, t, t
+      ).run();
+      return normalized;
+    } catch (error) {
+      const raced = await env.DB.prepare(
+        "SELECT id,evidence_status FROM lead_contacts WHERE lead_id=? AND contact_type=? AND normalized_value=?"
+      ).bind(leadId, type, normalized).first();
+      if (!raced) throw error;
+      return upsertLeadContact(env, leadId, contact);
+    }
+  }
+  const currentRank = CONTACT_EVIDENCE_RANK[existing.evidence_status] ?? 0;
+  if (currentRank >= CONTACT_EVIDENCE_RANK[status]) {
+    await env.DB.prepare("UPDATE lead_contacts SET updated_at=? WHERE id=?").bind(t, existing.id).run();
+    return normalized;
+  }
+  await env.DB.prepare(
+    "UPDATE lead_contacts SET raw_value=?,evidence_status=?,source=?,evidence_url=?,updated_at=? WHERE id=?"
+  ).bind(raw, status, String(contact.source || "discovery").slice(0,100), safeHttpUrl(contact.evidence_url) || null, t, existing.id).run();
+  return normalized;
+}
+
+async function storeLeadContacts(env, leadId, contacts = []) {
+  if (!leadId) return [];
+  const stored = [];
+  for (const contact of contacts) {
+    const value = await upsertLeadContact(env, leadId, contact);
+    if (value) stored.push({ contact_type: contact.contact_type, normalized_value: value });
+  }
+  return stored;
+}
+
+function extractContactsFromHtml(html, pageUrl, country = "", source = "web") {
+  const text = String(html || "");
+  const out = [];
+  const add = (contact_type, raw_value) => out.push({ contact_type, raw_value, country, source, evidence_url: pageUrl, evidence_status:'page_extracted' });
+  for (const match of text.matchAll(/href=["']([^"']+)["']/gi)) {
+    const href = match[1].replace(/&amp;/gi, "&").trim();
+    if (/^mailto:/i.test(href)) add('email', href);
+    else if (/^tel:/i.test(href)) add('phone', href);
+    else {
+      let absolute; try { absolute = new URL(href, pageUrl).toString(); } catch { continue; }
+      if (/https?:\/\/(?:www\.)?(?:wa\.me|api\.whatsapp\.com|whatsapp\.com)\//i.test(absolute)) add('whatsapp', absolute);
+      else if (/https?:\/\/(?:www\.)?instagram\.com\//i.test(absolute)) add('instagram', absolute);
+      else if (/https?:\/\/(?:www\.)?(?:t\.me|telegram\.me)\//i.test(absolute)) add('telegram', absolute);
+    }
+  }
+  const plain = text.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ");
+  for (const match of plain.matchAll(/(?:\+?98|0)?9\d{9}|(?:\+?964|0)?7\d{9,10}/g)) add('phone', match[0]);
+  const unique = new Map();
+  for (const item of out) {
+    const normalized = normalizeLeadContact(item.contact_type, item.raw_value, country);
+    if (normalized) unique.set(`${item.contact_type}:${normalized}`, item);
+  }
+  return [...unique.values()];
+}
+
+async function collectBoundedWebsiteContacts(startUrl, initialHtml, country = "", source = "web") {
+  const safeStart = safeHttpUrl(startUrl);
+  if (!safeStart) return [];
+  const origin = new URL(safeStart).origin;
+  const pages = [{ url:safeStart, html:String(initialHtml || "") }];
+  const candidates = [];
+  for (const match of String(initialHtml || "").matchAll(/href=["']([^"']+)["']/gi)) {
+    try {
+      const u = new URL(match[1], safeStart);
+      if (u.origin === origin && /^\/(?:contact|contact-us|about)\/?$/i.test(u.pathname)) candidates.push(u.toString());
+    } catch {}
+  }
+  for (const path of ['/contact','/contact-us','/about']) candidates.push(new URL(path, origin).toString());
+  const seen = new Set([safeStart]);
+  const initialContacts = extractContactsFromHtml(initialHtml, safeStart, country, source);
+  const usefulTypes = new Set(initialContacts.map(x => x.contact_type));
+  for (const candidate of candidates) {
+    if (pages.length >= 3 || usefulTypes.size >= 3 || seen.has(candidate)) continue;
+    seen.add(candidate);
+    try {
+      const response = await fetchWithRetry(candidate, { headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"} }, 1, AD_FETCH_TIMEOUT_MS);
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (!response.ok || (contentType && !contentType.includes('text/html'))) continue;
+      const html = (await response.text()).slice(0,100000);
+      pages.push({ url:candidate, html });
+      for (const item of extractContactsFromHtml(html, candidate, country, source)) usefulTypes.add(item.contact_type);
+    } catch {}
+  }
+  const contacts = [{ contact_type:'website', raw_value:safeStart, country, source, evidence_url:safeStart, evidence_status:'page_extracted' }];
+  contacts.push(...initialContacts);
+  for (const page of pages.slice(1)) contacts.push(...extractContactsFromHtml(page.html, page.url, country, source));
+  return contacts;
+}
+
+function contactsFromLeadMetadata(meta = {}, source = "discovery", evidenceStatus = "provider_supplied") {
+  const country = meta.country || "";
+  const evidenceUrl = meta.maps_url || meta.permalink || meta.url || meta.website || null;
+  const contacts = [];
+  const add = (contact_type, raw_value, status = evidenceStatus, url = evidenceUrl) => {
+    if (raw_value) contacts.push({ contact_type, raw_value, country, source, evidence_url:url, evidence_status:status });
+  };
+  add('phone', meta.phone);
+  add('email', meta.email);
+  add('website', meta.website || meta.url);
+  add('instagram', meta.instagram_url || meta.instagram_username || meta.profile);
+  add('telegram', meta.telegram_url || meta.telegram_username);
+  if (meta.whatsapp_url) add('whatsapp', meta.whatsapp_url);
+  return contacts;
 }
 
 function collectLeadIdentities(input = {}) {
@@ -5143,39 +5313,13 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
             if(mail) contactUrl=mail[1];
           }
 
-          if(!contactUrl){
-            const base=new URL(href);
-            const contactPaths=[
-              "/contact",
-              "/contact-us",
-              "/advertising",
-              "/media-kit",
-              "/sponsorship"
-            ];
-
-            for(const path of contactPaths){
-              try{
-                const candidate=new URL(path,base.origin).toString();
-                const probe=await fetchWithRetry(
-                  candidate,
-                  {headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}},
-                  1,
-                  AD_FETCH_TIMEOUT_MS
-                );
-
-                if(probe.ok){
-                  contactUrl=candidate;
-                  break;
-                }
-              }catch{}
-            }
-          }
           if(!contactUrl && !adHit && !contactPath) continue; 
           const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
           const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
           const saved=await upsertDiscoveredLead(env,{name:title,contact:href,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_autopilot",meta});
           if(saved.conflict){summary.errors++;continue;}
           const id=saved.id;
+          await storeLeadContacts(env,id,await collectBoundedWebsiteContacts(href,tx,groupType.endsWith("_ar")?"العراق":"ایران","ad_autopilot"));
           if(saved.created)summary.new_leads++;else summary.updated++;
           summary.found++;groupItems++;items.push({id,name:title,type:groupType,url:href,contact_url:contactUrl,score,ad_opportunity:adHit});
         }catch(e){summary.errors++;if(summary.error_details.length<20)summary.error_details.push({group:groupType,url:href,error:String(e?.message||e).slice(0,300)});}
@@ -5478,6 +5622,7 @@ telegram_url: telegram.telegram_url,
         const saved=await upsertDiscoveredLead(env,{name,contact,stage:"discovered",priority:"normal",source,meta});
         if(saved.conflict){summary.errors++;continue;}
         const id=saved.id;
+        await storeLeadContacts(env,id,contactsFromLeadMetadata(meta,"google_places","provider_supplied"));
         summary.found++;
         if(saved.created)summary.new_leads++;else summary.updated++;
 
@@ -5644,6 +5789,7 @@ if(!countryPattern.test(text)){
           };
           const saved=await upsertDiscoveredLead(env,{name:title||uu.hostname,contact:contact||safeHref,stage:"discovered",priority:score>=80?"high":score>=65?"normal":"low",source,meta});
           if(saved.conflict){summary.errors++;continue;}
+          await storeLeadContacts(env,saved.id,await collectBoundedWebsiteContacts(safeHref,tx,country,source));
           if(saved.created)summary.new_leads++;else summary.updated++;
           items.push({
             id:saved.id,
@@ -6743,11 +6889,16 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
           });
           const saved=await upsertDiscoveredLead(env,{name,contact,stage,priority,source:"manual",meta});
           if(saved.conflict)return json({ok:false,error:"Lead identity conflict requires review",lead_ids:saved.lead_ids},409);
+          const manualContacts=Array.isArray(b.contacts)?b.contacts:contactsFromLeadMetadata(meta,"manual","owner_confirmed");
+          await storeLeadContacts(env,saved.id,manualContacts.map(x=>({...x,source:"manual",evidence_status:"owner_confirmed"})));
           return json({ok:true,id:saved.id,existing:!saved.created});
         }
         const id = uid();
         await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
           .bind(id, name, contact, stage, priority, JSON.stringify(meta), t, t).run();
+        if(Array.isArray(b.contacts)){
+          await storeLeadContacts(env,id,b.contacts.map(x=>({...x,source:"manual",evidence_status:"owner_confirmed"})));
+        }
         return json({ ok: true, id });
       }
 
@@ -6792,6 +6943,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
             const stored=await upsertDiscoveredLead(env,{name,contact:url,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_discovery",meta:notes});
             if(stored.conflict)continue;
             const id=stored.id;
+            await storeLeadContacts(env,id,await collectBoundedWebsiteContacts(url,tx,"","ad_discovery"));
             items.push({id,name,kind:type,city,url,contact_url:contactUrl,score,evidence:plain.slice(0,240)});
           } catch {}
         }
@@ -6841,6 +6993,7 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
               const stored=await upsertDiscoveredLead(env,{name:title,contact:url,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_discovery",meta:notes});
               if(stored.conflict)continue;
               const id=stored.id;
+              await storeLeadContacts(env,id,await collectBoundedWebsiteContacts(url,tx,"","ad_discovery"));
               all.push({ id, name:title, type:groupType, url, contact_url:contactUrl, score });
             } catch {}
           }
@@ -7107,6 +7260,7 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
           const notes = { source: "instagram_hashtag_discovery", query: rawQ, score: x.score, profile: contact, instagram_username:x.username, evidence: x.evidence, permalink: x.permalink, media_type: x.media_type, discovered_at: t, outreach: "draft_only" };
           const stored=await upsertDiscoveredLead(env,{name:`@${x.username}`,contact,stage:"discovered",priority:x.score>=70?"high":x.score>=45?"normal":"low",source:"instagram_hashtag_discovery",meta:notes});
           if(stored.conflict)continue;
+          await storeLeadContacts(env,stored.id,[{contact_type:'instagram',raw_value:contact,evidence_status:'provider_supplied',source:'instagram_hashtag_discovery',evidence_url:x.permalink}]);
           saved.push({ ...x, id: stored.id, existing: !stored.created, contact });
         }
         await audit(env, "instagram_lead_discovery", "Instagram related-page lead discovery completed", { query: rawQ, found: rows.length, saved: saved.length });

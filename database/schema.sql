@@ -24,6 +24,20 @@ CREATE TABLE IF NOT EXISTS lead_identities (
  updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lead_identities_lead ON lead_identities(lead_id);
+CREATE TABLE IF NOT EXISTS lead_contacts (
+ id TEXT PRIMARY KEY,
+ lead_id TEXT NOT NULL,
+ contact_type TEXT NOT NULL,
+ raw_value TEXT NOT NULL,
+ normalized_value TEXT NOT NULL,
+ evidence_status TEXT NOT NULL,
+ source TEXT,
+ evidence_url TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ UNIQUE(lead_id, contact_type, normalized_value)
+);
+CREATE INDEX IF NOT EXISTS idx_lead_contacts_lead ON lead_contacts(lead_id);
 CREATE TABLE IF NOT EXISTS inbox_messages (
  id TEXT PRIMARY KEY, platform TEXT, external_id TEXT, sender TEXT, message TEXT,
  category TEXT, priority TEXT, reply_suggestion TEXT, status TEXT,
