@@ -41,8 +41,52 @@ CREATE INDEX IF NOT EXISTS idx_lead_contacts_lead ON lead_contacts(lead_id);
 CREATE TABLE IF NOT EXISTS inbox_messages (
  id TEXT PRIMARY KEY, platform TEXT, external_id TEXT, sender TEXT, message TEXT,
  category TEXT, priority TEXT, reply_suggestion TEXT, status TEXT,
+ lead_id TEXT, conversation_id TEXT, provider_sender_id TEXT,
+ provider_conversation_id TEXT, reply_to_provider_message_id TEXT,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS lead_conversations (
+ id TEXT PRIMARY KEY,
+ lead_id TEXT NOT NULL,
+ contact_id TEXT,
+ platform TEXT NOT NULL,
+ provider_conversation_id TEXT,
+ provider_sender_id TEXT,
+ provider_username TEXT,
+ status TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lead_conversations_lead ON lead_conversations(lead_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_conversations_provider
+ON lead_conversations(platform, provider_conversation_id)
+WHERE provider_conversation_id IS NOT NULL AND provider_conversation_id <> '';
+CREATE TABLE IF NOT EXISTS lead_outreach (
+ id TEXT PRIMARY KEY,
+ lead_id TEXT NOT NULL,
+ contact_id TEXT,
+ conversation_id TEXT,
+ channel TEXT NOT NULL,
+ recipient TEXT NOT NULL,
+ message TEXT NOT NULL,
+ language TEXT NOT NULL,
+ status TEXT NOT NULL,
+ provider_message_id TEXT,
+ provider_conversation_id TEXT,
+ approved_at TEXT,
+ approved_by TEXT,
+ sent_at TEXT,
+ error_code TEXT,
+ error_detail TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lead_outreach_lead_status ON lead_outreach(lead_id, status);
+CREATE INDEX IF NOT EXISTS idx_lead_outreach_contact ON lead_outreach(contact_id);
+CREATE INDEX IF NOT EXISTS idx_lead_outreach_conversation ON lead_outreach(conversation_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_outreach_provider_message
+ON lead_outreach(channel, provider_message_id)
+WHERE provider_message_id IS NOT NULL AND provider_message_id <> '';
 CREATE TABLE IF NOT EXISTS social_metrics (
  id TEXT PRIMARY KEY, content_id TEXT, platform TEXT, impressions INTEGER DEFAULT 0,
  reach INTEGER DEFAULT 0, likes INTEGER DEFAULT 0, comments INTEGER DEFAULT 0,

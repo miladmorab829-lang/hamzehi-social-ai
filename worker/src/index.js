@@ -4575,9 +4575,9 @@ async function proxyTelegramMedia(env,req){
 async function handleTelegramWebhook(env,req){
   if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(provided!==expected)return json({ok:false,error:'Unauthorized webhook'},401);
   const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
-  const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const isVault=isImageVault||isVideoVault;
+  const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const isVault=isImageVault||isVideoVault;
   const isReady=!!readyChatId(env)&& (chatId===readyChatId(env)||username===readyChatId(env).replace(/^@/,'').toLowerCase());
-  const externalId=String(m.message_id||body.update_id||uid());const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(!ex){const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.from?.username||m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',t,t).run();}
+  const providerSenderId=String(m.from?.id||m.chat.id||''),providerUsername=String(m.from?.username||m.chat.username||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;await ensureLeadOutreachStore(env);const linked=await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo});const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(!ex){const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||providerUsername||String(m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();}
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
   if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   return json({ok:true,media_received:!!media});
@@ -4585,7 +4585,7 @@ async function handleTelegramWebhook(env,req){
 
 async function verifyInstagramSignature(env,req,raw){if(env.INSTAGRAM_APP_SECRET){const sig=(req.headers.get('X-Hub-Signature-256')||'').trim().toLowerCase();if(!/^sha256=[0-9a-f]{64}$/.test(sig))return false;const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.INSTAGRAM_APP_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);const mac=await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(raw));const hex=Array.from(new Uint8Array(mac),x=>x.toString(16).padStart(2,'0')).join('');return sig===`sha256=${hex}`}if(env.INSTAGRAM_WEBHOOK_SECRET_TOKEN)return (req.headers.get('X-Hamzehi-Webhook-Secret')||'')===env.INSTAGRAM_WEBHOOK_SECRET_TOKEN;return false}
 
-async function handleInstagramWebhook(env,req){if(req.method==='GET'){const u=new URL(req.url);if(u.searchParams.get('hub.mode')==='subscribe'&&u.searchParams.get('hub.verify_token')&&env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&u.searchParams.get('hub.verify_token')===env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN)return new Response(u.searchParams.get('hub.challenge'),{status:200,headers:{'Content-Type':'text/plain'}});return json({ok:false,error:'Webhook verification failed'},403)}if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN||(!env.INSTAGRAM_APP_SECRET&&!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Instagram webhook secrets not configured'},503);const raw=await req.text();if(!(await verifyInstagramSignature(env,req,raw)))return json({ok:false,error:'Unauthorized webhook'},401);let body;try{body=JSON.parse(raw)}catch{return json({ok:false,error:'Invalid JSON'},400)}for(const entry of body.entry||[])for(const change of entry.changes||[]){const value=change.value||{},externalId=String(value.mid||value.message_id||`${entry.id||uid()}:${change.field||'change'}:${value.timestamp||Date.now()}`),ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='instagram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)continue;const text=String(value.text||value.message||'').trim();if(!text)continue;const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'instagram',externalId,String(value.from?.username||value.from?.id||entry.id||'unknown'),text,'unclassified','normal',null,'new',t,t).run()}return json({ok:true})}
+async function handleInstagramWebhook(env,req){if(req.method==='GET'){const u=new URL(req.url);if(u.searchParams.get('hub.mode')==='subscribe'&&u.searchParams.get('hub.verify_token')&&env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&u.searchParams.get('hub.verify_token')===env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN)return new Response(u.searchParams.get('hub.challenge'),{status:200,headers:{'Content-Type':'text/plain'}});return json({ok:false,error:'Webhook verification failed'},403)}if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN||(!env.INSTAGRAM_APP_SECRET&&!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Instagram webhook secrets not configured'},503);const raw=await req.text();if(!(await verifyInstagramSignature(env,req,raw)))return json({ok:false,error:'Unauthorized webhook'},401);let body;try{body=JSON.parse(raw)}catch{return json({ok:false,error:'Invalid JSON'},400)}await ensureLeadOutreachStore(env);for(const entry of body.entry||[])for(const change of entry.changes||[]){const value=change.value||{},externalId=String(value.mid||value.message_id||`${entry.id||uid()}:${change.field||'change'}:${value.timestamp||Date.now()}`),ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='instagram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)continue;const text=String(value.text||value.message||'').trim();if(!text)continue;const providerSenderId=String(value.from?.id||''),providerUsername=String(value.from?.username||''),providerConversationId=String(value.conversation_id||value.thread_id||''),replyTo=String(value.reply_to?.mid||value.reply_to_message_id||'');const linked=await matchInboundLead(env,{platform:'instagram',providerConversationId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo});const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'instagram',externalId,providerUsername||providerSenderId||String(entry.id||'unknown'),text,'unclassified','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,providerConversationId||null,replyTo||null,t,t).run()}return json({ok:true})}
 
 async function deferUnapprovedDistributionRetry(env,retryId,distribution){
   if(!["telegram","whatsapp"].includes(distribution.target)||await approved(env,distribution.content_id))return false;
@@ -4717,6 +4717,95 @@ async function ensureLeadContactStore(env) {
     UNIQUE(lead_id, contact_type, normalized_value)
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_contacts_lead ON lead_contacts(lead_id)").run();
+}
+
+async function ensureLeadOutreachStore(env) {
+  await ensureLeadContactStore(env);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_conversations (
+    id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, contact_id TEXT, platform TEXT NOT NULL,
+    provider_conversation_id TEXT, provider_sender_id TEXT, provider_username TEXT,
+    status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_conversations_lead ON lead_conversations(lead_id)").run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_conversations_provider ON lead_conversations(platform,provider_conversation_id) WHERE provider_conversation_id IS NOT NULL AND provider_conversation_id<>''").run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_outreach (
+    id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, contact_id TEXT, conversation_id TEXT,
+    channel TEXT NOT NULL, recipient TEXT NOT NULL, message TEXT NOT NULL, language TEXT NOT NULL,
+    status TEXT NOT NULL, provider_message_id TEXT, provider_conversation_id TEXT,
+    approved_at TEXT, approved_by TEXT, sent_at TEXT, error_code TEXT, error_detail TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_outreach_lead_status ON lead_outreach(lead_id,status)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_outreach_contact ON lead_outreach(contact_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_outreach_conversation ON lead_outreach(conversation_id)").run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_outreach_provider_message ON lead_outreach(channel,provider_message_id) WHERE provider_message_id IS NOT NULL AND provider_message_id<>''").run();
+  for (const column of ["lead_id TEXT","conversation_id TEXT","provider_sender_id TEXT","provider_conversation_id TEXT","reply_to_provider_message_id TEXT"]) {
+    try { await env.DB.prepare(`ALTER TABLE inbox_messages ADD COLUMN ${column}`).run(); }
+    catch (e) { if (!/duplicate column|already exists/i.test(String(e?.message || e))) throw e; }
+  }
+}
+
+const LEAD_OUTREACH_STATUSES = new Set(["draft","pending_approval","approved","sending","sent","rejected","send_failed","send_ambiguous"]);
+
+function outreachLanguage(meta = {}) {
+  const country = String(meta.country || meta.market || "").trim().toLowerCase();
+  if (["iq","iraq","iraqi","العراق","عراق"].includes(country)) return "Iraqi Arabic";
+  if (["ir","iran","iranian","ایران"].includes(country)) return "Persian";
+  return String(meta.type || "").endsWith("_ar") ? "Iraqi Arabic" : "Persian";
+}
+
+async function selectLeadOutreachContact(env, lead, body = {}) {
+  const requestedId = String(body.contact_id || "").trim();
+  const requestedChannel = String(body.channel || "").trim().toLowerCase();
+  const supported = new Set(["telegram","instagram","whatsapp","email"]);
+  let contact = null;
+  if (requestedId) contact = await env.DB.prepare("SELECT * FROM lead_contacts WHERE id=? AND lead_id=? LIMIT 1").bind(requestedId,lead.id).first();
+  else if (requestedChannel) contact = await env.DB.prepare("SELECT * FROM lead_contacts WHERE lead_id=? AND contact_type=? AND evidence_status!='invalid' ORDER BY CASE evidence_status WHEN 'owner_confirmed' THEN 0 WHEN 'provider_supplied' THEN 1 WHEN 'page_extracted' THEN 2 ELSE 3 END,created_at LIMIT 1").bind(lead.id,requestedChannel).first();
+  else contact = await env.DB.prepare("SELECT * FROM lead_contacts WHERE lead_id=? AND contact_type IN ('telegram','instagram','whatsapp','email') AND evidence_status!='invalid' ORDER BY CASE evidence_status WHEN 'owner_confirmed' THEN 0 WHEN 'provider_supplied' THEN 1 WHEN 'page_extracted' THEN 2 ELSE 3 END,created_at LIMIT 1").bind(lead.id).first();
+  if (requestedId && !contact) throw Error("Lead contact not found");
+  if (requestedChannel && !supported.has(requestedChannel)) throw Error("Unsupported outreach channel");
+  if (contact && requestedChannel && contact.contact_type !== requestedChannel) throw Error("Lead contact does not match requested channel");
+  if (contact?.contact_type === "whatsapp" && !["owner_confirmed","provider_supplied","page_extracted"].includes(contact.evidence_status)) throw Error("WhatsApp contact is not confirmed");
+  if (contact) return { contact, channel:contact.contact_type, recipient:contact.raw_value };
+  if (requestedChannel || requestedId) throw Error("A verified lead contact is required for this channel");
+  return { contact:null, channel:"manual", recipient:String(lead.contact || "manual review") };
+}
+
+async function ensureLeadConversation(env, leadId, contact, platform) {
+  if (!contact || !platform || platform === "manual") return null;
+  const existing = await env.DB.prepare("SELECT * FROM lead_conversations WHERE lead_id=? AND contact_id=? AND platform=? ORDER BY created_at LIMIT 1").bind(leadId,contact.id,platform).first();
+  if (existing) return existing;
+  const t=now(), id=uid();
+  await env.DB.prepare("INSERT INTO lead_conversations(id,lead_id,contact_id,platform,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(id,leadId,contact.id,platform,"open",t,t).run();
+  return {id,lead_id:leadId,contact_id:contact.id,platform,status:"open",created_at:t,updated_at:t};
+}
+
+async function matchInboundLead(env, { platform, providerConversationId, providerSenderId, providerUsername, replyToProviderMessageId }) {
+  await ensureLeadOutreachStore(env);
+  if (providerConversationId) {
+    const c=await env.DB.prepare("SELECT * FROM lead_conversations WHERE platform=? AND provider_conversation_id=? LIMIT 1").bind(platform,providerConversationId).first();
+    if (c) return {leadId:c.lead_id,conversationId:c.id};
+  }
+  if (replyToProviderMessageId) {
+    const o=await env.DB.prepare("SELECT lead_id,conversation_id FROM lead_outreach WHERE channel=? AND provider_message_id=? LIMIT 1").bind(platform,replyToProviderMessageId).first();
+    if (o) return {leadId:o.lead_id,conversationId:o.conversation_id || null};
+  }
+  const normalized=platform==="telegram"?normalizeTelegramIdentity(providerUsername):platform==="instagram"?normalizeInstagramIdentity(providerUsername):null;
+  if (!normalized) return {leadId:null,conversationId:null};
+  const contacts=await env.DB.prepare("SELECT id,lead_id FROM lead_contacts WHERE contact_type=? AND normalized_value=? AND evidence_status!='invalid' LIMIT 2").bind(platform,normalized).all();
+  const unique=[...new Set((contacts.results||[]).map(x=>x.lead_id))];
+  if (unique.length > 1) return {leadId:null,conversationId:null};
+  let leadId=unique.length===1?unique[0]:null, contactId=unique.length===1?(contacts.results||[]).find(x=>x.lead_id===unique[0])?.id:null;
+  if (!leadId) {
+    const identity=await env.DB.prepare("SELECT lead_id FROM lead_identities WHERE identity_key=? LIMIT 1").bind(`${platform}:${normalized}`).first();
+    if (identity?.lead_id) leadId=identity.lead_id;
+  }
+  if (!leadId) return {leadId:null,conversationId:null};
+  if (!providerConversationId) return {leadId,conversationId:null};
+  const t=now(),id=uid();
+  try { await env.DB.prepare("INSERT INTO lead_conversations(id,lead_id,contact_id,platform,provider_conversation_id,provider_sender_id,provider_username,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id,leadId,contactId||null,platform,providerConversationId,providerSenderId||null,normalized,"open",t,t).run(); }
+  catch { const c=await env.DB.prepare("SELECT id,lead_id FROM lead_conversations WHERE platform=? AND provider_conversation_id=? LIMIT 1").bind(platform,providerConversationId).first(); return c?.lead_id===leadId?{leadId,conversationId:c.id}:{leadId:null,conversationId:null}; }
+  return {leadId,conversationId:id};
 }
 
 function normalizePlaceId(value) {
@@ -7305,9 +7394,14 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         if (!leadId) return json({ ok: false, error: "lead_id is required" }, 400);
         const lead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(leadId).first();
         if (!lead) return json({ ok: false, error: "Lead not found" }, 404);
+        await ensureLeadOutreachStore(env);
+        let selected;
+        try { selected=await selectLeadOutreachContact(env,lead,b); }
+        catch(e) { return json({ok:false,error:e.message},400); }
+        const conversation=await ensureLeadConversation(env,leadId,selected.contact,selected.channel);
         let meta = parseLeadNotes(lead);
         const sourceLabel = meta.source === "customer_discovery" ? "Google Maps/Places business" : meta.source === "instagram_hashtag_discovery" ? "Instagram business/page" : "business lead";
-const language = String(meta.type || "").endsWith("_ar") ? "Iraqi Arabic" : "Persian";
+const language = outreachLanguage(meta);
 const context = `${sourceLabel}: ${lead.name || ""}. Contact: ${lead.contact || "unknown"}. Website: ${meta.url || "unknown"}. City: ${meta.city || "unknown"}. Discovery query: ${meta.query || "unknown"}. Evidence: ${meta.evidence || ""}. Current stage: ${lead.stage || "new"}.`;
         if (!env.OPENAI_API_KEY) return json({ ok: false, error: "OPENAI_API_KEY not configured" }, 503);
         const task =
@@ -7329,9 +7423,38 @@ Context: ${context}`;
         const text = responseText(d).trim();
         if (!text) return json({ ok: false, error: "No outreach draft returned" }, 502);
         meta.outreach_draft = text; meta.outreach_mode = mode; meta.outreach_drafted_at = now();
-        await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta), now(), leadId).run();
-        await audit(env, "instagram_outreach_draft", "Human-review outreach draft generated", { lead_id: leadId, mode });
-        return json({ ok: true, lead_id: leadId, draft: text, mode, send_mode: "manual_approval_only" });
+        const t=now(),outreachId=uid();
+        await env.DB.prepare("INSERT INTO lead_outreach(id,lead_id,contact_id,conversation_id,channel,recipient,message,language,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(outreachId,leadId,selected.contact?.id||null,conversation?.id||null,selected.channel,selected.recipient,text,language,"draft",t,t).run();
+        await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta), t, leadId).run();
+        await audit(env, "lead_outreach_draft", "Human-review outreach draft generated", { lead_id: leadId, outreach_id:outreachId, mode, channel:selected.channel });
+        return json({ ok: true, lead_id: leadId, outreach_id:outreachId, draft: text, mode, channel:selected.channel, recipient:selected.recipient, language, status:"draft", send_mode: "manual_approval_only" });
+      }
+
+      if (u.pathname === "/api/leads/outreach" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        await ensureLeadOutreachStore(env);
+        const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,c.evidence_status,c.source AS contact_source,c.evidence_url
+          FROM lead_outreach o JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_contacts c ON c.id=o.contact_id
+          ORDER BY o.created_at DESC LIMIT 100`).all();
+        return json({ok:true,items:r.results||[],sending_enabled:false});
+      }
+
+      if (u.pathname === "/api/leads/outreach/transition" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        await ensureLeadOutreachStore(env);
+        const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),action=String(b.action||"").trim();
+        if(!id||!["submit","approve","reject"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
+        const current=await env.DB.prepare("SELECT * FROM lead_outreach WHERE id=?").bind(id).first();
+        if(!current)return json({ok:false,error:"Outreach draft not found"},404);
+        if(!LEAD_OUTREACH_STATUSES.has(current.status))return json({ok:false,error:"Unknown outreach status"},409);
+        if((action==="approve"&&current.status==="approved")||(action==="reject"&&current.status==="rejected")||(action==="submit"&&current.status==="pending_approval"))return json({ok:true,id,status:current.status,idempotent:true,sending_enabled:false});
+        const from=action==="submit"?"draft":"pending_approval",to=action==="submit"?"pending_approval":action==="approve"?"approved":"rejected",t=now();
+        const result=action==="approve"
+          ?await env.DB.prepare("UPDATE lead_outreach SET status=?,approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status=?").bind(to,t,String(b.approved_by||"admin"),t,id,from).run()
+          :await env.DB.prepare("UPDATE lead_outreach SET status=?,updated_at=? WHERE id=? AND status=?").bind(to,t,id,from).run();
+        if(!result.meta?.changes)return json({ok:false,error:`Invalid outreach transition from ${current.status}`},409);
+        await audit(env,"lead_outreach_status_changed","Lead outreach review status changed",{outreach_id:id,lead_id:current.lead_id,from,to});
+        return json({ok:true,id,status:to,idempotent:false,sending_enabled:false});
       }
 
       if (u.pathname === "/api/learning/status" && req.method === "GET") {

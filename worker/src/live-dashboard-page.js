@@ -62,6 +62,12 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </section>
 
 <section class="card section">
+<div class="title"><div><h2>✉️ OUTREACH APPROVAL</h2><div class="hint">پیش‌نویس مشتری فقط برای بررسی است؛ تأیید در این مرحله هیچ پیامی ارسال نمی‌کند.</div></div><button class="btn" onclick="loadOutreachApprovals()">↻ REFRESH</button></div>
+<div id="outreachApprovalStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="outreachApprovalItems" class="rows"></div>
+</section>
+
+<section class="card section">
 <div class="title"><div><h2>🎛️ MASTER CONTROL</h2><div class="hint">کنترل فوری کل صف Autonomous. توقف، اجرای Taskهای آماده را کنترل می‌کند.</div></div><button class="btn" onclick="refreshAll()">↻ REFRESH</button></div>
 <div class="tools" style="margin-top:10px">
 <button class="btn primary" onclick="masterAction('on')">▶ START ALL</button>
@@ -335,6 +341,21 @@ async function setContentApproval(id,status){
  if(!d.ok){$("approvalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Approval update failed")+"</span>";return}
  $("approvalStatus").textContent=status==="approved"?"محتوا تأیید شد و طبق تقویم انتشار صف‌بندی شد.":"محتوا رد شد.";
  await loadApprovals();
+}
+async function loadOutreachApprovals(){
+ const status=$("outreachApprovalStatus"),list=$("outreachApprovalItems");
+ status.textContent="در حال دریافت پیش‌نویس‌های ارتباط…";
+ const d=await api("/api/leads/outreach");
+ if(!d.ok){status.innerHTML="<span class='bad'>✕ "+esc(d.error||"Outreach queue unavailable")+"</span>";list.innerHTML="";return}
+ const items=(d.items||[]).filter(x=>["draft","pending_approval","approved","rejected"].includes(x.status));
+ status.textContent=items.filter(x=>x.status==="pending_approval").length+" مورد در انتظار تأیید · ارسال خودکار غیرفعال است.";
+ list.innerHTML=items.length?items.map(x=>"<div class='row'><b>"+esc(x.lead_name||x.lead_id)+"</b><div class='mini'>"+esc(x.channel)+" · "+esc(x.recipient)+" · "+esc(x.language)+" · "+esc(x.status)+"</div><div class='mini'>Evidence: "+esc(x.evidence_status||"legacy/manual")+" · "+esc(x.contact_source||"")+"</div><div style='margin-top:6px;white-space:pre-wrap'>"+esc(x.message)+"</div><div class='tools' style='margin-top:8px'>"+(x.status==="draft"?"<button class='btn' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;submit&quot;)'>SUBMIT FOR REVIEW</button>":"")+(x.status==="pending_approval"?"<button class='btn primary' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;approve&quot;)'>APPROVE</button><button class='btn danger' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;reject&quot;)'>REJECT</button>":"")+"</div></div>").join(""):"<div class='hint'>پیش‌نویس ارتباطی وجود ندارد.</div>";
+}
+async function setOutreachStatus(id,action){
+ const d=await api("/api/leads/outreach/transition",{method:"POST",body:JSON.stringify({id,action})});
+ if(!d.ok){$("outreachApprovalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Outreach update failed")+"</span>";return}
+ $("outreachApprovalStatus").textContent=d.status==="approved"?"تأیید ثبت شد؛ هیچ پیامی ارسال نشد.":"وضعیت ثبت شد: "+d.status;
+ await loadOutreachApprovals();
 }
 async function loadDiagnostic(){
  const d=await api(A+"/status");
@@ -846,7 +867,7 @@ async function refreshAll(){
  refreshInProgress=true;
  try{
   await loadStatus();
-  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals()]);
+  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals(),loadOutreachApprovals()]);
  }catch(e){
   $("masterState").textContent="DASHBOARD ERROR";
   $("masterState").className="pill bad";
