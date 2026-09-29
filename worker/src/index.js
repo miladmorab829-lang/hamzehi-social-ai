@@ -2281,26 +2281,49 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId,duration){
     }
   };
 
-  const response=await fetch(
-    'https://api.shotstack.io/edit/stage/render',
-    {
-      method:'POST',
-      headers:{
-        'x-api-key':apiKey,
-        'Content-Type':'application/json',
-        'Accept':'application/json'
-      },
-      body:JSON.stringify(payload)
-    }
-  );
+  let response;
+  try{
+    response=await fetch(
+      'https://api.shotstack.io/edit/stage/render',
+      {
+        method:'POST',
+        headers:{
+          'x-api-key':apiKey,
+          'Content-Type':'application/json',
+          'Accept':'application/json'
+        },
+        body:JSON.stringify(payload)
+      }
+    );
+  }catch(e){
+    throw shotstackSubmissionError(e,{
+      outcome:'ambiguous',
+      response_category:'network_error'
+    });
+  }
 
-  const data=await response.json().catch(()=>({}));
+  const raw=await response.text();
+  let data;
+  try{
+    data=raw?JSON.parse(raw):{};
+  }catch{
+    throw shotstackSubmissionError('Shotstack returned malformed JSON',{
+      outcome:response.ok?'ambiguous':'rejected',
+      http_status:response.status,
+      response_category:response.ok?'malformed_success_response':'http_rejection'
+    });
+  }
 
-  if(!response.ok||!data?.success){
-    throw Error(
+  if(!response.ok||data?.success!==true){
+    throw shotstackSubmissionError(
       data?.message||
       data?.response?.message||
-      `Shotstack render failed (HTTP ${response.status})`
+      `Shotstack render failed (HTTP ${response.status})`,
+      {
+        outcome:'rejected',
+        http_status:response.status,
+        response_category:response.ok?'provider_rejection':'http_rejection'
+      }
     );
   }
 
@@ -2309,15 +2332,71 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId,duration){
   ).trim();
 
   if(!renderId){
-    throw Error('Shotstack did not return render id');
+    throw shotstackSubmissionError('Shotstack did not return render id',{
+      outcome:'ambiguous',
+      http_status:response.status,
+      response_category:'accepted_response_without_render_id'
+    });
   }
 
   return {
     ok:true,
     render_id:renderId,
+    http_status:response.status,
     week_id:String(weekId),
     duration:videoDuration
   };
+}
+function shotstackSubmissionError(message,details={}){
+  const error=Error(sanitizeOperationalError(message));
+  error.shotstack_submission={
+    outcome:String(details.outcome||'ambiguous'),
+    http_status:Number.isInteger(details.http_status)?details.http_status:null,
+    response_category:String(details.response_category||'unknown')
+      .replace(/[^a-z0-9_-]/gi,'')
+      .slice(0,80),
+    render_id:String(details.render_id||'')
+  };
+  return error;
+}
+
+async function persistAcceptedShotstackRender(env,weekId,klingTaskId,renderId){
+  let lastError=null;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      const updated=await env.DB.prepare(`
+        UPDATE weekly_video_autopilot
+        SET status=?, shotstack_task_id=?, updated_at=?
+        WHERE week_id=? AND task_id=? AND status='shotstack_submitting'
+      `).bind(
+        'compositing',
+        String(renderId),
+        now(),
+        String(weekId),
+        String(klingTaskId)
+      ).run();
+      if(Number(updated?.meta?.changes||0)===1)return;
+
+      const existing=await env.DB.prepare(`
+        SELECT status,shotstack_task_id
+        FROM weekly_video_autopilot
+        WHERE week_id=? AND task_id=?
+        LIMIT 1
+      `).bind(String(weekId),String(klingTaskId)).first();
+      if(
+        String(existing?.status||'')==='compositing' &&
+        String(existing?.shotstack_task_id||'')===String(renderId)
+      )return;
+      lastError=Error('Accepted Shotstack render could not be persisted in the expected weekly state');
+    }catch(e){
+      lastError=e;
+    }
+  }
+  throw shotstackSubmissionError(lastError||'Accepted Shotstack render persistence failed',{
+    outcome:'ambiguous',
+    response_category:'render_id_persistence_failed',
+    render_id:String(renderId)
+  });
 }
 function weeklyKlingExternalTaskId(weekId){
   return `weekly-video-${String(weekId||'').replace(/[^a-zA-Z0-9_-]/g,'-')}`;
@@ -2745,6 +2824,7 @@ async function pollWeeklyVideoAutopilot(env){
       AND shotstack_task_id IS NOT NULL
       AND shotstack_task_id!=''
     )
+    OR status='shotstack_submitting'
     OR (
       status IN ('telegram_uploading','telegram_upload_ambiguous')
       AND shotstack_task_id IS NOT NULL
@@ -2765,6 +2845,55 @@ async function pollWeeklyVideoAutopilot(env){
   }
 
   try{
+    if(String(row.status)==='shotstack_submitting'){
+      const updatedAt=Date.parse(String(row.updated_at||''));
+      const stale=!Number.isFinite(updatedAt)||
+        updatedAt<=Date.now()-UNKNOWN_PUBLISH_AFTER_MS;
+      if(!stale){
+        return {
+          ok:true,
+          status:'shotstack_submitting',
+          week_id:row.week_id,
+          task_id:row.task_id,
+          skipped:true,
+          reason:'shotstack_submission_in_progress'
+        };
+      }
+      const ambiguousAt=now();
+      await env.DB.prepare(`
+        UPDATE weekly_video_autopilot
+        SET status=?, updated_at=?
+        WHERE week_id=? AND task_id=? AND status='shotstack_submitting'
+      `).bind(
+        'shotstack_submission_ambiguous',
+        ambiguousAt,
+        row.week_id,
+        row.task_id
+      ).run();
+      await auditWeeklyVideoObservationOnce(
+        env,
+        'weekly_video_autopilot_shotstack_submission_ambiguous',
+        'Stale Shotstack submission outcome is ambiguous; do not retry',
+        {
+          week_id:row.week_id,
+          task_id:row.task_id||null,
+          stage:'shotstack_submission',
+          response_category:'stale_submitting_without_render_id',
+          error:'Shotstack acceptance cannot be confirmed',
+          timestamp:ambiguousAt,
+          retry_forbidden:true,
+          dedup_key:`${row.week_id}:${row.task_id}:stale_shotstack_submission`
+        }
+      );
+      return {
+        ok:false,
+        status:'shotstack_submission_ambiguous',
+        week_id:row.week_id,
+        task_id:row.task_id,
+        skipped:true,
+        reason:'manual_shotstack_reconciliation_required'
+      };
+    }
     if(['compositing','telegram_uploading','telegram_upload_ambiguous'].includes(String(row.status))){
       await ensureMediaVaultStore(env);
     }
@@ -2835,6 +2964,38 @@ async function pollWeeklyVideoAutopilot(env){
     }
 
     if(String(row.status)==='generating'){
+      if(String(row.shotstack_task_id||'').trim()){
+        const resumed=await env.DB.prepare(`
+          UPDATE weekly_video_autopilot
+          SET status=?, updated_at=?
+          WHERE week_id=? AND task_id=? AND status='generating'
+            AND shotstack_task_id=?
+        `).bind(
+          'compositing',
+          now(),
+          row.week_id,
+          row.task_id,
+          row.shotstack_task_id
+        ).run();
+        if(Number(resumed?.meta?.changes||0)===1){
+          return {
+            ok:true,
+            status:'compositing',
+            week_id:row.week_id,
+            task_id:row.task_id,
+            shotstack_task_id:row.shotstack_task_id,
+            reconciled:true
+          };
+        }
+        return {
+          ok:false,
+          status:'local_error',
+          week_id:row.week_id,
+          task_id:row.task_id,
+          shotstack_task_id:row.shotstack_task_id,
+          error:'Existing Shotstack render state could not be reconciled'
+        };
+      }
       const task=await getKlingWeeklyVideoTask(
         env,
         row.task_id
@@ -2865,29 +3026,141 @@ async function pollWeeklyVideoAutopilot(env){
           );
         }
 
-        const shotstack=
-          await createShotstackWeeklyEndCardTask(
+        const submittingAt=now();
+        const submissionIntent=await env.DB.prepare(`
+          UPDATE weekly_video_autopilot
+          SET status=?, updated_at=?
+          WHERE week_id=?
+            AND task_id=?
+            AND status='generating'
+        `).bind(
+          'shotstack_submitting',
+          submittingAt,
+          row.week_id,
+          row.task_id
+        ).run();
+        if(Number(submissionIntent?.meta?.changes||0)!==1){
+          throw Error('Shotstack submission intent could not be persisted');
+        }
+        await audit(
+          env,
+          'weekly_video_autopilot_shotstack_submitting',
+          'Weekly Video Autopilot is submitting to Shotstack',
+          {
+            week_id:row.week_id,
+            task_id:row.task_id,
+            stage:'shotstack_submission',
+            timestamp:submittingAt
+          }
+        );
+
+        let shotstack;
+        try{
+          shotstack=await createShotstackWeeklyEndCardTask(
             env,
             task.video_url,
             row.week_id,
             videoDuration
           );
+        }catch(e){
+          const details=e?.shotstack_submission||{};
+          const rejected=details.outcome==='rejected';
+          const failureStatus=rejected
+            ? 'shotstack_rejected'
+            : 'shotstack_submission_ambiguous';
+          const failureAt=now();
+          await env.DB.prepare(`
+            UPDATE weekly_video_autopilot
+            SET status=?, updated_at=?
+            WHERE week_id=? AND task_id=? AND status='shotstack_submitting'
+          `).bind(failureStatus,failureAt,row.week_id,row.task_id).run();
+          await audit(
+            env,
+            rejected
+              ? 'weekly_video_autopilot_shotstack_rejected'
+              : 'weekly_video_autopilot_shotstack_submission_ambiguous',
+            rejected
+              ? 'Shotstack rejected the weekly render submission'
+              : 'Shotstack render submission outcome is ambiguous; do not retry',
+            {
+              week_id:row.week_id,
+              task_id:row.task_id,
+              stage:'shotstack_submission',
+              http_status:Number.isInteger(details.http_status)?details.http_status:null,
+              response_category:String(details.response_category||'unknown'),
+              error:sanitizeOperationalError(e),
+              timestamp:failureAt,
+              retry_forbidden:true
+            }
+          );
+          return {
+            ok:false,
+            status:failureStatus,
+            week_id:row.week_id,
+            task_id:row.task_id,
+            error:sanitizeOperationalError(e)
+          };
+        }
 
-        await env.DB.prepare(`
-          UPDATE weekly_video_autopilot
-          SET status=?,
-              shotstack_task_id=?,
-              updated_at=?
-          WHERE week_id=?
-            AND task_id=?
-            AND status='generating'
-        `).bind(
-          "compositing",
-          shotstack.render_id,
-          now(),
-          row.week_id,
-          row.task_id
-        ).run();
+        try{
+          await persistAcceptedShotstackRender(
+            env,
+            row.week_id,
+            row.task_id,
+            shotstack.render_id
+          );
+        }catch(e){
+          const failureAt=now();
+          await env.DB.prepare(`
+            UPDATE weekly_video_autopilot
+            SET status=?, shotstack_task_id=?, updated_at=?
+            WHERE week_id=? AND task_id=? AND status='shotstack_submitting'
+          `).bind(
+            'shotstack_submission_ambiguous',
+            String(shotstack.render_id||''),
+            failureAt,
+            row.week_id,
+            row.task_id
+          ).run().catch(()=>{});
+          await audit(
+            env,
+            'weekly_video_autopilot_shotstack_submission_ambiguous',
+            'Shotstack accepted the render but local render ID persistence is ambiguous; do not retry',
+            {
+              week_id:row.week_id,
+              task_id:row.task_id,
+              shotstack_task_id:String(shotstack.render_id||'')||null,
+              stage:'shotstack_render_persistence',
+              http_status:Number.isInteger(shotstack.http_status)?shotstack.http_status:null,
+              response_category:'render_id_persistence_failed',
+              error:sanitizeOperationalError(e),
+              timestamp:failureAt,
+              retry_forbidden:true
+            }
+          ).catch(()=>{});
+          return {
+            ok:false,
+            status:'shotstack_submission_ambiguous',
+            week_id:row.week_id,
+            task_id:row.task_id,
+            shotstack_task_id:String(shotstack.render_id||''),
+            error:sanitizeOperationalError(e)
+          };
+        }
+        await audit(
+          env,
+          'weekly_video_autopilot_shotstack_accepted',
+          'Shotstack accepted the weekly render submission',
+          {
+            week_id:row.week_id,
+            task_id:row.task_id,
+            shotstack_task_id:shotstack.render_id,
+            stage:'shotstack_submission',
+            http_status:Number.isInteger(shotstack.http_status)?shotstack.http_status:null,
+            response_category:'accepted_with_render_id',
+            timestamp:now()
+          }
+        );
 
         return {
           ok:true,
@@ -5717,7 +5990,11 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
         'weekly_video_autopilot_kling_submitting',
         'weekly_video_autopilot_kling_rejected',
         'weekly_video_autopilot_kling_submission_ambiguous',
-        'weekly_video_autopilot_kling_accepted'
+        'weekly_video_autopilot_kling_accepted',
+        'weekly_video_autopilot_shotstack_submitting',
+        'weekly_video_autopilot_shotstack_rejected',
+        'weekly_video_autopilot_shotstack_submission_ambiguous',
+        'weekly_video_autopilot_shotstack_accepted'
       )
       ORDER BY created_at DESC
       LIMIT 100
@@ -6026,6 +6303,10 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
       'weekly_video_autopilot_kling_rejected',
       'weekly_video_autopilot_kling_submission_ambiguous',
       'weekly_video_autopilot_kling_accepted',
+      'weekly_video_autopilot_shotstack_submitting',
+      'weekly_video_autopilot_shotstack_rejected',
+      'weekly_video_autopilot_shotstack_submission_ambiguous',
+      'weekly_video_autopilot_shotstack_accepted',
       'video_autopilot_toggle'
     )
     ORDER BY created_at DESC
