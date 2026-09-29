@@ -347,14 +347,20 @@ async function loadOutreachApprovals(){
  status.textContent="در حال دریافت پیش‌نویس‌های ارتباط…";
  const d=await api("/api/leads/outreach");
  if(!d.ok){status.innerHTML="<span class='bad'>✕ "+esc(d.error||"Outreach queue unavailable")+"</span>";list.innerHTML="";return}
- const items=(d.items||[]).filter(x=>["draft","pending_approval","approved","rejected"].includes(x.status));
- status.textContent=items.filter(x=>x.status==="pending_approval").length+" مورد در انتظار تأیید · ارسال خودکار غیرفعال است.";
- list.innerHTML=items.length?items.map(x=>"<div class='row'><b>"+esc(x.lead_name||x.lead_id)+"</b><div class='mini'>"+esc(x.channel)+" · "+esc(x.recipient)+" · "+esc(x.language)+" · "+esc(x.status)+"</div><div class='mini'>Evidence: "+esc(x.evidence_status||"legacy/manual")+" · "+esc(x.contact_source||"")+"</div><div style='margin-top:6px;white-space:pre-wrap'>"+esc(x.message)+"</div><div class='tools' style='margin-top:8px'>"+(x.status==="draft"?"<button class='btn' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;submit&quot;)'>SUBMIT FOR REVIEW</button>":"")+(x.status==="pending_approval"?"<button class='btn primary' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;approve&quot;)'>APPROVE</button><button class='btn danger' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;reject&quot;)'>REJECT</button>":"")+"</div></div>").join(""):"<div class='hint'>پیش‌نویس ارتباطی وجود ندارد.</div>";
+ const items=(d.items||[]).filter(x=>["draft","pending_approval","approved","rejected","sending","sent","send_failed","send_ambiguous"].includes(x.status));
+ status.textContent=items.filter(x=>x.status==="pending_approval").length+" مورد در انتظار تأیید · ارسال فقط با دکمه SEND انجام می‌شود.";
+ list.innerHTML=items.length?items.map(x=>"<div class='row'><b>"+esc(x.lead_name||x.lead_id)+"</b><div class='mini'>"+esc(x.channel)+" · "+esc(x.recipient)+" · "+esc(x.language)+" · "+esc(x.status)+"</div><div class='mini'>"+(x.channel==="telegram"?(x.telegram_sendable?"<span class='ok'>SENDABLE</span>":"<span class='bad'>NOT SENDABLE</span>")+" · ":"")+"Evidence: "+esc(x.evidence_status||"legacy/manual")+" · "+esc(x.contact_source||"")+"</div><div style='margin-top:6px;white-space:pre-wrap'>"+esc(x.message)+"</div><div class='tools' style='margin-top:8px'>"+(x.status==="draft"?"<button class='btn' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;submit&quot;)'>SUBMIT FOR REVIEW</button>":"")+(x.status==="pending_approval"?"<button class='btn primary' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;approve&quot;)'>APPROVE</button><button class='btn danger' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;reject&quot;)'>REJECT</button>":"")+(x.status==="approved"&&x.channel==="telegram"&&x.telegram_sendable?"<button class='btn primary' onclick='sendTelegramOutreach(&quot;"+esc(x.id)+"&quot;)'>SEND</button>":"")+"</div></div>").join(""):"<div class='hint'>پیش‌نویس ارتباطی وجود ندارد.</div>";
 }
 async function setOutreachStatus(id,action){
  const d=await api("/api/leads/outreach/transition",{method:"POST",body:JSON.stringify({id,action})});
  if(!d.ok){$("outreachApprovalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Outreach update failed")+"</span>";return}
  $("outreachApprovalStatus").textContent=d.status==="approved"?"تأیید ثبت شد؛ هیچ پیامی ارسال نشد.":"وضعیت ثبت شد: "+d.status;
+ await loadOutreachApprovals();
+}
+async function sendTelegramOutreach(id){
+ const d=await api("/api/leads/outreach/send-telegram",{method:"POST",body:JSON.stringify({id})});
+ if(!d.ok){$("outreachApprovalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Telegram send failed")+"</span>";await loadOutreachApprovals();return}
+ $("outreachApprovalStatus").innerHTML="<span class='ok'>✓ پیام تأییدشده ارسال و ثبت شد.</span>";
  await loadOutreachApprovals();
 }
 async function loadDiagnostic(){

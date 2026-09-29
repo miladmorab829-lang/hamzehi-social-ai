@@ -1571,8 +1571,15 @@ function readyChatId(env){return String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'').tr
 function mainTelegramChatId(env){return String(env.TELEGRAM_CHAT_ID||'').trim()}
 async function telegramBotCall(env,method,body){
   if(!env.TELEGRAM_BOT_TOKEN)throw Error('Telegram bot token missing');
-  const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error(d.description||`Telegram ${method} failed`);return d.result;
+  let r;
+  try { r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(15000)}); }
+  catch(error){ error.telegramOutcome='ambiguous'; throw error; }
+  let d;
+  try { d=await r.json(); }
+  catch { const error=Error(`Telegram ${method} returned an unreadable response`);error.telegramOutcome='ambiguous';error.httpStatus=r.status;throw error; }
+  if(!r.ok||d?.ok===false){const error=Error(d?.description||`Telegram ${method} failed`);error.telegramOutcome='rejected';error.httpStatus=r.status;throw error;}
+  if(d?.ok!==true||!d.result){const error=Error(`Telegram ${method} returned an unverifiable response`);error.telegramOutcome='ambiguous';error.httpStatus=r.status;throw error;}
+  return d.result;
 }
 async function ingestVaultUpload(env,req){
   if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);await ensureMediaVaultStore(env);
@@ -4577,7 +4584,7 @@ async function handleTelegramWebhook(env,req){
   const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
   const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const isVault=isImageVault||isVideoVault;
   const isReady=!!readyChatId(env)&& (chatId===readyChatId(env)||username===readyChatId(env).replace(/^@/,'').toLowerCase());
-  const providerSenderId=String(m.from?.id||m.chat.id||''),providerUsername=String(m.from?.username||m.chat.username||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;await ensureLeadOutreachStore(env);const linked=await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo});const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(!ex){const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||providerUsername||String(m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();}
+  const providerSenderId=String(m.from?.id||m.chat.id||''),providerUsername=String(m.from?.username||m.chat.username||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;await ensureLeadOutreachStore(env);let linked=await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo});if(m.chat.type==='private'&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(!ex){const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();}
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
   if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   return json({ok:true,media_received:!!media});
@@ -4784,28 +4791,123 @@ async function matchInboundLead(env, { platform, providerConversationId, provide
   await ensureLeadOutreachStore(env);
   if (providerConversationId) {
     const c=await env.DB.prepare("SELECT * FROM lead_conversations WHERE platform=? AND provider_conversation_id=? LIMIT 1").bind(platform,providerConversationId).first();
-    if (c) return {leadId:c.lead_id,conversationId:c.id};
+    if (c) return {leadId:c.lead_id,conversationId:c.id,contactId:c.contact_id||null};
   }
   if (replyToProviderMessageId) {
-    const o=await env.DB.prepare("SELECT lead_id,conversation_id FROM lead_outreach WHERE channel=? AND provider_message_id=? LIMIT 1").bind(platform,replyToProviderMessageId).first();
-    if (o) return {leadId:o.lead_id,conversationId:o.conversation_id || null};
+    const o=await env.DB.prepare("SELECT lead_id,contact_id,conversation_id FROM lead_outreach WHERE channel=? AND provider_message_id=? LIMIT 1").bind(platform,replyToProviderMessageId).first();
+    if (o) return {leadId:o.lead_id,conversationId:o.conversation_id||null,contactId:o.contact_id||null};
+  }
+  if(platform==='telegram'){
+    const chatId=normalizeTelegramPrivateChatId(providerConversationId);
+    if(chatId){
+      const contacts=await env.DB.prepare("SELECT id,lead_id FROM lead_contacts WHERE contact_type='telegram' AND normalized_value=? AND evidence_status='provider_supplied' AND source IN ('telegram_webhook','telegram_provider') LIMIT 2").bind(chatId).all();
+      const unique=[...new Set((contacts.results||[]).map(x=>x.lead_id))];
+      if(unique.length>1)return {leadId:null,conversationId:null,contactId:null};
+      if(unique.length===1)return {leadId:unique[0],conversationId:null,contactId:(contacts.results||[])[0].id};
+    }
   }
   const normalized=platform==="telegram"?normalizeTelegramIdentity(providerUsername):platform==="instagram"?normalizeInstagramIdentity(providerUsername):null;
-  if (!normalized) return {leadId:null,conversationId:null};
-  const contacts=await env.DB.prepare("SELECT id,lead_id FROM lead_contacts WHERE contact_type=? AND normalized_value=? AND evidence_status!='invalid' LIMIT 2").bind(platform,normalized).all();
-  const unique=[...new Set((contacts.results||[]).map(x=>x.lead_id))];
-  if (unique.length > 1) return {leadId:null,conversationId:null};
-  let leadId=unique.length===1?unique[0]:null, contactId=unique.length===1?(contacts.results||[]).find(x=>x.lead_id===unique[0])?.id:null;
-  if (!leadId) {
-    const identity=await env.DB.prepare("SELECT lead_id FROM lead_identities WHERE identity_key=? LIMIT 1").bind(`${platform}:${normalized}`).first();
-    if (identity?.lead_id) leadId=identity.lead_id;
-  }
-  if (!leadId) return {leadId:null,conversationId:null};
-  if (!providerConversationId) return {leadId,conversationId:null};
+  if (!normalized) return {leadId:null,conversationId:null,contactId:null};
+  const identity=await env.DB.prepare("SELECT lead_id FROM lead_identities WHERE identity_key=? LIMIT 1").bind(`${platform}:${normalized}`).first();
+  const leadId=identity?.lead_id||null;
+  if (!leadId) return {leadId:null,conversationId:null,contactId:null};
+  const contact=await env.DB.prepare("SELECT id FROM lead_contacts WHERE lead_id=? AND contact_type=? AND normalized_value=? AND evidence_status!='invalid' LIMIT 1").bind(leadId,platform,normalized).first();
+  const contactId=contact?.id||null;
+  if (!providerConversationId) return {leadId,conversationId:null,contactId};
   const t=now(),id=uid();
   try { await env.DB.prepare("INSERT INTO lead_conversations(id,lead_id,contact_id,platform,provider_conversation_id,provider_sender_id,provider_username,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id,leadId,contactId||null,platform,providerConversationId,providerSenderId||null,normalized,"open",t,t).run(); }
-  catch { const c=await env.DB.prepare("SELECT id,lead_id FROM lead_conversations WHERE platform=? AND provider_conversation_id=? LIMIT 1").bind(platform,providerConversationId).first(); return c?.lead_id===leadId?{leadId,conversationId:c.id}:{leadId:null,conversationId:null}; }
-  return {leadId,conversationId:id};
+  catch { const c=await env.DB.prepare("SELECT id,lead_id,contact_id FROM lead_conversations WHERE platform=? AND provider_conversation_id=? LIMIT 1").bind(platform,providerConversationId).first(); return c?.lead_id===leadId?{leadId,conversationId:c.id,contactId:c.contact_id||contactId}:{leadId:null,conversationId:null,contactId:null}; }
+  return {leadId,conversationId:id,contactId};
+}
+
+async function enrichTelegramInboundContact(env, linked, {chatId,providerSenderId,providerUsername}) {
+  const normalizedChatId=normalizeTelegramPrivateChatId(chatId);
+  if(!linked?.leadId||!normalizedChatId)return linked;
+  await upsertLeadContact(env,linked.leadId,{contact_type:'telegram',raw_value:normalizedChatId,evidence_status:'provider_supplied',source:'telegram_webhook'});
+  const contact=await env.DB.prepare("SELECT id FROM lead_contacts WHERE lead_id=? AND contact_type='telegram' AND normalized_value=? LIMIT 1").bind(linked.leadId,normalizedChatId).first();
+  if(!contact)return linked;
+  const normalizedUsername=normalizeTelegramIdentity(providerUsername),t=now();
+  let conversation=linked.conversationId?await env.DB.prepare("SELECT id,lead_id FROM lead_conversations WHERE id=? LIMIT 1").bind(linked.conversationId).first():null;
+  if(conversation&&conversation.lead_id!==linked.leadId)return {leadId:null,conversationId:null,contactId:null};
+  if(!conversation)conversation=await env.DB.prepare("SELECT id,lead_id FROM lead_conversations WHERE platform='telegram' AND provider_conversation_id=? LIMIT 1").bind(normalizedChatId).first();
+  if(conversation&&conversation.lead_id!==linked.leadId)return {leadId:null,conversationId:null,contactId:null};
+  if(conversation){
+    await env.DB.prepare("UPDATE lead_conversations SET contact_id=?,provider_sender_id=?,provider_username=?,status='open',updated_at=? WHERE id=? AND lead_id=?").bind(contact.id,providerSenderId||null,normalizedUsername,t,conversation.id,linked.leadId).run();
+    return {leadId:linked.leadId,conversationId:conversation.id,contactId:contact.id};
+  }
+  const id=uid();
+  try { await env.DB.prepare("INSERT INTO lead_conversations(id,lead_id,contact_id,platform,provider_conversation_id,provider_sender_id,provider_username,status,created_at,updated_at) VALUES(?,?,?,'telegram',?,?,?,'open',?,?)").bind(id,linked.leadId,contact.id,normalizedChatId,providerSenderId||null,normalizedUsername,t,t).run(); }
+  catch { const raced=await env.DB.prepare("SELECT id,lead_id FROM lead_conversations WHERE platform='telegram' AND provider_conversation_id=? LIMIT 1").bind(normalizedChatId).first();return raced?.lead_id===linked.leadId?{leadId:linked.leadId,conversationId:raced.id,contactId:contact.id}:{leadId:null,conversationId:null,contactId:null}; }
+  return {leadId:linked.leadId,conversationId:id,contactId:contact.id};
+}
+
+async function persistTelegramOutreachSuccess(env,outreach,contact,result){
+  const providerMessageId=String(result?.message_id??'').trim(),providerConversationId=normalizeTelegramPrivateChatId(result?.chat?.id);
+  if(!/^\d+$/.test(providerMessageId)||!providerConversationId)throw Error('Telegram success response is missing durable message identifiers');
+  let lastError;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      let conversation=await env.DB.prepare("SELECT id,lead_id FROM lead_conversations WHERE platform='telegram' AND provider_conversation_id=? LIMIT 1").bind(providerConversationId).first();
+      if(conversation&&conversation.lead_id!==outreach.lead_id)throw Error('Telegram conversation is already linked to another lead');
+      if(!conversation){
+        const id=uid(),t=now();
+        await env.DB.prepare("INSERT OR IGNORE INTO lead_conversations(id,lead_id,contact_id,platform,provider_conversation_id,status,created_at,updated_at) VALUES(?,?,?,'telegram',?,'open',?,?)").bind(id,outreach.lead_id,contact.id,providerConversationId,t,t).run();
+        conversation=await env.DB.prepare("SELECT id,lead_id FROM lead_conversations WHERE platform='telegram' AND provider_conversation_id=? LIMIT 1").bind(providerConversationId).first();
+        if(!conversation||conversation.lead_id!==outreach.lead_id)throw Error('Unable to persist Telegram conversation mapping');
+      }
+      const t=now();
+      const results=await env.DB.batch([
+        env.DB.prepare("UPDATE lead_conversations SET contact_id=?,status='open',updated_at=? WHERE id=? AND lead_id=?").bind(contact.id,t,conversation.id,outreach.lead_id),
+        env.DB.prepare("UPDATE lead_outreach SET conversation_id=?,provider_message_id=?,provider_conversation_id=?,sent_at=?,status='sent',error_code=NULL,error_detail=NULL,updated_at=? WHERE id=? AND status='sending'").bind(conversation.id,providerMessageId,providerConversationId,t,t,outreach.id),
+        env.DB.prepare("UPDATE leads SET stage='contacted',updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(t,outreach.lead_id)
+      ]);
+      if(!results?.[1]?.meta?.changes){
+        const saved=await env.DB.prepare("SELECT status,provider_message_id,provider_conversation_id FROM lead_outreach WHERE id=?").bind(outreach.id).first();
+        if(saved?.status!=='sent'||String(saved.provider_message_id)!==providerMessageId||String(saved.provider_conversation_id)!==providerConversationId)throw Error('Unable to persist Telegram outreach result');
+      }
+      return {providerMessageId,providerConversationId,conversationId:conversation.id};
+    }catch(error){lastError=error;}
+  }
+  throw lastError||Error('Unable to persist Telegram outreach result');
+}
+
+async function sendApprovedTelegramOutreach(env,outreachId){
+  await ensureLeadOutreachStore(env);
+  const outreach=await env.DB.prepare(`SELECT o.*,l.id AS canonical_lead_id,l.stage AS lead_stage,
+    c.id AS selected_contact_id,c.lead_id AS contact_lead_id,c.contact_type,c.raw_value AS contact_raw_value,
+    c.normalized_value AS contact_normalized_value,c.evidence_status,c.source AS contact_source
+    FROM lead_outreach o LEFT JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_contacts c ON c.id=o.contact_id
+    WHERE o.id=? LIMIT 1`).bind(outreachId).first();
+  if(!outreach) return {ok:false,statusCode:404,error:'Outreach not found'};
+  if(outreach.status!=='approved')return {ok:false,statusCode:409,error:'Outreach is not approved for sending',status:outreach.status};
+  if(outreach.channel!=='telegram')return {ok:false,statusCode:400,error:'Outreach channel is not Telegram'};
+  if(!outreach.canonical_lead_id)return {ok:false,statusCode:409,error:'Canonical lead not found'};
+  if(!outreach.selected_contact_id||outreach.contact_lead_id!==outreach.lead_id)return {ok:false,statusCode:409,error:'Telegram contact does not belong to this lead'};
+  const contact={id:outreach.selected_contact_id,contact_type:outreach.contact_type,raw_value:outreach.contact_raw_value,normalized_value:outreach.contact_normalized_value,evidence_status:outreach.evidence_status,source:outreach.contact_source};
+  const chatId=telegramLeadContactChatId(contact);
+  if(!chatId)return {ok:false,statusCode:409,error:'Telegram recipient is not sendable'};
+  const message=String(outreach.message||'');
+  if(!message.trim())return {ok:false,statusCode:409,error:'Approved outreach message is empty'};
+  const claimed=await env.DB.prepare("UPDATE lead_outreach SET status='sending',error_code=NULL,error_detail=NULL,updated_at=? WHERE id=? AND status='approved'").bind(now(),outreach.id).run();
+  if(!claimed.meta?.changes)return {ok:false,statusCode:409,error:'Outreach send was already claimed'};
+  let result;
+  try { result=await telegramBotCall(env,'sendMessage',{chat_id:chatId,text:message}); }
+  catch(error){
+    const rejected=error?.telegramOutcome==='rejected',status=rejected?'send_failed':'send_ambiguous',detail=sanitizeOperationalError(error?.message||error),code=rejected?'telegram_rejected':'telegram_outcome_ambiguous',t=now();
+    try { await env.DB.prepare("UPDATE lead_outreach SET status=?,error_code=?,error_detail=?,updated_at=? WHERE id=? AND status='sending'").bind(status,code,detail,t,outreach.id).run(); } catch {}
+    try { await audit(env,rejected?'lead_outreach_send_failed':'lead_outreach_send_ambiguous',rejected?'Telegram definitively rejected lead outreach':'Telegram lead outreach outcome is ambiguous',{outreach_id:outreach.id,lead_id:outreach.lead_id,http_status:Number.isInteger(error?.httpStatus)?error.httpStatus:null,error:detail}); } catch {}
+    return {ok:false,statusCode:502,error:detail,status};
+  }
+  try {
+    const persisted=await persistTelegramOutreachSuccess(env,outreach,contact,result);
+    try { await audit(env,'lead_outreach_sent','Approved Telegram lead outreach sent',{outreach_id:outreach.id,lead_id:outreach.lead_id,provider_message_id:persisted.providerMessageId}); } catch {}
+    return {ok:true,status:'sent',id:outreach.id,...persisted};
+  } catch(error){
+    const detail=sanitizeOperationalError(error?.message||error);
+    try { await env.DB.prepare("UPDATE lead_outreach SET status='send_ambiguous',error_code='telegram_accepted_persistence_failed',error_detail=?,updated_at=? WHERE id=? AND status='sending'").bind(detail,now(),outreach.id).run(); } catch {}
+    try { await audit(env,'lead_outreach_send_ambiguous','Telegram accepted outreach but local persistence did not complete',{outreach_id:outreach.id,lead_id:outreach.lead_id,error:detail}); } catch {}
+    return {ok:false,statusCode:500,error:detail,status:'send_ambiguous'};
+  }
 }
 
 function normalizePlaceId(value) {
@@ -4887,6 +4989,18 @@ function normalizeTelegramIdentity(value) {
   return /^[a-z0-9_]{4,64}$/.test(raw) ? raw : null;
 }
 
+function normalizeTelegramPrivateChatId(value) {
+  const normalized=String(value||'').trim();
+  return /^[1-9]\d{0,19}$/.test(normalized)?normalized:null;
+}
+
+function telegramLeadContactChatId(contact) {
+  if(String(contact?.contact_type||'').toLowerCase()!=='telegram')return null;
+  if(String(contact?.evidence_status||'')!=='provider_supplied')return null;
+  if(!['telegram_webhook','telegram_provider'].includes(String(contact?.source||'')))return null;
+  return normalizeTelegramPrivateChatId(contact.normalized_value||contact.raw_value);
+}
+
 function normalizeLeadEmail(value) {
   const normalized = String(value || "").trim().replace(/^mailto:/i, "").split("?")[0].toLowerCase();
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : null;
@@ -4925,7 +5039,8 @@ async function upsertLeadContact(env, leadId, contact) {
   if (!['phone','email','website','instagram','telegram','whatsapp'].includes(type)) return null;
   if (!(status in CONTACT_EVIDENCE_RANK)) return null;
   const raw = String(contact.raw_value || "").trim();
-  const normalized = normalizeLeadContact(type, raw, contact.country || "");
+  const trustedTelegramChatId=type==='telegram'&&status==='provider_supplied'&&['telegram_webhook','telegram_provider'].includes(String(contact.source||''))?normalizeTelegramPrivateChatId(raw):null;
+  const normalized = trustedTelegramChatId || normalizeLeadContact(type, raw, contact.country || "");
   if (!normalized) return null;
   await ensureLeadContactStore(env);
   const existing = await env.DB.prepare(
@@ -7433,10 +7548,11 @@ Context: ${context}`;
       if (u.pathname === "/api/leads/outreach" && req.method === "GET") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         await ensureLeadOutreachStore(env);
-        const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,c.evidence_status,c.source AS contact_source,c.evidence_url
+        const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,c.contact_type,c.raw_value AS contact_raw_value,c.normalized_value AS contact_normalized_value,c.evidence_status,c.source AS contact_source,c.evidence_url
           FROM lead_outreach o JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_contacts c ON c.id=o.contact_id
           ORDER BY o.created_at DESC LIMIT 100`).all();
-        return json({ok:true,items:r.results||[],sending_enabled:false});
+        const items=(r.results||[]).map(item=>({...item,telegram_sendable:!!telegramLeadContactChatId({contact_type:item.contact_type,raw_value:item.contact_raw_value,normalized_value:item.contact_normalized_value,evidence_status:item.evidence_status,source:item.contact_source})}));
+        return json({ok:true,items,sending_enabled:true});
       }
 
       if (u.pathname === "/api/leads/outreach/transition" && req.method === "POST") {
@@ -7455,6 +7571,16 @@ Context: ${context}`;
         if(!result.meta?.changes)return json({ok:false,error:`Invalid outreach transition from ${current.status}`},409);
         await audit(env,"lead_outreach_status_changed","Lead outreach review status changed",{outreach_id:id,lead_id:current.lead_id,from,to});
         return json({ok:true,id,status:to,idempotent:false,sending_enabled:false});
+      }
+
+      if (u.pathname === "/api/leads/outreach/send-telegram" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({})),id=String(b.id||"").trim();
+        if(!id)return json({ok:false,error:"id is required"},400);
+        const result=await sendApprovedTelegramOutreach(env,id);
+        const statusCode=result.statusCode||200;
+        delete result.statusCode;
+        return json(result,statusCode);
       }
 
       if (u.pathname === "/api/learning/status" && req.method === "GET") {
