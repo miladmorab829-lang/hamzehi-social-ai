@@ -1602,8 +1602,177 @@ async function hasMp4FtypSignature(blob){
     bytes[4]===0x66 && bytes[5]===0x74 &&
     bytes[6]===0x79 && bytes[7]===0x70;
 }
-async function storeWeeklyVideoInVault(env,videoUrl,weekId,caption){
+function weeklyVideoVaultTag(weekId){
+  return `weekly_video:${String(weekId||'').trim()}`;
+}
+function validWeeklyVideoVaultRecord(row){
+  return !!row &&
+    String(row.media_id||'').trim()!=='' &&
+    /^[1-9]\d*$/.test(String(row.message_id||'')) &&
+    Number.isSafeInteger(Number(row.message_id)) &&
+    typeof row.file_id==='string' && row.file_id.trim()!=='' &&
+    typeof row.file_unique_id==='string' && row.file_unique_id.trim()!=='' &&
+    String(row.media_type||'')==='video' &&
+    String(row.source_kind||'')==='vault';
+}
+async function findWeeklyVideoVaultRecord(env,weekId,shotstackTaskId){
+  const rows=await env.DB.prepare(`
+    SELECT
+      m.id AS media_id,
+      m.message_id,
+      m.file_id,
+      m.file_unique_id,
+      m.media_type,
+      m.source_kind,
+      m.caption,
+      v.id AS vault_item_id,
+      v.tags
+    FROM media_vault_items v
+    JOIN telegram_media_sources m
+      ON m.id=v.telegram_media_id
+    JOIN weekly_video_autopilot w ON w.week_id=? AND w.shotstack_task_id=?
+    WHERE ((v.tags=? AND v.source_type='weekly_ai_video' AND v.ai_status='ready')
+      OR w.output_media_id=m.id)
+      AND (m.chat_id=? OR lower(m.chat_username)=?)
+  `).bind(String(weekId),String(shotstackTaskId||''),weeklyVideoVaultTag(weekId),
+    videoVaultChatId(env),videoVaultChatId(env).replace(/^@/,'').toLowerCase()).all();
+  return (rows.results||[]).find(validWeeklyVideoVaultRecord)||null;
+}
+async function findVideoVaultRecordByFileUniqueId(env,fileUniqueId){
+  const value=String(fileUniqueId||'').trim();
+  if(!value)return null;
+  const rows=await env.DB.prepare(`
+    SELECT
+      m.id AS media_id,
+      m.message_id,
+      m.file_id,
+      m.file_unique_id,
+      m.media_type,
+      m.source_kind,
+      m.caption,
+      v.id AS vault_item_id,
+      v.tags
+    FROM telegram_media_sources m
+    LEFT JOIN media_vault_items v
+      ON v.telegram_media_id=m.id
+    WHERE m.file_unique_id=?
+      AND m.media_type='video'
+      AND m.source_kind='vault'
+      AND (m.chat_id=? OR lower(m.chat_username)=?)
+    ORDER BY m.created_at ASC
+  `).bind(value,videoVaultChatId(env),videoVaultChatId(env).replace(/^@/,'').toLowerCase()).all();
+  return (rows.results||[]).find(validWeeklyVideoVaultRecord)||null;
+}
+function telegramWeeklyUploadError(message,details={}){
+  const error=Error(sanitizeOperationalError(message));
+  error.telegram_weekly_upload={
+    outcome:String(details.outcome||'ambiguous'),
+    http_status:Number.isInteger(details.http_status)?details.http_status:null,
+    response_category:String(details.response_category||'unknown')
+      .replace(/[^a-z0-9_-]/gi,'')
+      .slice(0,80)
+  };
+  return error;
+}
+async function persistWeeklyVideoVaultRecord(env,weekId,caption,identifiers,shotstackTaskId){
+  const tagged=await findWeeklyVideoVaultRecord(env,weekId,shotstackTaskId);
+  if(tagged)return {...tagged,reused:true,reuse_reason:'weekly_tag'};
+
+  const byFile=await findVideoVaultRecordByFileUniqueId(
+    env,
+    identifiers.file_unique_id
+  );
+  if(byFile?.vault_item_id){
+    // Retain the existing tag; link this week durably for restart recovery.
+    const linked=await env.DB.prepare(`
+      UPDATE weekly_video_autopilot SET output_media_id=?
+      WHERE week_id=? AND shotstack_task_id=?
+        AND status IN ('telegram_uploading','telegram_upload_ambiguous')
+    `).bind(byFile.media_id,weekId,shotstackTaskId).run();
+    if(Number(linked?.meta?.changes||0)!==1)throw Error('Weekly vault reuse link was not persisted');
+    return {...byFile,reused:true,reuse_reason:'file_unique_id'};
+  }
+
+  const t=now();
+  if(byFile){
+    await env.DB.prepare(
+      "INSERT INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)"
+    ).bind(
+      uid(),
+      byFile.media_id,
+      null,
+      'weekly_ai_video',
+      'ready',
+      null,
+      null,
+      weeklyVideoVaultTag(weekId),
+      t,
+      t
+    ).run();
+    const completed=await findWeeklyVideoVaultRecord(env,weekId,shotstackTaskId);
+    if(!completed)throw Error('Weekly Telegram vault record was not persisted');
+    return {...completed,reused:true,reuse_reason:'file_unique_id'};
+  }
+
+  const mediaId=uid();
+  const statements=[
+    env.DB.prepare(
+      "INSERT INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+    ).bind(
+      mediaId,
+      identifiers.chat_id,
+      '',
+      identifiers.message_id,
+      identifiers.file_id,
+      identifiers.file_unique_id,
+      'video',
+      String(caption||''),
+      'vault',
+      t,
+      t
+    ),
+    env.DB.prepare(
+      "INSERT INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)"
+    ).bind(
+      uid(),
+      mediaId,
+      null,
+      'weekly_ai_video',
+      'ready',
+      null,
+      null,
+      weeklyVideoVaultTag(weekId),
+      t,
+      t
+    )
+  ];
+  const results=await env.DB.batch(statements);
+  if(!Array.isArray(results)||results.length!==2||results.some(result=>result?.success!==true)){
+    throw Error('Weekly Telegram vault batch persistence failed');
+  }
+  const completed=await findWeeklyVideoVaultRecord(env,weekId,shotstackTaskId);
+  if(!completed)throw Error('Weekly Telegram vault record was not persisted');
+  return {...completed,reused:false,reuse_reason:''};
+}
+async function storeWeeklyVideoInVault(env,videoUrl,weekId,caption,shotstackTaskId){
   await ensureMediaVaultStore(env);
+
+  const existing=await findWeeklyVideoVaultRecord(env,weekId,shotstackTaskId);
+  if(existing){
+    await auditWeeklyVideoObservationOnce(
+      env,
+      'weekly_video_telegram_vault_reused',
+      'Existing weekly Telegram Video Vault record reused',
+      {
+        week_id:String(weekId),
+        shotstack_task_id:String(shotstackTaskId||''),
+        media_id:existing.media_id,
+        stage:'telegram_reconciliation',
+        dedup_key:`${weekId}:${existing.media_id}`
+      }
+    );
+    return {...existing,reused:true};
+  }
 
   const url=String(videoUrl||'').trim();
   if(!/^https?:\/\//i.test(url)){
@@ -1728,76 +1897,128 @@ async function storeWeeklyVideoInVault(env,videoUrl,weekId,caption){
     );
   }
 
-  const telegramResponse=await fetch(
-    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,
-    {
-      method:'POST',
-      body:upload
-    }
-  );
+  let uploadClaim;
+  try{
+    uploadClaim=await env.DB.prepare(`
+      UPDATE weekly_video_autopilot
+      SET status=?,
+          updated_at=?
+      WHERE week_id=?
+        AND shotstack_task_id=?
+        AND status='compositing'
+    `).bind(
+      'telegram_uploading',
+      now(),
+      String(weekId),
+      String(shotstackTaskId||'')
+    ).run();
+  }catch(e){
+    const localError=Error(sanitizeOperationalError(e));
+    localError.telegram_preupload_state=true;
+    throw localError;
+  }
+  if(Number(uploadClaim?.meta?.changes||0)!==1){
+    const localError=Error('Telegram upload state could not be persisted');
+    localError.telegram_preupload_state=true;
+    throw localError;
+  }
 
-  const telegramData=await telegramResponse.json().catch(()=>({}));
+  let telegramResponse;
+  try{
+    telegramResponse=await fetch(
+      `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,
+      {method:'POST',body:upload}
+    );
+  }catch(e){
+    throw telegramWeeklyUploadError(e,{
+      outcome:'ambiguous',
+      response_category:'network_error'
+    });
+  }
 
-  if(!telegramResponse.ok || !telegramData.ok){
-    throw Error(
-      telegramData.description ||
-      'Failed to store weekly video in Telegram Video Vault'
+  let telegramData;
+  try{
+    telegramData=await telegramResponse.json();
+  }catch{
+    throw telegramWeeklyUploadError('Telegram response could not be read or parsed',{
+      outcome:'ambiguous',
+      http_status:telegramResponse.status,
+      response_category:'unreadable_response'
+    });
+  }
+
+  const rejected=telegramData?.ok===false &&
+    Number.isInteger(telegramData?.error_code) && telegramData.error_code>=400;
+  if(!telegramResponse.ok||telegramData?.ok!==true){
+    throw telegramWeeklyUploadError(
+      telegramData?.description||'Telegram rejected weekly video upload',
+      {
+        outcome:rejected?'rejected':'ambiguous',
+        http_status:telegramResponse.status,
+        response_category:rejected?'provider_rejection':'uncertain_response'
+      }
     );
   }
 
   const message=telegramData.result;
   const video=message?.video;
-
-  if(!video?.file_id){
-    throw Error(
-      'Telegram did not return weekly video file_id'
+  const identifiers={
+    chat_id:chat,
+    message_id:String(message?.message_id??'').trim(),
+    file_id:typeof video?.file_id==='string'?video.file_id.trim():'',
+    file_unique_id:typeof video?.file_unique_id==='string'?video.file_unique_id.trim():''
+  };
+  if(
+    !Number.isSafeInteger(message?.message_id) || message.message_id<=0 ||
+    !identifiers.file_id || !identifiers.file_unique_id
+  ){
+    throw telegramWeeklyUploadError(
+      'Telegram success response did not include required video identifiers',
+      {
+        outcome:'ambiguous',
+        http_status:telegramResponse.status,
+        response_category:'missing_success_identifiers'
+      }
     );
   }
 
-  const t=now();
-  const mediaId=uid();
-
-  await env.DB.prepare(
-    "INSERT INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
-  )
-  .bind(
-    mediaId,
-    chat,
-    '',
-    String(message.message_id||''),
-    String(video.file_id),
-    String(video.file_unique_id||''),
-    'video',
-    String(caption||''),
-    'vault',
-    t,
-    t
-  )
-  .run();
-
-  await env.DB.prepare(
-    "INSERT INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)"
-  )
-  .bind(
-    uid(),
-    mediaId,
-    null,
-    'weekly_ai_video',
-    'ready',
-    null,
-    null,
-    `weekly_video:${weekId}`,
-    t,
-    t
-  )
-  .run();
-
-  return {
-    ok:true,
-    media_id:mediaId,
-    message_id:String(message.message_id||''),
-    file_id:String(video.file_id)
-  };
+  let stored;
+  let persistenceError;
+  for(let attempt=0;attempt<2&&!stored;attempt++){
+    try{
+      stored=await persistWeeklyVideoVaultRecord(
+        env,
+        weekId,
+        caption,
+        identifiers,
+        shotstackTaskId
+      );
+    }catch(e){
+      persistenceError=e;
+    }
+  }
+  if(!stored){
+    throw telegramWeeklyUploadError(persistenceError,{
+      outcome:'ambiguous',
+      http_status:telegramResponse.status,
+      response_category:'local_persistence_failure'
+    });
+  }
+  if(stored.reused){
+    await auditWeeklyVideoObservationOnce(env,
+      'weekly_video_telegram_vault_reused',
+      'Existing Telegram Video Vault identifiers reused during persistence',
+      {
+        week_id:String(weekId),
+        shotstack_task_id:String(shotstackTaskId||''),
+        media_id:stored.media_id,
+        stage:'telegram_reconciliation',
+        reuse_reason:stored.reuse_reason,
+        dedup_key:`${weekId}:${stored.media_id}`
+      }
+    );
+  }
+  return {ok:true,...stored};
 }
 async function getMediaVault(env,req){
   if(req.method!=='GET')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);await ensureMediaVaultStore(env);const u=new URL(req.url);const limit=Math.min(50,Math.max(1,Number(u.searchParams.get('limit')||24)));const r=await env.DB.prepare("SELECT m.*,v.content_id,v.source_type,v.ai_status,v.ai_prompt,v.parent_media_id,v.tags FROM telegram_media_sources m LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id WHERE m.source_kind='vault' ORDER BY m.created_at DESC LIMIT ?").bind(limit).all();return json({ok:true,items:r.results||[],vault_configured:!!vaultChatId(env)});
@@ -2401,6 +2622,80 @@ async function getShotstackWeeklyRender(env,renderId){
     error:String(render.error||'')
   };
 }
+async function completeWeeklyVideoFromVault(env,row,stored,caption){
+  let lastError;
+  for(let attempt=0;attempt<2;attempt++){
+    try{
+      const updated=await env.DB.prepare(`
+        UPDATE weekly_video_autopilot
+        SET status=?,
+            output_media_id=?,
+            caption=?,
+            updated_at=?
+        WHERE week_id=?
+          AND shotstack_task_id=?
+          AND status IN (
+            'compositing',
+            'telegram_uploading',
+            'telegram_upload_ambiguous'
+          )
+      `).bind(
+        'video_ready',
+        stored.media_id,
+        String(caption||stored.caption||''),
+        now(),
+        row.week_id,
+        row.shotstack_task_id
+      ).run();
+      if(Number(updated?.meta?.changes||0)===1)return true;
+      const current=await env.DB.prepare(`
+        SELECT status,output_media_id
+        FROM weekly_video_autopilot
+        WHERE week_id=?
+          AND shotstack_task_id=?
+        LIMIT 1
+      `).bind(row.week_id,row.shotstack_task_id).first();
+      if(
+        String(current?.status)==='video_ready' &&
+        String(current?.output_media_id)===String(stored.media_id)
+      )return true;
+      lastError=Error('Weekly video completion state was not persisted');
+    }catch(e){
+      lastError=e;
+    }
+  }
+  const error=Error(sanitizeOperationalError(lastError));
+  error.telegram_local_persistence=true;
+  throw error;
+}
+async function reconcileWeeklyVideoVaultRecord(env,row,stored){
+  await completeWeeklyVideoFromVault(
+    env,
+    row,
+    stored,
+    stored.caption||row.caption||''
+  );
+  await auditWeeklyVideoObservationOnce(
+    env,
+    'weekly_video_telegram_vault_reused',
+    'Existing weekly Telegram Video Vault record reconciled',
+    {
+      week_id:row.week_id,
+      shotstack_task_id:row.shotstack_task_id||null,
+      media_id:stored.media_id,
+      stage:'telegram_reconciliation',
+      dedup_key:`${row.week_id}:${stored.media_id}`
+    }
+  );
+  return {
+    ok:true,
+    status:'video_ready',
+    week_id:row.week_id,
+    shotstack_task_id:row.shotstack_task_id||'',
+    output_media_id:stored.media_id,
+    reconciled:true
+  };
+}
 async function pollWeeklyVideoAutopilot(env){
   await ensureWeeklyVideoAutopilotStore(env);
   const row=await env.DB.prepare(`
@@ -2409,7 +2704,9 @@ async function pollWeeklyVideoAutopilot(env){
       task_id,
       shotstack_task_id,
       status,
-      scenario_json
+      scenario_json,
+      caption,
+      updated_at
     FROM weekly_video_autopilot
     WHERE (
       status='generating'
@@ -2421,7 +2718,14 @@ async function pollWeeklyVideoAutopilot(env){
       AND shotstack_task_id IS NOT NULL
       AND shotstack_task_id!=''
     )
-    ORDER BY updated_at ASC
+    OR (
+      status IN ('telegram_uploading','telegram_upload_ambiguous')
+      AND shotstack_task_id IS NOT NULL
+      AND shotstack_task_id!=''
+    )
+    ORDER BY
+      CASE WHEN status='telegram_upload_ambiguous' THEN 1 ELSE 0 END,
+      updated_at ASC
     LIMIT 1
   `).first();
 
@@ -2434,6 +2738,75 @@ async function pollWeeklyVideoAutopilot(env){
   }
 
   try{
+    if(['compositing','telegram_uploading','telegram_upload_ambiguous'].includes(String(row.status))){
+      await ensureMediaVaultStore(env);
+    }
+    if(
+      String(row.status)==='telegram_uploading' ||
+      String(row.status)==='telegram_upload_ambiguous'
+    ){
+      const stored=await findWeeklyVideoVaultRecord(env,row.week_id,row.shotstack_task_id);
+      if(stored){
+        return await reconcileWeeklyVideoVaultRecord(env,row,stored);
+      }
+      if(String(row.status)==='telegram_upload_ambiguous'){
+        return {
+          ok:false,
+          status:'telegram_upload_ambiguous',
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id,
+          skipped:true,
+          reason:'manual_telegram_reconciliation_required'
+        };
+      }
+      const updatedAt=Date.parse(String(row.updated_at||''));
+      const stale=!Number.isFinite(updatedAt)||
+        updatedAt<=Date.now()-UNKNOWN_PUBLISH_AFTER_MS;
+      if(!stale){
+        return {
+          ok:true,
+          status:'telegram_uploading',
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id,
+          skipped:true,
+          reason:'telegram_upload_in_progress'
+        };
+      }
+      await env.DB.prepare(`
+        UPDATE weekly_video_autopilot
+        SET status=?,
+            updated_at=?
+        WHERE week_id=?
+          AND shotstack_task_id=?
+          AND status='telegram_uploading'
+      `).bind(
+        'telegram_upload_ambiguous',
+        now(),
+        row.week_id,
+        row.shotstack_task_id
+      ).run();
+      await auditWeeklyVideoObservationOnce(
+        env,
+        'weekly_video_telegram_upload_ambiguous',
+        'Stale Telegram upload has no durable vault record',
+        {
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id,
+          stage:'telegram_upload',
+          response_category:'stale_upload_without_durable_record',
+          error:'Telegram acceptance cannot be confirmed',
+          dedup_key:`${row.week_id}:${row.shotstack_task_id}:stale`
+        }
+      );
+      return {
+        ok:false,
+        status:'telegram_upload_ambiguous',
+        week_id:row.week_id,
+        shotstack_task_id:row.shotstack_task_id,
+        error:'Telegram acceptance cannot be confirmed'
+      };
+    }
+
     if(String(row.status)==='generating'){
       const task=await getKlingWeeklyVideoTask(
         env,
@@ -2546,6 +2919,10 @@ async function pollWeeklyVideoAutopilot(env){
     }
 
     if(String(row.status)==='compositing'){
+      const existing=await findWeeklyVideoVaultRecord(env,row.week_id,row.shotstack_task_id);
+      if(existing){
+        return await reconcileWeeklyVideoVaultRecord(env,row,existing);
+      }
       const render=
         await getShotstackWeeklyRender(
           env,
@@ -2580,26 +2957,10 @@ async function pollWeeklyVideoAutopilot(env){
             env,
             render.url,
             row.week_id,
-            caption
+            caption,
+            row.shotstack_task_id
           );
-
-        await env.DB.prepare(`
-          UPDATE weekly_video_autopilot
-          SET status=?,
-              output_media_id=?,
-              caption=?,
-              updated_at=?
-          WHERE week_id=?
-            AND shotstack_task_id=?
-            AND status='compositing'
-        `).bind(
-          "video_ready",
-          stored.media_id,
-          caption,
-          now(),
-          row.week_id,
-          row.shotstack_task_id
-        ).run();
+        await completeWeeklyVideoFromVault(env,row,stored,caption);
 
         return {
           ok:true,
@@ -2707,6 +3068,106 @@ async function pollWeeklyVideoAutopilot(env){
         shotstack_task_id:row.shotstack_task_id||'',
         stage:"final_video_validation",
         error:validationReason
+      };
+    }
+    if(e?.telegram_preupload_state && String(row.status)==='compositing'){
+      const localError=sanitizeOperationalError(e);
+      await auditWeeklyVideoObservationOnce(
+        env,
+        'weekly_video_telegram_upload_state_error',
+        'Telegram upload was blocked before provider call',
+        {
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id||null,
+          stage:'telegram_upload_state',
+          error:localError,
+          dedup_key:`${row.week_id}:${row.shotstack_task_id}:${localError}`
+        }
+      );
+      return {
+        ok:false,
+        status:'local_error',
+        week_id:row.week_id,
+        shotstack_task_id:row.shotstack_task_id||'',
+        error:localError
+      };
+    }
+    if(e?.telegram_weekly_upload && String(row.status)==='compositing'){
+      const outcome=e.telegram_weekly_upload;
+      const error=sanitizeOperationalError(e);
+      const targetStatus=outcome.outcome==='rejected'
+        ? 'telegram_rejected'
+        : 'telegram_upload_ambiguous';
+      try{
+        await env.DB.prepare(`
+          UPDATE weekly_video_autopilot
+          SET status=?,
+              updated_at=?
+          WHERE week_id=?
+            AND shotstack_task_id=?
+            AND status='telegram_uploading'
+        `).bind(
+          targetStatus,
+          now(),
+          row.week_id,
+          row.shotstack_task_id
+        ).run();
+      }catch{
+        // The durable uploading claim still blocks another send; stale recovery
+        // can mark it ambiguous when D1 becomes available again.
+      }
+      await auditWeeklyVideoObservationOnce(
+        env,
+        outcome.outcome==='rejected'
+          ? 'weekly_video_telegram_upload_rejected'
+          : 'weekly_video_telegram_upload_ambiguous',
+        outcome.outcome==='rejected'
+          ? 'Telegram rejected weekly video upload'
+          : 'Telegram weekly video upload outcome is ambiguous',
+        {
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id||null,
+          stage:'telegram_upload',
+          http_status:outcome.http_status,
+          response_category:outcome.response_category,
+          error,
+          dedup_key:[
+            row.week_id,
+            row.shotstack_task_id||'',
+            outcome.outcome,
+            outcome.response_category,
+            error
+          ].join(':')
+        }
+      );
+      return {
+        ok:false,
+        status:targetStatus,
+        week_id:row.week_id,
+        shotstack_task_id:row.shotstack_task_id||'',
+        error
+      };
+    }
+    if(e?.telegram_local_persistence){
+      const localError=sanitizeOperationalError(e);
+      await auditWeeklyVideoObservationOnce(
+        env,
+        'weekly_video_telegram_persistence_error',
+        'Telegram video is durable but weekly completion needs reconciliation',
+        {
+          week_id:row.week_id,
+          shotstack_task_id:row.shotstack_task_id||null,
+          stage:'telegram_persistence',
+          error:localError,
+          dedup_key:`${row.week_id}:${row.shotstack_task_id}:${localError}`
+        }
+      );
+      return {
+        ok:false,
+        status:'local_error',
+        week_id:row.week_id,
+        shotstack_task_id:row.shotstack_task_id||'',
+        error:localError
       };
     }
     const provider=String(row.status)==='generating'
