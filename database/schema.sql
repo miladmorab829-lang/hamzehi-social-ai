@@ -14,6 +14,16 @@ CREATE TABLE IF NOT EXISTS leads (
  id TEXT PRIMARY KEY, name TEXT, contact TEXT, stage TEXT, priority TEXT,
  notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS lead_identities (
+ identity_key TEXT PRIMARY KEY,
+ identity_type TEXT NOT NULL,
+ normalized_value TEXT NOT NULL,
+ lead_id TEXT NOT NULL,
+ source TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lead_identities_lead ON lead_identities(lead_id);
 CREATE TABLE IF NOT EXISTS inbox_messages (
  id TEXT PRIMARY KEY, platform TEXT, external_id TEXT, sender TEXT, message TEXT,
  category TEXT, priority TEXT, reply_suggestion TEXT, status TEXT,

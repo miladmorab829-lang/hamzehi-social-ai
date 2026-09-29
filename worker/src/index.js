@@ -4689,6 +4689,254 @@ else if(x.operation==='calendar_publish'){const cal=await env.DB.prepare("SELECT
       await env.DB.prepare("UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").bind(status,e.message,new Date(Date.now()+Math.min(3600000,2**attempts*60000)).toISOString(),now(),x.id).run()}await collectInstagramMetrics(env)}
 
 
+async function ensureLeadIdentityStore(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_identities (
+    identity_key TEXT PRIMARY KEY,
+    identity_type TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    lead_id TEXT NOT NULL,
+    source TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_identities_lead ON lead_identities(lead_id)").run();
+}
+
+function normalizePlaceId(value) {
+  const normalized = String(value || "").trim();
+  return normalized && normalized.length <= 300 ? normalized : null;
+}
+
+function normalizeLeadDomain(value) {
+  let raw = String(value || "").trim().toLowerCase();
+  if (!raw || raw.startsWith("mailto:") || raw.startsWith("tel:")) return null;
+  if (!/^https?:\/\//i.test(raw)) raw = `https://${raw.replace(/^\/\//, "")}`;
+  let hostname;
+  try { hostname = new URL(raw).hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, ""); }
+  catch { return null; }
+  if (!hostname || hostname === "localhost" || !hostname.includes(".")) return null;
+  const blocked = new Set([
+    "google.com","googleusercontent.com","googleapis.com","bing.com","instagram.com","facebook.com",
+    "t.me","telegram.me","telegram.org","whatsapp.com","wa.me","youtube.com","youtu.be","x.com","twitter.com"
+  ]);
+  if (blocked.has(hostname) || [...blocked].some(x => hostname.endsWith(`.${x}`))) return null;
+  const parts = hostname.split(".").filter(Boolean);
+  if (parts.length < 2) return null;
+  const multiLevel = new Set(["co.ir","com.ir","org.ir","ac.ir","co.iq","com.iq","org.iq"]);
+  const suffix2 = parts.slice(-2).join(".");
+  return multiLevel.has(suffix2) && parts.length >= 3 ? parts.slice(-3).join(".") : suffix2;
+}
+
+function normalizeLeadPhone(value, country = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const explicitPlus = raw.startsWith("+");
+  let digits = raw.replace(/\D/g, "");
+  if (!digits) return null;
+  if (digits.startsWith("0098")) digits = digits.slice(2);
+  else if (digits.startsWith("00964")) digits = digits.slice(2);
+  if (digits.startsWith("98")) {
+    const national = digits.slice(2).replace(/^0/, "");
+    return national.length === 10 ? `+98${national}` : null;
+  }
+  if (digits.startsWith("964")) {
+    const national = digits.slice(3).replace(/^0/, "");
+    return national.length >= 9 && national.length <= 10 ? `+964${national}` : null;
+  }
+  if (explicitPlus) return null;
+  const context = String(country || "").trim().toLowerCase();
+  const iran = /^(ir|iran|iranian|ایران|ایرانی)$/.test(context);
+  const iraq = /^(iq|iraq|iraqi|العراق|عراق|عراقي)$/.test(context);
+  if (iran && /^09\d{9}$/.test(digits)) return `+98${digits.slice(1)}`;
+  if (iraq && /^07\d{9}$/.test(digits)) return `+964${digits.slice(1)}`;
+  return null;
+}
+
+function normalizeInstagramIdentity(value) {
+  let raw = String(value || "").trim().toLowerCase();
+  if (!raw) return null;
+  try {
+    if (/^https?:\/\//.test(raw)) {
+      const u = new URL(raw);
+      if (!/(^|\.)instagram\.com$/.test(u.hostname.replace(/^www\./, ""))) return null;
+      raw = u.pathname.split("/").filter(Boolean)[0] || "";
+    }
+  } catch { return null; }
+  raw = raw.replace(/^@/, "").split(/[/?#]/)[0];
+  return /^[a-z0-9._]{1,30}$/.test(raw) ? raw : null;
+}
+
+function normalizeTelegramIdentity(value) {
+  let raw = String(value || "").trim().toLowerCase();
+  if (!raw) return null;
+  try {
+    if (/^https?:\/\//.test(raw)) {
+      const u = new URL(raw);
+      const host = u.hostname.replace(/^www\./, "");
+      if (!['t.me','telegram.me'].includes(host)) return null;
+      raw = u.pathname.split("/").filter(Boolean)[0] || "";
+    }
+  } catch { return null; }
+  raw = raw.replace(/^@/, "").split(/[/?#]/)[0];
+  return /^[a-z0-9_]{4,64}$/.test(raw) ? raw : null;
+}
+
+function normalizeLeadEmail(value) {
+  const normalized = String(value || "").trim().replace(/^mailto:/i, "").split("?")[0].toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : null;
+}
+
+function collectLeadIdentities(input = {}) {
+  const meta = input.meta && typeof input.meta === "object" ? input.meta : {};
+  const country = meta.country || input.country || "";
+  const candidates = [
+    ["place_id", normalizePlaceId(meta.place_id || input.place_id)],
+    ["phone", normalizeLeadPhone(meta.phone || input.phone || (/^[+\d\s().-]+$/.test(String(input.contact || "")) ? input.contact : ""), country)],
+    ["domain", normalizeLeadDomain(meta.website || meta.url || input.website || input.url || input.contact)],
+    ["instagram", normalizeInstagramIdentity(meta.instagram_username || meta.instagram_url || meta.profile || input.instagram)],
+    ["email", normalizeLeadEmail(meta.email || input.email || (String(input.contact || "").includes("@") ? input.contact : ""))],
+    ["telegram", normalizeTelegramIdentity(meta.telegram_username || meta.telegram_url || input.telegram)]
+  ];
+  const seen = new Set();
+  return candidates.filter(([, value]) => value).map(([type, normalized_value]) => ({
+    identity_type: type,
+    normalized_value,
+    identity_key: `${type}:${normalized_value}`
+  })).filter(x => !seen.has(x.identity_key) && seen.add(x.identity_key));
+}
+
+function mergeLeadMetadata(existing, incoming, source, identities) {
+  const out = existing && typeof existing === "object" ? { ...existing } : {};
+  const add = incoming && typeof incoming === "object" ? incoming : {};
+  for (const [key, value] of Object.entries(add)) {
+    if (value === null || value === undefined || value === "") continue;
+    if (out[key] === null || out[key] === undefined || out[key] === "") out[key] = value;
+  }
+  const evidence = Array.isArray(out.provider_evidence) ? [...out.provider_evidence] : [];
+  const entry = {
+    source: String(source || add.source || "discovery"),
+    discovered_at: add.discovered_at || now(),
+    place_id: normalizePlaceId(add.place_id),
+    domain: normalizeLeadDomain(add.website || add.url),
+    phone: normalizeLeadPhone(add.phone || add.contact, add.country),
+    instagram: normalizeInstagramIdentity(add.instagram_username || add.instagram_url || add.profile),
+    telegram: normalizeTelegramIdentity(add.telegram_username || add.telegram_url),
+    email: normalizeLeadEmail(add.email || add.contact)
+  };
+  const signature = JSON.stringify(entry);
+  if (!evidence.some(x => JSON.stringify(x) === signature)) evidence.push(entry);
+  out.provider_evidence = evidence.slice(-30);
+  out.strong_identities = [...new Set([...(Array.isArray(out.strong_identities) ? out.strong_identities : []), ...identities.map(x => x.identity_key)])];
+  return out;
+}
+
+function leadInputFromExisting(row) {
+  let meta = {};
+  try { meta = JSON.parse(row?.notes || "{}"); } catch {}
+  return { contact: row?.contact, meta };
+}
+
+async function findLegacyLeadByIdentities(env, identities) {
+  if (!identities.length) return null;
+  const wanted = new Set(identities.map(x => x.identity_key));
+  const matches = [];
+  for (let offset = 0;; offset += 500) {
+    const rows = await env.DB.prepare("SELECT id,contact,notes FROM leads ORDER BY updated_at DESC LIMIT 500 OFFSET ?").bind(offset).all();
+    const page = rows.results || [];
+    for (const row of page) {
+      const keys = collectLeadIdentities(leadInputFromExisting(row)).map(x => x.identity_key);
+      if (keys.some(x => wanted.has(x))) matches.push(row.id);
+    }
+    if (page.length < 500) break;
+  }
+  const unique = [...new Set(matches)];
+  return unique.length === 1 ? unique[0] : unique.length > 1 ? { conflict: unique } : null;
+}
+
+async function auditLeadIdentityConflict(env, identities, leadIds, source) {
+  await audit(env, "lead_identity_conflict", "Strong lead identities resolve to different leads", {
+    source: String(source || "discovery"),
+    identity_types: identities.map(x => x.identity_type),
+    lead_ids: [...new Set(leadIds)]
+  });
+}
+
+async function upsertDiscoveredLead(env, input) {
+  await ensureLeadIdentityStore(env);
+  const source = String(input.source || input.meta?.source || "discovery");
+  const identities = collectLeadIdentities(input);
+  const lookup = async () => identities.length ? (await env.DB.prepare(
+    `SELECT identity_key,lead_id FROM lead_identities WHERE identity_key IN (${identities.map(() => "?").join(",")})`
+  ).bind(...identities.map(x => x.identity_key)).all()).results || [] : [];
+  let mappings = await lookup();
+  let leadIds = [...new Set(mappings.map(x => x.lead_id))];
+  if (leadIds.length > 1) {
+    await auditLeadIdentityConflict(env, identities, leadIds, source);
+    return { conflict: true, lead_ids: leadIds, created: false };
+  }
+  let leadId = leadIds[0] || null;
+  if (!leadId) {
+    const legacy = await findLegacyLeadByIdentities(env, identities);
+    if (legacy && typeof legacy === "object" && legacy.conflict) {
+      await auditLeadIdentityConflict(env, identities, legacy.conflict, source);
+      return { conflict: true, lead_ids: legacy.conflict, created: false };
+    }
+    leadId = legacy || null;
+  }
+  const t = now();
+  if (!leadId) {
+    const id = uid();
+    const mergedMeta = mergeLeadMetadata({}, input.meta || {}, source, identities);
+    const statements = [env.DB.prepare(
+      "INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)"
+    ).bind(id, input.name || null, input.contact || null, input.stage || "discovered", input.priority || "normal", JSON.stringify(mergedMeta), t, t)];
+    for (const identity of identities) statements.push(env.DB.prepare(
+      "INSERT INTO lead_identities(identity_key,identity_type,normalized_value,lead_id,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?)"
+    ).bind(identity.identity_key, identity.identity_type, identity.normalized_value, id, source, t, t));
+    try {
+      await env.DB.batch(statements);
+      return { id, created: true, conflict: false };
+    } catch (error) {
+      mappings = await lookup();
+      leadIds = [...new Set(mappings.map(x => x.lead_id))];
+      if (leadIds.length !== 1) {
+        if (leadIds.length > 1) await auditLeadIdentityConflict(env, identities, leadIds, source);
+        throw error;
+      }
+      leadId = leadIds[0];
+    }
+  }
+  const existingLead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(leadId).first();
+  if (!existingLead) throw new Error("Lead identity points to a missing lead");
+  const mappedKeys = new Set(mappings.map(x => x.identity_key));
+  const claims = identities.filter(identity => !mappedKeys.has(identity.identity_key)).map(identity => env.DB.prepare(
+    "INSERT INTO lead_identities(identity_key,identity_type,normalized_value,lead_id,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?)"
+  ).bind(identity.identity_key, identity.identity_type, identity.normalized_value, leadId, source, t, t));
+  if (claims.length) {
+    try { await env.DB.batch(claims); }
+    catch {
+      mappings = await lookup();
+      leadIds = [...new Set(mappings.map(x => x.lead_id))];
+      if (leadIds.length !== 1 || leadIds[0] !== leadId) {
+        await auditLeadIdentityConflict(env, identities, leadIds, source);
+        return { conflict: true, lead_ids: leadIds, created: false };
+      }
+    }
+  }
+  mappings = await lookup();
+  leadIds = [...new Set(mappings.map(x => x.lead_id))];
+  if (leadIds.some(id => id !== leadId)) {
+    await auditLeadIdentityConflict(env, identities, leadIds, source);
+    return { conflict: true, lead_ids: leadIds, created: false };
+  }
+  let existingMeta = {};
+  try { existingMeta = JSON.parse(existingLead.notes || "{}"); } catch {}
+  const mergedMeta = mergeLeadMetadata(existingMeta, input.meta || {}, source, identities);
+  await env.DB.prepare("UPDATE leads SET name=?,contact=?,notes=?,updated_at=? WHERE id=?")
+    .bind(existingLead.name || input.name || null, existingLead.contact || input.contact || null, JSON.stringify(mergedMeta), t, leadId).run();
+  return { id: leadId, created: false, conflict: false };
+}
+
 function parseLeadNotes(lead) {
   try {
     const x = JSON.parse(lead?.notes || "{}");
@@ -4924,11 +5172,11 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
           }
           if(!contactUrl && !adHit && !contactPath) continue; 
           const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
-          const old=await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(href).first();
           const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
-          let id;
-          if(old){id=old.id;let om={};try{om=JSON.parse(old.notes||"{}")}catch{};Object.assign(om,meta);await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low",JSON.stringify(om),now(),id).run();summary.updated++;}
-          else{id=uid();await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,href,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(meta),now(),now()).run();summary.new_leads++;}
+          const saved=await upsertDiscoveredLead(env,{name:title,contact:href,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_autopilot",meta});
+          if(saved.conflict){summary.errors++;continue;}
+          const id=saved.id;
+          if(saved.created)summary.new_leads++;else summary.updated++;
           summary.found++;groupItems++;items.push({id,name:title,type:groupType,url:href,contact_url:contactUrl,score,ad_opportunity:adHit});
         }catch(e){summary.errors++;if(summary.error_details.length<20)summary.error_details.push({group:groupType,url:href,error:String(e?.message||e).slice(0,300)});}
       }
@@ -5198,9 +5446,6 @@ summary.discovery_diagnostics.push({
           continue;
         }
 
-        const existing = await env.DB.prepare(
-          "SELECT id,notes FROM leads WHERE contact=? LIMIT 1"
-        ).bind(contact).first();
 const telegram = extractTelegramContact(
   [
     place.website,
@@ -5230,43 +5475,11 @@ telegram_url: telegram.telegram_url,
           discovered_at: now()
         };
 
-        if (existing) {
-          let oldMeta = {};
-          try {
-            oldMeta = JSON.parse(existing.notes || "{}");
-          } catch {}
-
-          Object.assign(oldMeta, meta);
-
-          await env.DB.prepare(
-            "UPDATE leads SET notes=?,updated_at=? WHERE id=?"
-          ).bind(
-            JSON.stringify(oldMeta),
-            now(),
-            existing.id
-          ).run();
-
-          summary.updated++;
-          continue;
-        }
-
-        const id = uid();
-
-        await env.DB.prepare(
-          "INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)"
-        ).bind(
-          id,
-          name,
-          contact,
-          "discovered",
-          "normal",
-          JSON.stringify(meta),
-          now(),
-          now()
-        ).run();
-
+        const saved=await upsertDiscoveredLead(env,{name,contact,stage:"discovered",priority:"normal",source,meta});
+        if(saved.conflict){summary.errors++;continue;}
+        const id=saved.id;
         summary.found++;
-        summary.new_leads++;
+        if(saved.created)summary.new_leads++;else summary.updated++;
 
         items.push({
           id,
@@ -5413,7 +5626,7 @@ if(!countryPattern.test(text)){
             (contact?15:0)
           );
 
-          const notes=JSON.stringify({
+          const meta={
             source,
             customer_target:true,
             type:groupType,
@@ -5424,52 +5637,23 @@ if(!countryPattern.test(text)){
             contact,
             evidence:plain.slice(0,1500),
             score,
-            discovered_at:now()
+            discovered_at:now(),
+            website:safeHref,
+            phone:normalizeLeadPhone(contact,country),
+            email:normalizeLeadEmail(contact)
+          };
+          const saved=await upsertDiscoveredLead(env,{name:title||uu.hostname,contact:contact||safeHref,stage:"discovered",priority:score>=80?"high":score>=65?"normal":"low",source,meta});
+          if(saved.conflict){summary.errors++;continue;}
+          if(saved.created)summary.new_leads++;else summary.updated++;
+          items.push({
+            id:saved.id,
+            name:title||uu.hostname,
+            type:groupType,
+            country,
+            url:safeHref,
+            contact,
+            score
           });
-
-          const existing=await env.DB.prepare(
-            "SELECT id,notes FROM leads WHERE contact=? OR contact=? LIMIT 1"
-          ).bind(safeHref,contact||"").first();
-
-          if(existing){
-            let oldMeta={};
-            try{oldMeta=JSON.parse(existing.notes||"{}")}catch{}
-            if(oldMeta.source==="customer_discovery"){
-              await env.DB.prepare(
-                "UPDATE leads SET notes=?,updated_at=? WHERE id=?"
-              ).bind(notes,now(),existing.id).run();
-              summary.updated++;
-            }else{
-              summary.skipped++;
-              continue;
-            }
-          }else{
-            const id=uid();
-
-            await env.DB.prepare(
-              "INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)"
-            ).bind(
-              id,
-              title||uu.hostname,
-              contact||safeHref,
-              "discovered",
-              score>=80?"high":score>=65?"normal":"low",
-              notes,
-              now(),
-              now()
-            ).run();
-
-            summary.new_leads++;
-            items.push({
-              id,
-              name:title||uu.hostname,
-              type:groupType,
-              country,
-              url:safeHref,
-              contact,
-              score
-            });
-          }
 
           summary.found++;
         }catch{
@@ -6541,9 +6725,27 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
         const name = String(b.name || "").trim();
         if (!name) return json({ ok: false, error: "name is required" }, 400);
-        const id = uid();
+        const contact = b.contact == null ? null : String(b.contact).trim();
+        const stage = String(b.stage || "new");
+        const priority = String(b.priority || "normal");
+        const allowedStages=["new","discovered","qualified","contacted","replied","negotiation","customer","converted","rejected","archived"];
+        const allowedPriorities=["low","normal","high"];
+        if(!allowedStages.includes(stage)) return json({ok:false,error:"Invalid lead stage"},400);
+        if(!allowedPriorities.includes(priority)) return json({ok:false,error:"Invalid lead priority"},400);
         const t = now();
         const meta = { manual_notes: String(b.notes || "").slice(0,5000), source: "manual", score: b.score !== undefined ? Math.max(0, Math.min(100, Number(b.score) || 0)) : 10, next_followup_at: b.next_followup_at || null };
+        const structuredIdentity = b.identity && typeof b.identity === "object" ? b.identity : null;
+        if(structuredIdentity){
+          Object.assign(meta,{
+            place_id:structuredIdentity.place_id||null,website:structuredIdentity.website||null,phone:structuredIdentity.phone||null,
+            instagram_username:structuredIdentity.instagram_username||null,telegram_username:structuredIdentity.telegram_username||null,
+            email:structuredIdentity.email||null,country:structuredIdentity.country||null
+          });
+          const saved=await upsertDiscoveredLead(env,{name,contact,stage,priority,source:"manual",meta});
+          if(saved.conflict)return json({ok:false,error:"Lead identity conflict requires review",lead_ids:saved.lead_ids},409);
+          return json({ok:true,id:saved.id,existing:!saved.created});
+        }
+        const id = uid();
         await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
           .bind(id, name, contact, stage, priority, JSON.stringify(meta), t, t).run();
         return json({ ok: true, id });
@@ -6586,11 +6788,10 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
             if(cm){try{contactUrl=new URL(cm[1],url).toString()}catch{}}
             const host=new URL(url).hostname;
             const name=title||host;
-            const notes=JSON.stringify({source:"ad_discovery",ad_target:true,source_site:sourceSite,type,city,query:q,url,evidence:plain.slice(0,700),contact_url:contactUrl,discovered_at:t,score});
-            const existing=await env.DB.prepare("SELECT id FROM leads WHERE contact=? LIMIT 1").bind(url).first();
-            let id;
-            if(existing){id=existing.id;await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low",notes,t,id).run();}
-            else{id=uid();await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,name,url,"discovered",score>=70?"high":score>=45?"normal":"low",notes,t,t).run();}
+            const notes={source:"ad_discovery",ad_target:true,source_site:sourceSite,type,city,query:q,url,website:url,evidence:plain.slice(0,700),contact_url:contactUrl,discovered_at:t,score};
+            const stored=await upsertDiscoveredLead(env,{name,contact:url,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_discovery",meta:notes});
+            if(stored.conflict)continue;
+            const id=stored.id;
             items.push({id,name,kind:type,city,url,contact_url:contactUrl,score,evidence:plain.slice(0,240)});
           } catch {}
         }
@@ -6636,17 +6837,10 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
               const cm = tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
               let contactUrl = null; if (cm) { try { contactUrl = new URL(cm[1], url).toString(); } catch {} }
               const notes = { source:"ad_discovery", ad_target:true, source_site:sourceSite, type:groupType, city, query:q, url, evidence:plain.slice(0,900), contact_url:contactUrl, discovered_at:t, score, automation:"auto_campaign_v1" };
-              const existing = await env.DB.prepare("SELECT id,notes FROM leads WHERE contact=? LIMIT 1").bind(url).first();
-              let id;
-              if (existing) {
-                id = existing.id;
-                let old = {}; try { old = JSON.parse(existing.notes || "{}"); } catch {}
-                const merged = Object.assign(old, notes);
-                await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(score>=70?"high":score>=45?"normal":"low", JSON.stringify(merged), t, id).run();
-              } else {
-                id = uid();
-                await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id,title,url,"discovered",score>=70?"high":score>=45?"normal":"low",JSON.stringify(notes),t,t).run();
-              }
+              notes.website=url;
+              const stored=await upsertDiscoveredLead(env,{name:title,contact:url,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_discovery",meta:notes});
+              if(stored.conflict)continue;
+              const id=stored.id;
               all.push({ id, name:title, type:groupType, url, contact_url:contactUrl, score });
             } catch {}
           }
@@ -6910,16 +7104,10 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         const t = now();
         for (const x of rows.slice(0, 20)) {
           const contact = `https://instagram.com/${encodeURIComponent(x.username)}`;
-          const notes = JSON.stringify({ source: "instagram_hashtag_discovery", query: rawQ, score: x.score, profile: contact, evidence: x.evidence, permalink: x.permalink, media_type: x.media_type, discovered_at: t, outreach: "draft_only" });
-          const existing = await env.DB.prepare("SELECT id FROM leads WHERE contact=? LIMIT 1").bind(contact).first();
-          if (existing) {
-            await env.DB.prepare("UPDATE leads SET priority=?,notes=?,updated_at=? WHERE id=?").bind(x.score >= 70 ? "high" : x.score >= 45 ? "normal" : "low", notes, t, existing.id).run();
-            saved.push({ ...x, id: existing.id, existing: true, contact });
-          } else {
-            const id = uid();
-            await env.DB.prepare("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id, `@${x.username}`, contact, "discovered", x.score >= 70 ? "high" : x.score >= 45 ? "normal" : "low", notes, t, t).run();
-            saved.push({ ...x, id, existing: false, contact });
-          }
+          const notes = { source: "instagram_hashtag_discovery", query: rawQ, score: x.score, profile: contact, instagram_username:x.username, evidence: x.evidence, permalink: x.permalink, media_type: x.media_type, discovered_at: t, outreach: "draft_only" };
+          const stored=await upsertDiscoveredLead(env,{name:`@${x.username}`,contact,stage:"discovered",priority:x.score>=70?"high":x.score>=45?"normal":"low",source:"instagram_hashtag_discovery",meta:notes});
+          if(stored.conflict)continue;
+          saved.push({ ...x, id: stored.id, existing: !stored.created, contact });
         }
         await audit(env, "instagram_lead_discovery", "Instagram related-page lead discovery completed", { query: rawQ, found: rows.length, saved: saved.length });
         return json({ ok: true, query: rawQ, found: rows.length, saved: saved.length, items: saved });
