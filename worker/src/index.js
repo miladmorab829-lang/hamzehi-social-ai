@@ -1587,6 +1587,7 @@ async function ingestVaultUpload(env,req){
   await audit(env,'media_vault_uploaded','Media uploaded to Telegram Media Vault',{media_id:id,media_type:type.startsWith('video/')?'video':'photo'});
   return json({ok:true,media_id:id,message_id:messageId,media_type:type.startsWith('video/')?'video':'photo'});
 }
+const MAX_WEEKLY_FINAL_VIDEO_BYTES=20*1024*1024;
 function finalVideoValidationError(message,details={}){
   const error=Error(sanitizeOperationalError(message));
   const declaredLength=Number.isSafeInteger(details.declared_content_length)
@@ -1602,6 +1603,12 @@ function finalVideoValidationError(message,details={}){
     declared_content_length:declaredLength,
     actual_blob_size:Number.isSafeInteger(details.actual_blob_size)
       ? details.actual_blob_size
+      : null,
+    reason:String(details.reason||'')
+      .replace(/[^a-z0-9_-]/gi,'')
+      .slice(0,80)||null,
+    maximum_allowed_bytes:Number.isSafeInteger(details.maximum_allowed_bytes)
+      ? details.maximum_allowed_bytes
       : null
   };
   return error;
@@ -1849,9 +1856,35 @@ async function storeWeeklyVideoInVault(env,videoUrl,weekId,caption,shotstackTask
         }
       );
     }
+    if(declaredContentLength>MAX_WEEKLY_FINAL_VIDEO_BYTES){
+      throw finalVideoValidationError(
+        'Final video exceeds the maximum allowed size',
+        {
+          reason:'final_video_too_large',
+          maximum_allowed_bytes:MAX_WEEKLY_FINAL_VIDEO_BYTES,
+          http_status:response.status,
+          content_type:contentType,
+          declared_content_length:declaredContentLength
+        }
+      );
+    }
   }
 
   const videoBlob=await response.blob();
+
+  if(videoBlob.size>MAX_WEEKLY_FINAL_VIDEO_BYTES){
+    throw finalVideoValidationError(
+      'Final video exceeds the maximum allowed size',
+      {
+        reason:'final_video_too_large',
+        maximum_allowed_bytes:MAX_WEEKLY_FINAL_VIDEO_BYTES,
+        http_status:response.status,
+        content_type:contentType,
+        declared_content_length:declaredContentLength,
+        actual_blob_size:videoBlob.size
+      }
+    );
+  }
 
   if(!videoBlob.size){
     throw finalVideoValidationError(
@@ -3344,6 +3377,8 @@ async function pollWeeklyVideoAutopilot(env){
           content_type:validation.content_type||null,
           declared_content_length:validation.declared_content_length,
           actual_blob_size:validation.actual_blob_size,
+          reason:validation.reason||null,
+          maximum_allowed_bytes:validation.maximum_allowed_bytes,
           error:validationReason,
           transient:false
         }
