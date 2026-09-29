@@ -377,7 +377,9 @@ async function approved(env, id) {
   return q?.status === "approved";
 }
 
-async function openaiCheck(env) {
+const CONNECTION_DIAGNOSTIC_TIMEOUT_MS = 10000;
+
+async function openaiCheck(env, timeoutMs = 15000) {
   if (!env.OPENAI_API_KEY)
     return { status: "SKIP", details: "OPENAI_API_KEY not configured" };
 
@@ -392,13 +394,13 @@ async function openaiCheck(env) {
       model,
       input: "Reply with OK only."
     }),
-    signal: AbortSignal.timeout(15000)
+    signal: AbortSignal.timeout(timeoutMs)
   });
 
   const requestId = r.headers.get("x-request-id") || null;
   const d = await r.json().catch(() => ({}));
 
-  if (r.ok && !d.error) {
+  if (r.ok && !d.error && responseText(d).trim()) {
     return {
       status: "PASS",
       details: "OpenAI Responses API credential and model access accepted",
@@ -442,7 +444,7 @@ async function telegramCheck(env) {
   };
 }
 
-async function instagramCheck(env) {
+async function instagramCheck(env, timeoutMs = 8000) {
   if (!env.INSTAGRAM_ACCESS_TOKEN || !env.INSTAGRAM_ACCOUNT_ID)
     return { status: "SKIP", details: "Instagram credentials not configured" };
   const mode = instagramApiMode(env);
@@ -450,9 +452,9 @@ async function instagramCheck(env) {
   const u = new URL(`${instagramGraphBase(env)}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}`);
   u.searchParams.set("fields", "id,username,account_type,media_count");
   u.searchParams.set("access_token", env.INSTAGRAM_ACCESS_TOKEN);
-  const r = await fetch(u.toString(), { signal: AbortSignal.timeout(8000) });
+  const r = await fetch(u.toString(), { signal: AbortSignal.timeout(timeoutMs) });
   const d = await r.json().catch(() => ({}));
-  return r.ok && !d.error
+  return r.ok && !d.error && d.id
     ? { status: "PASS", details: `Instagram ${mode === "instagram_login" ? "Login" : "Facebook Login"} credential accepted`, account_id: d.id || null, username: d.username || null, account_type: d.account_type || null, media_count: Number(d.media_count || 0), api_mode: mode, graph_api_version: version }
     : { status: "FAIL", details: `Instagram HTTP ${r.status}`, provider_error: d.error?.message || null, api_mode: mode, graph_api_version: version };
 }
@@ -461,50 +463,60 @@ async function instagramCheck(env) {
 async function connectionTest(env) {
   const out = { tested_at: now(), providers: {} };
   const check = async (name, fn) => {
-    try { out.providers[name] = await fn(); }
-    catch (e) { out.providers[name] = { status: "FAIL", details: e?.message || "connection test failed" }; }
+    try {
+      const result = await fn();
+      out.providers[name] = result && typeof result === "object" && ["PASS","FAIL","SKIP"].includes(result.status)
+        ? result
+        : { status: "FAIL", details: "Malformed provider diagnostic response" };
+    } catch (e) {
+      const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+      out.providers[name] = {
+        status: "FAIL",
+        details: timedOut
+          ? `Connection diagnostic timed out after ${CONNECTION_DIAGNOSTIC_TIMEOUT_MS / 1000} seconds`
+          : sanitizeOperationalError(e)
+      };
+    }
   };
 
-  await check("OpenAI", async () => openaiCheck(env));
-
-  await check("Telegram", async () => {
-    if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return { status: "SKIP", details: "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing" };
-    const base = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
-    const [meR, whR] = await Promise.all([
-      fetch(`${base}/getMe`, { signal: AbortSignal.timeout(8000) }),
-      fetch(`${base}/getWebhookInfo`, { signal: AbortSignal.timeout(8000) })
-    ]);
-    const me = await meR.json().catch(() => ({}));
-    const wh = await whR.json().catch(() => ({}));
-    if (!(meR.ok && me.ok)) return { status: "FAIL", details: `Telegram getMe HTTP ${meR.status}` };
-    return {
-      status: "PASS",
-      details: "Bot credential accepted",
-      bot_username: me.result?.username || null,
-      webhook: { configured: !!wh.result?.url, pending_update_count: Number(wh.result?.pending_update_count || 0), last_error: wh.result?.last_error_message || null }
-    };
-  });
-
-  await check("Instagram", async () => instagramCheck(env));
-
-  await check("TelegramWebhook", async () => {
-    if (!env.TELEGRAM_WEBHOOK_SECRET_TOKEN)
-      return { status: "SKIP", details: "TELEGRAM_WEBHOOK_SECRET_TOKEN missing" };
-    return {
-      status: "PASS",
-      details: "Telegram webhook secret configured",
-      endpoint: "/webhooks/telegram"
-    };
-  });
-
-  await check("Admin", async () => {
-    if (!env.ADMIN_TOKEN)
-      return { status: "FAIL", details: "ADMIN_TOKEN missing" };
-    return {
-      status: "PASS",
-      details: "Admin credential configured and current request is authenticated"
-    };
-  });
+  await Promise.all([
+    check("OpenAI", async () => openaiCheck(env, CONNECTION_DIAGNOSTIC_TIMEOUT_MS)),
+    check("Telegram", async () => {
+      if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return { status: "SKIP", details: "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing" };
+      const base = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+      const [meR, whR] = await Promise.all([
+        fetch(`${base}/getMe`, { signal: AbortSignal.timeout(CONNECTION_DIAGNOSTIC_TIMEOUT_MS) }),
+        fetch(`${base}/getWebhookInfo`, { signal: AbortSignal.timeout(CONNECTION_DIAGNOSTIC_TIMEOUT_MS) })
+      ]);
+      const me = await meR.json().catch(() => ({}));
+      const wh = await whR.json().catch(() => ({}));
+      if (!(meR.ok && me.ok)) return { status: "FAIL", details: `Telegram getMe HTTP ${meR.status}` };
+      return {
+        status: "PASS",
+        details: "Bot credential accepted",
+        bot_username: me.result?.username || null,
+        webhook: { configured: !!wh.result?.url, pending_update_count: Number(wh.result?.pending_update_count || 0), last_error: wh.result?.last_error_message || null }
+      };
+    }),
+    check("Instagram", async () => instagramCheck(env, CONNECTION_DIAGNOSTIC_TIMEOUT_MS)),
+    check("TelegramWebhook", async () => {
+      if (!env.TELEGRAM_WEBHOOK_SECRET_TOKEN)
+        return { status: "SKIP", details: "TELEGRAM_WEBHOOK_SECRET_TOKEN missing" };
+      return {
+        status: "PASS",
+        details: "Telegram webhook secret configured",
+        endpoint: "/webhooks/telegram"
+      };
+    }),
+    check("Admin", async () => {
+      if (!env.ADMIN_TOKEN)
+        return { status: "FAIL", details: "ADMIN_TOKEN missing" };
+      return {
+        status: "PASS",
+        details: "Admin credential configured and current request is authenticated"
+      };
+    })
+  ]);
 
   out.summary = {
     pass: Object.values(out.providers).filter(x => x.status === "PASS").length,
@@ -2070,6 +2082,11 @@ form.append('model',String(env.OPENAI_IMAGE_MODEL||'gpt-image-2'));
 form.append('prompt',prompt);
 form.append('image',blob,filename);
   form.append('size',String(env.OPENAI_IMAGE_SIZE||'1024x1024'));
+  await assertPhotoAutopilotReservation(
+    env,
+    String(meta.photo_lock_date||''),
+    String(meta.photo_lock_created_at||'')
+  );
   const r=await fetch('https://api.openai.com/v1/images/edits',{method:'POST',headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`},body:form});
   const d=await r.json().catch(()=>({}));
   if(!r.ok) throw Error(d?.error?.message||`OpenAI image edit failed (HTTP ${r.status})`);
@@ -2093,6 +2110,11 @@ form.append('image',blob,filename);
   let finalCaption=String(meta.caption||"").trim();
 
 try{
+  await assertPhotoAutopilotReservation(
+    env,
+    String(meta.photo_lock_date||''),
+    String(meta.photo_lock_created_at||'')
+  );
   const captionPrompt=
     "Write one original luxury advertising caption for this exact final product image. " +
     "Write entirely in Persian (Farsi). " +
@@ -2154,6 +2176,11 @@ try{
 }
 
 meta.caption=finalCaption;
+  await assertPhotoAutopilotReservation(
+    env,
+    String(meta.photo_lock_date||''),
+    String(meta.photo_lock_created_at||'')
+  );
   const chat=vaultChatId(env); if(!chat) throw Error('TELEGRAM_VAULT_CHAT_ID missing');const upload=new FormData();
 upload.append('chat_id',chat);
 upload.append('photo',outBlob,'ai-edit.png');
@@ -3706,6 +3733,174 @@ async function prepareWeeklyVideoAutopilot(env){
     brief
   };
 }
+const PHOTO_AUTOPILOT_STALE_LOCK_MS = 60 * 60 * 1000;
+
+async function getPhotoAutopilotSuccessEvidence(env, date) {
+  const usage = await env.DB.prepare(`
+    SELECT id,output_media_id,used_at
+    FROM photo_autopilot_usage
+    WHERE substr(used_at,1,10)=?
+      AND status='completed'
+    ORDER BY used_at DESC
+    LIMIT 1
+  `).bind(date).first();
+
+  if (usage) {
+    return {
+      type: "completed_usage",
+      output_media_id: String(usage.output_media_id || "") || null
+    };
+  }
+
+  const output = await env.DB.prepare(`
+    SELECT m.id AS output_media_id
+    FROM media_vault_items v
+    JOIN telegram_media_sources m ON m.id=v.telegram_media_id
+    WHERE v.source_type='ai_edit'
+      AND v.ai_status='ready'
+      AND m.source_kind='vault'
+      AND m.media_type='photo'
+      AND substr(v.created_at,1,10)=?
+      AND instr(
+        ',' || replace(COALESCE(v.tags,''),' ','') || ',',
+        ',photo_autopilot,'
+      )>0
+    ORDER BY v.created_at DESC
+    LIMIT 1
+  `).bind(date).first();
+
+  return output
+    ? { type: "ready_photo_autopilot_output", output_media_id: String(output.output_media_id) }
+    : null;
+}
+
+async function ownsPhotoAutopilotReservation(env, date, createdAt) {
+  if (!date || !createdAt) return true;
+  const row = await env.DB.prepare(`
+    SELECT date
+    FROM photo_autopilot_daily_lock
+    WHERE date=? AND status='reserved' AND created_at=?
+    LIMIT 1
+  `).bind(date, createdAt).first();
+  return !!row;
+}
+
+async function assertPhotoAutopilotReservation(env, date, createdAt) {
+  if (!(await ownsPhotoAutopilotReservation(env, date, createdAt))) {
+    throw Error("Photo Autopilot reservation ownership was lost");
+  }
+}
+
+async function releasePhotoAutopilotReservation(env, date, createdAt) {
+  return env.DB.prepare(`
+    DELETE FROM photo_autopilot_daily_lock
+    WHERE date=? AND status='reserved' AND created_at=?
+  `).bind(date, createdAt).run();
+}
+
+async function acquirePhotoAutopilotDailyReservation(env, today) {
+  let createdAt=now();
+  const inserted=await env.DB.prepare(`
+    INSERT OR IGNORE INTO photo_autopilot_daily_lock
+    (date,status,created_at)
+    VALUES(?,?,?)
+  `).bind(today,"reserved",createdAt).run();
+
+  if(inserted.meta?.changes){
+    return { acquired:true, created_at:createdAt, recovered:false };
+  }
+
+  const success=await getPhotoAutopilotSuccessEvidence(env,today);
+  if(success){
+    return {
+      acquired:false,
+      response:{
+        ok:true,
+        skipped:true,
+        reason:"already_generated_today",
+        date:today,
+        output_media_id:success.output_media_id
+      }
+    };
+  }
+
+  const existing=await env.DB.prepare(`
+    SELECT status,created_at
+    FROM photo_autopilot_daily_lock
+    WHERE date=?
+    LIMIT 1
+  `).bind(today).first();
+
+  if(!existing||existing.status!=="reserved"){
+    return {
+      acquired:false,
+      response:{ok:true,skipped:true,reason:"already_generated_today",date:today}
+    };
+  }
+
+  const previousCreatedAt=String(existing.created_at||"");
+  const previousCreatedMs=Date.parse(previousCreatedAt);
+  const ageMs=Number.isFinite(previousCreatedMs)
+    ? Math.max(0,Date.now()-previousCreatedMs)
+    : null;
+
+  if(ageMs===null||ageMs<PHOTO_AUTOPILOT_STALE_LOCK_MS){
+    return {
+      acquired:false,
+      response:{
+        ok:true,
+        skipped:true,
+        reason:"photo_generation_in_progress",
+        legacy_reason:"already_generated_today",
+        date:today,
+        age_minutes:ageMs===null?null:Math.floor(ageMs/60000)
+      }
+    };
+  }
+
+  createdAt=now();
+  const recovered=await env.DB.prepare(`
+    UPDATE photo_autopilot_daily_lock
+    SET created_at=?
+    WHERE date=? AND status='reserved' AND created_at=?
+  `).bind(createdAt,today,previousCreatedAt).run();
+
+  if(Number(recovered.meta?.changes||0)!==1){
+    const racedSuccess=await getPhotoAutopilotSuccessEvidence(env,today);
+    return {
+      acquired:false,
+      response:{
+        ok:true,
+        skipped:true,
+        reason:racedSuccess?"already_generated_today":"photo_generation_in_progress",
+        legacy_reason:racedSuccess?undefined:"already_generated_today",
+        date:today,
+        output_media_id:racedSuccess?.output_media_id||undefined
+      }
+    };
+  }
+
+  try{
+    await audit(
+      env,
+      "photo_autopilot_stale_lock_recovered",
+      "Stale Photo Autopilot daily reservation recovered",
+      {
+        date:today,
+        previous_created_at:previousCreatedAt,
+        age_minutes:Math.floor(ageMs/60000),
+        recovery_reason:"reserved_without_success_evidence_after_60_minutes",
+        recovered_at:createdAt
+      }
+    );
+  }catch(e){
+    await releasePhotoAutopilotReservation(env,today,createdAt).catch(()=>{});
+    throw e;
+  }
+
+  return { acquired:true, created_at:createdAt, recovered:true };
+}
+
 async function runPhotoAutopilot(env){
   await ensureMediaVaultStore(env);
 const modulesRow=await env.DB.prepare(
@@ -3736,24 +3931,9 @@ await env.DB.prepare(`
   )
 `).run();
 
-const lock=await env.DB.prepare(`
-  INSERT OR IGNORE INTO photo_autopilot_daily_lock
-  (date,status,created_at)
-  VALUES(?,?,?)
-`).bind(
-  today,
-  "reserved",
-  now()
-).run();
-
-if(!lock.meta?.changes){
-  return {
-    ok:true,
-    skipped:true,
-    reason:"already_generated_today",
-    date:today
-  };
-}
+const reservation=await acquirePhotoAutopilotDailyReservation(env,today);
+if(!reservation.acquired)return reservation.response;
+const reservationCreatedAt=reservation.created_at;
   const sources=await env.DB.prepare(`
     SELECT m.id,m.created_at,m.caption
     FROM telegram_media_sources m
@@ -3767,9 +3947,7 @@ if(!lock.meta?.changes){
   const sourceRows=sources.results||[];
 
   if(!sourceRows.length){
-  await env.DB.prepare(
-    "DELETE FROM photo_autopilot_daily_lock WHERE date=?"
-  ).bind(today).run();
+  await releasePhotoAutopilotReservation(env,today,reservationCreatedAt);
 
   await audit(
     env,
@@ -3867,13 +4045,13 @@ try {
   tags:"photo_autopilot",
   content_id:null,
   scene,
-  source_caption:String(source.caption||"")
+  source_caption:String(source.caption||""),
+  photo_lock_date:today,
+  photo_lock_created_at:reservationCreatedAt
 }
   );
 } catch(e) {
-  await env.DB.prepare(
-    "DELETE FROM photo_autopilot_daily_lock WHERE date=?"
-  ).bind(today).run();
+  await releasePhotoAutopilotReservation(env,today,reservationCreatedAt);
 
   await audit(
     env,
@@ -3888,6 +4066,7 @@ try {
 
   throw e;
 }
+  await assertPhotoAutopilotReservation(env,today,reservationCreatedAt);
   const t=now();
 
   await env.DB.prepare(`
@@ -3903,6 +4082,12 @@ try {
     prompt,
     "completed"
   ).run();
+
+  await env.DB.prepare(`
+    UPDATE photo_autopilot_daily_lock
+    SET status='completed'
+    WHERE date=? AND status='reserved' AND created_at=?
+  `).bind(today,reservationCreatedAt).run();
 
   await audit(
     env,
@@ -5137,7 +5322,7 @@ async function loadAdAutopilotStatus(){const b=document.getElementById('adAutopi
 async function stopAdAutopilot(){const b=document.getElementById('adAutopilotControlStatus');if(b){b.className='status';b.textContent='\u{62F}\u{631} \u{62D}\u{627}\u{644} \u{62E}\u{627}\u{645}\u{648}\u{634}\u{200C}\u{6A9}\u{631}\u{62F}\u{646} \u{62E}\u{644}\u{628}\u{627}\u{646} \u{62E}\u{648}\u{62F}\u{6A9}\u{627}\u{631}\u{2026}'}try{await api('/api/ads/autopilot/stop',{method:'POST',body:'{}'});if(b){b.className='status ok';b.textContent='\u{23F9}\u{FE0F} AUTOPILOT \u{62E}\u{627}\u{645}\u{648}\u{634} \u{634}\u{62F}. \u{627}\u{62C}\u{631}\u{627}\u{6CC} \u{632}\u{645}\u{627}\u{646}\u{200C}\u{628}\u{646}\u{62F}\u{6CC}\u{200C}\u{634}\u{62F}\u{647} \u{645}\u{62A}\u{648}\u{642}\u{641} \u{627}\u{633}\u{62A}.'}await loadAdAutopilotStatus()}catch(e){if(b){b.className='status error';b.textContent='\u{62E}\u{637}\u{627}: '+e.message}}}
 
 async function loadMetrics(){const b=document.getElementById('metricsBody');b.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062f\u0631\u06cc\u0627\u0641\u062a\u2026';try{const d=await api('/api/metrics');const a=d.items||[];b.innerHTML='<div class="stat">'+a.length+'</div><div class="muted">\u0631\u06a9\u0648\u0631\u062f \u0645\u062a\u0631\u06cc\u06a9</div>'+ (a.length?'<div style="margin-top:12px">'+a.slice(0,50).map(x=>'<div class="item"><b>'+esc(x.platform||'')+'</b><div class="mini">impressions: '+esc(x.impressions)+' \u00b7 reach: '+esc(x.reach)+' \u00b7 likes: '+esc(x.likes)+' \u00b7 comments: '+esc(x.comments)+' \u00b7 shares: '+esc(x.shares)+' \u00b7 saves: '+esc(x.saves)+'</div></div>').join('')+'</div>':'<div class="empty">\u0647\u0646\u0648\u0632 \u0645\u062a\u0631\u06cc\u06a9\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647 \u0627\u0633\u062a.</div>')}catch(e){b.className='status error';b.textContent='\u062e\u0637\u0627: '+e.message}}
-async function testConnections(){const b=document.getElementById('connectionTestBody');b.className='status';b.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062a\u0633\u062a \u0627\u062a\u0635\u0627\u0644 \u0648\u0627\u0642\u0639\u06cc\u2026';try{const d=await api('/api/connections/test',{method:'POST'});const p=d.providers||{};b.innerHTML=Object.entries(p).map(([k,v])=>'<div class="item"><div class="itemhead"><b>'+esc(k)+'</b><span class="pill">'+esc(v.status||'UNKNOWN')+'</span></div><div class="mini">'+esc(v.details||'')+(v.bot_username?' \u00b7 @'+esc(v.bot_username):'')+(v.username?' \u00b7 @'+esc(v.username):'')+(v.webhook?(' \u00b7 webhook: '+(v.webhook.configured?'configured':'not configured')):'')+'</div></div>').join('')+'<div class="mini" style="margin-top:8px">PASS: '+esc(String(d.summary?.pass||0))+' \u00b7 FAIL: '+esc(String(d.summary?.fail||0))+' \u00b7 SKIP: '+esc(String(d.summary?.skip||0))+'</div>';b.className=(d.summary?.fail || d.summary?.skip) ? 'status error' : 'status ok'}catch(e){b.className='status error';b.textContent='\u062e\u0637\u0627: '+e.message}}
+async function testConnections(){const b=document.getElementById('connectionTestBody');const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);b.className='status';b.textContent='\u062f\u0631 \u062d\u0627\u0644 \u062a\u0633\u062a \u0627\u062a\u0635\u0627\u0644 \u0648\u0627\u0642\u0639\u06cc\u2026';try{const d=await api('/api/connections/test',{method:'POST',signal:controller.signal});const p=d.providers||{};b.innerHTML=Object.entries(p).map(([k,v])=>'<div class="item"><div class="itemhead"><b>'+esc(k)+'</b><span class="pill">'+esc(v.status||'UNKNOWN')+'</span></div><div class="mini">'+esc(v.details||'')+(v.bot_username?' \u00b7 @'+esc(v.bot_username):'')+(v.username?' \u00b7 @'+esc(v.username):'')+(v.webhook?(' \u00b7 webhook: '+(v.webhook.configured?'configured':'not configured')):'')+'</div></div>').join('')+'<div class="mini" style="margin-top:8px">PASS: '+esc(String(d.summary?.pass||0))+' \u00b7 FAIL: '+esc(String(d.summary?.fail||0))+' \u00b7 SKIP: '+esc(String(d.summary?.skip||0))+'</div>';b.className=(d.summary?.fail || d.summary?.skip) ? 'status error' : 'status ok'}catch(e){b.className='status error';b.textContent=e?.name==='AbortError'?'Connection test timed out after 10 seconds':'\u062e\u0637\u0627: '+e.message}finally{clearTimeout(timer)}}
 
 async function loadSettings(){const b=document.getElementById('settingsBody');try{const d=await api('/api/settings');const a=d.providers||{};b.innerHTML=Object.entries(a).map(([k,v])=>'<div class="item"><div class="itemhead"><b>'+esc(k)+'</b><span class="pill">'+(v.configured?'CONFIGURED':'MISSING')+'</span></div><div class="mini">'+esc(safeFa(v.note||''))+'</div></div>').join('')}catch(e){b.textContent='\u062e\u0637\u0627: '+e.message}}
 async function loadRuns(){const b=document.getElementById('runsBody');try{const d=await api('/api/production/runs');const a=d.items||[];b.innerHTML=a.length?a.map(x=>{let actions='';if(x.status==='stopped'){const id=JSON.stringify(String(x.id));actions='<div class="actions" style="margin-top:8px"><button class="btn secondary" onclick="reconcileRun(&quot;'+id+'&quot;,&quot;confirm_published&quot;)">\u062a\u0623\u06cc\u06cc\u062f \u0627\u0646\u062a\u0634\u0627\u0631</button><button class="btn danger" onclick="reconcileRun(&quot;'+id+'&quot;,&quot;retry&quot;)">Retry \u062f\u0633\u062a\u06cc</button></div>'}return '<div class="item"><div class="itemhead"><b>'+esc(x.run_type||x.id)+'</b><span class="pill">'+esc(x.status)+'</span></div><div class="mini">'+esc(x.updated_at||x.created_at||'')+'</div><div class="mini">'+esc(x.error||'')+'</div>'+actions+'</div>'}).join(''):'<div class="empty">\u0627\u062c\u0631\u0627\u06cc \u0627\u0646\u062a\u0634\u0627\u0631\u06cc \u0648\u062c\u0648\u062f \u0646\u062f\u0627\u0631\u062f.</div>'}catch(e){b.textContent='\u062e\u0637\u0627: '+e.message}}

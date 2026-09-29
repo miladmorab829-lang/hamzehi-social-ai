@@ -298,7 +298,23 @@ function clearToken(){
  updateTokenUI();
  $("commandStatus").innerHTML="<span class='warn'>توکن پاک شد. برای اتصال دوباره، Admin Token را وارد کن.</span>";
 }
-async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});return await r.json().catch(()=>({ok:false,error:"Invalid JSON"}))}
+const DASHBOARD_REQUEST_TIMEOUT_MS=10000;
+async function api(path,opt={}){
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),DASHBOARD_REQUEST_TIMEOUT_MS);
+ try{
+  const r=await fetch(path,{...opt,signal:controller.signal,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});
+  const d=await r.json().catch(()=>null);
+  if(!d||typeof d!=="object")return {ok:false,error:"Invalid JSON response",status:r.status};
+  if(!r.ok)return {...d,ok:false,error:d.error||("Request failed (HTTP "+r.status+")"),status:r.status};
+  return d;
+ }catch(e){
+  const timedOut=e?.name==="AbortError"||e?.name==="TimeoutError";
+  return {ok:false,error:timedOut?"Request timed out after 10 seconds":String(e?.message||"Connection request failed")};
+ }finally{
+  clearTimeout(timer);
+ }
+}
 function setCmd(x){$("command").value=x}
 function rows(a,fn){return (a||[]).slice(0,15).map(x=>"<div class='row'>"+fn(x)+"</div>").join("")||"<div class='hint'>داده‌ای وجود ندارد.</div>"}
 async function loadApprovals(){
@@ -598,7 +614,9 @@ async function photoRunNow(){
   if(d.ok){
     $("photoActivity").innerHTML=
       d.skipped
-        ? "<span class='warn'>⚠ امروز قبلاً اجرا شده است.</span>"
+        ? d.reason==="photo_generation_in_progress"
+          ? "<span class='warn'>⚠ تولید تصویر امروز در حال اجرا است.</span>"
+          : "<span class='warn'>⚠ امروز قبلاً اجرا شده است.</span>"
         : "<span class='ok'>✓ Photo Autopilot اجرا شد.</span>";
 
     await loadPhotoAutopilot();
@@ -822,7 +840,24 @@ async function loadOpp(){
  
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
 async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
-async function refreshAll(){await loadStatus();await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals()])}
+let refreshInProgress=false;
+async function refreshAll(){
+ if(refreshInProgress)return;
+ refreshInProgress=true;
+ try{
+  await loadStatus();
+  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals()]);
+ }catch(e){
+  $("masterState").textContent="DASHBOARD ERROR";
+  $("masterState").className="pill bad";
+ }finally{
+  if($("masterState").textContent==="CONNECTING…"){
+   $("masterState").textContent="AUTH / API ERROR";
+   $("masterState").className="pill bad";
+  }
+  refreshInProgress=false;
+ }
+}
 updateTokenUI();refreshAll();loadDiagnostic();setInterval(refreshAll,15000);
 </script></body></html>`;
 }
