@@ -4848,6 +4848,9 @@ async function processNegotiationInbound(env,inboxId) {
   const existing=await env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
   if(existing){
     if(row.reply_suggestion!==existing.message)await env.DB.prepare("UPDATE inbox_messages SET reply_suggestion=?,updated_at=? WHERE id=?").bind(existing.message,now(),inboxId).run();
+    const priorIntent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
+    if(priorIntent==="quote_requested")try{await ensureQuoteFromInbox(env,inboxId);}catch{}
+    if(priorIntent==="accepted"||priorIntent==="rejected")try{await recordQuoteDecisionFromInbound(env,inboxId,priorIntent);}catch{}
     return {processed:true,idempotent:true,outreach:existing};
   }
   const intent=classifyNegotiationIntent(row.message);
@@ -4868,7 +4871,222 @@ async function processNegotiationInbound(env,inboxId) {
   await env.DB.prepare("UPDATE inbox_messages SET category=?,reply_suggestion=?,updated_at=? WHERE id=?").bind(intent,outreach.message,now(),inboxId).run();
   const quoteRequest=intent==="quote_requested"?extractQuoteRequestDetails(row.message):null;
   await audit(env,"negotiation_reply_draft_created","Linked inbound reply prepared for owner review",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,intent,language,context_message_count:context.length,quote_request:quoteRequest});
+  if(intent==="quote_requested")try{await ensureQuoteFromInbox(env,inboxId);}catch(error){try{await audit(env,"lead_quote_creation_failed","Inbound reply remained stored after quote creation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+  if(intent==="accepted"||intent==="rejected")try{await recordQuoteDecisionFromInbound(env,inboxId,intent);}catch(error){try{await audit(env,"lead_quote_decision_link_failed","Quote decision could not be deterministically linked",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   return {processed:true,idempotent:outreach.id!==outreachId,intent,language,outreach};
+}
+
+const QUOTE_STATUSES=new Set(["draft","needs_details","requires_owner_review","waiting_for_owner_price","waiting_for_price_match","quote_ready","pending_approval","approved","sent","accepted","rejected","expired"]);
+const QUOTE_MUTABLE_STATUSES=new Set(["draft","needs_details","requires_owner_review","waiting_for_owner_price","waiting_for_price_match","quote_ready"]);
+const MONEY_FIELDS=["unit_price_minor","discount_minor","shipping_minor","tax_minor","other_fees_minor"];
+
+async function ensureQuoteStore(env){
+  await ensureLeadOutreachStore(env);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_quotes (
+    id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,conversation_id TEXT NOT NULL,inbox_message_id TEXT,outreach_id TEXT,
+    market TEXT,market_source TEXT,pricing_mode TEXT,price_item_id TEXT,price_item_version INTEGER,
+    product TEXT,quantity INTEGER,customization TEXT,destination TEXT,requested_price_discount TEXT,customer_notes TEXT,
+    currency TEXT,unit_price_minor INTEGER,subtotal_minor INTEGER,discount_minor INTEGER,shipping_minor INTEGER,tax_minor INTEGER,other_fees_minor INTEGER,total_minor INTEGER,
+    moq INTEGER,payment_terms TEXT,delivery_terms TEXT,notes TEXT,approved_quote_text TEXT,status TEXT NOT NULL,
+    approved_by TEXT,approved_at TEXT,sent_at TEXT,expires_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_quotes_inbox ON lead_quotes(inbox_message_id) WHERE inbox_message_id IS NOT NULL AND inbox_message_id<>''").run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_quotes_outreach ON lead_quotes(outreach_id) WHERE outreach_id IS NOT NULL AND outreach_id<>''").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_quotes_lead ON lead_quotes(lead_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_quotes_conversation ON lead_quotes(conversation_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_quotes_status ON lead_quotes(status)").run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS commercial_price_items (
+    id TEXT PRIMARY KEY,product_key TEXT NOT NULL,product_name TEXT NOT NULL,sku TEXT,market TEXT NOT NULL,currency TEXT NOT NULL,
+    unit_price_minor INTEGER NOT NULL,moq INTEGER,version INTEGER NOT NULL,active INTEGER NOT NULL,effective_from TEXT,effective_until TEXT,
+    approved_by TEXT NOT NULL,approved_at TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_commercial_price_version ON commercial_price_items(market,product_key,version)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_commercial_price_sku_active ON commercial_price_items(market,sku,active)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_commercial_price_key_active ON commercial_price_items(market,product_key,active)").run();
+}
+
+function normalizeProductKey(value){return String(value||"").normalize("NFKC").trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu,"-").replace(/^-+|-+$/g,"").slice(0,120)||null;}
+function safeCommercialInteger(value,{nullable=true,positive=false}={}){
+  if(value===null||value===undefined||value===""){if(nullable)return null;throw Error("Required integer is missing");}
+  const normalized=String(value).trim().replace(/[۰-۹]/g,c=>String("۰۱۲۳۴۵۶۷۸۹".indexOf(c))).replace(/[٠-٩]/g,c=>String("٠١٢٣٤٥٦٧٨٩".indexOf(c))).replace(/[\s,،]/g,"");
+  const n=typeof value==="number"?value:Number(normalized);
+  if(!Number.isSafeInteger(n)||(positive?n<=0:n<0))throw Error("Commercial value must be a safe non-negative integer");
+  return n;
+}
+function explicitMarket(value){
+  const x=String(value||"").normalize("NFKC").trim().toLowerCase();
+  if(["iran","ir","ایران","تهران"].includes(x))return "IRAN";
+  if(["arab","iraq","iq","عراق","العراق","بغداد"].includes(x))return "ARAB";
+  return null;
+}
+function determineQuoteMarket({ownerMarket,leadCountry,destination}={}){
+  const owner=explicitMarket(ownerMarket);if(owner)return {market:owner,source:"owner"};
+  const country=explicitMarket(leadCountry),dest=explicitMarket(destination);
+  if(country&&dest&&country!==dest)return {market:"requires_owner_review",source:"conflict"};
+  if(country)return {market:country,source:"lead_country"};
+  if(dest)return {market:dest,source:"destination"};
+  return {market:"requires_owner_review",source:"insufficient_evidence"};
+}
+function priceItemEffective(item,at=Date.now()){
+  if(!item||Number(item.active)!==1||item.market!=="ARAB")return false;
+  const from=item.effective_from?Date.parse(item.effective_from):NaN,to=item.effective_until?Date.parse(item.effective_until):NaN;
+  if((item.effective_from&&!Number.isFinite(from))||(item.effective_until&&!Number.isFinite(to)))return false;
+  return (!Number.isFinite(from)||from<=at)&&(!Number.isFinite(to)||to>=at);
+}
+async function exactArabPriceMatch(env,{priceItemId,sku,product}){
+  let rows=[];
+  if(priceItemId){const x=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=? AND market='ARAB' LIMIT 1").bind(priceItemId).first();rows=x?[x]:[];}
+  else if(String(sku||"").trim()){const r=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE market='ARAB' AND sku=? AND active=1").bind(String(sku).trim()).all();rows=r.results||[];}
+  else {const key=normalizeProductKey(product);if(key){const r=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE market='ARAB' AND product_key=? AND active=1").bind(key).all();rows=r.results||[];}}
+  const valid=rows.filter(x=>priceItemEffective(x));
+  if(valid.length===1)return {status:"matched",item:valid[0]};
+  if(valid.length>1)return {status:"multiple",item:null};
+  return {status:"none",item:null};
+}
+function calculateQuoteValues(quote){
+  const quantity=safeCommercialInteger(quote.quantity,{nullable:true,positive:true}),unit=safeCommercialInteger(quote.unit_price_minor);
+  const result={subtotal_minor:null,total_minor:null,error:null};
+  if(quantity===null||unit===null)return result;
+  const subtotal=quantity*unit;if(!Number.isSafeInteger(subtotal))return {...result,error:"unsafe_integer_overflow"};
+  result.subtotal_minor=subtotal;
+  const parts=[quote.discount_minor,quote.shipping_minor,quote.tax_minor,quote.other_fees_minor];
+  if(parts.some(x=>x===null||x===undefined||x===""))return result;
+  const [discount,shipping,tax,fees]=parts.map(x=>safeCommercialInteger(x,{nullable:false}));
+  const total=subtotal-discount+shipping+tax+fees;
+  if(!Number.isSafeInteger(total)||total<0)return {...result,error:"invalid_total"};
+  result.total_minor=total;return result;
+}
+function quoteReadiness(quote){
+  const missing=[];
+  if(!quote.lead_id||!quote.conversation_id)missing.push("linkage");
+  if(!["IRAN","ARAB"].includes(quote.market))missing.push("market");
+  if(!String(quote.product||"").trim())missing.push("product");
+  let quantity=null;try{quantity=safeCommercialInteger(quote.quantity,{nullable:false,positive:true});}catch{missing.push("quantity");}
+  if(!String(quote.currency||"").trim())missing.push("currency");
+  try{safeCommercialInteger(quote.unit_price_minor,{nullable:false});}catch{missing.push("unit_price");}
+  for(const f of ["discount_minor","shipping_minor","tax_minor","other_fees_minor"])try{safeCommercialInteger(quote[f],{nullable:false});}catch{missing.push(f);}
+  if(quote.market==="IRAN"&&quote.pricing_mode!=="variable_owner")missing.push("owner_price_confirmation");
+  if(quote.market==="ARAB"&&(!quote.price_item_id||!Number.isSafeInteger(Number(quote.price_item_version))||quote.pricing_mode!=="fixed_list"))missing.push("approved_price_item");
+  if(quantity!==null&&quote.moq!==null&&quote.moq!==undefined&&quantity<Number(quote.moq))missing.push("moq");
+  if(!String(quote.payment_terms||"").trim())missing.push("payment_terms");
+  if(!String(quote.delivery_terms||"").trim())missing.push("delivery_terms");
+  if(!String(quote.approved_quote_text||"").trim())missing.push("quote_text");
+  const calc=calculateQuoteValues(quote);if(calc.error||calc.total_minor===null)missing.push(calc.error||"total");
+  return {ready:missing.length===0,missing:[...new Set(missing)],...calc};
+}
+
+async function ensureQuoteFromInbox(env,inboxId,ownerMarket=null){
+  await ensureQuoteStore(env);
+  const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes FROM inbox_messages i JOIN leads l ON l.id=i.lead_id
+    JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
+    WHERE i.id=? AND i.category='quote_requested' AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
+  if(!row)return {created:false,reason:"not_linked_quote_request"};
+  const existing=await env.DB.prepare("SELECT * FROM lead_quotes WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();if(existing)return {created:false,idempotent:true,quote:existing};
+  const details=extractQuoteRequestDetails(row.message),meta=parseLeadNotes({notes:row.lead_notes});
+  const marketResult=determineQuoteMarket({ownerMarket,leadCountry:meta.country,destination:details.destination});
+  let status="needs_details",pricingMode=null,price=null;
+  if(details.requested_product&&details.quantity){
+    if(marketResult.market==="IRAN"){status="waiting_for_owner_price";pricingMode="variable_owner";}
+    else if(marketResult.market==="ARAB"){
+      pricingMode="fixed_list";price=await exactArabPriceMatch(env,{product:details.requested_product});status=price.status==="multiple"?"requires_owner_review":price.status==="matched"?"draft":"waiting_for_price_match";
+    }else status="requires_owner_review";
+  }
+  const item=price?.item||null,t=now(),id=uid();
+  await env.DB.prepare(`INSERT OR IGNORE INTO lead_quotes
+    (id,lead_id,conversation_id,inbox_message_id,market,market_source,pricing_mode,price_item_id,price_item_version,product,quantity,customization,destination,requested_price_discount,customer_notes,currency,unit_price_minor,moq,status,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,row.lead_id,row.conversation_id,inboxId,marketResult.market,marketResult.source,pricingMode,item?.id||null,item?.version??null,details.requested_product,safeCommercialInteger(details.quantity),details.customization,details.destination,details.requested_price_or_discount,details.customer_notes,item?.currency||null,item?.unit_price_minor??null,item?.moq??null,status,t,t).run();
+  const quote=await env.DB.prepare("SELECT * FROM lead_quotes WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
+  if(!quote)throw Error("Quote request could not be persisted");
+  await audit(env,"lead_quote_created","Linked quote request created",{quote_id:quote.id,lead_id:quote.lead_id,inbox_message_id:inboxId,market:quote.market,status:quote.status});
+  return {created:quote.id===id,idempotent:quote.id!==id,quote};
+}
+
+async function recordQuoteDecisionFromInbound(env,inboxId,intent){
+  if(!["accepted","rejected"].includes(intent))return {updated:false};
+  const row=await env.DB.prepare("SELECT lead_id,conversation_id,platform,reply_to_provider_message_id FROM inbox_messages WHERE id=?").bind(inboxId).first();
+  if(!row?.lead_id||!row.conversation_id||row.platform!=="telegram"||!row.reply_to_provider_message_id)return {updated:false,reason:"ambiguous"};
+  const quote=await env.DB.prepare(`SELECT q.id,q.status FROM lead_quotes q JOIN lead_outreach o ON o.id=q.outreach_id
+    WHERE q.lead_id=? AND q.conversation_id=? AND q.status='sent' AND o.channel='telegram' AND o.status='sent' AND o.provider_message_id=? LIMIT 2`).bind(row.lead_id,row.conversation_id,row.reply_to_provider_message_id).all();
+  if((quote.results||[]).length!==1)return {updated:false,reason:"ambiguous"};
+  const target=intent==="accepted"?"accepted":"rejected",id=quote.results[0].id;
+  const changed=await env.DB.prepare("UPDATE lead_quotes SET status=?,updated_at=? WHERE id=? AND status='sent'").bind(target,now(),id).run();
+  if(changed.meta?.changes)await audit(env,"lead_quote_customer_decision","Customer decision deterministically linked to sent quote",{quote_id:id,inbox_message_id:inboxId,status:target});
+  return {updated:!!changed.meta?.changes,quote_id:id,status:target};
+}
+
+async function updateQuoteByOwner(env,id,body){
+  await ensureQuoteStore(env);const current=await env.DB.prepare("SELECT * FROM lead_quotes WHERE id=? LIMIT 1").bind(id).first();
+  if(!current)throw Error("Quote not found");if(!QUOTE_MUTABLE_STATUSES.has(current.status))throw Error("Approved or sent quote cannot be edited");
+  const next={...current};
+  for(const f of ["product","customization","destination","requested_price_discount","customer_notes","payment_terms","delivery_terms","notes","approved_quote_text","expires_at"]){if(Object.prototype.hasOwnProperty.call(body,f))next[f]=body[f]==null?null:String(body[f]).trim().slice(0,f==="approved_quote_text"?4000:2000)||null;}
+  if(Object.prototype.hasOwnProperty.call(body,"quantity"))next.quantity=safeCommercialInteger(body.quantity,{nullable:true,positive:true});
+  const market=determineQuoteMarket({ownerMarket:body.market,leadCountry:null,destination:next.destination});
+  if(body.market){next.market=market.market;next.market_source="owner";}
+  if(next.market==="IRAN"){
+    next.pricing_mode="variable_owner";next.price_item_id=null;next.price_item_version=null;
+    if(Object.prototype.hasOwnProperty.call(body,"currency"))next.currency=String(body.currency||"").trim().toUpperCase().slice(0,12)||null;
+    if(Object.prototype.hasOwnProperty.call(body,"unit_price_minor"))next.unit_price_minor=safeCommercialInteger(body.unit_price_minor);
+    if(Object.prototype.hasOwnProperty.call(body,"moq"))next.moq=safeCommercialInteger(body.moq,{nullable:true,positive:true});
+  }else if(next.market==="ARAB"){
+    next.pricing_mode="fixed_list";
+    const match=await exactArabPriceMatch(env,{priceItemId:body.price_item_id||next.price_item_id,sku:body.sku,product:next.product});
+    if(match.status==="matched"){
+      const item=match.item;next.price_item_id=item.id;next.price_item_version=item.version;next.currency=item.currency;next.unit_price_minor=item.unit_price_minor;next.moq=item.moq;
+    }else{next.price_item_id=null;next.price_item_version=null;next.currency=null;next.unit_price_minor=null;next.moq=null;}
+    next._priceMatch=match.status;
+  }else{next.pricing_mode=null;next.price_item_id=null;next.price_item_version=null;next.currency=null;next.unit_price_minor=null;}
+  for(const f of ["discount_minor","shipping_minor","tax_minor","other_fees_minor"])if(Object.prototype.hasOwnProperty.call(body,f))next[f]=safeCommercialInteger(body[f]);
+  const ready=quoteReadiness(next);next.subtotal_minor=ready.subtotal_minor;next.total_minor=ready.total_minor;
+  if(ready.ready)next.status="quote_ready";
+  else if(!next.product||!next.quantity)next.status="needs_details";
+  else if(next.market==="requires_owner_review")next.status="requires_owner_review";
+  else if(next.market==="IRAN"&&next.unit_price_minor===null)next.status="waiting_for_owner_price";
+  else if(next.market==="ARAB"&&next._priceMatch==="multiple")next.status="requires_owner_review";
+  else if(next.market==="ARAB"&&!next.price_item_id)next.status="waiting_for_price_match";
+  else next.status="draft";
+  const t=now();
+  await env.DB.prepare(`UPDATE lead_quotes SET market=?,market_source=?,pricing_mode=?,price_item_id=?,price_item_version=?,product=?,quantity=?,customization=?,destination=?,requested_price_discount=?,customer_notes=?,currency=?,unit_price_minor=?,subtotal_minor=?,discount_minor=?,shipping_minor=?,tax_minor=?,other_fees_minor=?,total_minor=?,moq=?,payment_terms=?,delivery_terms=?,notes=?,approved_quote_text=?,status=?,expires_at=?,updated_at=? WHERE id=?`).bind(next.market,next.market_source,next.pricing_mode,next.price_item_id,next.price_item_version,next.product,next.quantity,next.customization,next.destination,next.requested_price_discount,next.customer_notes,next.currency,next.unit_price_minor,next.subtotal_minor,next.discount_minor,next.shipping_minor,next.tax_minor,next.other_fees_minor,next.total_minor,next.moq,next.payment_terms,next.delivery_terms,next.notes,next.approved_quote_text,next.status,next.expires_at,t,id).run();
+  await audit(env,"lead_quote_owner_updated","Owner updated quote commercial fields",{quote_id:id,status:next.status,market:next.market,missing:ready.missing});
+  return await env.DB.prepare("SELECT * FROM lead_quotes WHERE id=?").bind(id).first();
+}
+
+async function transitionQuote(env,id,action,actor="admin"){
+  await ensureQuoteStore(env);const q=await env.DB.prepare("SELECT * FROM lead_quotes WHERE id=? LIMIT 1").bind(id).first();if(!q)throw Error("Quote not found");
+  const t=now();
+  if(action==="submit"){
+    if(q.status!=="quote_ready")throw Error("Only quote_ready can be submitted");const readiness=quoteReadiness(q);if(!readiness.ready)throw Error(`Quote is incomplete: ${readiness.missing.join(",")}`);
+    if(q.market==="ARAB"){
+      const price=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=? AND version=? LIMIT 1").bind(q.price_item_id,q.price_item_version).first();
+      if(!priceItemEffective(price)||price.currency!==q.currency||Number(price.unit_price_minor)!==Number(q.unit_price_minor)||Number(price.moq??0)!==Number(q.moq??0))throw Error("Approved Arab price version is no longer an exact active match");
+    }
+    const c=await env.DB.prepare("SELECT c.*,lc.raw_value,lc.normalized_value,lc.contact_type,lc.evidence_status,lc.source FROM lead_conversations c LEFT JOIN lead_contacts lc ON lc.id=c.contact_id WHERE c.id=? AND c.lead_id=? AND c.platform='telegram' LIMIT 1").bind(q.conversation_id,q.lead_id).first();
+    const recipient=telegramLeadContactChatId(c);if(!recipient)throw Error("Quote conversation has no sendable Telegram contact");
+    if(q.outreach_id)throw Error("Quote already has an outreach record");
+    const oid=uid(),results=await env.DB.batch([env.DB.prepare(`INSERT INTO lead_outreach(id,lead_id,contact_id,conversation_id,channel,recipient,message,language,status,created_at,updated_at)
+      SELECT ?,?,?,?,?,?,?,?,?,?,? FROM lead_quotes WHERE id=? AND status='quote_ready' AND outreach_id IS NULL`).bind(oid,q.lead_id,c.contact_id,q.conversation_id,"telegram",recipient,q.approved_quote_text,outreachLanguage({country:q.market==="IRAN"?"iran":"iraq"}),"pending_approval",t,t,id),env.DB.prepare("UPDATE lead_quotes SET outreach_id=?,status='pending_approval',updated_at=? WHERE id=? AND status='quote_ready' AND outreach_id IS NULL").bind(oid,t,id)]);
+    if(!results?.[0]?.meta?.changes||!results?.[1]?.meta?.changes)throw Error("Quote submission transition failed");
+  }else if(action==="approve"){
+    if(q.status!=="pending_approval"||!q.outreach_id)throw Error("Only pending quote can be approved");
+    const results=await env.DB.batch([env.DB.prepare("UPDATE lead_outreach SET status='approved',approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status='pending_approval'").bind(t,actor,t,q.outreach_id),env.DB.prepare("UPDATE lead_quotes SET status='approved',approved_by=?,approved_at=?,updated_at=? WHERE id=? AND status='pending_approval'").bind(actor,t,t,id)]);
+    if(!results?.[0]?.meta?.changes||!results?.[1]?.meta?.changes)throw Error("Quote approval transition failed");
+  }else if(action==="reject"){
+    if(q.status!=="pending_approval"||!q.outreach_id)throw Error("Only pending quote can be rejected");
+    const results=await env.DB.batch([env.DB.prepare("UPDATE lead_outreach SET status='rejected',updated_at=? WHERE id=? AND status='pending_approval'").bind(t,q.outreach_id),env.DB.prepare("UPDATE lead_quotes SET status='rejected',updated_at=? WHERE id=? AND status='pending_approval'").bind(t,id)]);
+    if(!results?.[0]?.meta?.changes||!results?.[1]?.meta?.changes)throw Error("Quote rejection transition failed");
+  }else throw Error("Invalid quote action");
+  const updated=await env.DB.prepare("SELECT * FROM lead_quotes WHERE id=?").bind(id).first();await audit(env,"lead_quote_status_changed","Quote owner-review status changed",{quote_id:id,from:q.status,to:updated.status,action});return updated;
+}
+
+async function createPriceItemVersion(env,body,actor="admin"){
+  await ensureQuoteStore(env);const baseId=String(body.base_id||"").trim();let base=null;if(baseId)base=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=? LIMIT 1").bind(baseId).first();if(baseId&&!base)throw Error("Base price item not found");
+  const productName=String(body.product_name??base?.product_name??"").trim(),productKey=normalizeProductKey(body.product_key??base?.product_key??productName),sku=String(body.sku??base?.sku??"").trim()||null,currency=String(body.currency??base?.currency??"").trim().toUpperCase(),unit=safeCommercialInteger(body.unit_price_minor??base?.unit_price_minor,{nullable:false}),moq=safeCommercialInteger(Object.prototype.hasOwnProperty.call(body,"moq")?body.moq:base?.moq,{nullable:true,positive:true});
+  if(!productName||!productKey||!currency)throw Error("Product, product key and currency are required");
+  if(base&&productKey!==base.product_key)throw Error("A new price version must retain the original product key");
+  const latest=await env.DB.prepare("SELECT MAX(version) AS version FROM commercial_price_items WHERE market='ARAB' AND product_key=?").bind(productKey).first(),version=Number(latest?.version||0)+1,t=now(),id=uid();
+  const effectiveFrom=body.effective_from==null?(base?.effective_from||null):String(body.effective_from||"").trim()||null,effectiveUntil=body.effective_until==null?null:String(body.effective_until||"").trim()||null;
+  const statements=[];if(base&&body.deactivate_previous!==false)statements.push(env.DB.prepare("UPDATE commercial_price_items SET active=0,updated_at=? WHERE id=?").bind(t,base.id));
+  statements.push(env.DB.prepare("INSERT INTO commercial_price_items(id,product_key,product_name,sku,market,currency,unit_price_minor,moq,version,active,effective_from,effective_until,approved_by,approved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,productKey,productName,sku,"ARAB",currency,unit,moq,version,body.active===false?0:1,effectiveFrom,effectiveUntil,actor,t,t,t));
+  await env.DB.batch(statements);await audit(env,"commercial_price_version_created","Owner created immutable commercial price version",{price_item_id:id,product_key:productKey,version,active:body.active===false?0:1});return await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=?").bind(id).first();
 }
 
 async function selectLeadOutreachContact(env, lead, body = {}) {
@@ -7702,6 +7920,8 @@ Context: ${context}`;
         if(!id||!["submit","approve","reject"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
         const current=await env.DB.prepare("SELECT * FROM lead_outreach WHERE id=?").bind(id).first();
         if(!current)return json({ok:false,error:"Outreach draft not found"},404);
+        await ensureQuoteStore(env);const quoteLinked=await env.DB.prepare("SELECT id FROM lead_quotes WHERE outreach_id=? LIMIT 1").bind(id).first();
+        if(quoteLinked)return json({ok:false,error:"Quote-linked outreach must use the quote approval controls"},409);
         if(!LEAD_OUTREACH_STATUSES.has(current.status))return json({ok:false,error:"Unknown outreach status"},409);
         if((action==="approve"&&current.status==="approved")||(action==="reject"&&current.status==="rejected")||(action==="submit"&&current.status==="pending_approval"))return json({ok:true,id,status:current.status,idempotent:true,sending_enabled:false});
         const from=action==="submit"?"draft":"pending_approval",to=action==="submit"?"pending_approval":action==="approve"?"approved":"rejected",t=now();
@@ -7717,10 +7937,47 @@ Context: ${context}`;
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         const b=await req.json().catch(()=>({})),id=String(b.id||"").trim();
         if(!id)return json({ok:false,error:"id is required"},400);
+        await ensureQuoteStore(env);const linkedQuote=await env.DB.prepare("SELECT id,status FROM lead_quotes WHERE outreach_id=? LIMIT 1").bind(id).first();
+        if(linkedQuote&&linkedQuote.status!=="approved")return json({ok:false,error:"Quote is not approved for explicit sending"},409);
         const result=await sendApprovedTelegramOutreach(env,id);
+        if(result.ok&&result.status==="sent"){
+          await ensureQuoteStore(env);
+          let synced=false,lastError=null;
+          for(let attempt=0;attempt<3&&!synced;attempt++)try{const t=now(),changed=await env.DB.prepare("UPDATE lead_quotes SET status='sent',sent_at=?,updated_at=? WHERE outreach_id=? AND status='approved'").bind(t,t,id).run();synced=!!changed.meta?.changes||!(await env.DB.prepare("SELECT id FROM lead_quotes WHERE outreach_id=? AND status='approved'").bind(id).first());}catch(error){lastError=error;}
+          if(!synced){try{await audit(env,"lead_quote_sent_sync_failed","Telegram outreach was sent but quote status persistence needs local reconciliation",{outreach_id:id,error:sanitizeOperationalError(lastError?.message||lastError||"Quote sync failed")});}catch{}result.quote_sync=false;}
+        }
         const statusCode=result.statusCode||200;
         delete result.statusCode;
         return json(result,statusCode);
+      }
+
+      if (u.pathname === "/api/quotes" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);
+        const r=await env.DB.prepare(`SELECT q.*,l.name AS lead_name,o.status AS outreach_status,o.provider_message_id
+          FROM lead_quotes q JOIN leads l ON l.id=q.lead_id LEFT JOIN lead_outreach o ON o.id=q.outreach_id ORDER BY q.created_at DESC LIMIT 100`).all();
+        return json({ok:true,items:(r.results||[]).map(q=>({...q,readiness:quoteReadiness(q)}))});
+      }
+      if (u.pathname === "/api/quotes/from-inbox" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({})),id=String(b.inbox_message_id||"").trim();if(!id)return json({ok:false,error:"inbox_message_id is required"},400);
+        try{return json({ok:true,...await ensureQuoteFromInbox(env,id,b.market||null)});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+      }
+      if (u.pathname === "/api/quotes" && req.method === "PATCH") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({})),id=String(b.id||"").trim();if(!id)return json({ok:false,error:"id is required"},400);
+        try{return json({ok:true,quote:await updateQuoteByOwner(env,id,b)});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+      }
+      if (u.pathname === "/api/quotes/transition" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),action=String(b.action||"").trim();if(!id||!["submit","approve","reject"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
+        try{return json({ok:true,quote:await transitionQuote(env,id,action,String(b.approved_by||"admin"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+      if (u.pathname === "/api/commercial-price-items" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);const r=await env.DB.prepare("SELECT * FROM commercial_price_items ORDER BY product_key,version DESC LIMIT 300").all();return json({ok:true,items:r.results||[]});
+      }
+      if (u.pathname === "/api/commercial-price-items" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({}));try{return json({ok:true,item:await createPriceItemVersion(env,b,String(b.approved_by||"admin"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+      }
+      if (u.pathname === "/api/commercial-price-items/activation" && req.method === "PATCH") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);const b=await req.json().catch(()=>({})),id=String(b.id||"").trim();if(!id||typeof b.active!=="boolean")return json({ok:false,error:"id and boolean active are required"},400);
+        const changed=await env.DB.prepare("UPDATE commercial_price_items SET active=?,updated_at=? WHERE id=?").bind(b.active?1:0,now(),id).run();if(!changed.meta?.changes)return json({ok:false,error:"Price item not found"},404);await audit(env,"commercial_price_activation_changed","Owner changed commercial price activation",{price_item_id:id,active:b.active});return json({ok:true,id,active:b.active});
       }
 
       if (u.pathname === "/api/learning/status" && req.method === "GET") {

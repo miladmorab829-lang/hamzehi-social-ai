@@ -91,6 +91,75 @@ WHERE inbox_message_id IS NOT NULL AND inbox_message_id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_outreach_provider_message
 ON lead_outreach(channel, provider_message_id)
 WHERE provider_message_id IS NOT NULL AND provider_message_id <> '';
+CREATE TABLE IF NOT EXISTS lead_quotes (
+ id TEXT PRIMARY KEY,
+ lead_id TEXT NOT NULL,
+ conversation_id TEXT NOT NULL,
+ inbox_message_id TEXT,
+ outreach_id TEXT,
+ market TEXT,
+ market_source TEXT,
+ pricing_mode TEXT,
+ price_item_id TEXT,
+ price_item_version INTEGER,
+ product TEXT,
+ quantity INTEGER,
+ customization TEXT,
+ destination TEXT,
+ requested_price_discount TEXT,
+ customer_notes TEXT,
+ currency TEXT,
+ unit_price_minor INTEGER,
+ subtotal_minor INTEGER,
+ discount_minor INTEGER,
+ shipping_minor INTEGER,
+ tax_minor INTEGER,
+ other_fees_minor INTEGER,
+ total_minor INTEGER,
+ moq INTEGER,
+ payment_terms TEXT,
+ delivery_terms TEXT,
+ notes TEXT,
+ approved_quote_text TEXT,
+ status TEXT NOT NULL,
+ approved_by TEXT,
+ approved_at TEXT,
+ sent_at TEXT,
+ expires_at TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_quotes_inbox
+ON lead_quotes(inbox_message_id) WHERE inbox_message_id IS NOT NULL AND inbox_message_id <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_quotes_outreach
+ON lead_quotes(outreach_id) WHERE outreach_id IS NOT NULL AND outreach_id <> '';
+CREATE INDEX IF NOT EXISTS idx_lead_quotes_lead ON lead_quotes(lead_id);
+CREATE INDEX IF NOT EXISTS idx_lead_quotes_conversation ON lead_quotes(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_lead_quotes_status ON lead_quotes(status);
+CREATE TABLE IF NOT EXISTS commercial_price_items (
+ id TEXT PRIMARY KEY,
+ product_key TEXT NOT NULL,
+ product_name TEXT NOT NULL,
+ sku TEXT,
+ market TEXT NOT NULL,
+ currency TEXT NOT NULL,
+ unit_price_minor INTEGER NOT NULL,
+ moq INTEGER,
+ version INTEGER NOT NULL,
+ active INTEGER NOT NULL,
+ effective_from TEXT,
+ effective_until TEXT,
+ approved_by TEXT NOT NULL,
+ approved_at TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_commercial_price_version
+ON commercial_price_items(market, product_key, version);
+CREATE INDEX IF NOT EXISTS idx_commercial_price_sku_active
+ON commercial_price_items(market, sku, active);
+CREATE INDEX IF NOT EXISTS idx_commercial_price_key_active
+ON commercial_price_items(market, product_key, active);
 CREATE TABLE IF NOT EXISTS social_metrics (
  id TEXT PRIMARY KEY, content_id TEXT, platform TEXT, impressions INTEGER DEFAULT 0,
  reach INTEGER DEFAULT 0, likes INTEGER DEFAULT 0, comments INTEGER DEFAULT 0,
