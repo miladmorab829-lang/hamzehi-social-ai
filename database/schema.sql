@@ -136,6 +136,54 @@ ON lead_quotes(outreach_id) WHERE outreach_id IS NOT NULL AND outreach_id <> '';
 CREATE INDEX IF NOT EXISTS idx_lead_quotes_lead ON lead_quotes(lead_id);
 CREATE INDEX IF NOT EXISTS idx_lead_quotes_conversation ON lead_quotes(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_lead_quotes_status ON lead_quotes(status);
+CREATE TABLE IF NOT EXISTS lead_orders (
+ id TEXT PRIMARY KEY,
+ order_number TEXT NOT NULL,
+ quote_id TEXT NOT NULL,
+ lead_id TEXT NOT NULL,
+ conversation_id TEXT NOT NULL,
+ quote_outreach_id TEXT,
+ acceptance_inbox_message_id TEXT,
+ acceptance_provider_message_id TEXT,
+ acceptance_source TEXT,
+ customer_accepted_at TEXT,
+ market TEXT,
+ pricing_mode TEXT,
+ price_item_id TEXT,
+ price_item_version INTEGER,
+ product TEXT NOT NULL,
+ quantity INTEGER NOT NULL,
+ customization TEXT,
+ destination TEXT,
+ currency TEXT NOT NULL,
+ unit_price_minor INTEGER,
+ subtotal_minor INTEGER,
+ discount_minor INTEGER,
+ shipping_minor INTEGER,
+ tax_minor INTEGER,
+ other_fees_minor INTEGER,
+ total_minor INTEGER,
+ moq INTEGER,
+ payment_terms TEXT,
+ delivery_terms TEXT,
+ approved_quote_text TEXT,
+ status TEXT NOT NULL,
+ confirmed_by TEXT,
+ confirmed_at TEXT,
+ cancelled_by TEXT,
+ cancelled_at TEXT,
+ cancellation_reason TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_orders_quote ON lead_orders(quote_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_orders_number ON lead_orders(order_number);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_orders_acceptance_inbox
+ON lead_orders(acceptance_inbox_message_id)
+WHERE acceptance_inbox_message_id IS NOT NULL AND acceptance_inbox_message_id <> '';
+CREATE INDEX IF NOT EXISTS idx_lead_orders_lead ON lead_orders(lead_id);
+CREATE INDEX IF NOT EXISTS idx_lead_orders_conversation ON lead_orders(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_lead_orders_status ON lead_orders(status);
 CREATE TABLE IF NOT EXISTS commercial_price_items (
  id TEXT PRIMARY KEY,
  product_key TEXT NOT NULL,

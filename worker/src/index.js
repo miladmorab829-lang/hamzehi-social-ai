@@ -4598,6 +4598,11 @@ async function handleTelegramWebhook(env,req){
         try { await audit(env,"negotiation_reply_draft_failed","Inbound reply was stored but negotiation enrichment failed",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)}); } catch {}
       }
     }
+  }else{
+    try { await processNegotiationInbound(env,ex.id); }
+    catch(error){
+      try { await audit(env,"negotiation_reply_retry_failed","Persisted inbound reply recovery failed safely",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)}); } catch {}
+    }
   }
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
   if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
@@ -4905,6 +4910,116 @@ async function ensureQuoteStore(env){
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_commercial_price_key_active ON commercial_price_items(market,product_key,active)").run();
 }
 
+const ORDER_STATUSES=new Set(["order_candidate","confirmed","cancelled"]);
+const ORDER_ACCEPTANCE_SOURCE="telegram_reply_to_provider_message_id";
+
+async function ensureOrderStore(env){
+  await ensureQuoteStore(env);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_orders (
+    id TEXT PRIMARY KEY,order_number TEXT NOT NULL,quote_id TEXT NOT NULL,lead_id TEXT NOT NULL,conversation_id TEXT NOT NULL,
+    quote_outreach_id TEXT,acceptance_inbox_message_id TEXT,acceptance_provider_message_id TEXT,acceptance_source TEXT,customer_accepted_at TEXT,
+    market TEXT,pricing_mode TEXT,price_item_id TEXT,price_item_version INTEGER,product TEXT NOT NULL,quantity INTEGER NOT NULL,customization TEXT,destination TEXT,
+    currency TEXT NOT NULL,unit_price_minor INTEGER,subtotal_minor INTEGER,discount_minor INTEGER,shipping_minor INTEGER,tax_minor INTEGER,other_fees_minor INTEGER,total_minor INTEGER,
+    moq INTEGER,payment_terms TEXT,delivery_terms TEXT,approved_quote_text TEXT,status TEXT NOT NULL,
+    confirmed_by TEXT,confirmed_at TEXT,cancelled_by TEXT,cancelled_at TEXT,cancellation_reason TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_orders_quote ON lead_orders(quote_id)").run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_orders_number ON lead_orders(order_number)").run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_orders_acceptance_inbox ON lead_orders(acceptance_inbox_message_id) WHERE acceptance_inbox_message_id IS NOT NULL AND acceptance_inbox_message_id<>''").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_lead ON lead_orders(lead_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_conversation ON lead_orders(conversation_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_status ON lead_orders(status)").run();
+}
+
+async function deterministicOrderNumber(quoteId,acceptedAt){
+  const date=String(acceptedAt||"").slice(0,10).replace(/-/g,"");
+  if(!/^\d{8}$/.test(date))throw Error("Deterministic customer acceptance timestamp is required");
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(String(quoteId)));
+  const suffix=Array.from(new Uint8Array(digest).slice(0,6),b=>b.toString(16).padStart(2,"0")).join("").toUpperCase();
+  return `HB-${date}-${suffix}`;
+}
+
+function validateAcceptedQuoteOrderSnapshot(row){
+  if(!row||row.status!=="accepted")throw Error("Only an accepted quote can create an order candidate");
+  if(!row.lead_id||!row.conversation_id||!row.outreach_id||!row.acceptance_inbox_message_id||!row.quote_provider_message_id||!row.customer_accepted_at)throw Error("Deterministic quote acceptance evidence is incomplete");
+  if(!["IRAN","ARAB"].includes(row.market)||!["variable_owner","fixed_list"].includes(row.pricing_mode))throw Error("Accepted quote pricing mode is invalid");
+  if(!String(row.product||"").trim()||!String(row.currency||"").trim()||!String(row.approved_quote_text||"").trim())throw Error("Accepted quote snapshot is incomplete");
+  safeCommercialInteger(row.quantity,{nullable:false,positive:true});
+  for(const field of ["unit_price_minor","subtotal_minor","discount_minor","shipping_minor","tax_minor","other_fees_minor","total_minor"])safeCommercialInteger(row[field],{nullable:false});
+  if(row.moq!==null&&row.moq!==undefined)safeCommercialInteger(row.moq,{nullable:false,positive:true});
+  if(row.market==="IRAN"&&row.pricing_mode!=="variable_owner")throw Error("Iran quote pricing snapshot is invalid");
+  if(row.market==="ARAB"&&(!row.price_item_id||!Number.isSafeInteger(Number(row.price_item_version))||Number(row.price_item_version)<=0||row.pricing_mode!=="fixed_list"))throw Error("Arab quote price version snapshot is invalid");
+}
+
+async function auditOrderEventOnce(env,eventKey,type,message,details){
+  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,?,?,?,?)")
+    .bind(`lead-order:${eventKey}`,type,"info",message,JSON.stringify(details),now()).run();
+}
+
+async function ensureOrderCandidateFromAcceptedQuote(env,quoteId,inboxId){
+  await ensureOrderStore(env);
+  const row=await env.DB.prepare(`SELECT q.*,o.provider_message_id AS quote_provider_message_id,
+      i.id AS acceptance_inbox_message_id,i.external_id AS acceptance_provider_message_id,i.created_at AS customer_accepted_at
+    FROM lead_quotes q JOIN lead_outreach o ON o.id=q.outreach_id
+    JOIN inbox_messages i ON i.id=? AND i.lead_id=q.lead_id AND i.conversation_id=q.conversation_id
+    WHERE q.id=? AND q.status='accepted' AND o.channel='telegram' AND o.status='sent'
+      AND i.platform='telegram' AND i.reply_to_provider_message_id=o.provider_message_id
+    LIMIT 1`).bind(inboxId,quoteId).first();
+  if(!row)return {created:false,reason:"accepted_quote_evidence_not_found"};
+  validateAcceptedQuoteOrderSnapshot(row);
+  const existing=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(quoteId).first();
+  if(existing){
+    await auditOrderEventOnce(env,`candidate:${existing.id}`,"lead_order_candidate_created","Accepted quote created an order candidate",{order_id:existing.id,order_number:existing.order_number,quote_id:existing.quote_id,lead_id:existing.lead_id,acceptance_inbox_message_id:existing.acceptance_inbox_message_id,status:"order_candidate"});
+    return {created:false,idempotent:true,order:existing};
+  }
+  const id=uid(),orderNumber=await deterministicOrderNumber(row.id,row.customer_accepted_at),t=now();
+  const inserted=await env.DB.prepare(`INSERT OR IGNORE INTO lead_orders
+    (id,order_number,quote_id,lead_id,conversation_id,quote_outreach_id,acceptance_inbox_message_id,acceptance_provider_message_id,acceptance_source,customer_accepted_at,
+     market,pricing_mode,price_item_id,price_item_version,product,quantity,customization,destination,currency,unit_price_minor,subtotal_minor,discount_minor,shipping_minor,tax_minor,other_fees_minor,total_minor,
+     moq,payment_terms,delivery_terms,approved_quote_text,status,created_at,updated_at)
+    SELECT ?,?,q.id,q.lead_id,q.conversation_id,q.outreach_id,i.id,i.external_id,?,i.created_at,
+     q.market,q.pricing_mode,q.price_item_id,q.price_item_version,q.product,q.quantity,q.customization,q.destination,q.currency,q.unit_price_minor,q.subtotal_minor,q.discount_minor,q.shipping_minor,q.tax_minor,q.other_fees_minor,q.total_minor,
+     q.moq,q.payment_terms,q.delivery_terms,q.approved_quote_text,'order_candidate',?,?
+    FROM lead_quotes q JOIN lead_outreach o ON o.id=q.outreach_id
+    JOIN inbox_messages i ON i.id=? AND i.lead_id=q.lead_id AND i.conversation_id=q.conversation_id
+    WHERE q.id=? AND q.status='accepted' AND o.channel='telegram' AND o.status='sent'
+      AND i.platform='telegram' AND i.reply_to_provider_message_id=o.provider_message_id`)
+    .bind(id,orderNumber,ORDER_ACCEPTANCE_SOURCE,t,t,inboxId,quoteId).run();
+  const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(quoteId).first();
+  if(!order)throw Error("Accepted quote order candidate could not be persisted");
+  await auditOrderEventOnce(env,`candidate:${order.id}`,"lead_order_candidate_created","Accepted quote created an order candidate",{order_id:order.id,order_number:order.order_number,quote_id:order.quote_id,lead_id:order.lead_id,acceptance_inbox_message_id:order.acceptance_inbox_message_id,status:"order_candidate"});
+  return {created:!!inserted.meta?.changes,idempotent:!inserted.meta?.changes,order};
+}
+
+async function transitionLeadOrder(env,id,action,actor="admin",reason=null){
+  await ensureOrderStore(env);
+  const current=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(id).first();
+  if(!current)throw Error("Order not found");
+  if(!ORDER_STATUSES.has(current.status))throw Error("Unknown order status");
+  const owner=String(actor||"admin").trim().slice(0,120)||"admin",t=now();
+  if(action==="confirm"){
+    if(current.status==="cancelled")throw Error("Cancelled order cannot be reopened");
+    if(current.status==="order_candidate"){
+      const changed=await env.DB.prepare("UPDATE lead_orders SET status='confirmed',confirmed_by=?,confirmed_at=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(owner,t,t,id).run();
+      if(!changed.meta?.changes){const latest=await env.DB.prepare("SELECT status FROM lead_orders WHERE id=?").bind(id).first();if(latest?.status!=="confirmed")throw Error("Order confirmation conflict");}
+    }
+    const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(id).first();
+    await auditOrderEventOnce(env,`confirmed:${id}`,"lead_order_confirmed","Owner confirmed order candidate",{order_id:id,order_number:order.order_number,quote_id:order.quote_id,from:"order_candidate",to:"confirmed",confirmed_by:order.confirmed_by,confirmed_at:order.confirmed_at});
+    return order;
+  }
+  if(action==="cancel"){
+    const why=String(reason||"").trim().slice(0,500);if(!why)throw Error("Cancellation reason is required");
+    if(current.status!=="cancelled"){
+      const changed=await env.DB.prepare("UPDATE lead_orders SET status='cancelled',cancelled_by=?,cancelled_at=?,cancellation_reason=?,updated_at=? WHERE id=? AND status=?").bind(owner,t,why,t,id,current.status).run();
+      if(!changed.meta?.changes){const latest=await env.DB.prepare("SELECT status FROM lead_orders WHERE id=?").bind(id).first();if(latest?.status!=="cancelled")throw Error("Order cancellation conflict");}
+    }
+    const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(id).first();
+    await auditOrderEventOnce(env,`cancelled:${id}`,"lead_order_cancelled","Owner cancelled order while preserving its snapshot",{order_id:id,order_number:order.order_number,quote_id:order.quote_id,from:current.status,to:"cancelled",cancelled_by:order.cancelled_by,cancelled_at:order.cancelled_at,reason:order.cancellation_reason});
+    return order;
+  }
+  throw Error("Invalid order action");
+}
+
 function normalizeProductKey(value){return String(value||"").normalize("NFKC").trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu,"-").replace(/^-+|-+$/g,"").slice(0,120)||null;}
 function safeCommercialInteger(value,{nullable=true,positive=false}={}){
   if(value===null||value===undefined||value===""){if(nullable)return null;throw Error("Required integer is missing");}
@@ -5003,14 +5118,20 @@ async function ensureQuoteFromInbox(env,inboxId,ownerMarket=null){
 
 async function recordQuoteDecisionFromInbound(env,inboxId,intent){
   if(!["accepted","rejected"].includes(intent))return {updated:false};
+  await ensureOrderStore(env);
   const row=await env.DB.prepare("SELECT lead_id,conversation_id,platform,reply_to_provider_message_id FROM inbox_messages WHERE id=?").bind(inboxId).first();
   if(!row?.lead_id||!row.conversation_id||row.platform!=="telegram"||!row.reply_to_provider_message_id)return {updated:false,reason:"ambiguous"};
   const quote=await env.DB.prepare(`SELECT q.id,q.status FROM lead_quotes q JOIN lead_outreach o ON o.id=q.outreach_id
-    WHERE q.lead_id=? AND q.conversation_id=? AND q.status='sent' AND o.channel='telegram' AND o.status='sent' AND o.provider_message_id=? LIMIT 2`).bind(row.lead_id,row.conversation_id,row.reply_to_provider_message_id).all();
+    WHERE q.lead_id=? AND q.conversation_id=? AND q.status IN ('sent','accepted') AND o.channel='telegram' AND o.status='sent' AND o.provider_message_id=? LIMIT 2`).bind(row.lead_id,row.conversation_id,row.reply_to_provider_message_id).all();
   if((quote.results||[]).length!==1)return {updated:false,reason:"ambiguous"};
-  const target=intent==="accepted"?"accepted":"rejected",id=quote.results[0].id;
+  const matched=quote.results[0],target=intent==="accepted"?"accepted":"rejected",id=matched.id;
+  if(intent==="rejected"&&matched.status!=="sent")return {updated:false,reason:"accepted_quote_cannot_be_rejected",quote_id:id,status:matched.status};
   const changed=await env.DB.prepare("UPDATE lead_quotes SET status=?,updated_at=? WHERE id=? AND status='sent'").bind(target,now(),id).run();
   if(changed.meta?.changes)await audit(env,"lead_quote_customer_decision","Customer decision deterministically linked to sent quote",{quote_id:id,inbox_message_id:inboxId,status:target});
+  if(target==="accepted"){
+    const orderResult=await ensureOrderCandidateFromAcceptedQuote(env,id,inboxId);
+    return {updated:!!changed.meta?.changes,quote_id:id,status:target,order:orderResult.order||null,order_created:!!orderResult.created,idempotent:!!orderResult.idempotent};
+  }
   return {updated:!!changed.meta?.changes,quote_id:id,status:target};
 }
 
@@ -7968,6 +8089,19 @@ Context: ${context}`;
       if (u.pathname === "/api/quotes/transition" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),action=String(b.action||"").trim();if(!id||!["submit","approve","reject"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
         try{return json({ok:true,quote:await transitionQuote(env,id,action,String(b.approved_by||"admin"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+      if (u.pathname === "/api/orders" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureOrderStore(env);
+        const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,q.status AS quote_status
+          FROM lead_orders o JOIN leads l ON l.id=o.lead_id JOIN lead_quotes q ON q.id=o.quote_id
+          ORDER BY o.created_at DESC LIMIT 200`).all();
+        return json({ok:true,items:r.results||[],payment_engine:false,revenue_recognition:false});
+      }
+      if (u.pathname === "/api/orders/transition" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),action=String(b.action||"").trim();
+        if(!id||!["confirm","cancel"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
+        try{return json({ok:true,order:await transitionLeadOrder(env,id,action,String(b.actor||"admin"),b.reason)});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
       }
       if (u.pathname === "/api/commercial-price-items" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);const r=await env.DB.prepare("SELECT * FROM commercial_price_items ORDER BY product_key,version DESC LIMIT 300").all();return json({ok:true,items:r.results||[]});
