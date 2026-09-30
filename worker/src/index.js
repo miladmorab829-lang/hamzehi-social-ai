@@ -4715,6 +4715,244 @@ else if(x.operation==='calendar_publish'){const cal=await env.DB.prepare("SELECT
       await env.DB.prepare("UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").bind(status,e.message,new Date(Date.now()+Math.min(3600000,2**attempts*60000)).toISOString(),now(),x.id).run()}await collectInstagramMetrics(env)}
 
 
+// P0-7A is intentionally disconnected from autonomy, negotiation and pricing.
+// Fact contents are immutable; only lifecycle status changes when a revision is superseded.
+const SALES_KNOWLEDGE_SCHEMA = [
+  "CREATE TABLE IF NOT EXISTS sales_knowledge_change_requests (\n id TEXT PRIMARY KEY,\n operation TEXT NOT NULL CHECK(operation IN ('ADD','EXPAND','UPDATE','REPLACE','DEACTIVATE','DELETE')),\n fact_key TEXT NOT NULL,\n domain TEXT NOT NULL,\n entity_type TEXT NOT NULL,\n entity_key TEXT NOT NULL,\n attribute TEXT NOT NULL,\n market TEXT NOT NULL CHECK(market IN ('GLOBAL','IRAN','ARAB')),\n member_key TEXT NOT NULL DEFAULT '',\n target_fact_id TEXT,\n target_version INTEGER,\n old_value_json TEXT,\n new_value_json TEXT NOT NULL CHECK(json_valid(new_value_json)),\n value_hash TEXT NOT NULL,\n effective_from TEXT,\n effective_until TEXT,\n proposal_hash TEXT NOT NULL,\n conflict_json TEXT NOT NULL CHECK(json_valid(conflict_json)),\n sensitivity TEXT NOT NULL CHECK(sensitivity IN ('standard','commercial')),\n confidence REAL CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),\n status TEXT NOT NULL CHECK(status IN ('pending_review','approved','rejected','conflict','applied')),\n requested_by TEXT NOT NULL,\n source_type TEXT NOT NULL,\n source_command_id TEXT,\n reviewed_by TEXT,\n reviewed_at TEXT,\n review_note TEXT,\n applied_at TEXT,\n result_fact_id TEXT,\n created_at TEXT NOT NULL,\n updated_at TEXT NOT NULL,\n CHECK((target_fact_id IS NULL AND target_version IS NULL) OR (target_fact_id IS NOT NULL AND target_version > 0)),\n CHECK(status NOT IN ('approved','applied') OR (reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)),\n CHECK(status <> 'applied' OR (result_fact_id IS NOT NULL AND applied_at IS NOT NULL))\n)",
+  "CREATE INDEX IF NOT EXISTS idx_sales_knowledge_requests_status ON sales_knowledge_change_requests(status,created_at)",
+  "CREATE TABLE IF NOT EXISTS sales_knowledge_facts (\n id TEXT PRIMARY KEY,\n fact_key TEXT NOT NULL,\n domain TEXT NOT NULL,\n entity_type TEXT NOT NULL,\n entity_key TEXT NOT NULL,\n attribute TEXT NOT NULL,\n market TEXT NOT NULL CHECK(market IN ('GLOBAL','IRAN','ARAB')),\n member_key TEXT NOT NULL DEFAULT '',\n value_json TEXT NOT NULL CHECK(json_valid(value_json)),\n value_hash TEXT NOT NULL,\n version INTEGER NOT NULL CHECK(version > 0),\n status TEXT NOT NULL CHECK(status IN ('active','superseded','inactive','tombstoned')),\n authority TEXT NOT NULL CHECK(authority = 'owner_approved'),\n effective_from TEXT,\n effective_until TEXT,\n supersedes_fact_id TEXT,\n source_type TEXT NOT NULL,\n source_command_id TEXT,\n change_request_id TEXT NOT NULL UNIQUE,\n approved_by TEXT NOT NULL,\n approved_at TEXT NOT NULL,\n created_at TEXT NOT NULL,\n updated_at TEXT NOT NULL,\n UNIQUE(fact_key,version)\n)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_knowledge_active ON sales_knowledge_facts(fact_key) WHERE status='active'",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_knowledge_member_value\n ON sales_knowledge_facts(domain,entity_type,entity_key,attribute,market,value_hash)\n WHERE status='active' AND member_key<>''",
+  "CREATE INDEX IF NOT EXISTS idx_sales_knowledge_entity ON sales_knowledge_facts(domain,entity_type,entity_key,market)",
+  "CREATE TRIGGER IF NOT EXISTS sales_knowledge_no_delete BEFORE DELETE ON sales_knowledge_facts\n BEGIN SELECT RAISE(ABORT,'Knowledge history cannot be deleted'); END",
+  "CREATE TRIGGER IF NOT EXISTS sales_knowledge_immutable BEFORE UPDATE ON sales_knowledge_facts\n WHEN NEW.id IS NOT OLD.id OR NEW.fact_key IS NOT OLD.fact_key\n OR NEW.domain IS NOT OLD.domain OR NEW.entity_type IS NOT OLD.entity_type\n OR NEW.entity_key IS NOT OLD.entity_key OR NEW.attribute IS NOT OLD.attribute\n OR NEW.market IS NOT OLD.market OR NEW.member_key IS NOT OLD.member_key\n OR NEW.value_json IS NOT OLD.value_json OR NEW.value_hash IS NOT OLD.value_hash\n OR NEW.version IS NOT OLD.version OR NEW.authority IS NOT OLD.authority\n OR NEW.effective_from IS NOT OLD.effective_from OR NEW.effective_until IS NOT OLD.effective_until\n OR NEW.supersedes_fact_id IS NOT OLD.supersedes_fact_id OR NEW.source_type IS NOT OLD.source_type\n OR NEW.source_command_id IS NOT OLD.source_command_id OR NEW.change_request_id IS NOT OLD.change_request_id\n OR NEW.approved_by IS NOT OLD.approved_by OR NEW.approved_at IS NOT OLD.approved_at\n OR NEW.created_at IS NOT OLD.created_at\n OR OLD.status='superseded' OR NEW.status<>'superseded'\n BEGIN SELECT RAISE(ABORT,'Only superseding a knowledge revision is allowed'); END"
+];
+const SALES_KNOWLEDGE_FIELDS = {
+  product: {name:"text",category:"member",use_case:"member",material:"member",configuration:"member",available:"boolean"},
+  size: {available_size:"member",custom_size_rule:"text"},
+  quantity: {moq:"integer",quantity_rule:"text"},
+  color: {exterior:"member",interior:"member",combination:"member",restriction:"text"},
+  printing: {method:"member",color:"member",limitation:"text"},
+  production: {constraint:"text",timing_rule:"text"},
+  shipping: {method:"member",destination:"member",terms:"text"},
+  deposit: {rule:"text"},
+  payment: {terms:"text"},
+  discount: {rule:"text"},
+  pricing: {authority:"pricing_authority"}
+};
+const SALES_KNOWLEDGE_COMMERCIAL = new Set(["quantity","production","shipping","deposit","payment","discount","pricing"]);
+const SALES_KNOWLEDGE_OPERATIONS = new Set(["ADD","EXPAND","UPDATE","REPLACE","DEACTIVATE","DELETE"]);
+
+function knowledgeFieldType(domain,attribute) {
+  return Object.hasOwn(SALES_KNOWLEDGE_FIELDS,domain)&&Object.hasOwn(SALES_KNOWLEDGE_FIELDS[domain],attribute)?SALES_KNOWLEDGE_FIELDS[domain][attribute]:null;
+}
+async function ensureSalesKnowledgeStore(env) {
+  await env.DB.batch(SALES_KNOWLEDGE_SCHEMA.map(sql=>env.DB.prepare(sql)));
+}
+function knowledgeCanonical(value,depth=0) {
+  if(depth>8)throw Error("Knowledge value is too deeply nested");
+  if(value===null||typeof value==="boolean")return JSON.stringify(value);
+  if(typeof value==="number"){if(!Number.isSafeInteger(value))throw Error("Knowledge numbers must be safe integers");return JSON.stringify(value);}
+  if(typeof value==="string")return JSON.stringify(value.normalize("NFKC").trim());
+  if(Array.isArray(value))return "["+value.map(x=>knowledgeCanonical(x,depth+1)).join(",")+"]";
+  if(value&&Object.getPrototypeOf(value)===Object.prototype)return "{"+Object.keys(value).sort().map(k=>JSON.stringify(k)+":"+knowledgeCanonical(value[k],depth+1)).join(",")+"}";
+  throw Error("Invalid typed knowledge value");
+}
+function knowledgeKeyPart(value) {
+  if(typeof value!=="string")throw Error("Knowledge identifier must be text");
+  const x=value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g," ").replace(/ي/g,"ی").replace(/ك/g,"ک");
+  if(!x||x.length>120||/[\u0000-\u001f]/u.test(x))throw Error("Invalid knowledge identifier");
+  return x;
+}
+async function knowledgeHash(value) {
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,"0")).join("");
+}
+function knowledgeDate(value) {
+  if(value===null||value===undefined||value==="")return null;
+  if(typeof value!=="string"||!/^\d{4}-\d{2}-\d{2}T/.test(value)||!Number.isFinite(Date.parse(value)))throw Error("Effective dates must be ISO timestamps");
+  return new Date(value).toISOString();
+}
+function knowledgeValidateValue(domain,attribute,market,value) {
+  const type=knowledgeFieldType(domain,attribute);
+  if(!type)throw Error("Unsupported knowledge domain/attribute; final prices belong to the existing price list or owner quote");
+  if(type==="pricing_authority") {
+    if(!((market==="ARAB"&&value==="commercial_price_items")||(market==="IRAN"&&value==="owner_confirmed_quote")))throw Error("Pricing authority cannot be overridden");
+  } else if(value!==null) {
+    if(type==="text"&&(typeof value!=="string"||!value.trim()||value.length>2000))throw Error("This field requires one non-empty text value");
+    if(type==="member"&&!(typeof value==="string"&&value.trim()&&value.length<=2000)&&!(value&&Object.getPrototypeOf(value)===Object.prototype&&Object.keys(value).length))throw Error("Provide one text or structured member, not a replacement array");
+    if(type==="integer"&&(!Number.isSafeInteger(value)||value<=0))throw Error("MOQ must be a positive safe integer or null");
+    if(type==="boolean"&&typeof value!=="boolean")throw Error("Availability must be a boolean or null");
+  } else if(type==="member")throw Error("Multi-value members cannot be null");
+  return type;
+}
+function knowledgeOnlyKeys(body,allowed) {
+  if(!body||Array.isArray(body)||typeof body!=="object"||Object.keys(body).some(k=>!allowed.includes(k)))throw Error("Unexpected field; authority and approval identity are server-controlled");
+}
+function knowledgeId(id) {
+  if(typeof id!=="string"||!/^[a-zA-Z0-9_-]{8,80}$/.test(id))throw Error("A stable request ID is required");
+  return id;
+}
+function knowledgeAuditStatement(env,id,type,details,t) {
+  return env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Owner knowledge review lifecycle',?,?)")
+    .bind("knowledge:"+id+":"+type,type,JSON.stringify(details),t);
+}
+async function proposeSalesKnowledge(env,body) {
+  knowledgeOnlyKeys(body,["id","operation","domain","entity_type","entity_key","attribute","market","value","target_fact_id","target_version","effective_from","effective_until"]);
+  const id=knowledgeId(body.id),operation=body.operation;
+  if(!SALES_KNOWLEDGE_OPERATIONS.has(operation))throw Error("Invalid knowledge operation");
+  const domain=knowledgeKeyPart(body.domain),entityType=knowledgeKeyPart(body.entity_type),entityKey=knowledgeKeyPart(body.entity_key),attribute=knowledgeKeyPart(body.attribute),market=body.market||"GLOBAL";
+  if(!["business","product","model"].includes(entityType)||!["GLOBAL","IRAN","ARAB"].includes(market))throw Error("Invalid entity type or market");
+  const type=knowledgeFieldType(domain,attribute);
+  if(!type)throw Error("Unsupported knowledge field; use the existing commercial price list for prices");
+  const adding=operation==="ADD"||operation==="EXPAND";
+  if(operation==="EXPAND"&&type!=="member")throw Error("EXPAND requires a multi-value attribute");
+  let target=null;
+  if(!adding) {
+    if(typeof body.target_fact_id!=="string"||!Number.isSafeInteger(body.target_version)||body.target_version<1)throw Error("Exact target fact ID and version are required");
+    target=await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE id=?").bind(body.target_fact_id).first();
+    if(!target||target.version!==body.target_version||target.domain!==domain||target.entity_type!==entityType||target.entity_key!==entityKey||target.attribute!==attribute||target.market!==market)throw Error("Target identity/version does not match");
+  } else if(body.target_fact_id!=null||body.target_version!=null)throw Error("ADD/EXPAND cannot supersede an existing fact");
+  const retiring=operation==="DELETE"||operation==="DEACTIVATE";
+  if(!retiring&&!Object.hasOwn(body,"value"))throw Error("An explicit typed value is required; null is unknown");
+  const value=retiring?JSON.parse(target.value_json):body.value;
+  knowledgeValidateValue(domain,attribute,market,value);
+  const valueJson=knowledgeCanonical(value);
+  if(valueJson.length>6000)throw Error("Knowledge value is too large");
+  const memberCanonical=type==="member"&&typeof value==="string"?knowledgeCanonical(knowledgeKeyPart(value)):valueJson;
+  const valueHash=await knowledgeHash(memberCanonical);
+  // Each multi-value member has its own stable key; updates explicitly target that member.
+  const memberKey=target?.member_key||(type==="member"?valueHash:"");
+  const factKey=JSON.stringify([domain,entityType,entityKey,attribute,market,memberKey]);
+  const effectiveFrom=retiring?target.effective_from:knowledgeDate(body.effective_from),effectiveUntil=retiring?target.effective_until:knowledgeDate(body.effective_until);
+  if(effectiveFrom&&effectiveUntil&&effectiveFrom>=effectiveUntil)throw Error("Effective end must follow start");
+  const proposalHash=await knowledgeHash(knowledgeCanonical({operation,factKey,valueJson,target:target?.id||null,version:target?.version||null,effectiveFrom,effectiveUntil}));
+  const previous=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+  if(previous){if(previous.proposal_hash!==proposalHash)throw Error("Request ID already belongs to another proposal");return previous;}
+  const latest=await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE fact_key=? ORDER BY version DESC LIMIT 1").bind(factKey).first();
+  const conflicts=[];
+  if(adding&&latest)conflicts.push({reason:latest.status==="active"&&latest.value_hash===valueHash?"duplicate":"existing_fact_requires_explicit_update",fact_id:latest.id,version:latest.version});
+  if(target&&(latest?.id!==target.id||target.status==="superseded"||target.status==="tombstoned"))conflicts.push({reason:"stale_or_tombstoned_target",fact_id:latest?.id||null,version:latest?.version||null});
+  if(memberKey&&!retiring){
+    const duplicate=await env.DB.prepare("SELECT id,version FROM sales_knowledge_facts WHERE domain=? AND entity_type=? AND entity_key=? AND attribute=? AND market=? AND value_hash=? AND status='active' AND id<>?")
+      .bind(domain,entityType,entityKey,attribute,market,valueHash,target?.id||"").first();
+    if(duplicate&&!conflicts.some(x=>x.fact_id===duplicate.id))conflicts.push({reason:"duplicate_member",fact_id:duplicate.id,version:duplicate.version});
+  }
+  const t=now(),status=conflicts.length?"conflict":"pending_review";
+  await env.DB.batch([
+    env.DB.prepare(`INSERT OR IGNORE INTO sales_knowledge_change_requests
+      (id,operation,fact_key,domain,entity_type,entity_key,attribute,market,member_key,target_fact_id,target_version,old_value_json,new_value_json,value_hash,effective_from,effective_until,proposal_hash,conflict_json,sensitivity,confidence,status,requested_by,source_type,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,'admin','owner_form',?,?)`)
+      .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),SALES_KNOWLEDGE_COMMERCIAL.has(domain)?"commercial":"standard",status,t,t),
+    knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain},t)
+  ]);
+  const stored=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+  if(stored.proposal_hash!==proposalHash)throw Error("Concurrent request ID conflict");
+  return stored;
+}
+async function reviewSalesKnowledge(env,body) {
+  knowledgeOnlyKeys(body,["id","decision","proposal_hash","confirm_sensitive","note"]);
+  const id=knowledgeId(body.id),q=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+  if(!q||body.proposal_hash!==q.proposal_hash)throw Error("Review must identify the exact displayed proposal");
+  if(!["approve","reject"].includes(body.decision))throw Error("Invalid review decision");
+  if(body.decision==="approve"&&q.sensitivity==="commercial"&&body.confirm_sensitive!==true)throw Error("Explicit commercial authority confirmation required");
+  const status=body.decision==="approve"?"approved":"rejected";
+  if(q.status===status)return q;
+  if(q.status!=="pending_review"&&!(q.status==="conflict"&&status==="rejected"))throw Error("Proposal cannot be reviewed in its current state");
+  if(body.note!=null&&(typeof body.note!=="string"||body.note.length>1000))throw Error("Invalid review note");
+  const t=now();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE sales_knowledge_change_requests SET status=?,reviewed_by='admin',reviewed_at=?,review_note=?,updated_at=? WHERE id=? AND status=? AND proposal_hash=?")
+      .bind(status,t,body.note||null,t,id,q.status,q.proposal_hash),
+    env.DB.prepare(`INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at)
+      SELECT ?,?,'info','Owner reviewed knowledge proposal',?,? FROM sales_knowledge_change_requests WHERE id=? AND status=? AND reviewed_at=?`)
+      .bind("knowledge:"+id+":review",status==="approved"?"sales_knowledge_reviewed":"sales_knowledge_rejected",JSON.stringify({request_id:id,decision:body.decision,actor:"admin"}),t,id,status,t)
+  ]);
+  const stored=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+  if(stored.status!==status)throw Error("Concurrent review conflict");
+  return stored;
+}
+async function applySalesKnowledge(env,body) {
+  knowledgeOnlyKeys(body,["id","proposal_hash","confirm_apply"]);
+  const id=knowledgeId(body.id),q=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+  if(!q||q.proposal_hash!==body.proposal_hash||body.confirm_apply!==true)throw Error("Explicit Apply of the reviewed proposal is required");
+  if(q.status==="applied")return q;
+  if(q.status!=="approved"||q.reviewed_by!=="admin")throw Error("Owner review must precede Apply");
+  const t=now(),factId="knowledge-fact-"+id,version=(q.target_version||0)+1;
+  const status=q.operation==="DELETE"?"tombstoned":q.operation==="DEACTIVATE"?"inactive":"active";
+  // D1 batch is a transaction. A failed CAS forces the final CHECK to fail,
+  // rolling back supersession, insertion, request state and audit together.
+  const guard=`EXISTS(SELECT 1 FROM sales_knowledge_change_requests WHERE id=? AND status='approved')
+    AND NOT EXISTS(SELECT 1 FROM sales_knowledge_facts WHERE fact_key=? AND version>=?)`;
+  const statements=[];
+  if(q.target_fact_id)statements.push(env.DB.prepare(`UPDATE sales_knowledge_facts SET status='superseded',updated_at=?
+    WHERE id=? AND version=? AND status IN ('active','inactive') AND ${guard}`).bind(t,q.target_fact_id,q.target_version,id,q.fact_key,version));
+  statements.push(env.DB.prepare(`INSERT INTO sales_knowledge_facts
+    (id,fact_key,domain,entity_type,entity_key,attribute,market,member_key,value_json,value_hash,version,status,authority,effective_from,effective_until,supersedes_fact_id,source_type,source_command_id,change_request_id,approved_by,approved_at,created_at,updated_at)
+    SELECT ?,fact_key,domain,entity_type,entity_key,attribute,market,member_key,new_value_json,value_hash,?,?,'owner_approved',effective_from,effective_until,target_fact_id,source_type,source_command_id,id,reviewed_by,reviewed_at,?,?
+    FROM sales_knowledge_change_requests WHERE id=? AND status='approved' AND ${guard}
+    AND (target_fact_id IS NULL OR EXISTS(SELECT 1 FROM sales_knowledge_facts f WHERE f.id=target_fact_id AND f.version=target_version AND f.status='superseded'))`)
+    .bind(factId,version,status,t,t,id,id,q.fact_key,version));
+  statements.push(env.DB.prepare(`UPDATE sales_knowledge_change_requests SET status='applied',applied_at=?,updated_at=?,
+    result_fact_id=(SELECT id FROM sales_knowledge_facts WHERE id=? AND change_request_id=?)
+    WHERE id=? AND status='approved'`).bind(t,t,factId,id,id));
+  statements.push(env.DB.prepare(`INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at)
+    SELECT ?,'sales_knowledge_applied','info','Owner applied versioned knowledge',?,? FROM sales_knowledge_change_requests WHERE id=? AND status='applied'`)
+    .bind("knowledge:"+id+":apply",JSON.stringify({request_id:id,fact_id:factId,operation:q.operation,version,actor:"admin"}),t,id));
+  try {await env.DB.batch(statements);}
+  catch {
+    const latest=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+    if(latest?.status==="applied")return latest;
+    const current=await env.DB.prepare("SELECT id,version FROM sales_knowledge_facts WHERE fact_key=? ORDER BY version DESC LIMIT 1").bind(q.fact_key).first();
+    const duplicate=status==="active"&&q.member_key?await env.DB.prepare("SELECT id,version FROM sales_knowledge_facts WHERE domain=? AND entity_type=? AND entity_key=? AND attribute=? AND market=? AND value_hash=? AND status='active' AND id<>?")
+      .bind(q.domain,q.entity_type,q.entity_key,q.attribute,q.market,q.value_hash,q.target_fact_id||"").first():null;
+    if((current?.id||null)!==(q.target_fact_id||null)||duplicate) {
+      const conflict={reason:"fact_changed_since_review",current_fact_id:current?.id||null,current_version:current?.version||null,duplicate_fact_id:duplicate?.id||null};
+      await env.DB.batch([
+        env.DB.prepare("UPDATE sales_knowledge_change_requests SET status='conflict',conflict_json=?,updated_at=? WHERE id=? AND status='approved'").bind(JSON.stringify([conflict]),now(),id),
+        env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) SELECT ?,'sales_knowledge_conflict','info','Knowledge changed after owner review',?,? FROM sales_knowledge_change_requests WHERE id=? AND status='conflict'")
+          .bind("knowledge:"+id+":sales_knowledge_conflict",JSON.stringify({request_id:id,...conflict}),now(),id)
+      ]);
+    }
+    // Leave approved requests retryable for local DB failures; stale targets never pass the CAS.
+    throw Error("Knowledge Apply did not complete: stale/conflicting fact or database failure; refresh before retrying");
+  }
+  const applied=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+  if(applied.status!=="applied")throw Error("Knowledge Apply was not persisted");
+  return applied;
+}
+async function handleSalesKnowledge(req,env) {
+  if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+  const u=new URL(req.url),base="/api/sales-knowledge";
+  try {
+    if(req.method==="GET"&&u.pathname===base) {
+      // Read routes never create schema or apply pending changes.
+      const history=u.searchParams.get("fact_key");
+      const offset=Number(u.searchParams.get("offset")||0);
+      if(!Number.isSafeInteger(offset)||offset<0||offset>1000000)throw Error("Invalid page offset");
+      const facts=history?await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE fact_key=? ORDER BY version DESC LIMIT 100 OFFSET ?").bind(history,offset).all()
+        :await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE status<>'superseded' ORDER BY created_at DESC,id DESC LIMIT 100 OFFSET ?").bind(offset).all();
+      const requests=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests ORDER BY created_at DESC,id DESC LIMIT 100 OFFSET ?").bind(offset).all();
+      return json({ok:true,facts:facts.results||[],requests:requests.results||[],fields:SALES_KNOWLEDGE_FIELDS,offset,page_size:100});
+    }
+    if(req.method!=="POST"||![base+"/propose",base+"/review",base+"/apply"].includes(u.pathname))return json({ok:false,error:"Not found"},404);
+    if(Number(req.headers.get("Content-Length")||0)>16384)return json({ok:false,error:"Knowledge request too large"},413);
+    // Bound bodies even when Content-Length is omitted.
+    const reader=req.body?.getReader();if(!reader)throw Error("JSON body is required");
+    const chunks=[];let size=0;
+    while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>16384){await reader.cancel();throw Error("Knowledge request too large");}chunks.push(value);}
+    const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+    const body=JSON.parse(new TextDecoder().decode(bytes));
+    await ensureSalesKnowledgeStore(env);
+    const result=u.pathname.endsWith("/propose")?await proposeSalesKnowledge(env,body):u.pathname.endsWith("/review")?await reviewSalesKnowledge(env,body):await applySalesKnowledge(env,body);
+    return json({ok:true,request:result});
+  } catch(error) {
+    const message=String(error?.message||error);
+    const missing=/no such table/i.test(message);
+    return json({ok:false,error:missing?"Knowledge schema unavailable; migrate before deployment":sanitizeOperationalError(message)},missing?503:400);
+  }
+}
+
 async function ensureLeadIdentityStore(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_identities (
     identity_key TEXT PRIMARY KEY,
@@ -8071,6 +8309,8 @@ Context: ${context}`;
         delete result.statusCode;
         return json(result,statusCode);
       }
+
+      if (u.pathname === "/api/sales-knowledge" || u.pathname.startsWith("/api/sales-knowledge/")) return await handleSalesKnowledge(req,env);
 
       if (u.pathname === "/api/quotes" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);

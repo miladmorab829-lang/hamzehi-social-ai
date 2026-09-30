@@ -45,6 +45,28 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 <div id="commandStatus" class="hint" style="margin-top:10px">آماده دریافت دستور.</div>
 </section>
 
+<section class="card section" id="knowledgePanel">
+<div class="title"><div><h2>📚 SALES KNOWLEDGE</h2><div class="hint">پیشنهاد ← بررسی مالک ← اعمال. افزودن اطلاعات، اطلاعات قبلی را حذف نمی‌کند. قیمت نهایی از Quote/Price List موجود می‌آید.</div></div><button class="btn" onclick="loadSalesKnowledge()">REFRESH</button></div>
+<div class="grid4" style="margin-top:10px">
+<select class="input" id="knowledgeOperation"><option>ADD</option><option>EXPAND</option><option>UPDATE</option><option>REPLACE</option><option>DEACTIVATE</option><option>DELETE</option></select>
+<select class="input" id="knowledgeDomain" onchange="knowledgeAttributes()"></select><select class="input" id="knowledgeAttribute"></select>
+<select class="input" id="knowledgeEntityType"><option value="model">Model</option><option value="product">Product</option><option value="business">Business</option></select>
+<input class="input" id="knowledgeEntity" placeholder="Model / product identifier">
+<select class="input" id="knowledgeMarket"><option>GLOBAL</option><option>IRAN</option><option>ARAB</option></select>
+<input class="input" id="knowledgeFrom" placeholder="Effective from ISO (optional)"><input class="input" id="knowledgeUntil" placeholder="Effective until ISO (optional)">
+</div>
+<label class="hint" for="knowledgeValue">Typed JSON value: text in double quotes, integer, boolean, or null (unknown). Add each color/size separately.</label>
+<textarea class="input" id="knowledgeValue" rows="2" placeholder='مثال: "navy"'></textarea>
+<div id="knowledgeTarget" class="hint">ADD/EXPAND: no existing fact selected.</div>
+<div class="tools"><button class="btn" onclick="clearKnowledgeTarget()">NEW FACT</button><button class="btn primary" onclick="proposeKnowledge()">PROPOSE ONLY</button></div>
+<div id="knowledgeStatus" class="hint" role="status"></div>
+<div class="tools"><button class="btn" onclick="knowledgeOffset=Math.max(0,knowledgeOffset-100);loadSalesKnowledge()">PREVIOUS PAGE</button><button class="btn" onclick="knowledgeOffset+=100;loadSalesKnowledge()">NEXT PAGE</button></div>
+<div class="title"><h3>Owner Review · Old → Proposed</h3></div><div id="knowledgeRequests" class="rows"></div>
+<div class="title"><h3>Knowledge · Current revisions</h3></div><div id="knowledgeFacts" class="rows"></div>
+<div class="title"><h3>Revision History</h3></div><div id="knowledgeHistory" class="rows"></div>
+<div class="tools"><button class="btn" onclick="loadKnowledgeHistory(-100)">PREVIOUS HISTORY</button><button class="btn" onclick="loadKnowledgeHistory(100)">NEXT HISTORY</button></div>
+</section>
+
 <section class="card section" id="authPanel">
 <div class="title"><div><h2>🔐 ADMIN TOKEN</h2><div class="hint">اتصال امن پنل به Worker</div></div><span id="tokenState" class="tag">NOT SET</span></div>
 <div class="hint" style="margin-top:8px">توکن فقط روی همین مرورگر در localStorage ذخیره می‌شود و در صفحه به‌صورت مخفی نگه داشته می‌شود.</div>
@@ -408,6 +430,59 @@ async function saveNegotiationDraft(id,inputId){
  $("negotiationInboxStatus").innerHTML="<span class='ok'>✓ پیش‌نویس ذخیره شد؛ هیچ پیامی ارسال نشد.</span>";
  await Promise.all([loadNegotiationInbox(),loadOutreachApprovals()]);
 }
+let knowledgeFields={},knowledgeFacts=[],knowledgeRequests=[],knowledgeTarget=null,knowledgeBusy=false,knowledgeProposalId=null,knowledgeOffset=0,knowledgeHistoryKey=null,knowledgeHistoryOffset=0;
+function knowledgeAttributes(){const fields=knowledgeFields[$("knowledgeDomain").value]||{};$("knowledgeAttribute").innerHTML=Object.keys(fields).map(x=>"<option>"+esc(x)+"</option>").join("")}
+function clearKnowledgeTarget(){knowledgeTarget=null;knowledgeProposalId=null;$("knowledgeOperation").value="ADD";$("knowledgeTarget").textContent="ADD/EXPAND: no existing fact selected."}
+function knowledgeFactCard(x){return "<div class='row'><b>"+esc(x.entity_key)+" · "+esc(x.attribute)+" · v"+esc(x.version)+"</b><div>"+esc(x.status)+" · "+esc(x.market)+" · "+esc(x.authority)+"</div><pre style='white-space:pre-wrap'>"+esc(x.value_json)+"</pre><small>"+esc(x.approved_by)+" · "+esc(x.approved_at)+" · Request "+esc(x.change_request_id)+"</small></div>"}
+async function loadSalesKnowledge(){
+ const status=$("knowledgeStatus");status.textContent="Loading knowledge…";
+ try{
+  const d=await api("/api/sales-knowledge?offset="+knowledgeOffset);if(!d.ok)throw Error(d.error||"Knowledge unavailable");
+  knowledgeFields=d.fields||{};knowledgeFacts=d.facts||[];knowledgeRequests=d.requests||[];
+  const selected=$("knowledgeDomain").value;$("knowledgeDomain").innerHTML=Object.keys(knowledgeFields).map(x=>"<option>"+esc(x)+"</option>").join("");
+  if(knowledgeFields[selected])$("knowledgeDomain").value=selected;knowledgeAttributes();
+  $("knowledgeFacts").innerHTML=knowledgeFacts.map((x,i)=>knowledgeFactCard(x)+"<div class='tools'><button class='btn' data-knowledge='history' data-index='"+i+"'>HISTORY</button>"+(x.status!=="tombstoned"?"<button class='btn' data-knowledge='target' data-index='"+i+"'>SELECT EXACT REVISION</button>":"")+"</div>").join("")||"<div class='hint'>No approved knowledge yet.</div>";
+  $("knowledgeRequests").innerHTML=knowledgeRequests.map((x,i)=>"<div class='row'><b>"+esc(x.operation)+" · "+esc(x.entity_key)+" · "+esc(x.attribute)+"</b><div>"+esc(x.status)+" · "+esc(x.sensitivity)+" · "+esc(x.market)+"</div><div>Old:</div><pre style='white-space:pre-wrap'>"+esc(x.old_value_json??"(no previous fact)")+"</pre><div>Proposed:</div><pre style='white-space:pre-wrap'>"+esc(x.new_value_json)+"</pre><div>"+esc(x.conflict_json)+"</div><small>Target "+esc(x.target_fact_id||"none")+" / v"+esc(x.target_version??"—")+" · "+esc(x.effective_from||"no start")+" → "+esc(x.effective_until||"no end")+" · Reviewed "+esc(x.reviewed_by||"—")+" "+esc(x.reviewed_at||"")+"</small><div class='tools'>"+(x.status==="pending_review"?"<button class='btn' data-knowledge='approve' data-index='"+i+"'>REVIEW & APPROVE</button>":"")+(["pending_review","conflict"].includes(x.status)?"<button class='btn danger' data-knowledge='reject' data-index='"+i+"'>REJECT</button>":"")+(x.status==="approved"?"<button class='btn primary' data-knowledge='apply' data-index='"+i+"'>APPLY REVIEWED CHANGE</button>":"")+"</div></div>").join("")||"<div class='hint'>No proposals.</div>";
+  status.textContent="Page "+(knowledgeOffset/100+1)+". Review alone does not apply a change.";
+ }catch(e){status.textContent=e.message}
+}
+async function loadKnowledgeHistory(delta=0){
+ if(!knowledgeHistoryKey)return;
+ knowledgeHistoryOffset=Math.max(0,knowledgeHistoryOffset+delta);
+ try{const d=await api("/api/sales-knowledge?fact_key="+encodeURIComponent(knowledgeHistoryKey)+"&offset="+knowledgeHistoryOffset);if(!d.ok)throw Error(d.error);$("knowledgeHistory").innerHTML=d.facts.map(knowledgeFactCard).join("")||"<div class='hint'>No more revisions.</div>"}catch(e){$("knowledgeStatus").textContent=e.message}
+}
+async function proposeKnowledge(){
+ if(knowledgeBusy)return;knowledgeBusy=true;
+ try{
+  const operation=$("knowledgeOperation").value,retiring=["DELETE","DEACTIVATE"].includes(operation);
+  const body={id:knowledgeProposalId||crypto.randomUUID(),operation,domain:$("knowledgeDomain").value,attribute:$("knowledgeAttribute").value,entity_type:$("knowledgeEntityType").value,entity_key:$("knowledgeEntity").value,market:$("knowledgeMarket").value,effective_from:$("knowledgeFrom").value||null,effective_until:$("knowledgeUntil").value||null};
+  if(!retiring)body.value=JSON.parse($("knowledgeValue").value);
+  if(!["ADD","EXPAND"].includes(operation)){if(!knowledgeTarget)throw Error("Select an exact revision first");body.target_fact_id=knowledgeTarget.id;body.target_version=knowledgeTarget.version}
+  knowledgeProposalId=body.id;
+  const d=await api("/api/sales-knowledge/propose",{method:"POST",body:JSON.stringify(body)});if(!d.ok)throw Error(d.error);
+  knowledgeProposalId=null;await loadSalesKnowledge();$("knowledgeStatus").textContent="Proposal saved: "+d.request.status;
+ }catch(e){$("knowledgeStatus").textContent=e.message}finally{knowledgeBusy=false}
+}
+$("knowledgePanel").addEventListener("input",()=>{knowledgeProposalId=null});
+$("knowledgePanel").addEventListener("click",async event=>{
+ const button=event.target.closest("[data-knowledge]");if(!button||knowledgeBusy)return;
+ const action=button.dataset.knowledge,index=Number(button.dataset.index);
+ if(action==="target"){
+  const x=knowledgeFacts[index];if(!x)return;knowledgeTarget=x;knowledgeProposalId=null;
+  $("knowledgeOperation").value="UPDATE";$("knowledgeDomain").value=x.domain;knowledgeAttributes();$("knowledgeAttribute").value=x.attribute;$("knowledgeEntityType").value=x.entity_type;$("knowledgeEntity").value=x.entity_key;$("knowledgeMarket").value=x.market;$("knowledgeValue").value=x.value_json;$("knowledgeFrom").value=x.effective_from||"";$("knowledgeUntil").value=x.effective_until||"";$("knowledgeTarget").textContent="Exact target: "+x.id+" / v"+x.version;return;
+ }
+ knowledgeBusy=true;button.disabled=true;
+ try{
+  if(action==="history"){
+   knowledgeHistoryKey=knowledgeFacts[index].fact_key;knowledgeHistoryOffset=0;await loadKnowledgeHistory();return;
+  }
+  const x=knowledgeRequests[index];if(!x)return;
+  if(!confirm(action==="apply"?"Apply this reviewed change? History will be preserved.":action==="approve"?"Confirm the displayed old/proposed values and their business authority?":"Reject this proposal?"))return;
+  const body=action==="apply"?{id:x.id,proposal_hash:x.proposal_hash,confirm_apply:true}:{id:x.id,proposal_hash:x.proposal_hash,decision:action,confirm_sensitive:x.sensitivity==="commercial"};
+  const d=await api("/api/sales-knowledge/"+(action==="apply"?"apply":"review"),{method:"POST",body:JSON.stringify(body)});if(!d.ok)throw Error(d.error);
+  await loadSalesKnowledge();
+ }catch(e){$("knowledgeStatus").textContent=e.message}finally{knowledgeBusy=false;button.disabled=false}
+});
 function qv(id,name){return $("q-"+name+"-"+id)?.value??""}
 function nullableNumber(v){const x=String(v).trim();return x===""?null:Number(x)}
 async function loadQuotes(){
@@ -939,7 +1014,7 @@ async function refreshAll(){
  refreshInProgress=true;
  try{
   await loadStatus();
-  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals(),loadOutreachApprovals(),loadNegotiationInbox(),loadQuotes(),loadOrders(),loadPriceItems()]);
+  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals(),loadOutreachApprovals(),loadNegotiationInbox(),loadQuotes(),loadOrders(),loadPriceItems(),loadSalesKnowledge()]);
  }catch(e){
   $("masterState").textContent="DASHBOARD ERROR";
   $("masterState").className="pill bad";

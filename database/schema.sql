@@ -306,6 +306,91 @@ CREATE TABLE IF NOT EXISTS provider_config (
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL
 );
+-- P0-7A: knowledge proposals are separate from approved fact revisions.
+CREATE TABLE IF NOT EXISTS sales_knowledge_change_requests (
+ id TEXT PRIMARY KEY,
+ operation TEXT NOT NULL CHECK(operation IN ('ADD','EXPAND','UPDATE','REPLACE','DEACTIVATE','DELETE')),
+ fact_key TEXT NOT NULL,
+ domain TEXT NOT NULL,
+ entity_type TEXT NOT NULL,
+ entity_key TEXT NOT NULL,
+ attribute TEXT NOT NULL,
+ market TEXT NOT NULL CHECK(market IN ('GLOBAL','IRAN','ARAB')),
+ member_key TEXT NOT NULL DEFAULT '',
+ target_fact_id TEXT,
+ target_version INTEGER,
+ old_value_json TEXT,
+ new_value_json TEXT NOT NULL CHECK(json_valid(new_value_json)),
+ value_hash TEXT NOT NULL,
+ effective_from TEXT,
+ effective_until TEXT,
+ proposal_hash TEXT NOT NULL,
+ conflict_json TEXT NOT NULL CHECK(json_valid(conflict_json)),
+ sensitivity TEXT NOT NULL CHECK(sensitivity IN ('standard','commercial')),
+ confidence REAL CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+ status TEXT NOT NULL CHECK(status IN ('pending_review','approved','rejected','conflict','applied')),
+ requested_by TEXT NOT NULL,
+ source_type TEXT NOT NULL,
+ source_command_id TEXT,
+ reviewed_by TEXT,
+ reviewed_at TEXT,
+ review_note TEXT,
+ applied_at TEXT,
+ result_fact_id TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ CHECK((target_fact_id IS NULL AND target_version IS NULL) OR (target_fact_id IS NOT NULL AND target_version > 0)),
+ CHECK(status NOT IN ('approved','applied') OR (reviewed_by IS NOT NULL AND reviewed_at IS NOT NULL)),
+ CHECK(status <> 'applied' OR (result_fact_id IS NOT NULL AND applied_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_sales_knowledge_requests_status ON sales_knowledge_change_requests(status,created_at);
+CREATE TABLE IF NOT EXISTS sales_knowledge_facts (
+ id TEXT PRIMARY KEY,
+ fact_key TEXT NOT NULL,
+ domain TEXT NOT NULL,
+ entity_type TEXT NOT NULL,
+ entity_key TEXT NOT NULL,
+ attribute TEXT NOT NULL,
+ market TEXT NOT NULL CHECK(market IN ('GLOBAL','IRAN','ARAB')),
+ member_key TEXT NOT NULL DEFAULT '',
+ value_json TEXT NOT NULL CHECK(json_valid(value_json)),
+ value_hash TEXT NOT NULL,
+ version INTEGER NOT NULL CHECK(version > 0),
+ status TEXT NOT NULL CHECK(status IN ('active','superseded','inactive','tombstoned')),
+ authority TEXT NOT NULL CHECK(authority = 'owner_approved'),
+ effective_from TEXT,
+ effective_until TEXT,
+ supersedes_fact_id TEXT,
+ source_type TEXT NOT NULL,
+ source_command_id TEXT,
+ change_request_id TEXT NOT NULL UNIQUE,
+ approved_by TEXT NOT NULL,
+ approved_at TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ UNIQUE(fact_key,version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_knowledge_active ON sales_knowledge_facts(fact_key) WHERE status='active';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_knowledge_member_value
+ ON sales_knowledge_facts(domain,entity_type,entity_key,attribute,market,value_hash)
+ WHERE status='active' AND member_key<>'';
+CREATE INDEX IF NOT EXISTS idx_sales_knowledge_entity ON sales_knowledge_facts(domain,entity_type,entity_key,market);
+CREATE TRIGGER IF NOT EXISTS sales_knowledge_no_delete BEFORE DELETE ON sales_knowledge_facts
+ BEGIN SELECT RAISE(ABORT,'Knowledge history cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS sales_knowledge_immutable BEFORE UPDATE ON sales_knowledge_facts
+ WHEN NEW.id IS NOT OLD.id OR NEW.fact_key IS NOT OLD.fact_key
+ OR NEW.domain IS NOT OLD.domain OR NEW.entity_type IS NOT OLD.entity_type
+ OR NEW.entity_key IS NOT OLD.entity_key OR NEW.attribute IS NOT OLD.attribute
+ OR NEW.market IS NOT OLD.market OR NEW.member_key IS NOT OLD.member_key
+ OR NEW.value_json IS NOT OLD.value_json OR NEW.value_hash IS NOT OLD.value_hash
+ OR NEW.version IS NOT OLD.version OR NEW.authority IS NOT OLD.authority
+ OR NEW.effective_from IS NOT OLD.effective_from OR NEW.effective_until IS NOT OLD.effective_until
+ OR NEW.supersedes_fact_id IS NOT OLD.supersedes_fact_id OR NEW.source_type IS NOT OLD.source_type
+ OR NEW.source_command_id IS NOT OLD.source_command_id OR NEW.change_request_id IS NOT OLD.change_request_id
+ OR NEW.approved_by IS NOT OLD.approved_by OR NEW.approved_at IS NOT OLD.approved_at
+ OR NEW.created_at IS NOT OLD.created_at
+ OR OLD.status='superseded' OR NEW.status<>'superseded'
+ BEGIN SELECT RAISE(ABORT,'Only superseding a knowledge revision is allowed'); END;
 CREATE TABLE IF NOT EXISTS migration_runs (
  id TEXT PRIMARY KEY,
  direction TEXT NOT NULL,
