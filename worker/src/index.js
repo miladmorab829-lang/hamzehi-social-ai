@@ -4584,7 +4584,21 @@ async function handleTelegramWebhook(env,req){
   const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
   const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const isVault=isImageVault||isVideoVault;
   const isReady=!!readyChatId(env)&& (chatId===readyChatId(env)||username===readyChatId(env).replace(/^@/,'').toLowerCase());
-  const providerSenderId=String(m.from?.id||m.chat.id||''),providerUsername=String(m.from?.username||m.chat.username||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;await ensureLeadOutreachStore(env);let linked=await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo});if(m.chat.type==='private'&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();if(!ex){const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'unclassified','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();}
+  const providerSenderId=String(m.from?.id||m.chat.id||''),providerUsername=String(m.from?.username||m.chat.username||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;
+  await ensureLeadOutreachStore(env);
+  let linked=await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo});
+  if(m.chat.type==='private'&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});
+  const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();
+  if(!ex){
+    const t=now(),inboxId=uid();
+    await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(inboxId,'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'other','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();
+    if(linked.leadId&&linked.conversationId){
+      try { await processNegotiationInbound(env,inboxId); }
+      catch(error){
+        try { await audit(env,"negotiation_reply_draft_failed","Inbound reply was stored but negotiation enrichment failed",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)}); } catch {}
+      }
+    }
+  }
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
   if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   return json({ok:true,media_received:!!media});
@@ -4736,15 +4750,18 @@ async function ensureLeadOutreachStore(env) {
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_conversations_lead ON lead_conversations(lead_id)").run();
   await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_conversations_provider ON lead_conversations(platform,provider_conversation_id) WHERE provider_conversation_id IS NOT NULL AND provider_conversation_id<>''").run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_outreach (
-    id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, contact_id TEXT, conversation_id TEXT,
+    id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, contact_id TEXT, conversation_id TEXT, inbox_message_id TEXT,
     channel TEXT NOT NULL, recipient TEXT NOT NULL, message TEXT NOT NULL, language TEXT NOT NULL,
     status TEXT NOT NULL, provider_message_id TEXT, provider_conversation_id TEXT,
     approved_at TEXT, approved_by TEXT, sent_at TEXT, error_code TEXT, error_detail TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   )`).run();
+  try { await env.DB.prepare("ALTER TABLE lead_outreach ADD COLUMN inbox_message_id TEXT").run(); }
+  catch (e) { if (!/duplicate column|already exists/i.test(String(e?.message || e))) throw e; }
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_outreach_lead_status ON lead_outreach(lead_id,status)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_outreach_contact ON lead_outreach(contact_id)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_outreach_conversation ON lead_outreach(conversation_id)").run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_outreach_inbox_message ON lead_outreach(inbox_message_id) WHERE inbox_message_id IS NOT NULL AND inbox_message_id<>''").run();
   await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_outreach_provider_message ON lead_outreach(channel,provider_message_id) WHERE provider_message_id IS NOT NULL AND provider_message_id<>''").run();
   for (const column of ["lead_id TEXT","conversation_id TEXT","provider_sender_id TEXT","provider_conversation_id TEXT","reply_to_provider_message_id TEXT"]) {
     try { await env.DB.prepare(`ALTER TABLE inbox_messages ADD COLUMN ${column}`).run(); }
@@ -4759,6 +4776,99 @@ function outreachLanguage(meta = {}) {
   if (["iq","iraq","iraqi","العراق","عراق"].includes(country)) return "Iraqi Arabic";
   if (["ir","iran","iranian","ایران"].includes(country)) return "Persian";
   return String(meta.type || "").endsWith("_ar") ? "Iraqi Arabic" : "Persian";
+}
+
+const NEGOTIATION_INTENTS = new Set(["interested","asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted","rejected","other"]);
+const NEGOTIATION_STAGE_INTENTS = new Set(["asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted"]);
+
+function classifyNegotiationIntent(value) {
+  const text=String(value||"").trim().toLowerCase();
+  if(!text)return "other";
+  const rules=[
+    ["rejected",/(?:not interested|no thanks|نه\s*(?:ممنون|متشکرم)|علاقه\s*ندار|نمی\s*خوا|لا\s*(?:شكرا|أرغب)|غير\s*مهتم)/iu],
+    ["accepted",/(?:i accept|agreed|deal\b|قبول(?:ه|\s*دارم)?|موافقم|تأیید|تاييد|اوکی|نعم\s*موافق|اتفقنا|موافق)/iu],
+    ["quote_requested",/(?:quotation|proforma|quote\b|پیش[‌\s-]*فاکتور|عرض\s*سعر)/iu],
+    ["objection_price",/(?:too expensive|price\s+(?:is\s+)?too high|گران(?:ه|\s*است)?|گرون|قیمت\s*(?:زیاد|بالا)|غالي|السعر\s*(?:غالي|مرتفع))/iu],
+    ["asks_moq",/(?:\bmoq\b|minimum\s*(?:order|quantity)|حداقل\s*(?:سفارش|تعداد)|اقل\s*(?:طلب|كمية)|الحد\s*الأدنى)/iu],
+    ["asks_shipping",/(?:shipping|delivery|ارسال|تحویل|زمان\s*رسیدن|شحن|توصيل|التسليم)/iu],
+    ["asks_price",/(?:\bprice\b|\bcost\b|قیمت|هزینه|چنده|سعر|بكم|كم\s*السعر)/iu],
+    ["negotiating",/(?:negotia|terms|discount|شرایط|مذاکره|تخفیف|توافق|تفاوض|خصم|الشروط)/iu],
+    ["interested",/(?:interested|tell me more|علاقه|مایل|اطلاعات\s*بیشتر|مهتم|اريد\s*تفاصيل)/iu]
+  ];
+  for(const [intent,pattern] of rules)if(pattern.test(text))return intent;
+  return "other";
+}
+
+function negotiationReplyDraft(intent,language) {
+  const ar=language==="Iraqi Arabic";
+  const drafts={
+    interested:ar?"شكراً لاهتمامكم. حتى نساعدكم بشكل أدق، يرجى إرسال نوع المنتج والكمية المطلوبة والتخصيص والوجهة. أي شروط تجارية نهائية تحتاج تأكيد صاحب العمل.":"از توجه شما سپاسگزاریم. برای راهنمایی دقیق‌تر، لطفاً نوع محصول، تعداد، شخصی‌سازی و مقصد را بفرمایید. هرگونه شرایط تجاری نهایی پس از تأیید مالک کسب‌وکار اعلام می‌شود.",
+    asks_price:ar?"شكراً لسؤالكم عن السعر. يرجى إرسال نوع المنتج والكمية المطلوبة والتخصيص والوجهة. السعر النهائي يحتاج تأكيد صاحب العمل.":"از پرسش شما درباره قیمت متشکریم. لطفاً نوع محصول، تعداد، شخصی‌سازی و مقصد را بفرمایید. قیمت نهایی پس از تأیید مالک کسب‌وکار اعلام می‌شود.",
+    asks_moq:ar?"شكراً لاستفساركم عن الحد الأدنى. يرجى إرسال نوع المنتج والكمية المطلوبة والتخصيص والوجهة. الحد الأدنى النهائي يحتاج تأكيد صاحب العمل.":"از پرسش شما درباره حداقل سفارش متشکریم. لطفاً نوع محصول، تعداد، شخصی‌سازی و مقصد را بفرمایید. حداقل نهایی پس از تأیید مالک کسب‌وکار اعلام می‌شود.",
+    asks_shipping:ar?"شكراً لاستفساركم عن الشحن. يرجى إرسال نوع المنتج والكمية والتخصيص والوجهة الكاملة. طريقة ومدة وتكلفة الشحن تحتاج تأكيد صاحب العمل.":"از پرسش شما درباره ارسال متشکریم. لطفاً نوع محصول، تعداد، شخصی‌سازی و مقصد کامل را بفرمایید. روش، زمان و هزینه ارسال پس از تأیید مالک کسب‌وکار اعلام می‌شود.",
+    objection_price:ar?"نتفهم ملاحظتكم بشأن السعر. يرجى إرسال نوع المنتج والكمية والتخصيص والوجهة حتى يراجع صاحب العمل الشروط الممكنة. لا يمكن تأكيد أي خصم قبل هذه المراجعة.":"ملاحظه شما درباره قیمت را درک می‌کنیم. لطفاً نوع محصول، تعداد، شخصی‌سازی و مقصد را بفرمایید تا مالک کسب‌وکار شرایط ممکن را بررسی کند. هیچ تخفیفی پیش از این بررسی قابل تأیید نیست.",
+    negotiating:ar?"شكراً لتوضيحكم. يرجى إرسال نوع المنتج والكمية والتخصيص والوجهة وأي متطلبات مهمة. صاحب العمل يراجع التفاصيل ويؤكد الشروط النهائية.":"از توضیحات شما متشکریم. لطفاً نوع محصول، تعداد، شخصی‌سازی، مقصد و نیازهای مهم را بفرمایید. مالک کسب‌وکار جزئیات را بررسی و شرایط نهایی را تأیید می‌کند.",
+    quote_requested:ar?"تم استلام طلب عرض السعر. يرجى إرسال نوع المنتج والكمية والتخصيص والوجهة وملاحظاتكم. هذا ليس عرض سعر نهائياً؛ صاحب العمل يؤكد الشروط قبل إصدار أي عرض.":"درخواست پیش‌فاکتور دریافت شد. لطفاً نوع محصول، تعداد، شخصی‌سازی، مقصد و توضیحات خود را بفرمایید. این پیام پیش‌فاکتور نهایی نیست و شرایط باید پیش از صدور هر پیشنهاد توسط مالک تأیید شود.",
+    accepted:ar?"شكراً لتأكيد اهتمامكم. للتقدم، يرجى تأكيد نوع المنتج والكمية والتخصيص والوجهة. هذا التأكيد لا يعني إنشاء طلب أو دفع، والشروط النهائية تحتاج مراجعة صاحب العمل.":"از اعلام موافقت شما سپاسگزاریم. برای ادامه، لطفاً نوع محصول، تعداد، شخصی‌سازی و مقصد را تأیید کنید. این موافقت به معنی ثبت سفارش یا پرداخت نیست و شرایط نهایی نیازمند بررسی مالک است.",
+    rejected:ar?"شكراً لردكم. نحترم قراركم، وإذا احتجتم معلومات إضافية مستقبلاً فنحن بالخدمة.":"از پاسخ شما متشکریم. به تصمیم شما احترام می‌گذاریم و اگر در آینده به اطلاعات بیشتری نیاز داشتید، در خدمت هستیم.",
+    other:ar?"شكراً لرسالتكم. يرجى توضيح نوع المنتج والكمية والتخصيص والوجهة المطلوبة حتى يراجع صاحب العمل طلبكم ويرد بدقة.":"از پیام شما متشکریم. لطفاً نوع محصول، تعداد، شخصی‌سازی و مقصد موردنظر را بفرمایید تا مالک کسب‌وکار درخواست شما را بررسی و دقیق پاسخ دهد."
+  };
+  return drafts[NEGOTIATION_INTENTS.has(intent)?intent:"other"];
+}
+
+function extractQuoteRequestDetails(value) {
+  const text=String(value||"").trim().slice(0,2000);
+  const take=pattern=>String(text.match(pattern)?.[1]||"").trim().slice(0,180)||null;
+  return {
+    requested_product:take(/(?:product|محصول|منتج)\s*[:：-]?\s*([^\n،,؛;]{2,180})/iu),
+    quantity:take(/(?:quantity|qty|تعداد|كمية)\s*[:：-]?\s*([0-9۰-۹٠-٩][0-9۰-۹٠-٩\s.,]*)/iu),
+    customization:take(/(?:customi[sz]ation|personalization|شخصی[‌\s-]*سازی|چاپ|لوگو|تخصيص)\s*[:：-]?\s*([^\n،,؛;]{2,180})/iu),
+    destination:take(/(?:destination|ship(?:ping)?\s+to|مقصد|ارسال\s+به|الوجهة|شحن\s+الى)\s*[:：-]?\s*([^\n،,؛;]{2,180})/iu),
+    requested_price_or_discount:take(/(?:requested\s+(?:price|discount)|قیمت\s+درخواستی|تخفیف|السعر\s+المطلوب|خصم)\s*[:：-]?\s*([^\n،,؛;]{1,180})/iu),
+    customer_notes:text||null
+  };
+}
+
+async function getNegotiationConversationContext(env,leadId,conversationId) {
+  const inbound=await env.DB.prepare("SELECT id,message,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
+  const outbound=await env.DB.prepare("SELECT id,message,created_at,status FROM lead_outreach WHERE lead_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
+  return [
+    ...(inbound.results||[]).map(x=>({id:x.id,direction:"inbound",message:String(x.message||"").slice(0,1200),created_at:x.created_at})),
+    ...(outbound.results||[]).map(x=>({id:x.id,direction:"outbound",message:String(x.message||"").slice(0,1200),created_at:x.created_at,status:x.status}))
+  ].sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at))).slice(-12);
+}
+
+async function processNegotiationInbound(env,inboxId) {
+  await ensureLeadOutreachStore(env);
+  const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,l.stage AS lead_stage,c.contact_id,c.platform AS conversation_platform
+    FROM inbox_messages i JOIN leads l ON l.id=i.lead_id
+    JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
+    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
+  if(!row||row.platform!=="telegram"||row.conversation_platform!=="telegram")return {processed:false,reason:"unlinked_or_unsupported"};
+  const existing=await env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
+  if(existing){
+    if(row.reply_suggestion!==existing.message)await env.DB.prepare("UPDATE inbox_messages SET reply_suggestion=?,updated_at=? WHERE id=?").bind(existing.message,now(),inboxId).run();
+    return {processed:true,idempotent:true,outreach:existing};
+  }
+  const intent=classifyNegotiationIntent(row.message);
+  const language=outreachLanguage(parseLeadNotes({notes:row.lead_notes}));
+  await env.DB.prepare("UPDATE inbox_messages SET category=?,updated_at=? WHERE id=? AND lead_id=? AND conversation_id=?").bind(intent,now(),inboxId,row.lead_id,row.conversation_id).run();
+  const nextStage=NEGOTIATION_STAGE_INTENTS.has(intent)?"negotiation":"replied";
+  await env.DB.prepare(`UPDATE leads SET stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified','contacted','replied')`).bind(nextStage,now(),row.lead_id).run();
+  const contact=await env.DB.prepare("SELECT * FROM lead_contacts WHERE id=? AND lead_id=? LIMIT 1").bind(row.contact_id||"",row.lead_id).first();
+  const recipient=telegramLeadContactChatId(contact);
+  if(!recipient)throw Error("Linked Telegram conversation has no sendable numeric contact");
+  const context=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);
+  const message=negotiationReplyDraft(intent,language),t=now(),outreachId=uid();
+  await env.DB.prepare(`INSERT OR IGNORE INTO lead_outreach
+    (id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,created_at,updated_at)
+    VALUES(?,?,?,?,?,'telegram',?,?,?,?,?,?)`).bind(outreachId,row.lead_id,contact.id,row.conversation_id,inboxId,recipient,message,language,"draft",t,t).run();
+  const outreach=await env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
+  if(!outreach)throw Error("Negotiation draft could not be persisted");
+  await env.DB.prepare("UPDATE inbox_messages SET category=?,reply_suggestion=?,updated_at=? WHERE id=?").bind(intent,outreach.message,now(),inboxId).run();
+  const quoteRequest=intent==="quote_requested"?extractQuoteRequestDetails(row.message):null;
+  await audit(env,"negotiation_reply_draft_created","Linked inbound reply prepared for owner review",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,intent,language,context_message_count:context.length,quote_request:quoteRequest});
+  return {processed:true,idempotent:outreach.id!==outreachId,intent,language,outreach};
 }
 
 async function selectLeadOutreachContact(env, lead, body = {}) {
@@ -7048,8 +7158,25 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
 
       if (u.pathname === "/api/inbox" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        const r = await env.DB.prepare("SELECT * FROM inbox_messages ORDER BY created_at DESC LIMIT 200").all();
+        await ensureLeadOutreachStore(env);
+        const r = await env.DB.prepare(`SELECT i.*,l.name AS lead_name,o.id AS outreach_id,o.status AS outreach_status,o.message AS outreach_message,o.language AS outreach_language
+          FROM inbox_messages i LEFT JOIN leads l ON l.id=i.lead_id LEFT JOIN lead_outreach o ON o.inbox_message_id=i.id
+          ORDER BY i.created_at DESC LIMIT 200`).all();
         return json({ items: r.results || [] });
+      }
+
+      if (u.pathname === "/api/inbox/negotiation-draft" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({})),id=String(b.id||"").trim();
+        if(!id)return json({ok:false,error:"id is required"},400);
+        const inbox=await env.DB.prepare("SELECT lead_id,conversation_id FROM inbox_messages WHERE id=? LIMIT 1").bind(id).first();
+        if(!inbox)return json({ok:false,error:"Inbox message not found"},404);
+        if(!inbox.lead_id||!inbox.conversation_id)return json({ok:false,error:"Inbox message is not deterministically linked"},409);
+        try { return json({ok:true,...await processNegotiationInbound(env,id)}); }
+        catch(error){
+          try { await audit(env,"negotiation_reply_draft_failed","Manual negotiation draft generation failed",{inbox_message_id:id,lead_id:inbox.lead_id,conversation_id:inbox.conversation_id,error:sanitizeOperationalError(error?.message||error)}); } catch {}
+          return json({ok:false,error:sanitizeOperationalError(error?.message||error)},500);
+        }
       }
 
       if (u.pathname === "/api/inbox" && req.method === "PATCH") {
@@ -7553,6 +7680,19 @@ Context: ${context}`;
           ORDER BY o.created_at DESC LIMIT 100`).all();
         const items=(r.results||[]).map(item=>({...item,telegram_sendable:!!telegramLeadContactChatId({contact_type:item.contact_type,raw_value:item.contact_raw_value,normalized_value:item.contact_normalized_value,evidence_status:item.evidence_status,source:item.contact_source})}));
         return json({ok:true,items,sending_enabled:true});
+      }
+
+      if (u.pathname === "/api/leads/outreach/draft" && req.method === "PATCH") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        await ensureLeadOutreachStore(env);
+        const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),message=String(b.message||"").trim();
+        if(!id||!message)return json({ok:false,error:"id and message are required"},400);
+        if(message.length>4000)return json({ok:false,error:"Draft is too long"},400);
+        const t=now();
+        const result=await env.DB.prepare("UPDATE lead_outreach SET message=?,updated_at=? WHERE id=? AND status='draft'").bind(message,t,id).run();
+        if(!result.meta?.changes)return json({ok:false,error:"Only a draft outreach can be edited"},409);
+        await env.DB.prepare("UPDATE inbox_messages SET reply_suggestion=?,updated_at=? WHERE id=(SELECT inbox_message_id FROM lead_outreach WHERE id=?)").bind(message,t,id).run();
+        return json({ok:true,id,status:"draft",sending_enabled:false});
       }
 
       if (u.pathname === "/api/leads/outreach/transition" && req.method === "POST") {

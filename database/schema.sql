@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS lead_outreach (
  lead_id TEXT NOT NULL,
  contact_id TEXT,
  conversation_id TEXT,
+ inbox_message_id TEXT,
  channel TEXT NOT NULL,
  recipient TEXT NOT NULL,
  message TEXT NOT NULL,
@@ -84,6 +85,9 @@ CREATE TABLE IF NOT EXISTS lead_outreach (
 CREATE INDEX IF NOT EXISTS idx_lead_outreach_lead_status ON lead_outreach(lead_id, status);
 CREATE INDEX IF NOT EXISTS idx_lead_outreach_contact ON lead_outreach(contact_id);
 CREATE INDEX IF NOT EXISTS idx_lead_outreach_conversation ON lead_outreach(conversation_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_outreach_inbox_message
+ON lead_outreach(inbox_message_id)
+WHERE inbox_message_id IS NOT NULL AND inbox_message_id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_outreach_provider_message
 ON lead_outreach(channel, provider_message_id)
 WHERE provider_message_id IS NOT NULL AND provider_message_id <> '';

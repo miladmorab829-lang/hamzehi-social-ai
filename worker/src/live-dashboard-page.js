@@ -68,6 +68,12 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </section>
 
 <section class="card section">
+<div class="title"><div><h2>💬 NEGOTIATION INBOX</h2><div class="hint">پاسخ‌های لینک‌شده، نیت محدود و پیش‌نویس قابل ویرایش. تأیید به‌تنهایی ارسال نمی‌کند.</div></div><button class="btn" onclick="loadNegotiationInbox()">↻ REFRESH</button></div>
+<div id="negotiationInboxStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="negotiationInboxItems" class="rows"></div>
+</section>
+
+<section class="card section">
 <div class="title"><div><h2>🎛️ MASTER CONTROL</h2><div class="hint">کنترل فوری کل صف Autonomous. توقف، اجرای Taskهای آماده را کنترل می‌کند.</div></div><button class="btn" onclick="refreshAll()">↻ REFRESH</button></div>
 <div class="tools" style="margin-top:10px">
 <button class="btn primary" onclick="masterAction('on')">▶ START ALL</button>
@@ -355,13 +361,38 @@ async function setOutreachStatus(id,action){
  const d=await api("/api/leads/outreach/transition",{method:"POST",body:JSON.stringify({id,action})});
  if(!d.ok){$("outreachApprovalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Outreach update failed")+"</span>";return}
  $("outreachApprovalStatus").textContent=d.status==="approved"?"تأیید ثبت شد؛ هیچ پیامی ارسال نشد.":"وضعیت ثبت شد: "+d.status;
- await loadOutreachApprovals();
+ await Promise.all([loadOutreachApprovals(),loadNegotiationInbox()]);
 }
 async function sendTelegramOutreach(id){
  const d=await api("/api/leads/outreach/send-telegram",{method:"POST",body:JSON.stringify({id})});
  if(!d.ok){$("outreachApprovalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Telegram send failed")+"</span>";await loadOutreachApprovals();return}
  $("outreachApprovalStatus").innerHTML="<span class='ok'>✓ پیام تأییدشده ارسال و ثبت شد.</span>";
  await loadOutreachApprovals();
+}
+async function loadNegotiationInbox(){
+ const status=$("negotiationInboxStatus"),list=$("negotiationInboxItems");
+ status.textContent="در حال دریافت پاسخ‌های مشتری…";
+ const d=await api("/api/inbox");
+ if(!d.ok){status.innerHTML="<span class='bad'>✕ "+esc(d.error||"Inbox unavailable")+"</span>";list.innerHTML="";return}
+ const items=(d.items||[]).filter(x=>x.platform==="telegram");
+ status.textContent=items.filter(x=>x.lead_id&&x.conversation_id).length+" پیام لینک‌شده · پیام ناشناس بدون پیش‌نویس باقی می‌ماند.";
+ list.innerHTML=items.length?items.map(x=>{
+  const linked=!!(x.lead_id&&x.conversation_id),draftId="neg-draft-"+String(x.id),state=x.outreach_status||"none";
+  const controls=!linked?"<span class='warn'>UNLINKED — NO DRAFT</span>":!x.outreach_id?"<button class='btn' onclick='generateNegotiationDraft(&quot;"+esc(x.id)+"&quot;)'>GENERATE DRAFT</button>":state==="draft"?"<button class='btn' onclick='saveNegotiationDraft(&quot;"+esc(x.outreach_id)+"&quot;,&quot;"+esc(draftId)+"&quot;)'>SAVE DRAFT</button><button class='btn' onclick='setOutreachStatus(&quot;"+esc(x.outreach_id)+"&quot;,&quot;submit&quot;)'>SUBMIT FOR APPROVAL</button>":state==="pending_approval"?"<button class='btn primary' onclick='setOutreachStatus(&quot;"+esc(x.outreach_id)+"&quot;,&quot;approve&quot;)'>APPROVE</button><button class='btn danger' onclick='setOutreachStatus(&quot;"+esc(x.outreach_id)+"&quot;,&quot;reject&quot;)'>REJECT</button>":state==="approved"?"<span class='ok'>APPROVED — SEND فقط از بخش Outreach Approval</span>":"<span class='tag'>"+esc(state)+"</span>";
+  return "<div class='row'><b>"+esc(x.lead_name||x.sender||"Unknown")+"</b><div class='mini'>Intent: "+esc(x.category||"other")+" · Conversation: "+esc(x.conversation_id||"—")+" · Draft: "+esc(state)+"</div><div style='margin-top:6px;white-space:pre-wrap'>"+esc(x.message||"")+"</div>"+(x.outreach_id?"<textarea id='"+esc(draftId)+"' class='input' style='margin-top:8px;min-height:100px'>"+esc(x.outreach_message||x.reply_suggestion||"")+"</textarea>":"<div class='hint' style='margin-top:7px'>Suggested reply: "+esc(x.reply_suggestion||"—")+"</div>")+"<div class='tools' style='margin-top:8px'>"+controls+"</div></div>";
+ }).join(""):"<div class='hint'>پیامی وجود ندارد.</div>";
+}
+async function generateNegotiationDraft(id){
+ const d=await api("/api/inbox/negotiation-draft",{method:"POST",body:JSON.stringify({id})});
+ if(!d.ok){$("negotiationInboxStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Draft generation failed")+"</span>";return}
+ await Promise.all([loadNegotiationInbox(),loadOutreachApprovals()]);
+}
+async function saveNegotiationDraft(id,inputId){
+ const message=$(inputId)?.value?.trim()||"";
+ const d=await api("/api/leads/outreach/draft",{method:"PATCH",body:JSON.stringify({id,message})});
+ if(!d.ok){$("negotiationInboxStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Draft save failed")+"</span>";return}
+ $("negotiationInboxStatus").innerHTML="<span class='ok'>✓ پیش‌نویس ذخیره شد؛ هیچ پیامی ارسال نشد.</span>";
+ await Promise.all([loadNegotiationInbox(),loadOutreachApprovals()]);
 }
 async function loadDiagnostic(){
  const d=await api(A+"/status");
@@ -873,7 +904,7 @@ async function refreshAll(){
  refreshInProgress=true;
  try{
   await loadStatus();
-  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals(),loadOutreachApprovals()]);
+  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals(),loadOutreachApprovals(),loadNegotiationInbox()]);
  }catch(e){
   $("masterState").textContent="DASHBOARD ERROR";
   $("masterState").className="pill bad";
