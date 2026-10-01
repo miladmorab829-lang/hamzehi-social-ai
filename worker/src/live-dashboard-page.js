@@ -35,12 +35,13 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 
 <section class="card section">
 <div class="title"><div><h2>🤖 AI COMMAND CENTER</h2><div class="hint">فرمان طبیعی بنویس. نمونه: «تلگرام را بررسی کن، ولی اینستاگرام را فعلاً متوقف کن و فرصت‌های تبلیغاتی را پیدا کن.»</div></div><span class="tag">ADMIN CONTROLLED</span></div>
-<div class="command" style="margin-top:11px"><input id="command" class="input" placeholder="دستور عملیاتی خودت را اینجا بنویس…"><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button></div>
+<div class="command" style="margin-top:11px"><input id="command" class="input" placeholder="دستور عملیاتی یا دانش فروش را اینجا بنویس…"><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button></div>
 <div class="examples">
 <div class="example" onclick="setCmd('تلگرام را بررسی کن و مشتری‌های جدید را تحلیل کن')"><b>📥 Telegram + CRM</b><span>بررسی پیام و تحلیل مشتری</span></div>
 <div class="example" onclick="setCmd('واتساپ را بررسی کن ولی فعلاً هیچ اقدامی انجام نده')"><b>🛑 WhatsApp observe</b><span>فقط مشاهده و عدم اقدام</span></div>
 <div class="example" onclick="setCmd('اینستاگرام را متوقف کن و تبلیغات را بررسی کن')"><b>⛔ Instagram + Ads</b><span>کنترل ماژول و کشف فرصت</span></div>
 <div class="example" onclick="setCmd('سایت و مشتری‌ها را بررسی کن و گزارش بده')"><b>🌐 Website + CRM</b><span>رصد رشد و مشتری</span></div>
+<div class="example" onclick="setCmd('برای مدل X هم رنگ سرمه‌ای اضافه کن')"><b>📚 Sales Knowledge</b><span>پیشنهاد دانش فروش؛ بدون اعمال مستقیم</span></div>
 </div>
 <div id="commandStatus" class="hint" style="margin-top:10px">آماده دریافت دستور.</div>
 </section>
@@ -796,17 +797,29 @@ async function photoRunNow(){
 }
 async function masterAction(action){$("masterHelp").textContent="در حال اجرای "+action+"…";const d=await api(A+"/master",{method:"POST",body:JSON.stringify({action})});$("masterHelp").innerHTML=d.ok?"<span class='ok'>✓ MASTER → "+esc(action)+" · وضعیت ثبت شد.</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}
 async function moduleToggle(module,enabled){const d=await api(A+"/module",{method:"POST",body:JSON.stringify({module,enabled})});if(!d.ok)alert(d.error||"خطا");await loadStatus()}
+let commandRequestId=null;
 async function sendCommand(){
  const raw=$("command").value.trim();
  if(!raw){
   $("commandStatus").innerHTML="<span class='warn'>لطفاً ابتدا دستور را وارد کنید.</span>";
   return;
  }
- $("commandStatus").textContent="در حال ساخت Plan و Task…";
- const d=await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw})});
+ commandRequestId=commandRequestId||("cmd-"+crypto.randomUUID());
+ $("commandStatus").textContent="در حال تحلیل فرمان…";
+ const d=await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw,command_id:commandRequestId})});
+ if(d.knowledge_router){
+  const x=d.interpretation||{},request=d.request||{};
+  const detail="Intent: "+esc(x.intent||"—")+" · "+esc(x.operation||"—")+" · "+esc(x.domain||"—")+" / "+esc(x.attribute||"—")+" · "+esc(x.market||"—");
+  const review=d.change_request_id?" <a href='#knowledgePanel'>OPEN KNOWLEDGE REVIEW</a>":"";
+  $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ "+esc(d.message||"Knowledge command handled")+"</span><div class='mini'>"+detail+" · Request: "+esc(d.change_request_id||"clarification")+review+"</div>":"<span class='bad'>✕ "+esc(d.error||"Knowledge command failed")+"</span>";
+  commandRequestId=null;
+  if(d.ok&&d.change_request_id)await loadSalesKnowledge();
+  return;
+ }
  $("commandStatus").innerHTML=d.ok
   ?"<span class='ok'>✓ فرمان ثبت شد · "+esc(d.command_id)+" · "+(d.plan?.tasks?.length||0)+" Task ساخته شد.</span>"
   :"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";
+ commandRequestId=null;
  if(d.ok){await runTasks()}
 }
 async function runTasks(){$("commandStatus").textContent="در حال اجرای Taskهای آماده…";const d=await api(A+"/tasks/run",{method:"POST",body:"{}"});$("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ اجرا: "+d.executed+" · خطا: "+d.failed+(d.paused?" · PAUSED":"")+"</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}

@@ -4738,6 +4738,8 @@ const SALES_KNOWLEDGE_FIELDS = {
   deposit: {rule:"text"},
   payment: {terms:"text"},
   discount: {rule:"text"},
+  sales: {rule:"text"},
+  negotiation: {rule:"text",behavior:"text"},
   pricing: {authority:"pricing_authority"}
 };
 const SALES_KNOWLEDGE_COMMERCIAL = new Set(["quantity","production","shipping","deposit","payment","discount","pricing"]);
@@ -4797,7 +4799,7 @@ function knowledgeAuditStatement(env,id,type,details,t) {
   return env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Owner knowledge review lifecycle',?,?)")
     .bind("knowledge:"+id+":"+type,type,JSON.stringify(details),t);
 }
-async function proposeSalesKnowledge(env,body) {
+async function proposeSalesKnowledge(env,body,context={}) {
   knowledgeOnlyKeys(body,["id","operation","domain","entity_type","entity_key","attribute","market","value","target_fact_id","target_version","effective_from","effective_until"]);
   const id=knowledgeId(body.id),operation=body.operation;
   if(!SALES_KNOWLEDGE_OPERATIONS.has(operation))throw Error("Invalid knowledge operation");
@@ -4838,13 +4840,15 @@ async function proposeSalesKnowledge(env,body) {
       .bind(domain,entityType,entityKey,attribute,market,valueHash,target?.id||"").first();
     if(duplicate&&!conflicts.some(x=>x.fact_id===duplicate.id))conflicts.push({reason:"duplicate_member",fact_id:duplicate.id,version:duplicate.version});
   }
+  const sourceCommandId=context.sourceCommandId?knowledgeId(context.sourceCommandId):null;
+  const parserConfidence=Number.isFinite(context.parserConfidence)&&context.parserConfidence>=0&&context.parserConfidence<=1?context.parserConfidence:null;
   const t=now(),status=conflicts.length?"conflict":"pending_review";
   await env.DB.batch([
     env.DB.prepare(`INSERT OR IGNORE INTO sales_knowledge_change_requests
-      (id,operation,fact_key,domain,entity_type,entity_key,attribute,market,member_key,target_fact_id,target_version,old_value_json,new_value_json,value_hash,effective_from,effective_until,proposal_hash,conflict_json,sensitivity,confidence,status,requested_by,source_type,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,'admin','owner_form',?,?)`)
-      .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),SALES_KNOWLEDGE_COMMERCIAL.has(domain)?"commercial":"standard",status,t,t),
-    knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain},t)
+      (id,operation,fact_key,domain,entity_type,entity_key,attribute,market,member_key,target_fact_id,target_version,old_value_json,new_value_json,value_hash,effective_from,effective_until,proposal_hash,conflict_json,sensitivity,confidence,status,requested_by,source_type,source_command_id,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admin',?,?,?,?)`)
+      .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),SALES_KNOWLEDGE_COMMERCIAL.has(domain)?"commercial":"standard",parserConfidence,status,context.sourceType||"owner_form",sourceCommandId,t,t),
+    knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain,source_command_id:sourceCommandId,parser_source:context.parserSource||"owner_form",parser_confidence:parserConfidence},t)
   ]);
   const stored=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
   if(stored.proposal_hash!==proposalHash)throw Error("Concurrent request ID conflict");
@@ -4951,6 +4955,186 @@ async function handleSalesKnowledge(req,env) {
     const missing=/no such table/i.test(message);
     return json({ok:false,error:missing?"Knowledge schema unavailable; migrate before deployment":sanitizeOperationalError(message)},missing?503:400);
   }
+}
+
+// P0-7B deliberately recognizes a small, allowlisted subset of owner language.
+// It never calls the operational planner for a recognized knowledge command and
+// it never applies a fact: it can only create a P0-7A review request.
+const KNOWLEDGE_COMMAND_OPERATIONS=new Set(["ADD","EXPAND","UPDATE","REPLACE","DEACTIVATE","DELETE"]);
+const PERSIAN_DIGITS="۰۱۲۳۴۵۶۷۸۹",ARABIC_DIGITS="٠١٢٣٤٥٦٧٨٩";
+function knowledgeCommandText(value){
+  if(typeof value!=="string")return "";
+  return value.normalize("NFKC").replace(/\s+/g," ").trim();
+}
+function knowledgeCommandNumber(value){
+  const s=knowledgeCommandText(value).replace(/[۰-۹]/g,x=>String(PERSIAN_DIGITS.indexOf(x))).replace(/[٠-٩]/g,x=>String(ARABIC_DIGITS.indexOf(x)));
+  const n=Number(s);return Number.isSafeInteger(n)?n:null;
+}
+function knowledgeCommandOperation(raw){
+  const s=raw.toLowerCase();
+  if(/(?:حذف|پاک\s*کن|بردار|احذف|\bdelete\b|\bremove\b)/i.test(s))return {operation:"DELETE",intent:"DELETE"};
+  if(/(?:غیرفعال|متوقف\s*کن|عطّل|معطل|\bdeactivate\b|\bdisable\b)/i.test(s))return {operation:"DEACTIVATE",intent:"DEACTIVATE"};
+  if(/(?:جایگزین|\breplace\b)/i.test(s))return {operation:"REPLACE",intent:"REPLACE"};
+  if(/(?:اصلاح|اشتباه|\bcorrect\b)/i.test(s))return {operation:"UPDATE",intent:"CORRECT"};
+  if(/(?:تغییر|به\s*روز|غيّر|غير|\bupdate\b|\bchange\b)/i.test(s))return {operation:"UPDATE",intent:"UPDATE"};
+  if(/(?:هم\s+.*(?:اضافه|داریم)|(?:اضافه|add).*\b(?:also|too)\b|(?:also|too)\s+(?:add|have)|\bexpand\b)/i.test(s))return {operation:"EXPAND",intent:"EXPAND"};
+  if(/(?:یاد\s*بگیر|علّمني|علمني|\bteach\b)/i.test(s))return {operation:"ADD",intent:"TEACH"};
+  if(/(?:قانون.*(?:فروش|تخفیف)|\bsales\s+rule\b|\badd\s+rule\b)/i.test(s))return {operation:"ADD",intent:"ADD_SALES_RULE"};
+  if(/(?:مذاکره|\bnegotiat)/i.test(s))return {operation:"ADD",intent:"CHANGE_NEGOTIATION_BEHAVIOR"};
+  return {operation:"ADD",intent:"ADD_PRODUCT_KNOWLEDGE"};
+}
+function knowledgeCommandMarket(raw){
+  const s=raw.toLowerCase();
+  if(/(?:ایران|\biran\b)/i.test(s))return "IRAN";
+  if(/(?:عراق|\biraq\b|عربی|عرب|\barab\b)/i.test(s))return "ARAB";
+  return "GLOBAL";
+}
+function knowledgeCommandEntity(raw){
+  const s=knowledgeCommandText(raw);
+  const fa=s.match(/(?:برای\s*)?(?:مدل(?:\s+(?:جعبه|box))?|model|موديل|الموديل)\s+(.+?)(?=\s+(?:را|رو|هم|رنگ|color|لون|موک|moq|حداقل|از|به|اضافه|تغییر|اصلاح|جایگزین|حذف|غیرفعال|delete|replace|update|deactivate)|$)/i);
+  const en=s.match(/(?:for\s+|to\s+)?model\s+([a-z0-9][a-z0-9 _-]{0,100}?)(?=\s+(?:color|moq|from|to|add|change|correct|replace|delete|deactivate)\b|$)/i);
+  const value=(fa?.[1]||en?.[1]||"").trim();
+  if(value)return {entity_type:"model",entity_key:value};
+  return {entity_type:"business",entity_key:"global"};
+}
+function knowledgeCommandValue(raw,domain,attribute,entity){
+  const s=knowledgeCommandText(raw),lower=s.toLowerCase();
+  const afterTo=s.match(/(?:\bto\b|به)\s*([۰-۹٠-٩0-9]+)/i);
+  if(domain==="quantity"&&attribute==="moq"){
+    const values=[...s.matchAll(/[۰-۹٠-٩0-9]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger);
+    return {value:afterTo?knowledgeCommandNumber(afterTo[1]):values.at(-1)??null,oldValue:values.length>1?values[0]:null};
+  }
+  if(domain==="color"){
+    const en=s.match(/\badd\s+(.+?)\s+color\s+(?:to|for)\s+(?:the\s+)?model\b/i);
+    const m=s.match(/(?:رنگ|color|لون)\s+(?:های?\s+)?(.+?)(?=\s+(?:را|رو|هم|اضافه|تغییر|اصلاح|جایگزین|حذف|غیرفعال|add|change|correct|replace|delete|deactivate|to\s+model|for\s+model|للموديل|للمودل)|$)/i);
+    return {value:en?.[1]?.trim()||m?.[1]?.trim()||null};
+  }
+  if(domain==="size"){
+    const m=s.match(/(?:سایز|اندازه|size)\s+(.+?)(?=\s+(?:را|رو|هم|اضافه|تغییر|اصلاح|جایگزین|حذف|غیرفعال|add|change|correct|replace|delete|deactivate)|$)/i);
+    return {value:m?.[1]?.trim()||null};
+  }
+  if(domain==="product"&&attribute==="name")return {value:entity.entity_key};
+  if(domain==="pricing")return {value:null};
+  const quoted=s.match(/[«"]([^»"]+)[»"]/);
+  return {value:(quoted?.[1]||s).trim()||null};
+}
+export function parseSalesKnowledgeCommand(raw){
+  const command=knowledgeCommandText(raw);
+  if(!command||command.length>2000)return {recognized:false,error:"A bounded owner command is required"};
+  const knowledgeSignal=/(?:مدل|جعبه|رنگ|سایز|اندازه|موک|حداقل سفارش|تخفیف|زمان تولید|محدودیت تولید|ارسال|حمل|پرداخت|بیعانه|قیمت|قانون فروش|مذاکره|تصویر|عکس|موديل|الموديل|لون|سعر|خصم|شحن|انتاج|\bproduct\b|\bmodel\b|\bcolor\b|\bsize\b|\bmoq\b|\bminimum order\b|\bdiscount\b|\bproduction\b|\bshipping\b|\bpayment\b|\bdeposit\b|\bprice\b|\bsales rule\b|\bnegotiat|\bvisual\b|\bmedia\b|\bteach\b)/i.test(command);
+  if(!knowledgeSignal)return {recognized:false};
+  const action=knowledgeCommandOperation(command),entity=knowledgeCommandEntity(command),market=knowledgeCommandMarket(command),s=command.toLowerCase();
+  if(/(?:مذاکره|\bnegotiat)/i.test(s))action.intent="CHANGE_NEGOTIATION_BEHAVIOR";
+  if(/(?:قانون فروش|\bsales\s+rule\b)/i.test(s))action.intent=["UPDATE","REPLACE"].includes(action.operation)?"CHANGE_SALES_RULE":"ADD_SALES_RULE";
+  let domain=null,attribute=null;
+  if(/(?:قیمت|سعر|\bprice\b)/i.test(s)){domain="pricing";attribute="authority";}
+  else if(/(?:موک|\bmoq\b|\bminimum\s+order\b|حداقل سفارش)/i.test(s)){domain="quantity";attribute="moq";}
+  else if(/(?:تخفیف|خصم|\bdiscount\b)/i.test(s)){domain="discount";attribute="rule";}
+  else if(/(?:زمان تولید|\bproduction\s*(?:time|timing)\b|\blead time\b)/i.test(s)){domain="production";attribute="timing_rule";}
+  else if(/(?:محدودیت تولید|\bproduction\s*(?:constraint|limit)\b|\bcapacity\b)/i.test(s)){domain="production";attribute="constraint";}
+  else if(/(?:ارسال|حمل|شحن|\bshipping\b)/i.test(s)){domain="shipping";attribute="terms";}
+  else if(/(?:پرداخت|\bpayment\b)/i.test(s)){domain="payment";attribute="terms";}
+  else if(/(?:بیعانه|\bdeposit\b)/i.test(s)){domain="deposit";attribute="rule";}
+  else if(/(?:چاپ|فویل|\bprinting\b|\bfoil\b|\bbranding\b)/i.test(s)){domain="printing";attribute=/فویل|foil/i.test(s)?"method":"limitation";}
+  else if(/(?:سایز|اندازه|\bsize\b)/i.test(s)){domain="size";attribute="available_size";}
+  else if(/(?:رنگ ترکیبی|\bcolor combination\b)/i.test(s)){domain="color";attribute="combination";}
+  else if(/(?:رنگ داخلی|\binterior color\b)/i.test(s)){domain="color";attribute="interior";}
+  else if(/(?:رنگ|لون|\bcolor\b)/i.test(s)){domain="color";attribute="exterior";}
+  else if(/(?:قانون فروش|\bsales\s+rule\b)/i.test(s)){domain="sales";attribute="rule";}
+  else if(/(?:مذاکره|\bnegotiat)/i.test(s)){domain="negotiation";attribute="behavior";}
+  else if(/(?:تصویر|عکس|\bvisual\b|\bmedia\b)/i.test(s))return {recognized:true,requires_phase:"visual_knowledge",intent:"ADD_VISUAL_KNOWLEDGE",operation:"ADD",confidence:0.85,error:"Visual knowledge requires the dedicated real-media indexing phase"};
+  else if(/(?:مدل|جعبه|\bproduct\b|\bmodel\b)/i.test(s)){domain="product";attribute="name";}
+  else return {recognized:true,confidence:0.4,error:"The knowledge domain or attribute is not allowlisted"};
+  const parsed={recognized:true,intent:action.intent,operation:action.operation,domain,attribute,market,...entity,confidence:0.96};
+  Object.assign(parsed,knowledgeCommandValue(command,domain,attribute,entity));
+  if(["DELETE","DEACTIVATE"].includes(parsed.operation))parsed.value=null;
+  if(domain==="pricing")parsed.pricing_redirect=true;
+  if(!parsed.value&&!["DELETE","DEACTIVATE"].includes(parsed.operation))parsed.error="The proposed value is not clear enough for a review request";
+  if(entity.entity_type==="business"&&domain==="product")parsed.error="The target model or product is required";
+  return parsed;
+}
+async function recordKnowledgeCommandAudit(env,id,type,details){
+  const t=now();
+  await knowledgeAuditStatement(env,id,type,details,t).run();
+}
+async function createKnowledgeRouterConflict(env,parsed,reason,matches,context){
+  const type=knowledgeValidateValue(parsed.domain,parsed.attribute,parsed.market,parsed.value);
+  const valueJson=knowledgeCanonical(parsed.value),memberCanonical=type==="member"&&typeof parsed.value==="string"?knowledgeCanonical(knowledgeKeyPart(parsed.value)):valueJson;
+  const valueHash=await knowledgeHash(memberCanonical),memberKey=type==="member"?valueHash:"";
+  const factKey=JSON.stringify([parsed.domain,parsed.entity_type,parsed.entity_key,parsed.attribute,parsed.market,memberKey]);
+  const id=context.proposalId,proposalHash=await knowledgeHash(knowledgeCanonical({operation:parsed.operation,factKey,valueJson,reason,matches:matches.map(x=>[x.id,x.version])}));
+  const previous=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+  if(previous){if(previous.proposal_hash!==proposalHash)throw Error("Command retry identity belongs to another proposal");return previous;}
+  const conflict=[{reason,matching_facts:matches.map(x=>({id:x.id,version:x.version,status:x.status,value_json:x.value_json}))}],t=now();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO sales_knowledge_change_requests
+      (id,operation,fact_key,domain,entity_type,entity_key,attribute,market,member_key,target_fact_id,target_version,old_value_json,new_value_json,value_hash,proposal_hash,conflict_json,sensitivity,confidence,status,requested_by,source_type,source_command_id,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,'conflict','admin','owner_command_router',?,?,?)`)
+      .bind(id,parsed.operation,factKey,parsed.domain,parsed.entity_type,parsed.entity_key,parsed.attribute,parsed.market,memberKey,JSON.stringify(conflict[0].matching_facts),valueJson,valueHash,proposalHash,JSON.stringify(conflict),SALES_KNOWLEDGE_COMMERCIAL.has(parsed.domain)?"commercial":"standard",parsed.confidence,context.sourceCommandId,t,t),
+    knowledgeAuditStatement(env,id,"sales_knowledge_command_conflict",{request_id:id,source_command_id:context.sourceCommandId,reason,raw_command:context.raw_command,parser_source:"deterministic",parser_confidence:parsed.confidence},t)
+  ]);
+  return await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+}
+export async function routeSalesKnowledgeCommand(env,body){
+  const raw=knowledgeCommandText(body?.command),parsed=parseSalesKnowledgeCommand(raw);
+  if(!parsed.recognized)return {handled:false};
+  const commandId=typeof body?.command_id==="string"&&/^[a-zA-Z0-9_-]{8,60}$/.test(body.command_id)?body.command_id:"cmd-"+uid();
+  const context={proposalId:"knowledge-"+commandId,sourceCommandId:commandId,sourceType:"owner_command_router",parserSource:"deterministic",parserConfidence:parsed.confidence||null,raw_command:raw};
+  if(parsed.requires_phase){
+    await recordKnowledgeCommandAudit(env,context.proposalId,"sales_knowledge_command_requires_phase",{source_command_id:commandId,raw_command:raw,intent:parsed.intent,required_phase:parsed.requires_phase,reason:parsed.error});
+    return {handled:true,knowledge_router:true,status:"requires_owner_review",message:parsed.error,command_id:commandId,interpretation:parsed};
+  }
+  if(parsed.pricing_redirect){
+    const authority=parsed.market==="ARAB"?"commercial_price_items":parsed.market==="IRAN"?"owner_confirmed_quote":"requires_owner_market_selection";
+    await recordKnowledgeCommandAudit(env,context.proposalId,"sales_knowledge_command_pricing_redirected",{source_command_id:commandId,raw_command:raw,authority,market:parsed.market});
+    return {handled:true,knowledge_router:true,status:"requires_authoritative_pricing_workflow",message:authority==="requires_owner_market_selection"?"Market is required before pricing can be routed safely.":"Pricing remains in the existing authoritative pricing workflow and was not added as knowledge.",command_id:commandId,interpretation:parsed,pricing_authority:authority};
+  }
+  if(parsed.error){
+    await recordKnowledgeCommandAudit(env,context.proposalId,"sales_knowledge_command_clarification_required",{source_command_id:commandId,raw_command:raw,intent:parsed.intent,reason:parsed.error});
+    return {handled:true,knowledge_router:true,status:"clarification_required",message:parsed.error,command_id:commandId,interpretation:parsed};
+  }
+  await ensureSalesKnowledgeStore(env);
+  let proposal;
+  if(!["ADD","EXPAND"].includes(parsed.operation)){
+    let candidates=(await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE domain=? AND entity_type=? AND entity_key=? AND attribute=? AND market=? AND status IN ('active','inactive') ORDER BY version DESC").bind(parsed.domain,parsed.entity_type,knowledgeKeyPart(parsed.entity_key),parsed.attribute,parsed.market).all()).results||[];
+    if(parsed.oldValue!=null){const oldJson=knowledgeCanonical(parsed.oldValue);candidates=candidates.filter(x=>x.value_json===oldJson);}
+    if(candidates.length!==1){
+      if(parsed.value===null){
+        await recordKnowledgeCommandAudit(env,context.proposalId,"sales_knowledge_command_clarification_required",{source_command_id:commandId,raw_command:raw,intent:parsed.intent,reason:"exact_active_fact_required",matching_fact_count:candidates.length});
+        return {handled:true,knowledge_router:true,status:"clarification_required",message:"Select the exact active fact to deactivate or delete; no knowledge was changed.",command_id:commandId,interpretation:parsed};
+      }
+      proposal=await createKnowledgeRouterConflict(env,parsed,candidates.length?"ambiguous_target":"target_not_found",candidates,context);
+      return {handled:true,knowledge_router:true,status:"conflict",message:"The exact current fact could not be identified. Old and proposed values were saved for owner review.",command_id:commandId,change_request_id:proposal.id,request:proposal,interpretation:parsed};
+    }
+    parsed.target_fact_id=candidates[0].id;parsed.target_version=candidates[0].version;
+  }
+  proposal=await proposeSalesKnowledge(env,{id:context.proposalId,operation:parsed.operation,domain:parsed.domain,entity_type:parsed.entity_type,entity_key:parsed.entity_key,attribute:parsed.attribute,market:parsed.market,...(["DELETE","DEACTIVATE"].includes(parsed.operation)?{}:{value:parsed.value}),...(parsed.target_fact_id?{target_fact_id:parsed.target_fact_id,target_version:parsed.target_version}:{})},context);
+  await recordKnowledgeCommandAudit(env,context.proposalId,"sales_knowledge_command_routed",{source_command_id:commandId,raw_command:raw,normalized_command:raw.normalize("NFKC"),intent:parsed.intent,operation:parsed.operation,domain:parsed.domain,entity:parsed.entity_key,attribute:parsed.attribute,market:parsed.market,proposed_value:parsed.value,parser_source:"deterministic",parser_confidence:parsed.confidence,change_request_id:proposal.id,status:proposal.status});
+  return {handled:true,knowledge_router:true,status:proposal.status,message:proposal.status==="conflict"?"This conflicts with active knowledge. Old and proposed values are ready for review.":"Knowledge proposal saved and waiting for owner review.",command_id:commandId,change_request_id:proposal.id,request:proposal,interpretation:parsed};
+}
+async function maybeHandleAutonomyKnowledgeCommand(req,env){
+  if(req.method!=="POST"||new URL(req.url).pathname!=="/api/autonomy/command")return null;
+  const copy=req.clone(),reader=copy.body?.getReader();
+  if(!reader)return null;
+  const chunks=[];let length=0;
+  try{
+    while(true){
+      const {done,value}=await reader.read();
+      if(done)break;
+      length+=value.byteLength;
+      if(length>4096){await reader.cancel();return json({ok:false,error:"Command body is too large"},413);}
+      chunks.push(value);
+    }
+  }catch{return null;}
+  const bytes=new Uint8Array(length);let offset=0;
+  for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+  let body;try{body=JSON.parse(new TextDecoder().decode(bytes));}catch{return null;}
+  if(!body||typeof body!=="object"||typeof body.command!=="string")return null;
+  const parsed=parseSalesKnowledgeCommand(body.command);
+  if(!parsed.recognized)return null;
+  if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+  try{return json({ok:true,...await routeSalesKnowledgeCommand(env,body)});}
+  catch(error){return json({ok:false,knowledge_router:true,error:sanitizeOperationalError(error?.message||error)},400);}
 }
 
 async function ensureLeadIdentityStore(env) {
@@ -6983,6 +7167,8 @@ await pollWeeklyVideoAutopilot(env);
 
   async fetch(req, env) {
   const u = new URL(req.url);
+  const knowledgeCommandResponse=await maybeHandleAutonomyKnowledgeCommand(req,env);
+  if(knowledgeCommandResponse)return knowledgeCommandResponse;
   if (u.pathname.startsWith("/api/autonomy/")) return await handleAutonomy(env, req);
 
     try {
