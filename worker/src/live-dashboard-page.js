@@ -68,6 +68,12 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 <div class="tools"><button class="btn" onclick="loadKnowledgeHistory(-100)">PREVIOUS HISTORY</button><button class="btn" onclick="loadKnowledgeHistory(100)">NEXT HISTORY</button></div>
 </section>
 
+<section class="card section" id="ownerEscalationsPanel">
+<div class="title"><div><h2>🧭 OWNER ESCALATIONS</h2><div class="hint">مواردی که Sales Brain بدون تصمیم مالک پاسخ نمی‌دهد. حل‌کردن مورد، هیچ پیام مشتری را خودکار ارسال نمی‌کند.</div></div><button class="btn" onclick="loadOwnerEscalations()">REFRESH</button></div>
+<div id="ownerEscalationsStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="ownerEscalationsItems" class="rows"></div>
+</section>
+
 <section class="card section" id="authPanel">
 <div class="title"><div><h2>🔐 ADMIN TOKEN</h2><div class="hint">اتصال امن پنل به Worker</div></div><span id="tokenState" class="tag">NOT SET</span></div>
 <div class="hint" style="margin-top:8px">توکن فقط روی همین مرورگر در localStorage ذخیره می‌شود و در صفحه به‌صورت مخفی نگه داشته می‌شود.</div>
@@ -430,6 +436,19 @@ async function saveNegotiationDraft(id,inputId){
  if(!d.ok){$("negotiationInboxStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Draft save failed")+"</span>";return}
  $("negotiationInboxStatus").innerHTML="<span class='ok'>✓ پیش‌نویس ذخیره شد؛ هیچ پیامی ارسال نشد.</span>";
  await Promise.all([loadNegotiationInbox(),loadOutreachApprovals()]);
+}
+async function loadOwnerEscalations(){
+ const status=$("ownerEscalationsStatus"),list=$("ownerEscalationsItems");status.textContent="در حال دریافت موارد نیازمند تصمیم مالک…";
+ try{const d=await api("/api/owner-escalations");if(!d.ok)throw Error(d.error||"Escalations unavailable");const items=d.items||[];
+  status.textContent=items.filter(x=>x.status==="open").length+" OPEN · "+items.filter(x=>x.status==="resolved").length+" RESOLVED";
+  list.innerHTML=items.length?items.map(x=>{const id=esc(x.id),open=x.status==="open",decisionId="escalation-decision-"+String(x.id),noteId="escalation-note-"+String(x.id);return "<div class='row'><b>"+esc(x.lead_name||x.lead_id)+"</b><div class='mini'>"+esc(x.status)+" · "+esc(x.channel)+" · "+esc(x.current_sales_stage||"—")+" · "+esc(x.created_at)+"</div><div class='mini'>Reason: "+esc(x.reason_code)+" · Conversation: "+esc(x.conversation_id)+"</div><div style='margin-top:5px'>"+esc(x.context_summary)+"</div><div class='mini' style='margin-top:5px'>Unresolved: "+esc(x.unresolved_question)+"</div><div class='mini'>Decision needed: "+esc(x.decision_required)+"</div>"+(open?"<textarea id='"+esc(decisionId)+"' class='input' style='margin-top:8px' placeholder='Owner decision for this customer case'></textarea><textarea id='"+esc(noteId)+"' class='input' style='margin-top:6px' placeholder='Optional owner note'></textarea><div class='tools' style='margin-top:7px'><button class='btn primary' onclick='resolveOwnerEscalation(&quot;"+id+"&quot;,"+Number(x.version)+",&quot;"+esc(decisionId)+"&quot;,&quot;"+esc(noteId)+"&quot;)'>RESOLVE</button></div>":"<div class='mini' style='margin-top:7px'>Resolved by "+esc(x.resolved_by||"—")+" · "+esc(x.resolved_at||"—")+"</div><div>Decision: "+esc(x.owner_decision||"—")+"</div>" )+"</div>"}).join(""):"<div class='hint'>Owner escalation باز وجود ندارد.</div>";
+ }catch(e){status.innerHTML="<span class='bad'>✕ "+esc(e.message)+"</span>";list.innerHTML=""}
+}
+async function resolveOwnerEscalation(id,version,decisionId,noteId){
+ const decision=$(decisionId)?.value?.trim()||"",owner_note=$(noteId)?.value?.trim()||null;
+ const d=await api("/api/owner-escalations/resolve",{method:"POST",body:JSON.stringify({id,version,owner_decision:decision,owner_note})});
+ $("ownerEscalationsStatus").innerHTML=d.ok?"<span class='ok'>✓ تصمیم مالک ثبت شد؛ هیچ پیام مشتری ارسال نشد.</span>":"<span class='bad'>✕ "+esc(d.error||"Resolution failed")+"</span>";
+ if(d.ok)await Promise.all([loadOwnerEscalations(),loadNegotiationInbox(),loadOutreachApprovals()]);
 }
 let knowledgeFields={},knowledgeFacts=[],knowledgeRequests=[],knowledgeTarget=null,knowledgeBusy=false,knowledgeProposalId=null,knowledgeOffset=0,knowledgeHistoryKey=null,knowledgeHistoryOffset=0;
 function knowledgeAttributes(){const fields=knowledgeFields[$("knowledgeDomain").value]||{};$("knowledgeAttribute").innerHTML=Object.keys(fields).map(x=>"<option>"+esc(x)+"</option>").join("")}
@@ -1027,7 +1046,7 @@ async function refreshAll(){
  refreshInProgress=true;
  try{
   await loadStatus();
-  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals(),loadOutreachApprovals(),loadNegotiationInbox(),loadQuotes(),loadOrders(),loadPriceItems(),loadSalesKnowledge()]);
+  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals(),loadOutreachApprovals(),loadNegotiationInbox(),loadQuotes(),loadOrders(),loadPriceItems(),loadSalesKnowledge(),loadOwnerEscalations()]);
  }catch(e){
   $("masterState").textContent="DASHBOARD ERROR";
   $("masterState").className="pill bad";

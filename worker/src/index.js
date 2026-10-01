@@ -5540,15 +5540,61 @@ function validateSalesBrainDraft(draft,allowedNumbers=[]){
   if(/(?:[$€£٪%]|(?:قیمت|price|سعر)\s*[:=]?\s*\d|(?:موک|moq|حداقل سفارش)\s*[:=]?\s*\d|(?:ارسال|shipping|شحن)\s*[:=]?\s*\d)/iu.test(text))return {valid:false,reason:"unsupported_commercial_claim"};
   return {valid:true};
 }
+const OWNER_ESCALATION_REASONS=new Set(["missing_business_knowledge","conflicting_business_knowledge","unsupported_price","unauthorized_discount","unclear_moq","unusual_customization","uncertain_production_capability","uncertain_production_time","uncertain_shipping","unusual_commercial_terms","ambiguous_customer_identity","low_confidence_commercial_interpretation","unsupported_factual_claim"]);
+const OWNER_ESCALATION_SCHEMA=[
+  `CREATE TABLE IF NOT EXISTS owner_escalations (
+    id TEXT PRIMARY KEY,escalation_key TEXT NOT NULL UNIQUE,lead_id TEXT NOT NULL,conversation_id TEXT NOT NULL,contact_id TEXT,channel TEXT NOT NULL,source_message_id TEXT,sales_brain_event_id TEXT NOT NULL,context_hash TEXT,current_sales_stage TEXT,context_summary TEXT NOT NULL,unresolved_question TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code IN ('missing_business_knowledge','conflicting_business_knowledge','unsupported_price','unauthorized_discount','unclear_moq','unusual_customization','uncertain_production_capability','uncertain_production_time','uncertain_shipping','unusual_commercial_terms','ambiguous_customer_identity','low_confidence_commercial_interpretation','unsupported_factual_claim')),
+    decision_required TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('open','resolved')),version INTEGER NOT NULL CHECK(version>0),owner_decision TEXT,owner_note TEXT,resolved_by TEXT,resolved_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+    CHECK(status='open' OR (owner_decision IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL))
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_owner_escalations_open ON owner_escalations(status,created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_owner_escalations_conversation ON owner_escalations(lead_id,conversation_id,created_at)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_escalations_open_source_reason ON owner_escalations(source_message_id,reason_code) WHERE status='open' AND source_message_id IS NOT NULL AND source_message_id<>''",
+  "CREATE TRIGGER IF NOT EXISTS owner_escalations_no_delete BEFORE DELETE ON owner_escalations BEGIN SELECT RAISE(ABORT,'Owner escalation history cannot be deleted'); END"
+];
+async function ensureOwnerEscalationStore(env){await env.DB.batch(OWNER_ESCALATION_SCHEMA.map(sql=>env.DB.prepare(sql)));}
+function ownerEscalationReason(brain){
+  const reason=String(brain?.needs_owner_reason||"");
+  if(reason==="authoritative_price_required")return "unsupported_price";
+  if(reason==="approved_moq_missing")return "unclear_moq";
+  if(reason==="commercial_owner_review_required")return "unusual_commercial_terms";
+  if(reason==="ambiguous_customer_identity")return "ambiguous_customer_identity";
+  if(reason==="unsupported_commercial_claim"||reason==="unsupported_numeric_claim")return "unsupported_factual_claim";
+  if(reason==="quote_requirements_incomplete")return "missing_business_knowledge";
+  return "low_confidence_commercial_interpretation";
+}
+function ownerEscalationSummary(row,brain){return String(row?.message||brain?.customer_known_facts?.customer_message||"").normalize("NFKC").trim().slice(0,1000)||"Linked customer issue requires owner review";}
+async function ensureOwnerEscalationFromBrain(env,row,brain){
+  if(!brain?.needs_owner||!row?.lead_id||!row?.conversation_id)return null;
+  await ensureOwnerEscalationStore(env);
+  const reason=ownerEscalationReason(brain),source=String(row.id||brain.source_message_id||"").trim(),key="owner-escalation:"+(source||await knowledgeHash(knowledgeCanonical([row.lead_id,row.conversation_id,reason,brain.context_hash||""])))+":"+reason;
+  const prior=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();
+  if(prior)return {escalation:prior,idempotent:true};
+  const t=now(),id="owner-escalation-"+uid(),question=String(brain.needs_owner_reason||reason).slice(0,300),decision=`Owner decision required: ${question}`;
+  try{await env.DB.prepare("INSERT OR IGNORE INTO owner_escalations(id,escalation_key,lead_id,conversation_id,contact_id,channel,source_message_id,sales_brain_event_id,context_hash,current_sales_stage,context_summary,unresolved_question,reason_code,decision_required,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open',1,?,?)").bind(id,key,row.lead_id,row.conversation_id,row.contact_id||null,row.conversation_platform||"telegram",source||null,"sales-brain:"+String(brain.source_message_id||source),brain.context_hash||null,brain.current_stage||null,ownerEscalationSummary(row,brain),question,reason,decision,t,t).run();}catch(error){
+    const raced=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();if(raced)return {escalation:raced,idempotent:true};throw error;
+  }
+  const escalation=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();
+  if(!escalation)throw Error("Owner escalation persistence failed");
+  if(escalation.id===id)await audit(env,"owner_escalation_created","Sales Brain requires an owner decision",{escalation_id:id,lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:source||null,reason_code:reason});
+  return {escalation,idempotent:escalation.id!==id};
+}
+async function hasOpenOwnerEscalation(env,outreach){
+  if(!outreach?.lead_id||!outreach?.conversation_id||!outreach?.inbox_message_id)return false;
+  await ensureOwnerEscalationStore(env);
+  return !!(await env.DB.prepare("SELECT id FROM owner_escalations WHERE status='open' AND lead_id=? AND conversation_id=? AND source_message_id=? LIMIT 1").bind(outreach.lead_id,outreach.conversation_id,outreach.inbox_message_id).first());
+}
 async function runSalesNegotiationBrain(env,inboxId){
-  await ensureConversationMemoryStore(env);await ensureSalesKnowledgeStore(env);await ensureQuoteStore(env);
+  await ensureConversationMemoryStore(env);await ensureSalesKnowledgeStore(env);await ensureQuoteStore(env);await ensureOwnerEscalationStore(env);
   const prior=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+inboxId).first();
-  if(prior?.details_json)try{return {...JSON.parse(prior.details_json),idempotent:true}}catch{}
   const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,c.platform AS conversation_platform,c.contact_id
     FROM inbox_messages i JOIN leads l ON l.id=i.lead_id JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
     WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
   if(!row)return {resolved:false,needs_owner:true,needs_owner_reason:"ambiguous_customer_identity",draft_customer_reply:null};
+  if(prior?.details_json)try{const priorResult={...JSON.parse(prior.details_json),idempotent:true},escalation=await ensureOwnerEscalationFromBrain(env,row,priorResult);return escalation?.escalation?{...priorResult,owner_escalation_id:escalation.escalation.id}:priorResult}catch{}
   const context=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);
+  const ownerCaseDecisions=(await env.DB.prepare("SELECT id,source_message_id,reason_code,owner_decision,resolved_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='resolved' ORDER BY resolved_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id).all()).results||[];
   const memories=(await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all()).results||[];
   const memory={};for(const fact of memories)if(!(fact.memory_key in memory))try{memory[fact.memory_key]=JSON.parse(fact.value_json)}catch{}
   const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message),language=salesBrainLanguage(row.message,row.lead_notes),stage=salesBrainStage(intent,memory);
@@ -5562,8 +5608,9 @@ async function runSalesNegotiationBrain(env,inboxId){
   else if(intent==="accepted"){action="accepted";}
   else if(/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
   const draft=salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,[]);if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length}};
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
+  const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
   return result;
 }
 
@@ -8279,6 +8326,35 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         return json({ok:true,state:state||null});
       }
 
+      if (u.pathname === "/api/owner-escalations" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        await ensureOwnerEscalationStore(env);
+        const status=String(u.searchParams.get("status")||"all").trim(),allowed=new Set(["open","resolved","all"]);
+        if(!allowed.has(status))return json({ok:false,error:"Invalid escalation status"},400);
+        const limit=Math.min(200,Math.max(1,Number(u.searchParams.get("limit")||100)));
+        const sql=status==="all"?`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id ORDER BY CASE e.status WHEN 'open' THEN 0 ELSE 1 END,e.created_at DESC LIMIT ?`:`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE e.status=? ORDER BY e.created_at DESC LIMIT ?`;
+        const r=status==="all"?await env.DB.prepare(sql).bind(limit).all():await env.DB.prepare(sql).bind(status,limit).all();
+        return json({ok:true,items:r.results||[]});
+      }
+
+      if (u.pathname === "/api/owner-escalations/resolve" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        await ensureOwnerEscalationStore(env);
+        const b=await req.json().catch(()=>null),id=String(b?.id||"").trim(),decision=String(b?.owner_decision||"").normalize("NFKC").trim(),note=b?.owner_note==null?null:String(b.owner_note).normalize("NFKC").trim();
+        const version=Number(b?.version);
+        if(!id||!Number.isSafeInteger(version)||version<1)return json({ok:false,error:"id and current version are required"},400);
+        if(!decision||decision.length>2000||note?.length>2000)return json({ok:false,error:"A bounded owner decision and optional note are required"},400);
+        const existing=await env.DB.prepare("SELECT * FROM owner_escalations WHERE id=? LIMIT 1").bind(id).first();
+        if(!existing)return json({ok:false,error:"Owner escalation not found"},404);
+        if(existing.status==="resolved")return json({ok:true,escalation:existing,idempotent:true,sending_enabled:false});
+        const t=now(),actor="authenticated_owner";
+        const changed=await env.DB.prepare("UPDATE owner_escalations SET status='resolved',owner_decision=?,owner_note=?,resolved_by=?,resolved_at=?,version=version+1,updated_at=? WHERE id=? AND status='open' AND version=?").bind(decision,note||null,actor,t,t,id,version).run();
+        if(!changed.meta?.changes)return json({ok:false,error:"Escalation changed; reload before resolving"},409);
+        const escalation=await env.DB.prepare("SELECT * FROM owner_escalations WHERE id=? LIMIT 1").bind(id).first();
+        await audit(env,"owner_escalation_resolved","Authenticated owner resolved Sales Brain escalation",{escalation_id:id,lead_id:escalation.lead_id,conversation_id:escalation.conversation_id,reason_code:escalation.reason_code,resolved_by:actor});
+        return json({ok:true,escalation,idempotent:false,sending_enabled:false});
+      }
+
       if (u.pathname === "/api/conversations/memory" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         await ensureConversationMemoryStore(env);
@@ -8845,7 +8921,7 @@ Context: ${context}`;
         if(!id||!["submit","approve","reject"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
         const current=await env.DB.prepare("SELECT * FROM lead_outreach WHERE id=?").bind(id).first();
         if(!current)return json({ok:false,error:"Outreach draft not found"},404);
-        if(action==="submit"&&current.error_code==="sales_brain_needs_owner")return json({ok:false,error:"Sales Brain requires owner resolution before this draft can enter approval"},409);
+        if(action==="submit"&&(current.error_code==="sales_brain_needs_owner"||await hasOpenOwnerEscalation(env,current)))return json({ok:false,error:"Sales Brain requires owner resolution before this draft can enter approval"},409);
         await ensureQuoteStore(env);const quoteLinked=await env.DB.prepare("SELECT id FROM lead_quotes WHERE outreach_id=? LIMIT 1").bind(id).first();
         if(quoteLinked)return json({ok:false,error:"Quote-linked outreach must use the quote approval controls"},409);
         if(!LEAD_OUTREACH_STATUSES.has(current.status))return json({ok:false,error:"Unknown outreach status"},409);

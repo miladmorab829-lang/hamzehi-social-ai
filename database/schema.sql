@@ -495,6 +495,41 @@ CREATE TRIGGER IF NOT EXISTS sales_knowledge_immutable BEFORE UPDATE ON sales_kn
  OR NEW.created_at IS NOT OLD.created_at
  OR OLD.status='superseded' OR NEW.status<>'superseded'
  BEGIN SELECT RAISE(ABORT,'Only superseding a knowledge revision is allowed'); END;
+-- P0-7F: case-scoped owner decisions; never a replacement for global knowledge or pricing authority.
+CREATE TABLE IF NOT EXISTS owner_escalations (
+ id TEXT PRIMARY KEY,
+ escalation_key TEXT NOT NULL UNIQUE,
+ lead_id TEXT NOT NULL,
+ conversation_id TEXT NOT NULL,
+ contact_id TEXT,
+ channel TEXT NOT NULL,
+ source_message_id TEXT,
+ sales_brain_event_id TEXT NOT NULL,
+ context_hash TEXT,
+ current_sales_stage TEXT,
+ context_summary TEXT NOT NULL,
+ unresolved_question TEXT NOT NULL,
+ reason_code TEXT NOT NULL CHECK(reason_code IN ('missing_business_knowledge','conflicting_business_knowledge','unsupported_price','unauthorized_discount','unclear_moq','unusual_customization','uncertain_production_capability','uncertain_production_time','uncertain_shipping','unusual_commercial_terms','ambiguous_customer_identity','low_confidence_commercial_interpretation','unsupported_factual_claim')),
+ decision_required TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('open','resolved')),
+ version INTEGER NOT NULL CHECK(version > 0),
+ owner_decision TEXT,
+ owner_note TEXT,
+ resolved_by TEXT,
+ resolved_at TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ CHECK(status='open' OR (owner_decision IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_owner_escalations_open
+ON owner_escalations(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_owner_escalations_conversation
+ON owner_escalations(lead_id, conversation_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_escalations_open_source_reason
+ON owner_escalations(source_message_id, reason_code)
+WHERE status='open' AND source_message_id IS NOT NULL AND source_message_id<>'';
+CREATE TRIGGER IF NOT EXISTS owner_escalations_no_delete BEFORE DELETE ON owner_escalations
+BEGIN SELECT RAISE(ABORT,'Owner escalation history cannot be deleted'); END;
 CREATE TABLE IF NOT EXISTS migration_runs (
  id TEXT PRIMARY KEY,
  direction TEXT NOT NULL,
