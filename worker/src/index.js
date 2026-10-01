@@ -5502,6 +5502,71 @@ async function getNegotiationConversationContext(env,leadId,conversationId) {
   ].sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at))).slice(-12);
 }
 
+const SALES_BRAIN_STAGES=new Set(["lead","contacted","customer_replied","needs_discovery","product_interest","quantity_discovery","size_discovery","color_discussion","printing_discussion","asks_price","asks_moq","asks_shipping","asks_discount","price_objection","negotiating","quote_requested","quote_ready","quote_sent","customer_accepted","customer_rejected"]);
+function salesBrainLanguage(message,leadNotes){const text=String(message||"");if(/[\u067e\u0686\u0698\u06af\u06a9\u06cc]/u.test(text))return "Persian";if(/[\u0600-\u06ff]/u.test(text))return "Iraqi Arabic";return outreachLanguage(parseLeadNotes({notes:leadNotes}));}
+function salesBrainStage(intent,memory){
+  const product=memory.product_interest,quantity=memory.requested_quantity;
+  if(intent==="accepted")return "customer_accepted";if(intent==="rejected")return "customer_rejected";
+  if(intent==="quote_requested")return "quote_requested";if(intent==="objection_price")return "price_objection";
+  if(intent==="asks_price")return "asks_price";if(intent==="asks_moq")return "asks_moq";if(intent==="asks_shipping")return "asks_shipping";
+  if(intent==="negotiating")return "negotiating";if(!product)return "needs_discovery";if(quantity===undefined||quantity===null)return "quantity_discovery";return "product_interest";
+}
+function salesBrainDraft(action,language){const ar=language==="Iraqi Arabic";const p=ar?{
+  ask_product:"حتى نساعدكم بدقة، ممكن توضحون نوع المنتج أو موديل العلبة المطلوب؟",
+  ask_quantity:"ممتاز. حتى نحدد الخيار المناسب، شكد الكمية المطلوبة؟",
+  ask_size:"ممكن ترسلون المقاس أو أبعاد المنتج حتى نتحقق من الخيار المناسب؟",
+  ask_details:"يرجى إرسال الكمية والمقاس والتخصيص والوجهة حتى نتابع طلبكم بدقة.",
+  price_owner:"حتى نراجع السعر بشكل صحيح، نحتاج نوع المنتج والكمية والمقاس والتخصيص والوجهة. الشروط النهائية يؤكدها صاحب العمل.",
+  moq_owner:"يرجى تحديد الموديل والكمية المطلوبة حتى نراجع الحد الأدنى المعتمد ونرد عليكم بدقة.",
+  commercial_owner:"تم استلام طلبكم. التفاصيل التجارية النهائية تحتاج مراجعة صاحب العمل قبل أي تأكيد.",
+  quote:"تم استلام طلب عرض السعر. نراجع المتطلبات عبر مسار عرض السعر المعتمد قبل أي تأكيد نهائي.",
+  accepted:"شكراً لتأكيدكم. سنراجع التفاصيل عبر مسار القبول المعتمد؛ هذا لا يعني إنشاء طلب أو دفع.",
+  visual:"نراجع أمثلة المنتج الحقيقية المطابقة للمواصفات المطلوبة ونشارك فقط الأمثلة المتحقق منها بعد المراجعة."
+}:{
+  ask_product:"برای راهنمایی دقیق‌تر، لطفاً نوع محصول یا مدل جعبه موردنظر را بفرمایید.",
+  ask_quantity:"عالی است. برای بررسی گزینه مناسب، لطفاً تعداد موردنیاز را بفرمایید.",
+  ask_size:"لطفاً اندازه یا ابعاد محصول را بفرمایید تا گزینه مناسب را بررسی کنیم.",
+  ask_details:"لطفاً تعداد، اندازه، شخصی‌سازی و مقصد را بفرمایید تا درخواست شما دقیق بررسی شود.",
+  price_owner:"برای بررسی دقیق قیمت، نوع محصول، تعداد، اندازه، شخصی‌سازی و مقصد لازم است. شرایط نهایی را مالک کسب‌وکار تأیید می‌کند.",
+  moq_owner:"لطفاً مدل و تعداد موردنظر را بفرمایید تا حداقل سفارش تأییدشده بررسی و دقیق پاسخ داده شود.",
+  commercial_owner:"درخواست شما دریافت شد. جزئیات تجاری نهایی پیش از هر تأیید باید توسط مالک کسب‌وکار بررسی شود.",
+  quote:"درخواست پیش‌فاکتور دریافت شد. نیازها از مسیر تأییدشده پیش‌فاکتور بررسی می‌شوند و هنوز تأیید نهایی نیست.",
+  accepted:"از تأیید شما سپاسگزاریم. جزئیات از مسیر تأییدشده بررسی می‌شود؛ این پیام به معنی ثبت سفارش یا پرداخت نیست.",
+  visual:"نمونه‌های واقعی منطبق با مشخصات شما بررسی می‌شوند و فقط نمونه‌های تأییدشده پس از بررسی ارائه خواهند شد."
+};return p[action]||p.ask_details;}
+function validateSalesBrainDraft(draft,allowedNumbers=[]){
+  const text=String(draft||""),numbers=[...text.matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0]));
+  if(numbers.some(n=>n===null||!allowedNumbers.includes(n)))return {valid:false,reason:"unsupported_numeric_claim"};
+  if(/(?:[$€£٪%]|(?:قیمت|price|سعر)\s*[:=]?\s*\d|(?:موک|moq|حداقل سفارش)\s*[:=]?\s*\d|(?:ارسال|shipping|شحن)\s*[:=]?\s*\d)/iu.test(text))return {valid:false,reason:"unsupported_commercial_claim"};
+  return {valid:true};
+}
+async function runSalesNegotiationBrain(env,inboxId){
+  await ensureConversationMemoryStore(env);await ensureSalesKnowledgeStore(env);await ensureQuoteStore(env);
+  const prior=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+inboxId).first();
+  if(prior?.details_json)try{return {...JSON.parse(prior.details_json),idempotent:true}}catch{}
+  const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,c.platform AS conversation_platform,c.contact_id
+    FROM inbox_messages i JOIN leads l ON l.id=i.lead_id JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
+    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
+  if(!row)return {resolved:false,needs_owner:true,needs_owner_reason:"ambiguous_customer_identity",draft_customer_reply:null};
+  const context=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);
+  const memories=(await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all()).results||[];
+  const memory={};for(const fact of memories)if(!(fact.memory_key in memory))try{memory[fact.memory_key]=JSON.parse(fact.value_json)}catch{}
+  const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message),language=salesBrainLanguage(row.message,row.lead_notes),stage=salesBrainStage(intent,memory);
+  const model=String(memory.product_interest||"").trim(),knowledge=(await env.DB.prepare("SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND (entity_key='global' OR (?<>'' AND entity_key=?)) ORDER BY created_at DESC LIMIT 100").bind(model,model).all()).results||[];
+  const knownQuantity=memory.requested_quantity,quantityValid=Number.isSafeInteger(knownQuantity)&&knownQuantity>0,missing=[];if(!model)missing.push("product_or_model");if(!quantityValid)missing.push("quantity");
+  let action=!model?"ask_product":!quantityValid?"ask_quantity":"ask_details",needsOwner=false,needsOwnerReason=null,visuals=[];
+  if(intent==="asks_price"){action="price_owner";needsOwner=true;needsOwnerReason="authoritative_price_required";}
+  else if(intent==="asks_moq"){const moq=knowledge.find(x=>x.domain==="quantity"&&x.attribute==="moq");action=moq&&model?"ask_details":"moq_owner";needsOwner=!moq;needsOwnerReason=needsOwner?"approved_moq_missing":null;}
+  else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price"){action="commercial_owner";needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
+  else if(intent==="quote_requested"){action="quote";needsOwner=!model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
+  else if(intent==="accepted"){action="accepted";}
+  else if(/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
+  const draft=salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,[]);if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length}};
+  const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
+  return result;
+}
+
 async function processNegotiationInbound(env,inboxId) {
   await ensureLeadOutreachStore(env);
   const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,l.stage AS lead_stage,c.contact_id,c.platform AS conversation_platform
@@ -5528,15 +5593,16 @@ async function processNegotiationInbound(env,inboxId) {
   const recipient=telegramLeadContactChatId(contact);
   if(!recipient)throw Error("Linked Telegram conversation has no sendable numeric contact");
   const context=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);
-  const message=negotiationReplyDraft(intent,language),t=now(),outreachId=uid();
+  const brain=await runSalesNegotiationBrain(env,inboxId);
+  const message=brain.draft_customer_reply||negotiationReplyDraft(intent,language),t=now(),outreachId=uid();
   await env.DB.prepare(`INSERT OR IGNORE INTO lead_outreach
-    (id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,created_at,updated_at)
-    VALUES(?,?,?,?,?,'telegram',?,?,?,?,?,?)`).bind(outreachId,row.lead_id,contact.id,row.conversation_id,inboxId,recipient,message,language,"draft",t,t).run();
+    (id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,error_code,error_detail,created_at,updated_at)
+    VALUES(?,?,?,?,?,'telegram',?,?,?,?,?,?,?,?)`).bind(outreachId,row.lead_id,contact.id,row.conversation_id,inboxId,recipient,message,language,"draft",brain.needs_owner?"sales_brain_needs_owner":null,brain.needs_owner?String(brain.needs_owner_reason||"owner_review_required").slice(0,240):null,t,t).run();
   const outreach=await env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
   if(!outreach)throw Error("Negotiation draft could not be persisted");
   await env.DB.prepare("UPDATE inbox_messages SET category=?,reply_suggestion=?,updated_at=? WHERE id=?").bind(intent,outreach.message,now(),inboxId).run();
   const quoteRequest=intent==="quote_requested"?extractQuoteRequestDetails(row.message):null;
-  await audit(env,"negotiation_reply_draft_created","Linked inbound reply prepared for owner review",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,intent,language,context_message_count:context.length,quote_request:quoteRequest});
+  await audit(env,"negotiation_reply_draft_created","Linked inbound reply prepared for owner review",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,intent,language,context_message_count:context.length,quote_request:quoteRequest,sales_brain_needs_owner:brain.needs_owner});
   if(intent==="quote_requested")try{await ensureQuoteFromInbox(env,inboxId);}catch(error){try{await audit(env,"lead_quote_creation_failed","Inbound reply remained stored after quote creation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   if(intent==="accepted"||intent==="rejected")try{await recordQuoteDecisionFromInbound(env,inboxId,intent);}catch(error){try{await audit(env,"lead_quote_decision_link_failed","Quote decision could not be deterministically linked",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   return {processed:true,idempotent:outreach.id!==outreachId,intent,language,outreach};
@@ -8766,7 +8832,7 @@ Context: ${context}`;
         if(!id||!message)return json({ok:false,error:"id and message are required"},400);
         if(message.length>4000)return json({ok:false,error:"Draft is too long"},400);
         const t=now();
-        const result=await env.DB.prepare("UPDATE lead_outreach SET message=?,updated_at=? WHERE id=? AND status='draft'").bind(message,t,id).run();
+        const result=await env.DB.prepare("UPDATE lead_outreach SET message=?,error_code=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_code END,error_detail=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_detail END,updated_at=? WHERE id=? AND status='draft'").bind(message,t,id).run();
         if(!result.meta?.changes)return json({ok:false,error:"Only a draft outreach can be edited"},409);
         await env.DB.prepare("UPDATE inbox_messages SET reply_suggestion=?,updated_at=? WHERE id=(SELECT inbox_message_id FROM lead_outreach WHERE id=?)").bind(message,t,id).run();
         return json({ok:true,id,status:"draft",sending_enabled:false});
@@ -8779,6 +8845,7 @@ Context: ${context}`;
         if(!id||!["submit","approve","reject"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
         const current=await env.DB.prepare("SELECT * FROM lead_outreach WHERE id=?").bind(id).first();
         if(!current)return json({ok:false,error:"Outreach draft not found"},404);
+        if(action==="submit"&&current.error_code==="sales_brain_needs_owner")return json({ok:false,error:"Sales Brain requires owner resolution before this draft can enter approval"},409);
         await ensureQuoteStore(env);const quoteLinked=await env.DB.prepare("SELECT id FROM lead_quotes WHERE outreach_id=? LIMIT 1").bind(id).first();
         if(quoteLinked)return json({ok:false,error:"Quote-linked outreach must use the quote approval controls"},409);
         if(!LEAD_OUTREACH_STATUSES.has(current.status))return json({ok:false,error:"Unknown outreach status"},409);
