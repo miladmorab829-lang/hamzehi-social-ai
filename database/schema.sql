@@ -61,6 +61,57 @@ CREATE INDEX IF NOT EXISTS idx_lead_conversations_lead ON lead_conversations(lea
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_conversations_provider
 ON lead_conversations(platform, provider_conversation_id)
 WHERE provider_conversation_id IS NOT NULL AND provider_conversation_id <> '';
+CREATE TABLE IF NOT EXISTS conversation_sales_state (
+ conversation_id TEXT PRIMARY KEY,
+ lead_id TEXT NOT NULL,
+ sales_stage TEXT,
+ market TEXT CHECK(market IS NULL OR market IN ('GLOBAL','IRAN','ARAB')),
+ language TEXT,
+ last_meaningful_inbox_message_id TEXT,
+ last_meaningful_at TEXT,
+ next_action TEXT,
+ version INTEGER NOT NULL DEFAULT 1,
+ source_message_id TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_sales_state_lead
+ON conversation_sales_state(lead_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_sales_state_stage
+ON conversation_sales_state(sales_stage);
+CREATE TABLE IF NOT EXISTS conversation_memory_facts (
+ id TEXT PRIMARY KEY,
+ lead_id TEXT NOT NULL,
+ conversation_id TEXT NOT NULL,
+ memory_key TEXT NOT NULL,
+ fact_type TEXT NOT NULL,
+ value_json TEXT NOT NULL CHECK(json_valid(value_json)),
+ value_hash TEXT NOT NULL,
+ source_message_id TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('active','superseded')),
+ version INTEGER NOT NULL CHECK(version > 0),
+ supersedes_fact_id TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ UNIQUE(conversation_id, source_message_id, memory_key, value_hash)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_memory_active
+ON conversation_memory_facts(conversation_id, memory_key)
+WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_conversation_memory_lead_conversation
+ON conversation_memory_facts(lead_id, conversation_id, created_at);
+CREATE TRIGGER IF NOT EXISTS conversation_memory_no_delete
+BEFORE DELETE ON conversation_memory_facts
+BEGIN SELECT RAISE(ABORT,'Customer memory history cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS conversation_memory_immutable
+BEFORE UPDATE ON conversation_memory_facts
+WHEN NEW.id IS NOT OLD.id OR NEW.lead_id IS NOT OLD.lead_id
+ OR NEW.conversation_id IS NOT OLD.conversation_id OR NEW.memory_key IS NOT OLD.memory_key
+ OR NEW.fact_type IS NOT OLD.fact_type OR NEW.value_json IS NOT OLD.value_json
+ OR NEW.value_hash IS NOT OLD.value_hash OR NEW.source_message_id IS NOT OLD.source_message_id
+ OR NEW.version IS NOT OLD.version OR NEW.supersedes_fact_id IS NOT OLD.supersedes_fact_id
+ OR NEW.created_at IS NOT OLD.created_at OR OLD.status='superseded' OR NEW.status NOT IN ('active','superseded')
+BEGIN SELECT RAISE(ABORT,'Customer memory facts are immutable except supersession'); END;
 CREATE TABLE IF NOT EXISTS lead_outreach (
  id TEXT PRIMARY KEY,
  lead_id TEXT NOT NULL,

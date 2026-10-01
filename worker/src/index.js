@@ -5196,6 +5196,121 @@ async function ensureLeadOutreachStore(env) {
   }
 }
 
+const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question"]);
+const CONVERSATION_SALES_STAGES=new Set(["new_reply","interested","asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted","rejected","other"]);
+
+async function ensureConversationMemoryStore(env){
+  await ensureLeadOutreachStore(env);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS conversation_sales_state (
+    conversation_id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,sales_stage TEXT,
+    market TEXT CHECK(market IS NULL OR market IN ('GLOBAL','IRAN','ARAB')),language TEXT,
+    last_meaningful_inbox_message_id TEXT,last_meaningful_at TEXT,next_action TEXT,
+    version INTEGER NOT NULL DEFAULT 1,source_message_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_conversation_sales_state_lead ON conversation_sales_state(lead_id)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_conversation_sales_state_stage ON conversation_sales_state(sales_stage)").run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS conversation_memory_facts (
+    id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,conversation_id TEXT NOT NULL,memory_key TEXT NOT NULL,fact_type TEXT NOT NULL,
+    value_json TEXT NOT NULL CHECK(json_valid(value_json)),value_hash TEXT NOT NULL,source_message_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','superseded')),version INTEGER NOT NULL CHECK(version>0),supersedes_fact_id TEXT,
+    created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(conversation_id,source_message_id,memory_key,value_hash)
+  )`).run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_memory_active ON conversation_memory_facts(conversation_id,memory_key) WHERE status='active'").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_conversation_memory_lead_conversation ON conversation_memory_facts(lead_id,conversation_id,created_at)").run();
+  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS conversation_memory_no_delete BEFORE DELETE ON conversation_memory_facts BEGIN SELECT RAISE(ABORT,'Customer memory history cannot be deleted'); END").run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS conversation_memory_immutable BEFORE UPDATE ON conversation_memory_facts
+    WHEN NEW.id IS NOT OLD.id OR NEW.lead_id IS NOT OLD.lead_id OR NEW.conversation_id IS NOT OLD.conversation_id
+    OR NEW.memory_key IS NOT OLD.memory_key OR NEW.fact_type IS NOT OLD.fact_type OR NEW.value_json IS NOT OLD.value_json
+    OR NEW.value_hash IS NOT OLD.value_hash OR NEW.source_message_id IS NOT OLD.source_message_id OR NEW.version IS NOT OLD.version
+    OR NEW.supersedes_fact_id IS NOT OLD.supersedes_fact_id OR NEW.created_at IS NOT OLD.created_at OR OLD.status='superseded'
+    OR NEW.status NOT IN ('active','superseded') BEGIN SELECT RAISE(ABORT,'Customer memory facts are immutable except supersession'); END`).run();
+}
+
+function conversationMemoryValue(value){
+  if(value===null||value===undefined)return null;
+  if(typeof value==="string")return value.normalize("NFKC").trim().slice(0,2000)||null;
+  if(typeof value==="number"&&Number.isSafeInteger(value))return value;
+  return null;
+}
+function conversationMemoryStage(intent){
+  return CONVERSATION_SALES_STAGES.has(intent)?intent:"other";
+}
+function conversationNextAction(intent){
+  const actions={
+    asks_price:"collect_product_quantity_customization_destination",
+    asks_moq:"collect_product_quantity_customization_destination",
+    asks_shipping:"collect_product_quantity_customization_destination",
+    objection_price:"owner_review_commercial_request",
+    negotiating:"collect_customer_requirements",
+    quote_requested:"collect_quote_requirements",
+    accepted:"owner_review_customer_acceptance",
+    rejected:"no_automatic_follow_up",
+    interested:"collect_customer_requirements"
+  };
+  return actions[intent]||"await_customer_details";
+}
+function extractConversationMemoryFacts(message,intent,inboxId){
+  const text=String(message||"").normalize("NFKC").trim().slice(0,2000),facts=[];
+  if(!text)return facts;
+  const add=(fact_type,value,memory_key=fact_type)=>{const normalized=conversationMemoryValue(value);if(normalized!==null&&CONVERSATION_MEMORY_FACT_TYPES.has(fact_type))facts.push({fact_type,value:normalized,memory_key});};
+  add("customer_message",text,`customer_message:${inboxId}`);
+  const quantity=text.match(/(?:quantity|qty|تعداد|كمية)\s*[:：=-]?\s*([0-9۰-۹٠-٩]+)/iu)?.[1];
+  if(quantity!==undefined){const n=knowledgeCommandNumber(quantity);if(n!==null)add("requested_quantity",n);}
+  const product=text.match(/(?:product|model|محصول|مدل|منتج|موديل)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  if(product)add("product_interest",product);
+  const size=text.match(/(?:size|dimensions?|سایز|اندازه|قياس)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  if(size)add("requested_size",size);
+  const exterior=text.match(/(?:exterior\s+color|رنگ\s*بیرونی|رنگ\s*خارجی|لون\s*خارجي)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  if(exterior)add("exterior_color",exterior);
+  const interior=text.match(/(?:interior\s+color|رنگ\s*داخلی|لون\s*داخلي)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  if(interior)add("interior_color",interior);
+  const printing=text.match(/(?:printing|print|چاپ|فویل|طباعة)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  if(printing)add("printing",printing);
+  const branding=text.match(/(?:branding|logo|برندینگ|لوگو|شعار)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  if(branding)add("branding",branding);
+  if(intent==="objection_price")add("objection",text,`objection:${inboxId}`);
+  if(["asks_price","asks_moq","asks_shipping","quote_requested"].includes(intent)||/[?؟]$/.test(text))add("customer_question",text,`customer_question:${inboxId}`);
+  if(["asks_price","asks_moq","asks_shipping","quote_requested","negotiating"].includes(intent))add("unresolved_question",text,`unresolved_question:${inboxId}`);
+  return facts;
+}
+async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMessageId,fact}){
+  const valueJson=knowledgeCanonical(fact.value),valueHash=await knowledgeHash(valueJson);
+  const same=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND source_message_id=? AND memory_key=? AND value_hash=? LIMIT 1").bind(conversationId,sourceMessageId,fact.memory_key,valueHash).first();
+  if(same)return {fact:same,idempotent:true};
+  const current=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND memory_key=? AND status='active' LIMIT 1").bind(conversationId,fact.memory_key).first();
+  const t=now(),id="conversation-memory-"+uid(),version=(current?.version||0)+1;
+  try{
+    const statements=[];
+    if(current)statements.push(env.DB.prepare("UPDATE conversation_memory_facts SET status='superseded',updated_at=? WHERE id=? AND version=? AND status='active'").bind(t,current.id,current.version));
+    statements.push(env.DB.prepare("INSERT INTO conversation_memory_facts(id,lead_id,conversation_id,memory_key,fact_type,value_json,value_hash,source_message_id,status,version,supersedes_fact_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'active',?,?,?,?)").bind(id,leadId,conversationId,fact.memory_key,fact.fact_type,valueJson,valueHash,sourceMessageId,version,current?.id||null,t,t));
+    await env.DB.batch(statements);
+  }catch(error){
+    const raced=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND source_message_id=? AND memory_key=? AND value_hash=? LIMIT 1").bind(conversationId,sourceMessageId,fact.memory_key,valueHash).first();
+    if(raced)return {fact:raced,idempotent:true};
+    throw error;
+  }
+  const stored=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(id,leadId,conversationId).first();
+  if(!stored)throw Error("Conversation memory persistence failed");
+  return {fact:stored,idempotent:false};
+}
+async function captureConversationSalesMemory(env,inboxId){
+  await ensureConversationMemoryStore(env);
+  const row=await env.DB.prepare(`SELECT i.id,i.lead_id,i.conversation_id,i.message,i.category,i.created_at,c.id AS verified_conversation_id
+    FROM inbox_messages i JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
+    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
+  if(!row)return {captured:false,reason:"unlinked"};
+  const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
+  const facts=extractConversationMemoryFacts(row.message,intent,row.id),captured=[];
+  for(const fact of facts)captured.push(await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact}));
+  const t=now();
+  await env.DB.prepare(`INSERT INTO conversation_sales_state(conversation_id,lead_id,sales_stage,last_meaningful_inbox_message_id,last_meaningful_at,next_action,version,source_message_id,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,1,?,?,?)
+    ON CONFLICT(conversation_id) DO UPDATE SET sales_stage=excluded.sales_stage,last_meaningful_inbox_message_id=excluded.last_meaningful_inbox_message_id,last_meaningful_at=excluded.last_meaningful_at,next_action=excluded.next_action,version=conversation_sales_state.version+1,source_message_id=excluded.source_message_id,updated_at=excluded.updated_at
+    WHERE conversation_sales_state.lead_id=excluded.lead_id AND (conversation_sales_state.last_meaningful_at IS NULL OR conversation_sales_state.last_meaningful_at<excluded.last_meaningful_at)`).bind(row.conversation_id,row.lead_id,conversationMemoryStage(intent),row.id,row.created_at,conversationNextAction(intent),row.id,t,t).run();
+  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Linked customer conversation memory captured',?,?)").bind("conversation-memory:"+row.id,"conversation_memory_captured",JSON.stringify({inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,fact_count:captured.length,intent}),t).run();
+  return {captured:true,lead_id:row.lead_id,conversation_id:row.conversation_id,facts:captured.map(x=>x.fact.id),idempotent:captured.every(x=>x.idempotent)};
+}
+
 const LEAD_OUTREACH_STATUSES = new Set(["draft","pending_approval","approved","sending","sent","rejected","send_failed","send_ambiguous"]);
 
 function outreachLanguage(meta = {}) {
@@ -5276,6 +5391,7 @@ async function processNegotiationInbound(env,inboxId) {
   if(existing){
     if(row.reply_suggestion!==existing.message)await env.DB.prepare("UPDATE inbox_messages SET reply_suggestion=?,updated_at=? WHERE id=?").bind(existing.message,now(),inboxId).run();
     const priorIntent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
+    try{await captureConversationSalesMemory(env,inboxId);}catch(error){try{await audit(env,"conversation_memory_capture_failed","Linked inbound remained stored after customer-memory capture failure",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
     if(priorIntent==="quote_requested")try{await ensureQuoteFromInbox(env,inboxId);}catch{}
     if(priorIntent==="accepted"||priorIntent==="rejected")try{await recordQuoteDecisionFromInbound(env,inboxId,priorIntent);}catch{}
     return {processed:true,idempotent:true,outreach:existing};
@@ -5283,6 +5399,7 @@ async function processNegotiationInbound(env,inboxId) {
   const intent=classifyNegotiationIntent(row.message);
   const language=outreachLanguage(parseLeadNotes({notes:row.lead_notes}));
   await env.DB.prepare("UPDATE inbox_messages SET category=?,updated_at=? WHERE id=? AND lead_id=? AND conversation_id=?").bind(intent,now(),inboxId,row.lead_id,row.conversation_id).run();
+  try{await captureConversationSalesMemory(env,inboxId);}catch(error){try{await audit(env,"conversation_memory_capture_failed","Linked inbound remained stored after customer-memory capture failure",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   const nextStage=NEGOTIATION_STAGE_INTENTS.has(intent)?"negotiation":"replied";
   await env.DB.prepare(`UPDATE leads SET stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified','contacted','replied')`).bind(nextStage,now(),row.lead_id).run();
   const contact=await env.DB.prepare("SELECT * FROM lead_contacts WHERE id=? AND lead_id=? LIMIT 1").bind(row.contact_id||"",row.lead_id).first();
@@ -7917,6 +8034,37 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const t = now();
         await env.DB.prepare("UPDATE campaigns SET status=?,updated_at=? WHERE id=?").bind(b.status, t, b.id).run();
         return json({ ok: true, id: b.id, status: b.status });
+      }
+
+      if (u.pathname === "/api/conversations/sales-state" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        await ensureConversationMemoryStore(env);
+        const leadId=String(u.searchParams.get("lead_id")||"").trim(),conversationId=String(u.searchParams.get("conversation_id")||"").trim();
+        if(!leadId||!conversationId)return json({ok:false,error:"lead_id and conversation_id are required"},400);
+        const state=await env.DB.prepare(`SELECT s.* FROM conversation_sales_state s
+          JOIN lead_conversations c ON c.id=s.conversation_id AND c.lead_id=s.lead_id
+          WHERE s.lead_id=? AND s.conversation_id=? LIMIT 1`).bind(leadId,conversationId).first();
+        return json({ok:true,state:state||null});
+      }
+
+      if (u.pathname === "/api/conversations/memory" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        await ensureConversationMemoryStore(env);
+        const leadId=String(u.searchParams.get("lead_id")||"").trim(),conversationId=String(u.searchParams.get("conversation_id")||"").trim();
+        if(!leadId||!conversationId)return json({ok:false,error:"lead_id and conversation_id are required"},400);
+        const r=await env.DB.prepare(`SELECT f.* FROM conversation_memory_facts f
+          JOIN lead_conversations c ON c.id=f.conversation_id AND c.lead_id=f.lead_id
+          WHERE f.lead_id=? AND f.conversation_id=? ORDER BY f.created_at DESC LIMIT 200`).bind(leadId,conversationId).all();
+        return json({ok:true,facts:r.results||[]});
+      }
+
+      if (u.pathname === "/api/conversations/memory/refresh" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const b=await req.json().catch(()=>null),inboxId=String(b?.inbox_message_id||"").trim();
+        if(!inboxId)return json({ok:false,error:"inbox_message_id is required"},400);
+        const result=await captureConversationSalesMemory(env,inboxId);
+        if(!result.captured)return json({ok:false,error:"Inbox message is not deterministically linked"},409);
+        return json({ok:true,...result});
       }
 
       if (u.pathname === "/api/inbox" && req.method === "GET") {
