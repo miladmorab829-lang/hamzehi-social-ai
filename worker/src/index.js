@@ -1564,6 +1564,128 @@ async function ensureMediaVaultStore(env){
     UNIQUE(source_media_id,cycle)
   )`).run();
 }
+const VISUAL_PRODUCT_ATTRIBUTE_TYPES=new Set(["model","category","use_case","size","exterior_color","interior_color","color_combination","printing","branding","other"]);
+function visualAttributeValue(value){
+  if(typeof value!=="string")throw Error("Visual attribute values must be text");
+  const raw=value.normalize("NFKC").trim();
+  if(!raw||raw.length>240||/[\u0000-\u001f]/u.test(raw))throw Error("Invalid visual attribute value");
+  return {raw,normalized:raw.toLowerCase().replace(/\s+/g," ").replace(/ي/g,"ی").replace(/ك/g,"ک")};
+}
+async function ensureVisualProductMediaStore(env){
+  await ensureMediaVaultStore(env);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS visual_product_media (
+    id TEXT PRIMARY KEY,source_platform TEXT NOT NULL CHECK(source_platform IN ('telegram','instagram')),source_identity TEXT NOT NULL UNIQUE,
+    source_media_id TEXT,source_message_id TEXT,source_file_unique_id TEXT,source_post_id TEXT,source_account_id TEXT,
+    media_type TEXT NOT NULL CHECK(media_type IN ('photo','video')),source_kind TEXT NOT NULL,ownership_status TEXT NOT NULL CHECK(ownership_status='owned'),
+    generated_detected INTEGER NOT NULL DEFAULT 0 CHECK(generated_detected IN (0,1)),candidate_status TEXT NOT NULL CHECK(candidate_status IN ('candidate','verified','rejected','inactive')),
+    verified_real_product INTEGER NOT NULL DEFAULT 0 CHECK(verified_real_product IN (0,1)),verified_by TEXT,verified_at TEXT,version INTEGER NOT NULL CHECK(version>0),created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_visual_product_media_candidates ON visual_product_media(candidate_status,verified_real_product,source_platform)").run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS visual_product_media_attributes (
+    id TEXT PRIMARY KEY,visual_media_id TEXT NOT NULL,attribute_type TEXT NOT NULL CHECK(attribute_type IN ('model','category','use_case','size','exterior_color','interior_color','color_combination','printing','branding','other')),
+    normalized_value TEXT NOT NULL,value_json TEXT NOT NULL CHECK(json_valid(value_json)),status TEXT NOT NULL CHECK(status IN ('active','superseded')),version INTEGER NOT NULL CHECK(version>0),supersedes_attribute_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+    UNIQUE(visual_media_id,attribute_type,version)
+  )`).run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_product_media_attribute_active ON visual_product_media_attributes(visual_media_id,attribute_type) WHERE status='active'").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_visual_product_media_attribute_lookup ON visual_product_media_attributes(attribute_type,normalized_value,visual_media_id) WHERE status='active'").run();
+  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS visual_product_media_attributes_no_delete BEFORE DELETE ON visual_product_media_attributes BEGIN SELECT RAISE(ABORT,'Visual product attribute history cannot be deleted'); END").run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS visual_product_media_attributes_immutable BEFORE UPDATE ON visual_product_media_attributes
+    WHEN NEW.id IS NOT OLD.id OR NEW.visual_media_id IS NOT OLD.visual_media_id OR NEW.attribute_type IS NOT OLD.attribute_type
+    OR NEW.normalized_value IS NOT OLD.normalized_value OR NEW.value_json IS NOT OLD.value_json OR NEW.version IS NOT OLD.version
+    OR NEW.supersedes_attribute_id IS NOT OLD.supersedes_attribute_id OR NEW.created_at IS NOT OLD.created_at
+    OR OLD.status='superseded' OR NEW.status NOT IN ('active','superseded') BEGIN SELECT RAISE(ABORT,'Visual product attributes are immutable except supersession'); END`).run();
+}
+async function generatedVisualParentChain(env,telegramMediaId){
+  let current=String(telegramMediaId||"").trim();
+  for(let depth=0;current&&depth<8;depth++){
+    const row=await env.DB.prepare(`SELECT m.source_kind,v.source_type,v.ai_status,v.parent_media_id
+      FROM telegram_media_sources m LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id WHERE m.id=? LIMIT 1`).bind(current).first();
+    if(!row)return depth>0;
+    const sourceType=String(row.source_type||"").toLowerCase(),aiStatus=String(row.ai_status||"none").toLowerCase();
+    if(String(row.source_kind||"").toLowerCase()==="ready"||["ready","processing"].includes(aiStatus)||/(?:^|_)(?:ai|generated|weekly)(?:_|$)/.test(sourceType))return true;
+    current=String(row.parent_media_id||"").trim();
+  }
+  return !!current;
+}
+async function ingestVisualProductMedia(env,body){
+  await ensureVisualProductMediaStore(env);
+  if(!body||typeof body!=="object"||Array.isArray(body))throw Error("Invalid visual media candidate");
+  const platform=String(body.platform||"").toLowerCase();
+  let candidate;
+  if(platform==="telegram"){
+    const sourceId=String(body.telegram_media_id||"").trim();
+    if(!sourceId)throw Error("telegram_media_id is required");
+    const source=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=? LIMIT 1").bind(sourceId).first();
+    if(!source||!["vault","archive"].includes(String(source.source_kind||"")))throw Error("Only owned Telegram archive or vault media can be indexed");
+    if(!["photo","video"].includes(String(source.media_type||""))||await generatedVisualParentChain(env,source.id))throw Error("Generated or unsupported media cannot be a real-product candidate");
+    candidate={source_platform:"telegram",source_identity:`telegram:${source.chat_id}:${source.message_id}:${source.file_unique_id||source.id}`,source_media_id:source.id,source_message_id:source.message_id,source_file_unique_id:source.file_unique_id||null,source_post_id:null,source_account_id:null,media_type:source.media_type,source_kind:source.source_kind};
+  }else if(platform==="instagram"){
+    const accountId=String(body.source_account_id||"").trim(),postId=String(body.source_post_id||"").trim(),mediaType=String(body.media_type||"").toLowerCase();
+    if(!env.INSTAGRAM_ACCOUNT_ID||accountId!==String(env.INSTAGRAM_ACCOUNT_ID)||!/^[A-Za-z0-9_.:-]{1,180}$/.test(postId)||!["photo","video"].includes(mediaType))throw Error("Only media from the configured owned Instagram account can be indexed");
+    candidate={source_platform:"instagram",source_identity:`instagram:${accountId}:${postId}`,source_media_id:null,source_message_id:null,source_file_unique_id:null,source_post_id:postId,source_account_id:accountId,media_type:mediaType,source_kind:"owned_instagram"};
+  }else throw Error("Unsupported visual source platform");
+  const t=now(),id="visual-media-"+uid();
+  await env.DB.prepare(`INSERT OR IGNORE INTO visual_product_media
+    (id,source_platform,source_identity,source_media_id,source_message_id,source_file_unique_id,source_post_id,source_account_id,media_type,source_kind,ownership_status,generated_detected,candidate_status,verified_real_product,version,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?, 'owned',0,'candidate',0,1,?,?)`).bind(id,candidate.source_platform,candidate.source_identity,candidate.source_media_id,candidate.source_message_id,candidate.source_file_unique_id,candidate.source_post_id,candidate.source_account_id,candidate.media_type,candidate.source_kind,t,t).run();
+  const stored=await env.DB.prepare("SELECT * FROM visual_product_media WHERE source_identity=? LIMIT 1").bind(candidate.source_identity).first();
+  if(!stored)throw Error("Visual product candidate persistence failed");
+  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Owned visual product candidate recorded',?,?)").bind("visual-media:"+stored.id+":candidate","visual_product_media_candidate",JSON.stringify({visual_media_id:stored.id,source_platform:stored.source_platform,source_kind:stored.source_kind,candidate_status:stored.candidate_status}),t).run();
+  return {item:stored,idempotent:stored.id!==id};
+}
+async function transitionVisualProductMedia(env,body){
+  await ensureVisualProductMediaStore(env);
+  const id=String(body?.id||"").trim(),action=String(body?.action||"").trim(),version=Number(body?.expected_version);
+  if(!id||!Number.isSafeInteger(version)||version<1||!["verify","reject","deactivate"].includes(action))throw Error("id, expected_version, and a valid action are required");
+  const current=await env.DB.prepare("SELECT * FROM visual_product_media WHERE id=? LIMIT 1").bind(id).first();
+  if(!current)throw Error("Visual media not found");
+  if(action==="verify"&&current.candidate_status==="verified"&&current.verified_real_product===1)return current;
+  if(current.version!==version||current.generated_detected||current.ownership_status!=="owned")throw Error("Visual media state changed or is not eligible for this transition");
+  const t=now(),next=action==="verify"?"verified":action==="reject"?"rejected":"inactive";
+  const verified=action==="verify"?1:0;
+  const result=await env.DB.prepare(`UPDATE visual_product_media SET candidate_status=?,verified_real_product=?,verified_by=?,verified_at=?,version=version+1,updated_at=?
+    WHERE id=? AND version=? AND candidate_status<>? AND generated_detected=0 AND ownership_status='owned'`).bind(next,verified,action==="verify"?"admin":current.verified_by||null,action==="verify"?t:current.verified_at||null,t,id,version,"inactive").run();
+  if(!result.meta?.changes)throw Error("Concurrent visual media transition conflict");
+  const stored=await env.DB.prepare("SELECT * FROM visual_product_media WHERE id=? LIMIT 1").bind(id).first();
+  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Visual product media owner transition',?,?)").bind(`visual-media:${id}:${action}:${stored.version}`,"visual_product_media_"+action,JSON.stringify({visual_media_id:id,action,status:stored.candidate_status,verified_real_product:stored.verified_real_product}),t).run();
+  return stored;
+}
+async function updateVisualProductAttributes(env,body){
+  await ensureVisualProductMediaStore(env);
+  const mediaId=String(body?.visual_media_id||"").trim(),items=Array.isArray(body?.attributes)?body.attributes:[];
+  if(!mediaId||!items.length||items.length>12)throw Error("visual_media_id and 1-12 attributes are required");
+  const media=await env.DB.prepare("SELECT * FROM visual_product_media WHERE id=? AND candidate_status<>'inactive' LIMIT 1").bind(mediaId).first();
+  if(!media)throw Error("Active visual media candidate not found");
+  const output=[];
+  for(const item of items){
+    const type=String(item?.type||"").trim();if(!VISUAL_PRODUCT_ATTRIBUTE_TYPES.has(type))throw Error("Unsupported visual attribute type");
+    const value=visualAttributeValue(item?.value),current=await env.DB.prepare("SELECT * FROM visual_product_media_attributes WHERE visual_media_id=? AND attribute_type=? AND status='active' LIMIT 1").bind(mediaId,type).first();
+    if(current?.normalized_value===value.normalized){output.push(current);continue;}
+    if(current&&(!Number.isSafeInteger(item?.expected_version)||item.expected_version!==current.version))throw Error("Exact active attribute version is required for replacement");
+    const t=now(),id="visual-attribute-"+uid(),nextVersion=(current?.version||0)+1;
+    const statements=[];
+    if(current)statements.push(env.DB.prepare("UPDATE visual_product_media_attributes SET status='superseded',updated_at=? WHERE id=? AND version=? AND status='active'").bind(t,current.id,current.version));
+    statements.push(env.DB.prepare("INSERT INTO visual_product_media_attributes(id,visual_media_id,attribute_type,normalized_value,value_json,status,version,supersedes_attribute_id,created_at,updated_at) VALUES(?,?,?,?,?,'active',?,?,?,?)").bind(id,mediaId,type,value.normalized,JSON.stringify(value.raw),nextVersion,current?.id||null,t,t));
+    await env.DB.batch(statements);
+    const stored=await env.DB.prepare("SELECT * FROM visual_product_media_attributes WHERE id=? LIMIT 1").bind(id).first();if(!stored)throw Error("Visual attribute persistence failed");output.push(stored);
+  }
+  return output;
+}
+async function visualProductMediaWithAttributes(env,item){
+  const attrs=await env.DB.prepare("SELECT * FROM visual_product_media_attributes WHERE visual_media_id=? ORDER BY attribute_type,version DESC").bind(item.id).all();
+  return {...item,attributes:attrs.results||[]};
+}
+async function retrieveEligibleVisualProductMedia(env,filters,limit){
+  const base="m.candidate_status='verified' AND m.verified_real_product=1 AND m.generated_detected=0 AND m.ownership_status='owned'";
+  const clauses=filters.map(()=>"EXISTS(SELECT 1 FROM visual_product_media_attributes a WHERE a.visual_media_id=m.id AND a.status='active' AND a.attribute_type=? AND a.normalized_value=?)");
+  const exact=await env.DB.prepare(`SELECT m.* FROM visual_product_media m WHERE ${base} AND ${clauses.join(" AND ")} ORDER BY m.verified_at DESC LIMIT ?`).bind(...filters.flatMap(x=>[x.type,x.value]),limit).all();
+  let items=exact.results||[],match="exact";
+  if(!items.length){
+    const approximate=await env.DB.prepare(`SELECT m.* FROM visual_product_media m WHERE ${base} AND (${clauses.join(" OR ")}) ORDER BY m.verified_at DESC LIMIT ?`).bind(...filters.flatMap(x=>[x.type,x.value]),limit).all();
+    items=approximate.results||[];match="approximate";
+  }
+  return {match,items:await Promise.all(items.map(x=>visualProductMediaWithAttributes(env,{...x,match})))};
+}
 function vaultChatId(env){return String(env.TELEGRAM_VAULT_CHAT_ID||'').trim()}
 function videoVaultChatId(env){return String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||env.TELEGRAM_VAULT_CHAT_ID||'').trim()}
 function mediaVaultChatId(env,type){return String(type==='video'?videoVaultChatId(env):vaultChatId(env)).trim()}
@@ -7305,6 +7427,50 @@ await pollWeeklyVideoAutopilot(env);
 
       if (!(await rate(env, req)))
         return json({ ok: false, error: "Rate limit exceeded" }, 429);
+
+      if (u.pathname === "/api/visual-product-media" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        await ensureVisualProductMediaStore(env);
+        const id=String(u.searchParams.get("id")||"").trim();
+        if(id){
+          const item=await env.DB.prepare("SELECT * FROM visual_product_media WHERE id=? LIMIT 1").bind(id).first();
+          if(!item)return json({ok:false,error:"Visual media not found"},404);
+          return json({ok:true,item:await visualProductMediaWithAttributes(env,item)});
+        }
+        const status=String(u.searchParams.get("status")||"candidate"),allowed=new Set(["candidate","verified","rejected","inactive","all"]);
+        if(!allowed.has(status))return json({ok:false,error:"Invalid visual media status"},400);
+        const limit=Math.min(100,Math.max(1,Number(u.searchParams.get("limit")||50)));
+        const r=status==="all"?await env.DB.prepare("SELECT * FROM visual_product_media ORDER BY created_at DESC LIMIT ?").bind(limit).all():await env.DB.prepare("SELECT * FROM visual_product_media WHERE candidate_status=? ORDER BY created_at DESC LIMIT ?").bind(status,limit).all();
+        return json({ok:true,items:await Promise.all((r.results||[]).map(item=>visualProductMediaWithAttributes(env,item)))});
+      }
+
+      if (u.pathname === "/api/visual-product-media/eligible" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        await ensureVisualProductMediaStore(env);
+        const filters=[];
+        for(const type of VISUAL_PRODUCT_ATTRIBUTE_TYPES){const raw=u.searchParams.get(type);if(raw)filters.push({type,value:visualAttributeValue(raw).normalized});}
+        if(!filters.length)return json({ok:false,error:"At least one structured visual attribute is required"},400);
+        const limit=Math.min(4,Math.max(1,Number(u.searchParams.get("limit")||4)));
+        return json({ok:true,...await retrieveEligibleVisualProductMedia(env,filters,limit)});
+      }
+
+      if (u.pathname === "/api/visual-product-media/ingest" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const body=await req.json().catch(()=>null);
+        try{return json({ok:true,...await ingestVisualProductMedia(env,body)});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+      }
+
+      if (u.pathname === "/api/visual-product-media/transition" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const body=await req.json().catch(()=>null);
+        try{return json({ok:true,item:await transitionVisualProductMedia(env,body)});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+
+      if (u.pathname === "/api/visual-product-media/attributes" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const body=await req.json().catch(()=>null);
+        try{return json({ok:true,attributes:await updateVisualProductAttributes(env,body)});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
 
       if (req.method === "GET" && u.pathname === "/api/diagnostic/location") {
         if (!auth(req, env))

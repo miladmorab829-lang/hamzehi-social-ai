@@ -259,6 +259,59 @@ CREATE INDEX IF NOT EXISTS idx_commercial_price_sku_active
 ON commercial_price_items(market, sku, active);
 CREATE INDEX IF NOT EXISTS idx_commercial_price_key_active
 ON commercial_price_items(market, product_key, active);
+CREATE TABLE IF NOT EXISTS visual_product_media (
+ id TEXT PRIMARY KEY,
+ source_platform TEXT NOT NULL CHECK(source_platform IN ('telegram','instagram')),
+ source_identity TEXT NOT NULL UNIQUE,
+ source_media_id TEXT,
+ source_message_id TEXT,
+ source_file_unique_id TEXT,
+ source_post_id TEXT,
+ source_account_id TEXT,
+ media_type TEXT NOT NULL CHECK(media_type IN ('photo','video')),
+ source_kind TEXT NOT NULL,
+ ownership_status TEXT NOT NULL CHECK(ownership_status='owned'),
+ generated_detected INTEGER NOT NULL DEFAULT 0 CHECK(generated_detected IN (0,1)),
+ candidate_status TEXT NOT NULL CHECK(candidate_status IN ('candidate','verified','rejected','inactive')),
+ verified_real_product INTEGER NOT NULL DEFAULT 0 CHECK(verified_real_product IN (0,1)),
+ verified_by TEXT,
+ verified_at TEXT,
+ version INTEGER NOT NULL CHECK(version > 0),
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_visual_product_media_candidates
+ON visual_product_media(candidate_status, verified_real_product, source_platform);
+CREATE TABLE IF NOT EXISTS visual_product_media_attributes (
+ id TEXT PRIMARY KEY,
+ visual_media_id TEXT NOT NULL,
+ attribute_type TEXT NOT NULL CHECK(attribute_type IN ('model','category','use_case','size','exterior_color','interior_color','color_combination','printing','branding','other')),
+ normalized_value TEXT NOT NULL,
+ value_json TEXT NOT NULL CHECK(json_valid(value_json)),
+ status TEXT NOT NULL CHECK(status IN ('active','superseded')),
+ version INTEGER NOT NULL CHECK(version > 0),
+ supersedes_attribute_id TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ UNIQUE(visual_media_id, attribute_type, version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_product_media_attribute_active
+ON visual_product_media_attributes(visual_media_id, attribute_type)
+WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_visual_product_media_attribute_lookup
+ON visual_product_media_attributes(attribute_type, normalized_value, visual_media_id)
+WHERE status='active';
+CREATE TRIGGER IF NOT EXISTS visual_product_media_attributes_no_delete
+BEFORE DELETE ON visual_product_media_attributes
+BEGIN SELECT RAISE(ABORT,'Visual product attribute history cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS visual_product_media_attributes_immutable
+BEFORE UPDATE ON visual_product_media_attributes
+WHEN NEW.id IS NOT OLD.id OR NEW.visual_media_id IS NOT OLD.visual_media_id
+ OR NEW.attribute_type IS NOT OLD.attribute_type OR NEW.normalized_value IS NOT OLD.normalized_value
+ OR NEW.value_json IS NOT OLD.value_json OR NEW.version IS NOT OLD.version
+ OR NEW.supersedes_attribute_id IS NOT OLD.supersedes_attribute_id OR NEW.created_at IS NOT OLD.created_at
+ OR OLD.status='superseded' OR NEW.status NOT IN ('active','superseded')
+BEGIN SELECT RAISE(ABORT,'Visual product attributes are immutable except supersession'); END;
 CREATE TABLE IF NOT EXISTS social_metrics (
  id TEXT PRIMARY KEY, content_id TEXT, platform TEXT, impressions INTEGER DEFAULT 0,
  reach INTEGER DEFAULT 0, likes INTEGER DEFAULT 0, comments INTEGER DEFAULT 0,
