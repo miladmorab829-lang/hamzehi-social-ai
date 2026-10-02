@@ -8748,7 +8748,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const r = await env.DB.prepare(`SELECT i.*,l.name AS lead_name,o.id AS outreach_id,o.status AS outreach_status,o.message AS outreach_message,o.language AS outreach_language
           FROM inbox_messages i LEFT JOIN leads l ON l.id=i.lead_id LEFT JOIN lead_outreach o ON o.inbox_message_id=i.id
           ORDER BY i.created_at DESC LIMIT 200`).all();
-        return json({ items: r.results || [] });
+        return json({ ok: true, items: r.results || [] });
       }
 
       if (u.pathname === "/api/inbox/negotiation-draft" && req.method === "POST") {

@@ -751,13 +751,16 @@ async function loadVideoAutopilot(){
       ? "<span class='ok'>ENABLED</span>"
       : "<span class='bad'>DISABLED</span>";
 
-  $("videoCycle").textContent=d.week_id||"—";
+  // Summary cards describe the actual current ISO week; older cycles (e.g. a failed historical week) stay in history only.
+  const cw=d.current_week&&typeof d.current_week==="object"?d.current_week:null;
+  const cycleStatus=cw?(cw.exists?cw.status:null):d.status;
+  $("videoCycle").textContent=(cw?cw.week_id:d.week_id)||"—";
 
   $("videoProgress").textContent=
-    statusLabel(d.status);
+    cw&&!cw.exists?"Not started":statusLabel(cycleStatus);
 
   $("videoToday").innerHTML=
-    d.status==="video_ready"
+    cycleStatus==="video_ready"
       ? "<span class='ok'>READY</span>"
       : "<span class='muted'>NOT READY</span>";
 
@@ -789,7 +792,8 @@ async function loadVideoAutopilot(){
       (currentWeek.created_at?"<div>Created: "+esc(currentWeek.created_at)+"</div>":"")+
       (currentWeek.updated_at?"<div>Updated: "+esc(currentWeek.updated_at)+"</div>":"")+
       (currentWeek.caption?"<div>Caption: "+esc(currentWeek.caption)+"</div>":"")+
-      eventText;
+      eventText+
+      (d.week_id&&d.week_id!==currentWeek.week_id?"<div class='mini'>Latest recorded cycle (history only, never retried): "+esc(d.week_id)+" · "+esc(statusLabel(d.status))+"</div>":"");
   }else{
     $("videoCurrentWeek").textContent="Current-week details unavailable.";
   }
