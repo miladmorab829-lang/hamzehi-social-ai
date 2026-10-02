@@ -5561,27 +5561,30 @@ function salesBrainClaimFactsSupport(claim,facts){
   return (facts||[]).some(f=>compatible[claim.category]?.has(f.category)&&(!claim.values?.length||claim.values.every(value=>f.values.some(actual=>salesBrainPhraseIncluded(actual,value)||salesBrainPhraseIncluded(value,actual)))));
 }
 function salesBrainBusinessClaims(text){
-  const value=String(text||""),normalized=salesBrainClaimText(value),claims=[],add=(category,values=[])=>claims.push({category,values:values.map(salesBrainClaimText).filter(Boolean)});
-  if(/[؟?]/u.test(value)&&/^(?:.*[؟?])?$/u.test(value.trim()))return claims;
-  const availability=value.match(/(?:^|[.!؟?]\s*)(.+?)\s+(?:is|are)\s+available\b|(.+?)\s+(?:موجود(?:\s+است|ه|باشد)?|متوفر(?:ة|ين)?)(?:\b|$)/iu);if(availability)add("availability",[availability[1]||availability[2]]);
-  if(/(?:foil|foiling|logo|branding|printing|چاپ|طلاکوب|فویل|لوگو|برند|فويل|طباعة|شعار)/iu.test(value)&&/(?:supports?|available|possible|can|قابلیت|امکان|پشتیبانی|موجود|يدعم|متاح|يمكن)/iu.test(value))add("capability",[...(value.match(/(?:foil|foiling|logo|branding|printing|چاپ|طلاکوب|فویل|لوگو|برند|فويل|طباعة|شعار)/giu)||[])]);
-  const size=value.match(/(?:size|ابعاد|اندازه|مقاس)\s*([0-9۰-۹٠-٩]+\s*[x×]\s*[0-9۰-۹٠-٩]+)/iu);if(size&&/(?:available|موجود|متوفر|compatible|سازگار|مناسب)/iu.test(value))add("size",[size[1]]);
-  const production=value.match(/(?:takes?|production|تولید|زمان تولید|مدة الإنتاج|انتاج)[^\p{N}]{0,20}([0-9۰-۹٠-٩]+)\s*(?:days?|روز|يوم)/iu);if(production)add("production",[production[1]]);
-  const shipping=value.match(/(?:shipping|ارسال|شحن)\s+(?:to\s+)?([^.!؟?]+?)(?:\s+(?:is|available|موجود|متوفر)|[.!؟?]|$)/iu);if(shipping&&/(?:available|موجود|متوفر|can ship|ارسال داریم|نوفر الشحن)/iu.test(value))add("shipping",[shipping[1]]);
-  if(/(?:shipping|ارسال|شحن)/iu.test(value)&&/(?:costs?|price|هزینه|هزینهٔ?|سعر|تكلفة|[$€£])/iu.test(value))add("shipping",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
-  if(/(?:minimum order|moq|حداقل سفارش|موک|الحد الأدنى)/iu.test(value)&&/[0-9۰-۹٠-٩]/u.test(value))add("moq",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
-  if(/(?:price|قیمت|سعر)/iu.test(value)&&(/[0-9۰-۹٠-٩]/u.test(value)||/[$€£]/u.test(value)))add("price",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
-  if(/(?:discount|تخفیف|خصم)/iu.test(value)&&( /[0-9۰-۹٠-٩%٪]/u.test(value)))add("discount",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
-  if(/(?:deposit|payment|پرداخت|بیعانه|ودیعه|دفع|عربون)/iu.test(value)&&(/[0-9۰-۹٠-٩%٪]/u.test(value)||/(?:terms|شرایط|شروط)/iu.test(value)))add("payment",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
-  if(/(?:custom(?:ization| configuration)?|سفارشی|شخصی سازی|تخصیص|مخصص)/iu.test(value)&&/(?:possible|available|can|امکان|قابلیت|ممکن|يمكن|متاح)/iu.test(value))add("capability",["customization"]);
+  const claimTerms={product:/(?:\b(?:model|product|box|case|collection)\b|مدل|محصول|جعبه|علبة|موديل|منتج)/iu,color:/(?:\b(?:navy|blue|red|green|black|white|cream|gold|silver|burgundy|interior|exterior|colour|color)\b|رنگ|سرمه[‌ای ]|قرمز|داخلی|خارجی|لون|كحلي|أحمر|داخلي|خارجي)/iu,material:/(?:\b(?:leather|wood|metal|velvet|cardboard|paper|material)\b|چرم|چوب|فلز|مخمل|مقوا|جنس|جلد|خشب|معدن|مادة)/iu,size:/(?:\b(?:size|dimension|dimensions|measurement|compatible)\b|اندازه|ابعاد|سایز|مقاس|أبعاد)/iu,printing:/(?:\b(?:foil|foiling|stamp(?:ing)?|printing|print|logo|branding)\b|چاپ|طلاکوب|فویل|لوگو|برند|فويل|طباعة|شعار)/iu,capability:/(?:\b(?:custom(?:ization| configuration)?|configuration|capability|option)\b|سفارشی|شخصی[‌ ]سازی|پیکربندی|قابلیت|تخصیص|تخصيص|مخصص|إمكانية)/iu,moq:/(?:\b(?:moq|minimum order|minimum quantity|quantity restriction|pieces)\b|حداقل سفارش|حداقل تعداد|موک|تعداد|الحد الأدنى|كمية)/iu,price:/(?:\b(?:price|unit price|total price|currency)\b|قیمت|سعر|ارز)/iu,discount:/(?:\b(?:discount|percentage)\b|تخفیف|درصد|خصم|نسبة)/iu,payment:/(?:\b(?:deposit|payment|bank transfer|cash|payment terms|commercial terms)\b|بیعانه|ودیعه|پرداخت|انتقال بانکی|شرایط پرداخت|عربون|دفع|(?:ال)?تحويل (?:ال)?بنكي|نقد|شروط الدفع)/iu,production:/(?:\b(?:production|manufacture|completion|production time|production date)\b|تولید|زمان تولید|تاریخ تولید|انتاج|تصنيع|مدة الإنتاج)/iu,shipping:/(?:\b(?:shipping|ship|delivery|air|ground|courier|baghdad|destination)\b|ارسال|تحویل|هوایی|زمینی|بغداد|شحن|توصيل|جوي|بري)/iu},phrases={material:/(?:leather|wood|metal|velvet|cardboard|paper|چرم|چوب|فلز|مخمل|مقوا|جلد|خشب|معدن|مادة)/giu,color:/(?:navy|blue|red|green|black|white|cream|gold|silver|burgundy|interior|exterior|سرمه[‌ای ]|قرمز|داخلی|خارجی|كحلي|أحمر|داخلي|خارجي)/giu,printing:/(?:foil(?:ing)?|stamp(?:ing)?|printing|logo|branding|چاپ|طلاکوب|فویل|لوگو|فويل|طباعة|شعار)/giu,capability:/(?:custom(?:ization| configuration)?|configuration|سفارشی|شخصی[‌ ]سازی|پیکربندی|تخصیص|تخصيص|مخصص)/giu,shipping:/(?:air|ground|courier|baghdad|هوایی|زمینی|بغداد|(?:ال)?جوي|(?:ال)?بري)/giu,payment:/(?:bank transfer|cash|انتقال بانکی|نقد|(?:ال)?تحويل (?:ال)?بنكي)/giu},question=/[؟?]$|^(?:do|what|would|how|are you|can you|آیا|چه|کدام|چند|میشه|می‌شود|ممکن است|هل|شنو|كم|ممكن)/iu,safeRequest=/(?:لطفاً|لطفا).*(?:بفرمایید|ارسال کنید|مشخص کنید)|(?:يرجى|يرجي).*(?:حددوا|ارسلوا|توضحون)/iu,explicitAssertion=/\b(?:is|are|made of|supports?|available|can|we ship|we accept|takes?|costs?|give|offer|deliver(?:y)?|complete)\b|(?:ساخته شده|پشتیبانی می‌کند|موجود|می‌توانیم|ارسال می‌دهیم|انجام می‌دهیم|می‌پذیریم|طول می‌کشد|هزینه|ارائه می‌دهیم|تحویل می‌دهیم|ممکن(?: است)?)|(?:مصنوع من|يدعم|متوفر|يمكن|ممكنة|نوفر|نقبل|يستغرق|تكلفة|نسلم)/iu;
+  const claims=[];
+  for(const sentence of String(text||"").match(/[^.!؟?]+[.!؟?]?/gu)||[]){
+    if(question.test(sentence)||safeRequest.test(sentence))continue;
+    const matched=Object.entries(claimTerms).filter(([,pattern])=>pattern.test(sentence)).map(([category])=>category),categories=matched.some(category=>category!=="product")?matched.filter(category=>category!=="product"):matched,numbers=sentence.match(/[0-9۰-۹٠-٩]+/g)||[];
+    for(const category of categories){
+      const numeric=["moq","price","discount","production","shipping"].includes(category)&&numbers.length>0;
+      if(!explicitAssertion.test(sentence)&&!numeric)continue;
+      const values=[],add=value=>{const normalized=salesBrainClaimText(value);if(normalized&&!values.includes(normalized))values.push(normalized);};
+      if(category==="size"){for(const value of sentence.match(/[0-9۰-۹٠-٩]+\s*[x×]\s*[0-9۰-۹٠-٩]+/giu)||[])add(value);}else if(numbers.length){for(const value of numbers)add(value);}
+      for(const value of sentence.match(phrases[category]||/$(?!)/g)||[])add(value);
+      const availability=sentence.match(/(.+?)\s+(?:is|are)\s+available\b|(.+?)\s+(?:موجود(?:\s+است|ه|باشد)?|متوفر(?:ة|ين)?)(?:\b|$)/iu);if(availability&&["product","color","size","material","printing","capability","shipping"].includes(category))add(availability[1]||availability[2]);
+      claims.push({category,values});
+    }
+  }
   return claims;
 }
 function validateSalesBrainDraft(draft,options=[]){
   const config=Array.isArray(options)?{allowedNumbers:options}:options||{},text=String(draft||""),facts=config.authoritativeFacts||[];
-  const allowedNumbers=[...(config.allowedNumbers||[]),...facts.flatMap(f=>(f.values||[]).flatMap(v=>[...String(v).matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])))).filter(Number.isSafeInteger)];
-  const numbers=[...text.matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0]));
+  const allowedNumbers=[...(config.allowedNumbers||[]),...facts.flatMap(f=>(f.values||[]).flatMap(v=>[...String(v).matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])))).filter(Number.isSafeInteger)],numbers=[...text.matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0]));
   if(numbers.some(n=>n===null||!allowedNumbers.includes(n)))return {valid:false,reason:"unsupported_numeric_claim"};
-  const unsupported=salesBrainBusinessClaims(text).find(claim=>!salesBrainClaimFactsSupport(claim,facts));
+  const compatible={product:new Set(["availability"]),color:new Set(["color"]),size:new Set(["size"]),material:new Set(["material"]),printing:new Set(["capability"]),capability:new Set(["capability"]),moq:new Set(["moq"]),price:new Set(["price"]),discount:new Set(["discount"]),payment:new Set(["payment"]),production:new Set(["production"]),shipping:new Set(["shipping"])};
+  const supported=claim=>(facts||[]).some(f=>compatible[claim.category]?.has(f.category)&&(!claim.values?.length||claim.values.every(value=>(f.values||[]).some(actual=>salesBrainPhraseIncluded(actual,value)||salesBrainPhraseIncluded(value,actual)))));
+  const unsupported=salesBrainBusinessClaims(text).find(claim=>!supported(claim));
   if(unsupported)return {valid:false,reason:"unsupported_factual_claim",claim_category:unsupported.category};
   return {valid:true};
 }
