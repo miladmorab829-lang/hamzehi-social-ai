@@ -4719,12 +4719,12 @@ async function handleTelegramWebhook(env,req){
       catch(error){
         try { await audit(env,"negotiation_reply_draft_failed","Inbound reply was stored but negotiation enrichment failed",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)}); } catch {}
       }
-    }
+    }else try{await ensureAmbiguousTelegramIdentityEscalation(env,inboxId);}catch(error){try{await audit(env,"owner_escalation_creation_failed","Unlinked Telegram inbound remained stored after escalation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }else{
-    try { await processNegotiationInbound(env,ex.id); }
-    catch(error){
-      try { await audit(env,"negotiation_reply_retry_failed","Persisted inbound reply recovery failed safely",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)}); } catch {}
-    }
+    const existing=await env.DB.prepare("SELECT lead_id,conversation_id FROM inbox_messages WHERE id=? LIMIT 1").bind(ex.id).first();
+    if(existing?.lead_id&&existing?.conversation_id)try { await processNegotiationInbound(env,ex.id); }
+    catch(error){try { await audit(env,"negotiation_reply_retry_failed","Persisted inbound reply recovery failed safely",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)}); } catch {}}
+    else try{await ensureAmbiguousTelegramIdentityEscalation(env,ex.id);}catch(error){try{await audit(env,"owner_escalation_retry_failed","Unlinked Telegram inbound remained stored after escalation retry failure",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
   if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
@@ -5534,26 +5534,102 @@ function salesBrainDraft(action,language){const ar=language==="Iraqi Arabic";con
   accepted:"از تأیید شما سپاسگزاریم. جزئیات از مسیر تأییدشده بررسی می‌شود؛ این پیام به معنی ثبت سفارش یا پرداخت نیست.",
   visual:"نمونه‌های واقعی منطبق با مشخصات شما بررسی می‌شوند و فقط نمونه‌های تأییدشده پس از بررسی ارائه خواهند شد."
 };return p[action]||p.ask_details;}
-function validateSalesBrainDraft(draft,allowedNumbers=[]){
-  const text=String(draft||""),numbers=[...text.matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0]));
+function salesBrainClaimText(value){return String(value||"").normalize("NFKC").toLowerCase().replace(/[۰-۹]/g,x=>String(PERSIAN_DIGITS.indexOf(x))).replace(/[٠-٩]/g,x=>String(ARABIC_DIGITS.indexOf(x))).replace(/[يى]/g,"ی").replace(/ك/g,"ک").replace(/[\u064b-\u065f]/g,"").replace(/[^\p{L}\p{N}%$€£]+/gu," ").replace(/\s+/g," ").trim();}
+function salesBrainFactValues(value,into=[]){if(value===null||value===undefined)return into;if(["string","number","boolean"].includes(typeof value)){into.push(String(value));return into;}if(Array.isArray(value)){for(const item of value)salesBrainFactValues(item,into);return into;}if(typeof value==="object")for(const [key,item] of Object.entries(value)){into.push(key);salesBrainFactValues(item,into);}return into;}
+function salesBrainFactCategory(domain,attribute){
+  const key=`${String(domain||"")}_${String(attribute||"")}`.toLowerCase();
+  if(/price|pricing|currency/.test(key))return "price";if(/discount/.test(key))return "discount";if(/moq|quantity/.test(key))return "moq";
+  if(/deposit|payment|commercial/.test(key))return "payment";if(/production|delivery/.test(key))return "production";
+  if(/shipping|destination/.test(key))return "shipping";if(/color/.test(key))return "color";
+  if(/size/.test(key))return "size";if(/material/.test(key))return "material";
+  if(/printing|foil|logo|brand|configuration|capability/.test(key))return "capability";
+  return "availability";
+}
+function salesBrainAuthoritativeFacts({knowledge=[],pricingFacts=[],customerFacts=[],visualFacts=[],ownerFacts=[]}={}){
+  const facts=[];
+  const add=(source,category,parts)=>{const values=parts.flatMap(x=>salesBrainFactValues(x)).map(salesBrainClaimText).filter(Boolean);if(values.length)facts.push({source,category,values});};
+  for(const fact of knowledge||[]){let value=null;try{value=JSON.parse(fact.value_json)}catch{continue;}add("approved_knowledge",salesBrainFactCategory(fact.domain,fact.attribute),[fact.entity_key,fact.attribute,value]);}
+  for(const fact of pricingFacts||[])add("authoritative_pricing",fact.category||"price",[fact.value,fact.currency,fact.product]);
+  for(const fact of customerFacts||[])add("customer_stated",fact.category||"customer",[fact.value]);
+  for(const fact of visualFacts||[])if(fact?.verified_real_product)add("verified_visual",fact.category||"availability",[fact.model,fact.category_name,fact.attributes]);
+  for(const fact of ownerFacts||[])if(fact?.explicit===true)add("owner_resolution",fact.category||"commercial",[fact.value]);
+  return facts;
+}
+function salesBrainPhraseIncluded(value,phrase){const source=` ${salesBrainClaimText(value)} `,target=salesBrainClaimText(phrase);return !!target&&source.includes(` ${target} `);}
+function salesBrainClaimFactsSupport(claim,facts){
+  const compatible={availability:new Set(["availability","color","size","material","capability","shipping"]),color:new Set(["color"]),size:new Set(["size"]),material:new Set(["material"]),capability:new Set(["capability"]),moq:new Set(["moq"]),price:new Set(["price"]),discount:new Set(["discount"]),payment:new Set(["payment"]),production:new Set(["production"]),shipping:new Set(["shipping"])};
+  return (facts||[]).some(f=>compatible[claim.category]?.has(f.category)&&(!claim.values?.length||claim.values.every(value=>f.values.some(actual=>salesBrainPhraseIncluded(actual,value)||salesBrainPhraseIncluded(value,actual)))));
+}
+function salesBrainBusinessClaims(text){
+  const value=String(text||""),normalized=salesBrainClaimText(value),claims=[],add=(category,values=[])=>claims.push({category,values:values.map(salesBrainClaimText).filter(Boolean)});
+  if(/[؟?]/u.test(value)&&/^(?:.*[؟?])?$/u.test(value.trim()))return claims;
+  const availability=value.match(/(?:^|[.!؟?]\s*)(.+?)\s+(?:is|are)\s+available\b|(.+?)\s+(?:موجود(?:\s+است|ه|باشد)?|متوفر(?:ة|ين)?)(?:\b|$)/iu);if(availability)add("availability",[availability[1]||availability[2]]);
+  if(/(?:foil|foiling|logo|branding|printing|چاپ|طلاکوب|فویل|لوگو|برند|فويل|طباعة|شعار)/iu.test(value)&&/(?:supports?|available|possible|can|قابلیت|امکان|پشتیبانی|موجود|يدعم|متاح|يمكن)/iu.test(value))add("capability",[...(value.match(/(?:foil|foiling|logo|branding|printing|چاپ|طلاکوب|فویل|لوگو|برند|فويل|طباعة|شعار)/giu)||[])]);
+  const size=value.match(/(?:size|ابعاد|اندازه|مقاس)\s*([0-9۰-۹٠-٩]+\s*[x×]\s*[0-9۰-۹٠-٩]+)/iu);if(size&&/(?:available|موجود|متوفر|compatible|سازگار|مناسب)/iu.test(value))add("size",[size[1]]);
+  const production=value.match(/(?:takes?|production|تولید|زمان تولید|مدة الإنتاج|انتاج)[^\p{N}]{0,20}([0-9۰-۹٠-٩]+)\s*(?:days?|روز|يوم)/iu);if(production)add("production",[production[1]]);
+  const shipping=value.match(/(?:shipping|ارسال|شحن)\s+(?:to\s+)?([^.!؟?]+?)(?:\s+(?:is|available|موجود|متوفر)|[.!؟?]|$)/iu);if(shipping&&/(?:available|موجود|متوفر|can ship|ارسال داریم|نوفر الشحن)/iu.test(value))add("shipping",[shipping[1]]);
+  if(/(?:shipping|ارسال|شحن)/iu.test(value)&&/(?:costs?|price|هزینه|هزینهٔ?|سعر|تكلفة|[$€£])/iu.test(value))add("shipping",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
+  if(/(?:minimum order|moq|حداقل سفارش|موک|الحد الأدنى)/iu.test(value)&&/[0-9۰-۹٠-٩]/u.test(value))add("moq",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
+  if(/(?:price|قیمت|سعر)/iu.test(value)&&(/[0-9۰-۹٠-٩]/u.test(value)||/[$€£]/u.test(value)))add("price",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
+  if(/(?:discount|تخفیف|خصم)/iu.test(value)&&( /[0-9۰-۹٠-٩%٪]/u.test(value)))add("discount",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
+  if(/(?:deposit|payment|پرداخت|بیعانه|ودیعه|دفع|عربون)/iu.test(value)&&(/[0-9۰-۹٠-٩%٪]/u.test(value)||/(?:terms|شرایط|شروط)/iu.test(value)))add("payment",[...(value.match(/[0-9۰-۹٠-٩]+/g)||[])]);
+  if(/(?:custom(?:ization| configuration)?|سفارشی|شخصی سازی|تخصیص|مخصص)/iu.test(value)&&/(?:possible|available|can|امکان|قابلیت|ممکن|يمكن|متاح)/iu.test(value))add("capability",["customization"]);
+  return claims;
+}
+function validateSalesBrainDraft(draft,options=[]){
+  const config=Array.isArray(options)?{allowedNumbers:options}:options||{},text=String(draft||""),facts=config.authoritativeFacts||[];
+  const allowedNumbers=[...(config.allowedNumbers||[]),...facts.flatMap(f=>(f.values||[]).flatMap(v=>[...String(v).matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])))).filter(Number.isSafeInteger)];
+  const numbers=[...text.matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0]));
   if(numbers.some(n=>n===null||!allowedNumbers.includes(n)))return {valid:false,reason:"unsupported_numeric_claim"};
-  if(/(?:[$€£٪%]|(?:قیمت|price|سعر)\s*[:=]?\s*\d|(?:موک|moq|حداقل سفارش)\s*[:=]?\s*\d|(?:ارسال|shipping|شحن)\s*[:=]?\s*\d)/iu.test(text))return {valid:false,reason:"unsupported_commercial_claim"};
+  const unsupported=salesBrainBusinessClaims(text).find(claim=>!salesBrainClaimFactsSupport(claim,facts));
+  if(unsupported)return {valid:false,reason:"unsupported_factual_claim",claim_category:unsupported.category};
   return {valid:true};
 }
 const OWNER_ESCALATION_REASONS=new Set(["missing_business_knowledge","conflicting_business_knowledge","unsupported_price","unauthorized_discount","unclear_moq","unusual_customization","uncertain_production_capability","uncertain_production_time","uncertain_shipping","unusual_commercial_terms","ambiguous_customer_identity","low_confidence_commercial_interpretation","unsupported_factual_claim"]);
 const OWNER_ESCALATION_SCHEMA=[
   `CREATE TABLE IF NOT EXISTS owner_escalations (
-    id TEXT PRIMARY KEY,escalation_key TEXT NOT NULL UNIQUE,lead_id TEXT NOT NULL,conversation_id TEXT NOT NULL,contact_id TEXT,channel TEXT NOT NULL,source_message_id TEXT,sales_brain_event_id TEXT NOT NULL,context_hash TEXT,current_sales_stage TEXT,context_summary TEXT NOT NULL,unresolved_question TEXT NOT NULL,
+    id TEXT PRIMARY KEY,escalation_key TEXT NOT NULL UNIQUE,lead_id TEXT,conversation_id TEXT,contact_id TEXT,channel TEXT NOT NULL,source_message_id TEXT,sales_brain_event_id TEXT NOT NULL,context_hash TEXT,current_sales_stage TEXT,context_summary TEXT NOT NULL,unresolved_question TEXT NOT NULL,
     reason_code TEXT NOT NULL CHECK(reason_code IN ('missing_business_knowledge','conflicting_business_knowledge','unsupported_price','unauthorized_discount','unclear_moq','unusual_customization','uncertain_production_capability','uncertain_production_time','uncertain_shipping','unusual_commercial_terms','ambiguous_customer_identity','low_confidence_commercial_interpretation','unsupported_factual_claim')),
     decision_required TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('open','resolved')),version INTEGER NOT NULL CHECK(version>0),owner_decision TEXT,owner_note TEXT,resolved_by TEXT,resolved_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
-    CHECK(status='open' OR (owner_decision IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL))
+    CHECK(status='open' OR (owner_decision IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL)),
+    CHECK(reason_code='ambiguous_customer_identity' OR (lead_id IS NOT NULL AND conversation_id IS NOT NULL))
   )`,
   "CREATE INDEX IF NOT EXISTS idx_owner_escalations_open ON owner_escalations(status,created_at)",
   "CREATE INDEX IF NOT EXISTS idx_owner_escalations_conversation ON owner_escalations(lead_id,conversation_id,created_at)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_escalations_open_source_reason ON owner_escalations(source_message_id,reason_code) WHERE status='open' AND source_message_id IS NOT NULL AND source_message_id<>''",
   "CREATE TRIGGER IF NOT EXISTS owner_escalations_no_delete BEFORE DELETE ON owner_escalations BEGIN SELECT RAISE(ABORT,'Owner escalation history cannot be deleted'); END"
 ];
-async function ensureOwnerEscalationStore(env){await env.DB.batch(OWNER_ESCALATION_SCHEMA.map(sql=>env.DB.prepare(sql)));}
+async function ownerEscalationIdentityColumns(env){
+  const r=await env.DB.prepare("PRAGMA table_info(owner_escalations)").all();
+  return new Map((r.results||[]).map(column=>[String(column.name),column]));
+}
+async function ownerEscalationIdentityIsNullable(env){
+  const columns=await ownerEscalationIdentityColumns(env);
+  return columns.has("lead_id")&&columns.has("conversation_id")&&!Number(columns.get("lead_id").notnull)&&!Number(columns.get("conversation_id").notnull);
+}
+async function upgradeOwnerEscalationIdentityColumns(env){
+  if(await ownerEscalationIdentityIsNullable(env))return;
+  const replacement="owner_escalations__nullable_identity_p1";
+  const create=OWNER_ESCALATION_SCHEMA[0].replace("CREATE TABLE IF NOT EXISTS owner_escalations","CREATE TABLE "+replacement);
+  const copyColumns="id,escalation_key,lead_id,conversation_id,contact_id,channel,source_message_id,sales_brain_event_id,context_hash,current_sales_stage,context_summary,unresolved_question,reason_code,decision_required,status,version,owner_decision,owner_note,resolved_by,resolved_at,created_at,updated_at";
+  try{
+    // D1 batch is atomic: either the replacement and every preserved row become live, or the old table remains intact.
+    await env.DB.batch([
+      env.DB.prepare(create),
+      env.DB.prepare(`INSERT INTO ${replacement}(${copyColumns}) SELECT ${copyColumns} FROM owner_escalations`),
+      env.DB.prepare("DROP TABLE owner_escalations"),
+      env.DB.prepare(`ALTER TABLE ${replacement} RENAME TO owner_escalations`)
+    ]);
+  }catch(error){
+    if(await ownerEscalationIdentityIsNullable(env))return;
+    throw error;
+  }
+}
+async function ensureOwnerEscalationStore(env){
+  await env.DB.batch(OWNER_ESCALATION_SCHEMA.map(sql=>env.DB.prepare(sql)));
+  await upgradeOwnerEscalationIdentityColumns(env);
+  await env.DB.batch(OWNER_ESCALATION_SCHEMA.slice(1).map(sql=>env.DB.prepare(sql)));
+}
 function ownerEscalationReason(brain){
   const reason=String(brain?.needs_owner_reason||"");
   if(reason==="authoritative_price_required")return "unsupported_price";
@@ -5566,19 +5642,27 @@ function ownerEscalationReason(brain){
 }
 function ownerEscalationSummary(row,brain){return String(row?.message||brain?.customer_known_facts?.customer_message||"").normalize("NFKC").trim().slice(0,1000)||"Linked customer issue requires owner review";}
 async function ensureOwnerEscalationFromBrain(env,row,brain){
-  if(!brain?.needs_owner||!row?.lead_id||!row?.conversation_id)return null;
+  if(!brain?.needs_owner||!row)return null;
+  const reason=ownerEscalationReason(brain),linked=!!row.lead_id&&!!row.conversation_id;
+  // Only identity ambiguity may exist without a deterministic customer link.
+  if((reason!=="ambiguous_customer_identity"&&!linked)||(reason==="ambiguous_customer_identity"&&linked===false&&!String(row.id||brain.source_message_id||"").trim()))return null;
   await ensureOwnerEscalationStore(env);
-  const reason=ownerEscalationReason(brain),source=String(row.id||brain.source_message_id||"").trim(),key="owner-escalation:"+(source||await knowledgeHash(knowledgeCanonical([row.lead_id,row.conversation_id,reason,brain.context_hash||""])))+":"+reason;
+  const source=String(row.id||brain.source_message_id||"").trim(),key="owner-escalation:"+(source||await knowledgeHash(knowledgeCanonical([row.lead_id,row.conversation_id,reason,brain.context_hash||""])))+":"+reason;
   const prior=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();
   if(prior)return {escalation:prior,idempotent:true};
   const t=now(),id="owner-escalation-"+uid(),question=String(brain.needs_owner_reason||reason).slice(0,300),decision=`Owner decision required: ${question}`;
-  try{await env.DB.prepare("INSERT OR IGNORE INTO owner_escalations(id,escalation_key,lead_id,conversation_id,contact_id,channel,source_message_id,sales_brain_event_id,context_hash,current_sales_stage,context_summary,unresolved_question,reason_code,decision_required,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open',1,?,?)").bind(id,key,row.lead_id,row.conversation_id,row.contact_id||null,row.conversation_platform||"telegram",source||null,"sales-brain:"+String(brain.source_message_id||source),brain.context_hash||null,brain.current_stage||null,ownerEscalationSummary(row,brain),question,reason,decision,t,t).run();}catch(error){
+  try{await env.DB.prepare("INSERT OR IGNORE INTO owner_escalations(id,escalation_key,lead_id,conversation_id,contact_id,channel,source_message_id,sales_brain_event_id,context_hash,current_sales_stage,context_summary,unresolved_question,reason_code,decision_required,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open',1,?,?)").bind(id,key,linked?row.lead_id:null,linked?row.conversation_id:null,row.contact_id||null,row.conversation_platform||row.platform||"telegram",source||null,"sales-brain:"+String(brain.source_message_id||source),brain.context_hash||null,brain.current_stage||null,ownerEscalationSummary(row,brain),question,reason,decision,t,t).run();}catch(error){
     const raced=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();if(raced)return {escalation:raced,idempotent:true};throw error;
   }
   const escalation=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();
   if(!escalation)throw Error("Owner escalation persistence failed");
   if(escalation.id===id)await audit(env,"owner_escalation_created","Sales Brain requires an owner decision",{escalation_id:id,lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:source||null,reason_code:reason});
   return {escalation,idempotent:escalation.id!==id};
+}
+async function ensureAmbiguousTelegramIdentityEscalation(env,inboxId){
+  const row=await env.DB.prepare("SELECT id,platform,message,lead_id,conversation_id,provider_sender_id,provider_conversation_id,created_at FROM inbox_messages WHERE id=? AND platform='telegram' LIMIT 1").bind(inboxId).first();
+  if(!row||row.lead_id||row.conversation_id)return null;
+  return ensureOwnerEscalationFromBrain(env,{...row,conversation_platform:"telegram",contact_id:null},{needs_owner:true,needs_owner_reason:"ambiguous_customer_identity",source_message_id:row.id,current_stage:null,customer_known_facts:{customer_message:row.message},context_hash:await knowledgeHash(knowledgeCanonical([row.id,row.provider_sender_id||"",row.provider_conversation_id||""]))});
 }
 async function hasOpenOwnerEscalation(env,outreach){
   if(!outreach?.lead_id||!outreach?.conversation_id||!outreach?.inbox_message_id)return false;
@@ -5607,7 +5691,8 @@ async function runSalesNegotiationBrain(env,inboxId){
   else if(intent==="quote_requested"){action="quote";needsOwner=!model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
   else if(intent==="accepted"){action="accepted";}
   else if(/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
-  const draft=salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,[]);if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const authorityFacts=salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))});
+  const draft=salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;

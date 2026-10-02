@@ -499,8 +499,8 @@ CREATE TRIGGER IF NOT EXISTS sales_knowledge_immutable BEFORE UPDATE ON sales_kn
 CREATE TABLE IF NOT EXISTS owner_escalations (
  id TEXT PRIMARY KEY,
  escalation_key TEXT NOT NULL UNIQUE,
- lead_id TEXT NOT NULL,
- conversation_id TEXT NOT NULL,
+ lead_id TEXT,
+ conversation_id TEXT,
  contact_id TEXT,
  channel TEXT NOT NULL,
  source_message_id TEXT,
@@ -519,7 +519,8 @@ CREATE TABLE IF NOT EXISTS owner_escalations (
  resolved_at TEXT,
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL,
- CHECK(status='open' OR (owner_decision IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL))
+ CHECK(status='open' OR (owner_decision IS NOT NULL AND resolved_by IS NOT NULL AND resolved_at IS NOT NULL)),
+ CHECK(reason_code='ambiguous_customer_identity' OR (lead_id IS NOT NULL AND conversation_id IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_owner_escalations_open
 ON owner_escalations(status, created_at);
