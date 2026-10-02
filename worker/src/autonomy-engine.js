@@ -243,7 +243,43 @@ async function revenue(env){
  for(const x of r.results||[])f[x.stage]=Number(x.n||0);
  const o=await env.DB.prepare("SELECT COUNT(*) n FROM leads WHERE stage IN ('qualified','contacted','replied','negotiation')").first();
  const c=await env.DB.prepare("SELECT COUNT(*) n FROM leads WHERE stage IN ('customer','converted')").first();
- return {ok:true,funnel:f,opportunities:Number(o?.n||0),conversions:Number(c?.n||0),money:{status:"not_available",reason:"No verified revenue amount field is present in the current data model"}};
+ return {ok:true,funnel:f,opportunities:Number(o?.n||0),conversions:Number(c?.n||0),money:await revenueSummary(env)};
+}
+// Owner-locked currency rules: IRAN = whole Toman (exponent 0), IRAQ/ARAB = USD stored in cents (exponent 2). No conversion anywhere.
+export const CURRENCY_RULES={TOMAN:{market:"IRAN",exponent:0,input_hint:"Enter amount in whole Toman"},USD:{market:"ARAB",exponent:2,input_hint:"Enter amount in US cents (100 = $1.00)"}};
+export const MARKET_CURRENCY={IRAN:"TOMAN",ARAB:"USD"};
+const CURRENCY_ALIASES={TOMAN:"TOMAN",TOMANS:"TOMAN",IRT:"TOMAN","تومان":"TOMAN","تومن":"TOMAN",USD:"USD","US$":"USD","$":"USD","دلار":"USD","دولار":"USD"};
+// Maps known aliases to the canonical label; anything else (e.g. legacy IQD/IRR) is returned as-is, uppercased, never converted.
+export function canonicalCurrency(value){const raw=String(value??"").normalize("NFKC").trim();if(!raw)return null;return CURRENCY_ALIASES[raw]||CURRENCY_ALIASES[raw.toUpperCase()]||raw.toUpperCase().slice(0,12);}
+// Read-only money report from recorded orders/payments; currencies are never combined and missing costs are never estimated.
+export async function revenueSummary(env){
+ const rows=async(sql)=>(await env.DB.prepare(sql).all()).results||[];
+ let payments,orders,quotes,repeat;
+ try{
+  // Reversal rows carry the negated amount, so SUM is net received; reversed payments do not count as received.
+  payments=await rows("SELECT currency,SUM(amount_minor) received,SUM(CASE WHEN payment_kind='reversal' THEN -1 ELSE 1 END) n,SUM(CASE WHEN payment_kind='reversal' THEN 1 ELSE 0 END) reversals FROM lead_order_payments GROUP BY currency");
+  orders=await rows(`SELECT currency,
+   SUM(CASE WHEN status NOT IN ('order_candidate','cancelled') THEN 1 ELSE 0 END) orders,
+   SUM(CASE WHEN status IN ('paid','shipped','fulfilled') THEN 1 ELSE 0 END) paid,
+   SUM(CASE WHEN status='fulfilled' THEN 1 ELSE 0 END) fulfilled,
+   SUM(CASE WHEN status IN ('confirmed','partially_paid') THEN total_minor-(SELECT COALESCE(SUM(p.amount_minor),0) FROM lead_order_payments p WHERE p.order_id=o.id) ELSE 0 END) outstanding,
+   SUM(CASE WHEN status IN ('paid','shipped','fulfilled') AND unit_cost_minor IS NOT NULL AND shipping_cost_minor IS NOT NULL AND other_cost_minor IS NOT NULL THEN total_minor-COALESCE(tax_minor,0)-(unit_cost_minor*quantity+shipping_cost_minor+other_cost_minor) END) profit,
+   SUM(CASE WHEN status IN ('paid','shipped','fulfilled') AND unit_cost_minor IS NOT NULL AND shipping_cost_minor IS NOT NULL AND other_cost_minor IS NOT NULL THEN 1 ELSE 0 END) profit_orders,
+   SUM(CASE WHEN status IN ('paid','shipped','fulfilled') AND (unit_cost_minor IS NULL OR shipping_cost_minor IS NULL OR other_cost_minor IS NULL) THEN 1 ELSE 0 END) missing_cost_orders
+   FROM lead_orders o GROUP BY currency`);
+  quotes=await rows("SELECT COALESCE(currency,'UNPRICED') currency,COUNT(*) n FROM lead_quotes GROUP BY COALESCE(currency,'UNPRICED')");
+  repeat=await rows("SELECT COUNT(*) n FROM (SELECT lead_id FROM lead_orders WHERE status IN ('paid','shipped','fulfilled') GROUP BY lead_id HAVING COUNT(*)>=2)");
+ }catch(e){
+  if(/no such table|no such column/i.test(String(e?.message||e)))return {status:"no_orders_recorded",by_currency:{},counts:{quotes:0,orders:0,paid:0,fulfilled:0,repeat_customers:0}};
+  throw e;
+ }
+ // Aliases (e.g. IRT/تومان) merge into their canonical bucket; legacy currencies (IQD/IRR/...) stay separate, unconverted and flagged.
+ const by={},cur=raw=>{const c=raw==="UNPRICED"?raw:canonicalCurrency(raw)||"UNKNOWN";return by[c]||(by[c]={currency_rule:CURRENCY_RULES[c]||null,legacy_currency:raw!=="UNPRICED"&&!CURRENCY_RULES[c],received_minor:0,payments:0,reversals:0,outstanding_minor:0,realized_profit_minor:null,profit_orders:0,paid_orders_missing_costs:0,quotes:0,orders:0,paid:0,fulfilled:0});};
+ for(const p of payments){const x=cur(p.currency);x.received_minor+=Number(p.received||0);x.payments+=Number(p.n||0);x.reversals+=Number(p.reversals||0);}
+ for(const o of orders){const x=cur(o.currency);x.orders+=Number(o.orders||0);x.paid+=Number(o.paid||0);x.fulfilled+=Number(o.fulfilled||0);x.outstanding_minor+=Number(o.outstanding||0);x.paid_orders_missing_costs+=Number(o.missing_cost_orders||0);if(Number(o.profit_orders||0)){x.profit_orders+=Number(o.profit_orders);x.realized_profit_minor=(x.realized_profit_minor??0)+Number(o.profit);}}
+ for(const q of quotes)cur(q.currency).quotes+=Number(q.n||0);
+ const sum=k=>Object.values(by).reduce((a,x)=>a+x[k],0);
+ return {status:"recorded",unit:"minor",by_currency:by,counts:{quotes:sum("quotes"),orders:sum("orders"),paid:sum("paid"),fulfilled:sum("fulfilled"),repeat_customers:Number(repeat[0]?.n||0)}};
 }
 async function executeTask(env,req,t){
  const p=JSON.parse(t.payload_json||"{}");

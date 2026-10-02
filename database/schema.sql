@@ -178,7 +178,13 @@ CREATE TABLE IF NOT EXISTS lead_quotes (
  sent_at TEXT,
  expires_at TEXT,
  created_at TEXT NOT NULL,
- updated_at TEXT NOT NULL
+ updated_at TEXT NOT NULL,
+ request_id TEXT,
+ config_key TEXT,
+ price_version_id TEXT,
+ custom_price_decision_id TEXT,
+ margin_json TEXT,
+ discount_reason TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_quotes_inbox
 ON lead_quotes(inbox_message_id) WHERE inbox_message_id IS NOT NULL AND inbox_message_id <> '';
@@ -225,7 +231,14 @@ CREATE TABLE IF NOT EXISTS lead_orders (
  cancelled_at TEXT,
  cancellation_reason TEXT,
  created_at TEXT NOT NULL,
- updated_at TEXT NOT NULL
+ updated_at TEXT NOT NULL,
+ unit_cost_minor INTEGER,
+ shipping_cost_minor INTEGER,
+ other_cost_minor INTEGER,
+ carrier TEXT,
+ tracking_reference TEXT,
+ shipped_at TEXT,
+ delivered_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_orders_quote ON lead_orders(quote_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_orders_number ON lead_orders(order_number);
@@ -235,6 +248,81 @@ WHERE acceptance_inbox_message_id IS NOT NULL AND acceptance_inbox_message_id <>
 CREATE INDEX IF NOT EXISTS idx_lead_orders_lead ON lead_orders(lead_id);
 CREATE INDEX IF NOT EXISTS idx_lead_orders_conversation ON lead_orders(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_lead_orders_status ON lead_orders(status);
+CREATE TABLE IF NOT EXISTS lead_order_payments (
+ id TEXT PRIMARY KEY,
+ order_id TEXT NOT NULL,
+ lead_id TEXT NOT NULL,
+ payment_kind TEXT NOT NULL,
+ amount_minor INTEGER NOT NULL,
+ currency TEXT NOT NULL,
+ method TEXT NOT NULL,
+ reference TEXT NOT NULL,
+ reference_key TEXT NOT NULL,
+ received_at TEXT,
+ notes TEXT,
+ recorded_by TEXT NOT NULL,
+ recorded_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_order_payments_reference
+ON lead_order_payments(order_id, method, reference_key);
+CREATE INDEX IF NOT EXISTS idx_lead_order_payments_order ON lead_order_payments(order_id);
+CREATE TRIGGER IF NOT EXISTS trg_lead_order_payments_no_update BEFORE UPDATE ON lead_order_payments
+BEGIN SELECT RAISE(ABORT, 'lead_order_payments is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_lead_order_payments_no_delete BEFORE DELETE ON lead_order_payments
+BEGIN SELECT RAISE(ABORT, 'lead_order_payments is append-only'); END;
+-- Sales intelligence: owner-approved, versioned structured knowledge (status current/superseded/retired; history never deleted).
+CREATE TABLE IF NOT EXISTS product_catalog (id TEXT PRIMARY KEY, product_key TEXT NOT NULL, family TEXT, name TEXT NOT NULL, aliases_json TEXT NOT NULL DEFAULT '[]',
+ version INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, source_decision_id TEXT, created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_catalog_current ON product_catalog(product_key) WHERE status='current';
+CREATE TABLE IF NOT EXISTS product_attribute_schema (id TEXT PRIMARY KEY, product_key TEXT NOT NULL, attribute_key TEXT NOT NULL, label TEXT NOT NULL, attribute_kind TEXT NOT NULL,
+ value_type TEXT NOT NULL, required INTEGER NOT NULL, commercial_critical INTEGER NOT NULL, allowed_values_json TEXT NOT NULL DEFAULT '[]', question_fa TEXT, question_ar TEXT, priority INTEGER NOT NULL DEFAULT 100,
+ version INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, source_decision_id TEXT, created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_attribute_current ON product_attribute_schema(product_key,attribute_key) WHERE status='current';
+CREATE TABLE IF NOT EXISTS product_configurations (id TEXT PRIMARY KEY, product_key TEXT NOT NULL, market TEXT NOT NULL, config_key TEXT NOT NULL, attributes_json TEXT NOT NULL, label TEXT,
+ version INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, source_decision_id TEXT, created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_configuration_current ON product_configurations(product_key,market,config_key) WHERE status='current';
+CREATE TABLE IF NOT EXISTS compatibility_rules (id TEXT PRIMARY KEY, rule_key TEXT NOT NULL, scope_json TEXT NOT NULL, attributes_json TEXT NOT NULL, verdict TEXT NOT NULL,
+ version INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, source_decision_id TEXT, created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_compatibility_current ON compatibility_rules(rule_key) WHERE status='current';
+CREATE TABLE IF NOT EXISTS price_versions (id TEXT PRIMARY KEY, market TEXT NOT NULL, product_key TEXT NOT NULL, config_key TEXT NOT NULL, quantity_min INTEGER NOT NULL, quantity_max INTEGER,
+ currency TEXT NOT NULL, unit_price_minor INTEGER NOT NULL, moq INTEGER, conditions_json TEXT NOT NULL DEFAULT '{}', effective_from TEXT, effective_until TEXT,
+ version INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, source_decision_id TEXT, created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_price_versions_current ON price_versions(market,product_key,config_key,quantity_min,COALESCE(quantity_max,-1)) WHERE status='current';
+CREATE TABLE IF NOT EXISTS cost_versions (id TEXT PRIMARY KEY, market TEXT NOT NULL, product_key TEXT NOT NULL, config_key TEXT NOT NULL, quantity_min INTEGER NOT NULL, quantity_max INTEGER,
+ component TEXT NOT NULL, basis TEXT NOT NULL, currency TEXT NOT NULL, amount_minor INTEGER NOT NULL,
+ version INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, source_decision_id TEXT, created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cost_versions_current ON cost_versions(market,product_key,config_key,quantity_min,COALESCE(quantity_max,-1),component) WHERE status='current';
+CREATE TABLE IF NOT EXISTS business_settings (id TEXT PRIMARY KEY, setting_key TEXT NOT NULL, scope_key TEXT NOT NULL, value_json TEXT NOT NULL,
+ version INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, source_decision_id TEXT, created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_business_settings_current ON business_settings(setting_key,scope_key) WHERE status='current';
+CREATE TABLE IF NOT EXISTS sales_requests (id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, conversation_id TEXT NOT NULL, market TEXT, product_key TEXT, product_text TEXT, quantity INTEGER,
+ requirements_json TEXT NOT NULL DEFAULT '{}', unknown_json TEXT NOT NULL DEFAULT '[]', case_overrides_json TEXT NOT NULL DEFAULT '{}', request_class TEXT, matched_config_key TEXT,
+ missing_json TEXT NOT NULL DEFAULT '[]', custom_reasons_json TEXT NOT NULL DEFAULT '[]', quote_id TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_requests_conversation ON sales_requests(conversation_id);
+CREATE TABLE IF NOT EXISTS owner_decisions (id TEXT PRIMARY KEY, status TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 50, decision_type TEXT NOT NULL, fingerprint TEXT NOT NULL,
+ lead_id TEXT, conversation_id TEXT, market TEXT, product_key TEXT, request_id TEXT, quote_id TEXT, order_id TEXT, question TEXT NOT NULL,
+ known_json TEXT NOT NULL DEFAULT '{}', missing_json TEXT NOT NULL DEFAULT '[]', conflicting_json TEXT NOT NULL DEFAULT '[]', history_json TEXT NOT NULL DEFAULT '[]',
+ recommendation TEXT, risk TEXT, payload_json TEXT NOT NULL DEFAULT '{}', owner_decision TEXT, owner_answer_json TEXT, owner_note TEXT, scope_json TEXT, knowledge_action TEXT,
+ resulting_ref TEXT, resolved_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_decisions_pending ON owner_decisions(fingerprint) WHERE status='PENDING';
+CREATE INDEX IF NOT EXISTS idx_owner_decisions_status ON owner_decisions(status,priority);
+CREATE TABLE IF NOT EXISTS knowledge_gaps (fingerprint TEXT PRIMARY KEY, decision_type TEXT NOT NULL, product_key TEXT, attribute_key TEXT, value_text TEXT, occurrences INTEGER NOT NULL,
+ lead_ids_json TEXT NOT NULL DEFAULT '[]', examples_json TEXT NOT NULL DEFAULT '[]', first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, status TEXT NOT NULL, proposal_decision_id TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS draft_corrections (outreach_id TEXT PRIMARY KEY, lead_id TEXT, conversation_id TEXT, inbox_message_id TEXT, market TEXT, request_class TEXT, product_key TEXT, config_key TEXT,
+ ai_draft TEXT, final_text TEXT, change_kind TEXT NOT NULL, changed_json TEXT NOT NULL DEFAULT '{}', owner_outcome TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS revenue_attribution (order_id TEXT PRIMARY KEY, lead_id TEXT, market TEXT, currency TEXT, lead_source TEXT, request_class TEXT, product_key TEXT, config_key TEXT, quantity INTEGER,
+ quote_id TEXT, price_version_id TEXT, pricing_mode TEXT, discount_minor INTEGER, total_minor INTEGER, paid_minor INTEGER, profit_minor INTEGER, order_status TEXT, repeat_index INTEGER, created_at TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ai_usage_ledger (id TEXT PRIMARY KEY, module TEXT NOT NULL, task TEXT NOT NULL, provider TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER,
+ cost_status TEXT NOT NULL, cost_minor INTEGER, cost_currency TEXT, lead_id TEXT, conversation_id TEXT, quote_id TEXT, order_id TEXT, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_module ON ai_usage_ledger(module,created_at);
+CREATE TRIGGER IF NOT EXISTS trg_price_versions_immutable BEFORE UPDATE ON price_versions WHEN NEW.market IS NOT OLD.market OR NEW.product_key IS NOT OLD.product_key OR NEW.config_key IS NOT OLD.config_key OR NEW.quantity_min IS NOT OLD.quantity_min OR NEW.quantity_max IS NOT OLD.quantity_max OR NEW.currency IS NOT OLD.currency OR NEW.unit_price_minor IS NOT OLD.unit_price_minor OR NEW.moq IS NOT OLD.moq OR NEW.conditions_json IS NOT OLD.conditions_json OR NEW.effective_from IS NOT OLD.effective_from OR NEW.effective_until IS NOT OLD.effective_until OR NEW.version IS NOT OLD.version OR NEW.approved_by IS NOT OLD.approved_by OR NEW.approved_at IS NOT OLD.approved_at OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'price_versions history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS trg_price_versions_no_delete BEFORE DELETE ON price_versions BEGIN SELECT RAISE(ABORT,'price_versions history cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS trg_cost_versions_immutable BEFORE UPDATE ON cost_versions WHEN NEW.market IS NOT OLD.market OR NEW.product_key IS NOT OLD.product_key OR NEW.config_key IS NOT OLD.config_key OR NEW.quantity_min IS NOT OLD.quantity_min OR NEW.quantity_max IS NOT OLD.quantity_max OR NEW.component IS NOT OLD.component OR NEW.basis IS NOT OLD.basis OR NEW.currency IS NOT OLD.currency OR NEW.amount_minor IS NOT OLD.amount_minor OR NEW.version IS NOT OLD.version OR NEW.approved_by IS NOT OLD.approved_by OR NEW.approved_at IS NOT OLD.approved_at OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'cost_versions history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS trg_cost_versions_no_delete BEFORE DELETE ON cost_versions BEGIN SELECT RAISE(ABORT,'cost_versions history cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS trg_business_settings_immutable BEFORE UPDATE ON business_settings WHEN NEW.setting_key IS NOT OLD.setting_key OR NEW.scope_key IS NOT OLD.scope_key OR NEW.value_json IS NOT OLD.value_json OR NEW.version IS NOT OLD.version OR NEW.approved_by IS NOT OLD.approved_by OR NEW.approved_at IS NOT OLD.approved_at OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'business_settings history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS trg_business_settings_no_delete BEFORE DELETE ON business_settings BEGIN SELECT RAISE(ABORT,'business_settings history cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS trg_product_configurations_immutable BEFORE UPDATE ON product_configurations WHEN NEW.product_key IS NOT OLD.product_key OR NEW.market IS NOT OLD.market OR NEW.config_key IS NOT OLD.config_key OR NEW.attributes_json IS NOT OLD.attributes_json OR NEW.version IS NOT OLD.version OR NEW.approved_by IS NOT OLD.approved_by OR NEW.approved_at IS NOT OLD.approved_at OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'product_configurations history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS trg_product_configurations_no_delete BEFORE DELETE ON product_configurations BEGIN SELECT RAISE(ABORT,'product_configurations history cannot be deleted'); END;
 CREATE TABLE IF NOT EXISTS commercial_price_items (
  id TEXT PRIMARY KEY,
  product_key TEXT NOT NULL,
