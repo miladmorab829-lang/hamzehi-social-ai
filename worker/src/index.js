@@ -1,6 +1,6 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES } from "./autonomy-engine.js";
-import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection } from "./sales-intelligence.js";
+import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -4969,7 +4969,7 @@ async function proposeSalesKnowledge(env,body,context={}) {
   await env.DB.batch([
     env.DB.prepare(`INSERT OR IGNORE INTO sales_knowledge_change_requests
       (id,operation,fact_key,domain,entity_type,entity_key,attribute,market,member_key,target_fact_id,target_version,old_value_json,new_value_json,value_hash,effective_from,effective_until,proposal_hash,conflict_json,sensitivity,confidence,status,requested_by,source_type,source_command_id,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admin',?,?,?,?)`)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admin',?,?,?,?)`)
       .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),SALES_KNOWLEDGE_COMMERCIAL.has(domain)?"commercial":"standard",parserConfidence,status,context.sourceType||"owner_form",sourceCommandId,t,t),
     knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain,source_command_id:sourceCommandId,parser_source:context.parserSource||"owner_form",parser_confidence:parserConfidence},t)
   ]);
@@ -5784,7 +5784,7 @@ async function runSalesNegotiationBrain(env,inboxId){
   else if(/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
   const authorityFacts=[...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
   const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length}};
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
   return result;
@@ -6059,6 +6059,22 @@ async function prepareOwnerRecordedPaymentRecoveryDrafts(env){
   const result={checked:rows.length,drafts_created:0,owner_decisions:0,skipped:0,sending_enabled:false,payment_engine:false};
   for(const order of rows){const prepared=await preparePaymentRequest(env,order);if(prepared?.created)result.drafts_created++;else if(prepared?.decision)result.owner_decisions++;else result.skipped++;}
   return result;
+}
+// Owner-recorded cost facts only: no payment, revenue recognition or customer message.
+const ORDER_COST_FIELDS=["unit_cost_minor","shipping_cost_minor","other_cost_minor"];
+async function setOrderCosts(env,body,actor="authenticated_owner"){
+  await ensureOrderStore(env);
+  const id=String(body.id||"").trim();if(!id)throw Error("id is required");
+  const current=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(id).first();
+  if(!current)throw Error("Order not found");
+  if(current.status==="cancelled")throw Error("Cancelled order costs cannot be changed");
+  const patch={};for(const field of ORDER_COST_FIELDS)if(body[field]!==undefined)patch[field]=safeCommercialInteger(body[field]);
+  const keys=Object.keys(patch);if(!keys.length)throw Error("No cost fields provided");
+  const changed=await env.DB.prepare(`UPDATE lead_orders SET ${keys.map(k=>k+"=?").join(",")},updated_at=? WHERE id=? AND status<>'cancelled'`).bind(...keys.map(k=>patch[k]),now(),id).run();
+  if(!changed.meta?.changes)throw Error("Order cost update conflict; reload the order");
+  const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(id).first();
+  await audit(env,"lead_order_costs_recorded","Owner recorded order costs",{order_id:id,order_number:order.order_number,recorded_by:String(actor||"authenticated_owner").slice(0,120),from:Object.fromEntries(keys.map(k=>[k,current[k]??null])),to:patch});
+  return {order,payment_engine:false};
 }
 
 function normalizeProductKey(value){return String(value||"").normalize("NFKC").trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu,"-").replace(/^-+|-+$/g,"").slice(0,120)||null;}
@@ -6491,15 +6507,34 @@ function telegramLeadContactChatId(contact) {
   return normalizeTelegramPrivateChatId(contact.normalized_value||contact.raw_value);
 }
 
+// Payment instructions count as authoritative only when the DB shows the owner recorded them: this order's resolved
+// case-only PAYMENT_TERMS answer, or the current owner setting for the order's market. Caller text alone is never trusted.
+async function authoritativePaymentInstructions(env,order,claimed){
+  const text=String(claimed??"").trim();if(!text)return null;
+  await ensureSalesIntelligenceStore(env);
+  if(String((await getSetting(env,"payment_instructions",{market:order.market}))?.value??"").trim()===text)return text;
+  const rows=(await env.DB.prepare("SELECT owner_answer_json,scope_json FROM owner_decisions WHERE order_id=? AND decision_type='PAYMENT_TERMS' AND status='RESOLVED'").bind(order.id).all()).results||[];
+  for(const row of rows){let answer={},scope={};try{answer=JSON.parse(row.owner_answer_json||"{}");scope=JSON.parse(row.scope_json||"{}");}catch{continue;}if(scope.scope==="CASE_ONLY"&&String(answer?.value??"").trim()===text)return text;}
+  return null;
+}
 async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,message,eventType,eventMessage,details={}}){
   await ensureLeadOutreachStore(env);
+  // Payment instructions are only verified here; they are never copied into the event log.
+  const {payment_instructions:claimedInstructions,...eventDetails}=details||{};details=eventDetails;
   if(details.order_id){
     await ensureOrderStore(env);const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();
     if(!order)return {created:false,reason:"order_missing",sending_enabled:false};
-    const allowedNumbers=[order.order_number,order.total_minor,customerPaymentAmountText({currency:order.currency,amount_minor:order.total_minor})].flatMap(value=>[...String(value||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger);
-    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||"")]}];
+    const blocked=async(reason,extra={})=>{await audit(env,"sales_draft_blocked","Approval-gated draft blocked by fail-closed validation",{order_id:order.id,event:details.event||null,reason,...extra});return {created:false,reason:`sales_draft_${reason}`,...extra,sending_enabled:false};};
+    // Order facts validate a draft only inside that order's own customer conversation.
+    if(order.lead_id!==leadId||order.conversation_id!==conversationId)return await blocked("order_context_mismatch");
+    const instructions=await authoritativePaymentInstructions(env,order,claimedInstructions);
+    if(String(claimedInstructions??"").trim()&&!instructions)return await blocked("payment_instructions_not_authoritative");
+    // Numbers may come only from this same order: number, total, formatted total, quantity, and owner-recorded instructions.
+    const amountText=customerPaymentAmountText({currency:order.currency,amount_minor:order.total_minor});
+    const allowedNumbers=[order.order_number,order.total_minor,amountText,order.quantity,instructions].flatMap(value=>[...String(value??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger);
+    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||""),amountText,instructions].filter(Boolean)}];
     const validation=validateSalesBrainDraft(message,{allowedNumbers,authoritativeFacts:facts});
-    if(!validation.valid)return {created:false,reason:`sales_draft_${validation.reason}`,validation,sending_enabled:false};
+    if(!validation.valid)return await blocked(validation.reason,{validation});
   }
   const eventId=`sales-draft:${key}`,prior=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind(eventId).first();
   if(prior)try{return {created:false,idempotent:true,outreach_id:JSON.parse(prior.details_json||"{}").outreach_id||null,sending_enabled:false};}catch{}
@@ -9280,7 +9315,8 @@ Context: ${context}`;
       }
       if (u.pathname === "/api/orders" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureOrderStore(env);
-        const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,q.status AS quote_status
+        const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,q.status AS quote_status,
+            (SELECT COALESCE(SUM(p.amount_minor),0) FROM lead_order_payments p WHERE p.order_id=o.id) AS paid_minor
           FROM lead_orders o JOIN leads l ON l.id=o.lead_id JOIN lead_quotes q ON q.id=o.quote_id
           ORDER BY o.created_at DESC LIMIT 200`).all();
         return json({ok:true,items:r.results||[],payment_engine:false,revenue_recognition:false});
@@ -9299,6 +9335,9 @@ Context: ${context}`;
       }
       if (u.pathname === "/api/orders/payments/reverse" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);try{return json({ok:true,...(await reverseOrderPayment(env,await req.json().catch(()=>({})),"authenticated_owner"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+      if (u.pathname === "/api/orders/costs" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);try{return json({ok:true,...(await setOrderCosts(env,await req.json().catch(()=>({})),"authenticated_owner"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
       }
       if (u.pathname === "/api/revenue/followups/run" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);try{return json({ok:true,...(await prepareOwnerRecordedPaymentRecoveryDrafts(env))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}

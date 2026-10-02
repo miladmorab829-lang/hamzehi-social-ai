@@ -697,7 +697,7 @@ export async function preparePaymentRequest(env,order,{caseInstructions=null}={}
   const message=(ar?[`تم تأكيد طلبكم ${order.order_number}: ${order.product} × ${order.quantity}`,`المبلغ المطلوب: ${amount}`,depositText?`العربون المطلوب (${deposit}%): ${depositText}`:null,`طريقة الدفع: ${instructions}`]
     :[`سفارش ${order.order_number} تأیید شد: ${order.product} × ${order.quantity}`,`مبلغ قابل پرداخت: ${amount}`,depositText?`پیش‌پرداخت (${deposit}%): ${depositText}`:null,`روش پرداخت: ${instructions}`]).filter(Boolean).join("\n");
   return await D.createApprovalGatedDraft(env,{key:`lead-order:update-draft:${order.id}:payment_request`,skipKey:`lead-order:update-draft-skipped:${order.id}:payment_request`,leadId:order.lead_id,conversationId:order.conversation_id,language,message,
-    eventType:"lead_order_update_draft_created",eventMessage:"Payment request draft created for owner approval",details:{order_id:order.id,order_number:order.order_number,event:"payment_request",snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}});
+    eventType:"lead_order_update_draft_created",eventMessage:"Payment request draft created for owner approval",details:{order_id:order.id,order_number:order.order_number,event:"payment_request",payment_instructions:instructions,snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}});
 }
 
 /* -------------------------------------------------- controlled learning */
