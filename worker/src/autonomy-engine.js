@@ -238,6 +238,12 @@ async function checkedSelfCall(req,env,path,method="GET",body){
  if(r.status>=300||r.data?.ok===false)throw new Error(r.data?.error||`Self-call failed (HTTP ${r.status})`);
  return r.data;
 }
+// Shared canonical labels only. Revenue reporting remains on the existing
+// funnel path until the separately deferred payment/revenue integration.
+export const CURRENCY_RULES={TOMAN:{market:"IRAN",exponent:0,input_hint:"Enter amount in whole Toman"},USD:{market:"ARAB",exponent:2,input_hint:"Enter amount in US cents (100 = $1.00)"}};
+export const MARKET_CURRENCY={IRAN:"TOMAN",ARAB:"USD"};
+const CURRENCY_ALIASES={TOMAN:"TOMAN",TOMANS:"TOMAN",IRT:"TOMAN","تومان":"TOMAN","تومن":"TOMAN",USD:"USD","US$":"USD","$":"USD","دلار":"USD","دولار":"USD"};
+export function canonicalCurrency(value){const raw=String(value??"").normalize("NFKC").trim();if(!raw)return null;return CURRENCY_ALIASES[raw]||CURRENCY_ALIASES[raw.toUpperCase()]||raw.toUpperCase().slice(0,12);}
 async function revenue(env){
  const r=await env.DB.prepare("SELECT stage,COUNT(*) n FROM leads GROUP BY stage").all(),f={};
  for(const x of r.results||[])f[x.stage]=Number(x.n||0);

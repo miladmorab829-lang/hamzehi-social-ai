@@ -1,5 +1,6 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
-import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate } from "./autonomy-engine.js";
+import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES } from "./autonomy-engine.js";
+import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -5644,6 +5645,74 @@ function ownerEscalationReason(brain){
   return "low_confidence_commercial_interpretation";
 }
 function ownerEscalationSummary(row,brain){return String(row?.message||brain?.customer_known_facts?.customer_message||"").normalize("NFKC").trim().slice(0,1000)||"Linked customer issue requires owner review";}
+async function ensureOwnerDecisionForEscalation(env,escalation,brain={}){
+  if(!escalation?.id)return null;
+  await ensureSalesIntelligenceStore(env);
+  const existing=await env.DB.prepare("SELECT * FROM owner_decisions WHERE owner_escalation_id=? AND status='PENDING' LIMIT 1").bind(escalation.id).first();
+  if(existing)return existing;
+  const reason=String(escalation.reason_code||"owner_escalation").toUpperCase().replace(/[^A-Z0-9_]/g,"_").slice(0,48);
+  const result=await openDecision(env,{
+    fingerprint:`ESCALATION|${escalation.id}`,
+    owner_escalation_id:escalation.id,
+    decision_type:`ESCALATION_${reason}`,
+    priority:20,
+    lead_id:escalation.lead_id||null,
+    conversation_id:escalation.conversation_id||null,
+    market:brain.market||null,
+    question:escalation.unresolved_question,
+    known:{escalation_id:escalation.id,reason_code:escalation.reason_code,context_summary:escalation.context_summary},
+    missing:[escalation.unresolved_question],
+    recommendation:"Resolve this customer case only, or submit a separate versioned Sales Knowledge proposal for review.",
+    risk:"This is a runtime-blocking customer case; it cannot activate reusable knowledge by itself.",
+    payload:{resolution:"escalation_case",escalation_id:escalation.id,reason_code:escalation.reason_code}
+  });
+  return result.decision||null;
+}
+function ownerEscalationKnowledgeBody(decision,answer){
+  const proposal=answer?.knowledge_proposal;
+  if(!proposal||Array.isArray(proposal)||typeof proposal!=="object")throw Error("SAVE_AS_KNOWLEDGE requires an explicit Sales Knowledge proposal for owner review");
+  const allowed=["operation","domain","entity_type","entity_key","attribute","market","value","target_fact_id","target_version","effective_from","effective_until"];
+  if(Object.keys(proposal).some(key=>!allowed.includes(key)))throw Error("Invalid Sales Knowledge proposal fields");
+  return {id:`escalation-${String(decision.id).replace(/[^A-Za-z0-9_-]/g,"")}`,...proposal};
+}
+async function resolveLinkedOwnerDecision(env,{id,action,scope="CASE_ONLY",answer={},note="",actor="authenticated_owner"}){
+  await ensureOwnerEscalationStore(env);await ensureSalesIntelligenceStore(env);await ensureSalesKnowledgeStore(env);
+  const decision=await env.DB.prepare("SELECT * FROM owner_decisions WHERE id=? LIMIT 1").bind(id).first();
+  if(!decision?.owner_escalation_id)throw Error("Linked owner decision not found");
+  const escalation=await env.DB.prepare("SELECT * FROM owner_escalations WHERE id=? LIMIT 1").bind(decision.owner_escalation_id).first();
+  if(!escalation)throw Error("Linked owner escalation not found");
+  const act=String(action||"").toUpperCase(),sc=String(scope||"CASE_ONLY").toUpperCase();
+  if(!["APPROVE","REJECT","ANSWER"].includes(act))throw Error("Invalid owner decision action");
+  if(!["CASE_ONLY","SAVE_AS_KNOWLEDGE"].includes(sc))throw Error("Linked escalation scope must be CASE_ONLY or SAVE_AS_KNOWLEDGE");
+  if(decision.status!=="PENDING"||escalation.status!=="open"){
+    if(decision.status!=="PENDING"&&escalation.status==="resolved")return {idempotent:true,decision,escalation,sending_enabled:false};
+    throw Error("Linked owner task changed; reload before resolving");
+  }
+  let knowledgeAction="CASE_ONLY",resultingRef=null;
+  if(sc==="SAVE_AS_KNOWLEDGE"&&act!=="REJECT"){
+    const proposal=await proposeSalesKnowledge(env,ownerEscalationKnowledgeBody(decision,answer),{
+      sourceType:"owner_escalation_resolution",sourceCommandId:`escalation-${String(decision.id).replace(/[^A-Za-z0-9_-]/g,"")}`,
+      parserSource:"owner_form",parserConfidence:1
+    });
+    knowledgeAction="PENDING_P0_7A_REVIEW";resultingRef=`sales_knowledge_change_request:${proposal.id}`;
+  }
+  const t=now(),decisionStatus=act==="REJECT"?"REJECTED":"RESOLVED",ownerText=String(answer?.owner_decision||note||act).normalize("NFKC").trim().slice(0,2000)||act;
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE owner_decisions SET status=?,owner_decision=?,owner_answer_json=?,owner_note=?,scope_json=?,knowledge_action=?,resulting_ref=?,resolved_by=?,resolved_at=?,updated_at=?
+      WHERE id=? AND status='PENDING' AND EXISTS(SELECT 1 FROM owner_escalations WHERE id=? AND status='open' AND version=?)`)
+      .bind(decisionStatus,act,JSON.stringify(answer||{}),String(note||"").slice(0,1000)||null,JSON.stringify({scope:sc}),knowledgeAction,resultingRef,actor,t,t,decision.id,escalation.id,escalation.version),
+    env.DB.prepare(`UPDATE owner_escalations SET status='resolved',owner_decision=?,owner_note=?,resolved_by=?,resolved_at=?,version=version+1,updated_at=?
+      WHERE id=? AND status='open' AND version=? AND EXISTS(SELECT 1 FROM owner_decisions WHERE id=? AND status=?)`)
+      .bind(ownerText,String(note||"").slice(0,2000)||null,actor,t,t,escalation.id,escalation.version,decision.id,decisionStatus)
+  ]);
+  const [resolvedDecision,resolvedEscalation]=await Promise.all([
+    env.DB.prepare("SELECT * FROM owner_decisions WHERE id=?").bind(decision.id).first(),
+    env.DB.prepare("SELECT * FROM owner_escalations WHERE id=?").bind(escalation.id).first()
+  ]);
+  if(resolvedDecision?.status!==decisionStatus||resolvedEscalation?.status!=="resolved")throw Error("Linked owner task resolution conflict");
+  await audit(env,"owner_escalation_and_decision_resolved","Authenticated owner resolved linked escalation and decision",{escalation_id:escalation.id,decision_id:decision.id,reason_code:escalation.reason_code,scope:sc,knowledge_action:knowledgeAction,resulting_ref:resultingRef});
+  return {idempotent:false,decision:resolvedDecision,escalation:resolvedEscalation,effect:{knowledge_action:knowledgeAction,resulting_ref:resultingRef},sending_enabled:false};
+}
 async function ensureOwnerEscalationFromBrain(env,row,brain){
   if(!brain?.needs_owner||!row)return null;
   const reason=ownerEscalationReason(brain),linked=!!row.lead_id&&!!row.conversation_id;
@@ -5652,7 +5721,7 @@ async function ensureOwnerEscalationFromBrain(env,row,brain){
   await ensureOwnerEscalationStore(env);
   const source=String(row.id||brain.source_message_id||"").trim(),key="owner-escalation:"+(source||await knowledgeHash(knowledgeCanonical([row.lead_id,row.conversation_id,reason,brain.context_hash||""])))+":"+reason;
   const prior=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();
-  if(prior)return {escalation:prior,idempotent:true};
+  if(prior){const linkedDecision=await ensureOwnerDecisionForEscalation(env,prior,brain);return {escalation:prior,owner_decision:linkedDecision,idempotent:true};}
   const t=now(),id="owner-escalation-"+uid(),question=String(brain.needs_owner_reason||reason).slice(0,300),decision=`Owner decision required: ${question}`;
   try{await env.DB.prepare("INSERT OR IGNORE INTO owner_escalations(id,escalation_key,lead_id,conversation_id,contact_id,channel,source_message_id,sales_brain_event_id,context_hash,current_sales_stage,context_summary,unresolved_question,reason_code,decision_required,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open',1,?,?)").bind(id,key,linked?row.lead_id:null,linked?row.conversation_id:null,row.contact_id||null,row.conversation_platform||row.platform||"telegram",source||null,"sales-brain:"+String(brain.source_message_id||source),brain.context_hash||null,brain.current_stage||null,ownerEscalationSummary(row,brain),question,reason,decision,t,t).run();}catch(error){
     const raced=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();if(raced)return {escalation:raced,idempotent:true};throw error;
@@ -5660,7 +5729,8 @@ async function ensureOwnerEscalationFromBrain(env,row,brain){
   const escalation=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();
   if(!escalation)throw Error("Owner escalation persistence failed");
   if(escalation.id===id)await audit(env,"owner_escalation_created","Sales Brain requires an owner decision",{escalation_id:id,lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:source||null,reason_code:reason});
-  return {escalation,idempotent:escalation.id!==id};
+  const linkedDecision=await ensureOwnerDecisionForEscalation(env,escalation,brain);
+  return {escalation,owner_decision:linkedDecision,idempotent:escalation.id!==id};
 }
 async function ensureAmbiguousTelegramIdentityEscalation(env,inboxId){
   const row=await env.DB.prepare("SELECT id,platform,message,lead_id,conversation_id,provider_sender_id,provider_conversation_id,created_at FROM inbox_messages WHERE id=? AND platform='telegram' LIMIT 1").bind(inboxId).first();
@@ -5671,6 +5741,22 @@ async function hasOpenOwnerEscalation(env,outreach){
   if(!outreach?.lead_id||!outreach?.conversation_id||!outreach?.inbox_message_id)return false;
   await ensureOwnerEscalationStore(env);
   return !!(await env.DB.prepare("SELECT id FROM owner_escalations WHERE status='open' AND lead_id=? AND conversation_id=? AND source_message_id=? LIMIT 1").bind(outreach.lead_id,outreach.conversation_id,outreach.inbox_message_id).first());
+}
+const ORDER_STATUS_QUESTION=/(?:tracking|\btrack\b|where\s+is\s+my\s+order|order\s+status|رهگیری|کد\s*پیگیری|وضعیت\s*سفارش|سفارش\s*(?:من|ما)|رقم\s*التتبع|تتبع|حالة\s*الطلب|متى\s*(?:يوصل|يصل))/iu;
+async function findPostSaleOrder(env,leadId,conversationId){
+  return await env.DB.prepare(`SELECT * FROM lead_orders WHERE lead_id=? AND conversation_id=? AND status IN (${ORDER_POST_SALE_STATUSES.map(()=>"?").join(",")}) ORDER BY updated_at DESC LIMIT 1`).bind(leadId,conversationId,...ORDER_POST_SALE_STATUSES).first();
+}
+function orderStatusReply(order,language){
+  const ar=language==="Iraqi Arabic",n=order.order_number;
+  const fa={confirmed:`سفارش ${n} تأیید شده است. هنوز پرداختی در سیستم ثبت نشده و ارسال هم ثبت نشده است.`,partially_paid:`برای سفارش ${n} بخشی از پرداخت ثبت شده است و مانده آن باز است. ارسال هنوز ثبت نشده است.`,paid:`پرداخت سفارش ${n} در سیستم ثبت شده است. هنوز اطلاعات ارسال ثبت نشده است.`,shipped:`سفارش ${n} ارسال شده است. حامل: ${order.carrier}. کد رهگیری: ${order.tracking_reference}.`,fulfilled:`تحویل سفارش ${n} در سیستم ثبت شده است.`};
+  const iraq={confirmed:`الطلب ${n} مؤكد. لا توجد دفعة مسجلة ولا يوجد شحن مسجل بعد.`,partially_paid:`تم تسجيل دفعة جزئية للطلب ${n} والباقي مفتوح. لم يتم تسجيل الشحن بعد.`,paid:`تم تسجيل دفع الطلب ${n}. لم يتم تسجيل معلومات الشحن بعد.`,shipped:`تم شحن الطلب ${n}. الناقل: ${order.carrier}. رقم التتبع: ${order.tracking_reference}.`,fulfilled:`تم تسجيل تسليم الطلب ${n}.`};
+  return (ar?iraq:fa)[order.status]||null;
+}
+function orderAuthoritativeFacts(order){
+  const base=[order.order_number,order.carrier,order.tracking_reference,order.shipped_at,order.delivered_at].filter(Boolean).map(String);
+  const values=[...new Set([...base,...base.flatMap(value=>[...value.matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>match[0]))])];
+  const categories=order.status==="confirmed"||order.status==="partially_paid"||order.status==="paid"?["payment","shipping"]:["shipping"];
+  return categories.map(category=>({category,values}));
 }
 async function runSalesNegotiationBrain(env,inboxId){
   await ensureConversationMemoryStore(env);await ensureSalesKnowledgeStore(env);await ensureQuoteStore(env);await ensureOwnerEscalationStore(env);
@@ -5684,19 +5770,21 @@ async function runSalesNegotiationBrain(env,inboxId){
   const ownerCaseDecisions=(await env.DB.prepare("SELECT id,source_message_id,reason_code,owner_decision,resolved_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='resolved' ORDER BY resolved_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id).all()).results||[];
   const memories=(await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all()).results||[];
   const memory={};for(const fact of memories)if(!(fact.memory_key in memory))try{memory[fact.memory_key]=JSON.parse(fact.value_json)}catch{}
-  const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message),language=salesBrainLanguage(row.message,row.lead_notes),stage=salesBrainStage(intent,memory);
+  const postSaleOrder=await findPostSaleOrder(env,row.lead_id,row.conversation_id);
+  const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message),language=salesBrainLanguage(row.message,row.lead_notes),orderStatusAsked=!!postSaleOrder&&(ORDER_STATUS_QUESTION.test(String(row.message||""))||(postSaleOrder.status!=="fulfilled"&&(intent==="asks_shipping"||intent==="other"))),stage=orderStatusAsked?`order_${postSaleOrder.status}`:salesBrainStage(intent,memory);
   const model=String(memory.product_interest||"").trim(),knowledge=(await env.DB.prepare("SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND (entity_key='global' OR (?<>'' AND entity_key=?)) ORDER BY created_at DESC LIMIT 100").bind(model,model).all()).results||[];
   const knownQuantity=memory.requested_quantity,quantityValid=Number.isSafeInteger(knownQuantity)&&knownQuantity>0,missing=[];if(!model)missing.push("product_or_model");if(!quantityValid)missing.push("quantity");
   let action=!model?"ask_product":!quantityValid?"ask_quantity":"ask_details",needsOwner=false,needsOwnerReason=null,visuals=[];
-  if(intent==="asks_price"){action="price_owner";needsOwner=true;needsOwnerReason="authoritative_price_required";}
+  if(orderStatusAsked){action="order_status";missing.length=0;}
+  else if(intent==="asks_price"){action="price_owner";needsOwner=true;needsOwnerReason="authoritative_price_required";}
   else if(intent==="asks_moq"){const moq=knowledge.find(x=>x.domain==="quantity"&&x.attribute==="moq");action=moq&&model?"ask_details":"moq_owner";needsOwner=!moq;needsOwnerReason=needsOwner?"approved_moq_missing":null;}
   else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price"){action="commercial_owner";needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
   else if(intent==="quote_requested"){action="quote";needsOwner=!model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
   else if(intent==="accepted"){action="accepted";}
   else if(/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
-  const authorityFacts=salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))});
-  const draft=salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length}};
+  const authorityFacts=[...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
+  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
   return result;
@@ -5772,8 +5860,11 @@ async function ensureQuoteStore(env){
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_commercial_price_key_active ON commercial_price_items(market,product_key,active)").run();
 }
 
-const ORDER_STATUSES=new Set(["order_candidate","confirmed","cancelled"]);
+const ORDER_STATUSES=new Set(["order_candidate","confirmed","partially_paid","paid","shipped","fulfilled","cancelled"]);
 const ORDER_ACCEPTANCE_SOURCE="telegram_reply_to_provider_message_id";
+const ORDER_PAYMENT_KINDS=new Set(["deposit","partial","full"]);
+const ORDER_PAYMENT_METHODS=new Set(["bank_transfer","card_to_card","cash","exchange_hawala","other"]);
+const ORDER_POST_SALE_STATUSES=["confirmed","partially_paid","paid","shipped","fulfilled"];
 
 async function ensureOrderStore(env){
   await ensureQuoteStore(env);
@@ -5791,6 +5882,18 @@ async function ensureOrderStore(env){
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_lead ON lead_orders(lead_id)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_conversation ON lead_orders(conversation_id)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_status ON lead_orders(status)").run();
+  for(const column of ["unit_cost_minor INTEGER","shipping_cost_minor INTEGER","other_cost_minor INTEGER","carrier TEXT","tracking_reference TEXT","shipped_at TEXT","delivered_at TEXT"]){
+    try{await env.DB.prepare(`ALTER TABLE lead_orders ADD COLUMN ${column}`).run();}
+    catch(error){if(!/duplicate column|already exists/i.test(String(error?.message||error)))throw error;}
+  }
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_order_payments (
+    id TEXT PRIMARY KEY,order_id TEXT NOT NULL,lead_id TEXT NOT NULL,payment_kind TEXT NOT NULL,amount_minor INTEGER NOT NULL,currency TEXT NOT NULL,
+    method TEXT NOT NULL,reference TEXT NOT NULL,reference_key TEXT NOT NULL,received_at TEXT,notes TEXT,recorded_by TEXT NOT NULL,recorded_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_order_payments_reference ON lead_order_payments(order_id,method,reference_key)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_order_payments_order ON lead_order_payments(order_id)").run();
+  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS trg_lead_order_payments_no_update BEFORE UPDATE ON lead_order_payments BEGIN SELECT RAISE(ABORT,'lead_order_payments is append-only'); END").run();
+  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS trg_lead_order_payments_no_delete BEFORE DELETE ON lead_order_payments BEGIN SELECT RAISE(ABORT,'lead_order_payments is append-only'); END").run();
 }
 
 async function deterministicOrderNumber(quoteId,acceptedAt){
@@ -5853,7 +5956,7 @@ async function ensureOrderCandidateFromAcceptedQuote(env,quoteId,inboxId){
   return {created:!!inserted.meta?.changes,idempotent:!inserted.meta?.changes,order};
 }
 
-async function transitionLeadOrder(env,id,action,actor="admin",reason=null){
+async function transitionLeadOrder(env,id,action,actor="admin",reason=null,details={}){
   await ensureOrderStore(env);
   const current=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(id).first();
   if(!current)throw Error("Order not found");
@@ -5867,6 +5970,8 @@ async function transitionLeadOrder(env,id,action,actor="admin",reason=null){
     }
     const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(id).first();
     await auditOrderEventOnce(env,`confirmed:${id}`,"lead_order_confirmed","Owner confirmed order candidate",{order_id:id,order_number:order.order_number,quote_id:order.quote_id,from:"order_candidate",to:"confirmed",confirmed_by:order.confirmed_by,confirmed_at:order.confirmed_at});
+    // This only creates an approval-gated draft or an owner decision. It never sends or charges.
+    try{await preparePaymentRequest(env,order);}catch(error){await audit(env,"payment_request_prepare_failed","Payment request draft could not be prepared",{order_id:id,error:sanitizeOperationalError(error?.message||error)});}
     return order;
   }
   if(action==="cancel"){
@@ -5879,7 +5984,81 @@ async function transitionLeadOrder(env,id,action,actor="admin",reason=null){
     await auditOrderEventOnce(env,`cancelled:${id}`,"lead_order_cancelled","Owner cancelled order while preserving its snapshot",{order_id:id,order_number:order.order_number,quote_id:order.quote_id,from:current.status,to:"cancelled",cancelled_by:order.cancelled_by,cancelled_at:order.cancelled_at,reason:order.cancellation_reason});
     return order;
   }
+  if(action==="ship"){
+    if(current.status!=="paid"&&current.status!=="shipped")throw Error("Only a fully paid order can be shipped");
+    if(current.status==="paid"){
+      const carrier=String(details.carrier||"").trim().slice(0,120),tracking=String(details.tracking_reference||"").trim().slice(0,200),shippedAt=ownerRecordedDate(details.shipped_at,"shipped_at");
+      if(!carrier||!tracking)throw Error("carrier and tracking_reference are required");
+      const changed=await env.DB.prepare("UPDATE lead_orders SET status='shipped',carrier=?,tracking_reference=?,shipped_at=?,updated_at=? WHERE id=? AND status='paid'").bind(carrier,tracking,shippedAt,t,id).run();
+      if(!changed.meta?.changes){const latest=await env.DB.prepare("SELECT status FROM lead_orders WHERE id=?").bind(id).first();if(latest?.status!=="shipped")throw Error("Order shipment conflict");}
+    }
+    const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(id).first();
+    await auditOrderEventOnce(env,`shipped:${id}`,"lead_order_shipped","Owner recorded order shipment",{order_id:id,order_number:order.order_number,carrier:order.carrier,tracking_reference:order.tracking_reference,shipped_at:order.shipped_at});
+    return order;
+  }
+  if(action==="fulfill"){
+    if(current.status!=="shipped"&&current.status!=="fulfilled")throw Error("Only a shipped order can be fulfilled");
+    if(current.status==="shipped"){
+      const deliveredAt=ownerRecordedDate(details.delivered_at,"delivered_at");
+      const changed=await env.DB.prepare("UPDATE lead_orders SET status='fulfilled',delivered_at=?,updated_at=? WHERE id=? AND status='shipped'").bind(deliveredAt,t,id).run();
+      if(!changed.meta?.changes){const latest=await env.DB.prepare("SELECT status FROM lead_orders WHERE id=?").bind(id).first();if(latest?.status!=="fulfilled")throw Error("Order fulfillment conflict");}
+    }
+    const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(id).first();
+    await auditOrderEventOnce(env,`fulfilled:${id}`,"lead_order_fulfilled","Owner recorded order delivery",{order_id:id,order_number:order.order_number,delivered_at:order.delivered_at});
+    return order;
+  }
   throw Error("Invalid order action");
+}
+
+function ownerRecordedDate(value,name){const d=new Date(String(value||"").trim());if(Number.isNaN(d.getTime()))throw Error(`${name} must be a valid owner-recorded date`);return d.toISOString();}
+
+function orderPaymentReferenceKey(value){return String(value||"").normalize("NFKC").replace(/\s+/g,"").toLowerCase().slice(0,200);}
+async function orderPaidMinor(env,orderId){const row=await env.DB.prepare("SELECT COALESCE(SUM(amount_minor),0) AS paid FROM lead_order_payments WHERE order_id=?").bind(orderId).first();return Number(row?.paid||0);}
+function customerPaymentAmountText({currency,amount_minor}){
+  const code=canonicalCurrency(currency),rule=CURRENCY_RULES[code],amount=Number(amount_minor);
+  if(!rule||!Number.isSafeInteger(amount)||amount<0)return null;
+  const exponent=rule.exponent,digits=String(amount).padStart(exponent+1,"0"),whole=(exponent?digits.slice(0,-exponent):digits).replace(/\B(?=(\d{3})+(?!\d))/g,","),fraction=exponent?`.`+digits.slice(-exponent):"";
+  return `${whole}${fraction} ${code}`;
+}
+async function recordOrderPayment(env,body,actor="authenticated_owner"){
+  await ensureOrderStore(env);
+  const orderId=String(body.order_id||"").trim(),kind=String(body.payment_kind||"").trim(),method=String(body.method||"").trim(),amount=safeCommercialInteger(body.amount_minor,{nullable:false,positive:true}),currency=canonicalCurrency(body.currency),reference=String(body.reference||"").trim().slice(0,200),referenceKey=orderPaymentReferenceKey(reference);
+  if(!orderId||!ORDER_PAYMENT_KINDS.has(kind)||!ORDER_PAYMENT_METHODS.has(method)||!currency||!referenceKey)throw Error("Valid order_id, payment kind, method, amount, currency and reference are required");
+  const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(orderId).first();
+  if(!order)throw Error("Order not found");
+  if(!["confirmed","partially_paid"].includes(order.status))throw Error("Payments can only be owner-recorded for confirmed or partially paid orders");
+  if(canonicalCurrency(order.currency)!==currency)throw Error("Payment currency must match the stored order currency");
+  const previous=await env.DB.prepare("SELECT * FROM lead_order_payments WHERE order_id=? AND method=? AND reference_key=? LIMIT 1").bind(orderId,method,referenceKey).first();
+  if(previous){if(Number(previous.amount_minor)!==amount||previous.payment_kind!==kind)throw Error("Payment reference is already recorded with different facts");return {recorded:false,idempotent:true,payment:previous,order};}
+  const total=safeCommercialInteger(order.total_minor,{nullable:false,positive:true}),paidBefore=await orderPaidMinor(env,orderId),outstanding=total-paidBefore;
+  if(amount>outstanding||(kind==="full"&&amount!==outstanding)||(kind==="deposit"&&paidBefore>0))throw Error("Payment does not match the recorded order balance");
+  const id=uid(),t=now();
+  const results=await env.DB.batch([
+    env.DB.prepare("INSERT INTO lead_order_payments(id,order_id,lead_id,payment_kind,amount_minor,currency,method,reference,reference_key,received_at,notes,recorded_by,recorded_at) SELECT ?,id,lead_id,?,?,?,?,?,?,?,?,?,? FROM lead_orders WHERE id=? AND status IN ('confirmed','partially_paid')").bind(id,kind,amount,order.currency,method,reference,referenceKey,body.received_at?ownerRecordedDate(body.received_at,"received_at"):null,String(body.notes||"").trim().slice(0,500)||null,String(actor||"authenticated_owner").slice(0,120),t,orderId),
+    env.DB.prepare("UPDATE lead_orders SET status=CASE WHEN (SELECT COALESCE(SUM(amount_minor),0) FROM lead_order_payments WHERE order_id=?)>=total_minor THEN 'paid' ELSE 'partially_paid' END,updated_at=? WHERE id=? AND status IN ('confirmed','partially_paid') AND EXISTS(SELECT 1 FROM lead_order_payments WHERE id=?)").bind(orderId,t,orderId,id)
+  ]);
+  if(!results?.[0]?.meta?.changes)throw Error("Payment recording conflict; reload the order");
+  const payment=await env.DB.prepare("SELECT * FROM lead_order_payments WHERE id=?").bind(id).first(),updated=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(orderId).first();
+  await auditOrderEventOnce(env,`payment:${id}`,"lead_order_payment_recorded","Owner recorded payment; no gateway was invoked",{order_id:orderId,payment_id:id,amount_minor:amount,currency,method,recorded_by:String(actor||"authenticated_owner")});
+  return {recorded:true,payment,order:updated,payment_engine:false};
+}
+async function reverseOrderPayment(env,body,actor="authenticated_owner"){
+  await ensureOrderStore(env);const paymentId=String(body.payment_id||"").trim(),reason=String(body.reason||"").trim().slice(0,500);if(!paymentId||!reason)throw Error("payment_id and reversal reason are required");
+  const original=await env.DB.prepare("SELECT * FROM lead_order_payments WHERE id=? LIMIT 1").bind(paymentId).first();if(!original||original.payment_kind==="reversal")throw Error("Reversible payment not found");
+  const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(original.order_id).first();if(!order||!["partially_paid","paid"].includes(order.status))throw Error("Only an unshipped recorded payment can be reversed");
+  const key=`reversal:${original.id}`,existing=await env.DB.prepare("SELECT * FROM lead_order_payments WHERE order_id=? AND reference_key=? LIMIT 1").bind(order.id,key).first();if(existing)return {reversed:false,idempotent:true,reversal:existing,order};
+  const id=uid(),t=now();const results=await env.DB.batch([
+    env.DB.prepare("INSERT INTO lead_order_payments(id,order_id,lead_id,payment_kind,amount_minor,currency,method,reference,reference_key,received_at,notes,recorded_by,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,order.id,order.lead_id,"reversal",-Number(original.amount_minor),original.currency,original.method,original.id,key,null,reason,String(actor||"authenticated_owner").slice(0,120),t),
+    env.DB.prepare("UPDATE lead_orders SET status=CASE WHEN (SELECT COALESCE(SUM(amount_minor),0) FROM lead_order_payments WHERE order_id=?)<=0 THEN 'confirmed' ELSE 'partially_paid' END,updated_at=? WHERE id=? AND status IN ('partially_paid','paid')").bind(order.id,t,order.id)
+  ]);if(!results?.[0]?.meta?.changes)throw Error("Payment reversal conflict; reload the order");
+  const reversal=await env.DB.prepare("SELECT * FROM lead_order_payments WHERE id=?").bind(id).first(),updated=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(order.id).first();await auditOrderEventOnce(env,`payment-reversal:${original.id}`,"lead_order_payment_reversed","Owner reversed recorded payment",{order_id:order.id,payment_id:original.id,reversal_id:id,reason});return {reversed:true,reversal,order:updated,payment_engine:false};
+}
+// Recovery is owner-invoked and creates only approval-gated drafts or owner decisions.
+async function prepareOwnerRecordedPaymentRecoveryDrafts(env){
+  await ensureOrderStore(env);const rows=(await env.DB.prepare("SELECT * FROM lead_orders WHERE status IN ('confirmed','partially_paid') ORDER BY updated_at ASC LIMIT 50").all()).results||[];
+  const result={checked:rows.length,drafts_created:0,owner_decisions:0,skipped:0,sending_enabled:false,payment_engine:false};
+  for(const order of rows){const prepared=await preparePaymentRequest(env,order);if(prepared?.created)result.drafts_created++;else if(prepared?.decision)result.owner_decisions++;else result.skipped++;}
+  return result;
 }
 
 function normalizeProductKey(value){return String(value||"").normalize("NFKC").trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu,"-").replace(/^-+|-+$/g,"").slice(0,120)||null;}
@@ -6310,6 +6489,34 @@ function telegramLeadContactChatId(contact) {
   if(String(contact?.evidence_status||'')!=='provider_supplied')return null;
   if(!['telegram_webhook','telegram_provider'].includes(String(contact?.source||'')))return null;
   return normalizeTelegramPrivateChatId(contact.normalized_value||contact.raw_value);
+}
+
+async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,message,eventType,eventMessage,details={}}){
+  await ensureLeadOutreachStore(env);
+  if(details.order_id){
+    await ensureOrderStore(env);const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();
+    if(!order)return {created:false,reason:"order_missing",sending_enabled:false};
+    const allowedNumbers=[order.order_number,order.total_minor,customerPaymentAmountText({currency:order.currency,amount_minor:order.total_minor})].flatMap(value=>[...String(value||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger);
+    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||"")]}];
+    const validation=validateSalesBrainDraft(message,{allowedNumbers,authoritativeFacts:facts});
+    if(!validation.valid)return {created:false,reason:`sales_draft_${validation.reason}`,validation,sending_enabled:false};
+  }
+  const eventId=`sales-draft:${key}`,prior=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind(eventId).first();
+  if(prior)try{return {created:false,idempotent:true,outreach_id:JSON.parse(prior.details_json||"{}").outreach_id||null,sending_enabled:false};}catch{}
+  const conversation=await env.DB.prepare("SELECT c.*,lc.raw_value,lc.normalized_value,lc.contact_type,lc.evidence_status,lc.source FROM lead_conversations c LEFT JOIN lead_contacts lc ON lc.id=c.contact_id WHERE c.id=? AND c.lead_id=? AND c.platform='telegram' LIMIT 1").bind(conversationId,leadId).first();
+  const recipient=telegramLeadContactChatId(conversation);if(!recipient)return {created:false,reason:"no_sendable_telegram_contact",sending_enabled:false};
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(eventId)),outreachId=`sales-draft-${Array.from(new Uint8Array(digest).slice(0,12),b=>b.toString(16).padStart(2,"0")).join("")}`,t=now();
+  await env.DB.prepare("INSERT OR IGNORE INTO lead_outreach(id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,created_at,updated_at) VALUES(?,?,?,?,NULL,'telegram',?,?,?,'draft',?,?)").bind(outreachId,leadId,conversation.contact_id||null,conversationId,recipient,String(message||"").trim().slice(0,4000),language||"Persian",t,t).run();
+  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?, 'info',?,?,?)").bind(eventId,eventType||"sales_draft_created",eventMessage||"Approval-gated sales draft created",JSON.stringify({...details,outreach_id:outreachId,snapshot:details.snapshot||null}),t).run();
+  return {created:true,idempotent:false,outreach_id:outreachId,sending_enabled:false};
+}
+
+// A payment/shipping draft may be sent only while its stored order snapshot remains current.
+async function salesOutreachStillCurrent(env,outreachId){
+  const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE id LIKE 'sales-draft:%' AND json_valid(details_json) AND json_extract(details_json,'$.outreach_id')=? LIMIT 1").bind(outreachId).first();
+  if(!event)return {current:true};let details={};try{details=JSON.parse(event.details_json||"{}")}catch{return {current:false,reason:"invalid_sales_draft_snapshot"};}
+  if(!details.order_id)return {current:true};const order=await env.DB.prepare("SELECT status,total_minor,currency FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();if(!order)return {current:false,reason:"order_missing"};
+  const snapshot=details.snapshot||{};return snapshot.status===order.status&&snapshot.total_minor===order.total_minor&&snapshot.currency===order.currency?{current:true}:{current:false,reason:"order_snapshot_stale"};
 }
 
 function normalizeLeadEmail(value) {
@@ -7536,6 +7743,12 @@ function dashboardHtml() {
 </html>`;
 }
 
+configureSalesIntelligence({
+  audit,json,auth,sanitizeOperationalError,ensureOrderStore,ensureLeadOutreachStore,
+  calculateQuoteValues,quoteReadiness,outreachLanguage,createApprovalGatedDraft:approvalGatedSalesDraft,
+  customerPaymentAmountText,orderPaidMinor,resolveLinkedOwnerDecision
+});
+
 export default {
   async scheduled(event, env, ctx) {
     if (event?.cron === "*/15 * * * *") {
@@ -8429,18 +8642,19 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         await ensureOwnerEscalationStore(env);
         const b=await req.json().catch(()=>null),id=String(b?.id||"").trim(),decision=String(b?.owner_decision||"").normalize("NFKC").trim(),note=b?.owner_note==null?null:String(b.owner_note).normalize("NFKC").trim();
-        const version=Number(b?.version);
+        const version=Number(b?.version),scope=String(b?.scope||"CASE_ONLY").toUpperCase();
         if(!id||!Number.isSafeInteger(version)||version<1)return json({ok:false,error:"id and current version are required"},400);
         if(!decision||decision.length>2000||note?.length>2000)return json({ok:false,error:"A bounded owner decision and optional note are required"},400);
+        if(!["CASE_ONLY","SAVE_AS_KNOWLEDGE"].includes(scope))return json({ok:false,error:"Invalid owner resolution scope"},400);
         const existing=await env.DB.prepare("SELECT * FROM owner_escalations WHERE id=? LIMIT 1").bind(id).first();
         if(!existing)return json({ok:false,error:"Owner escalation not found"},404);
         if(existing.status==="resolved")return json({ok:true,escalation:existing,idempotent:true,sending_enabled:false});
-        const t=now(),actor="authenticated_owner";
-        const changed=await env.DB.prepare("UPDATE owner_escalations SET status='resolved',owner_decision=?,owner_note=?,resolved_by=?,resolved_at=?,version=version+1,updated_at=? WHERE id=? AND status='open' AND version=?").bind(decision,note||null,actor,t,t,id,version).run();
-        if(!changed.meta?.changes)return json({ok:false,error:"Escalation changed; reload before resolving"},409);
-        const escalation=await env.DB.prepare("SELECT * FROM owner_escalations WHERE id=? LIMIT 1").bind(id).first();
-        await audit(env,"owner_escalation_resolved","Authenticated owner resolved Sales Brain escalation",{escalation_id:id,lead_id:escalation.lead_id,conversation_id:escalation.conversation_id,reason_code:escalation.reason_code,resolved_by:actor});
-        return json({ok:true,escalation,idempotent:false,sending_enabled:false});
+        if(existing.version!==version)return json({ok:false,error:"Escalation changed; reload before resolving"},409);
+        const linkedDecision=await ensureOwnerDecisionForEscalation(env,existing,{});
+        if(!linkedDecision)return json({ok:false,error:"Structured owner decision could not be persisted; retry safely"},409);
+        const answer={...(b?.answer&&typeof b.answer==="object"&&!Array.isArray(b.answer)?b.answer:{}),owner_decision:decision};
+        const result=await resolveLinkedOwnerDecision(env,{id:linkedDecision.id,action:"ANSWER",scope,answer,note:note||"",actor:"authenticated_owner"});
+        return json({ok:true,...result});
       }
 
       if (u.pathname === "/api/conversations/memory" && req.method === "GET") {
@@ -8995,9 +9209,10 @@ Context: ${context}`;
         const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),message=String(b.message||"").trim();
         if(!id||!message)return json({ok:false,error:"id and message are required"},400);
         if(message.length>4000)return json({ok:false,error:"Draft is too long"},400);
-        const t=now();
+        const before=(await env.DB.prepare("SELECT message FROM lead_outreach WHERE id=? LIMIT 1").bind(id).first())?.message??null,t=now();
         const result=await env.DB.prepare("UPDATE lead_outreach SET message=?,error_code=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_code END,error_detail=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_detail END,updated_at=? WHERE id=? AND status='draft'").bind(message,t,id).run();
         if(!result.meta?.changes)return json({ok:false,error:"Only a draft outreach can be edited"},409);
+        try{await recordDraftCorrection(env,{outreachId:id,before,after:message,outcome:"edited"});}catch(error){await audit(env,"sales_draft_correction_capture_failed","Owner draft edit remained saved after correction capture failure",{outreach_id:id,error:sanitizeOperationalError(error?.message||error)});}
         await env.DB.prepare("UPDATE inbox_messages SET reply_suggestion=?,updated_at=? WHERE id=(SELECT inbox_message_id FROM lead_outreach WHERE id=?)").bind(message,t,id).run();
         return json({ok:true,id,status:"draft",sending_enabled:false});
       }
@@ -9027,6 +9242,7 @@ Context: ${context}`;
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         const b=await req.json().catch(()=>({})),id=String(b.id||"").trim();
         if(!id)return json({ok:false,error:"id is required"},400);
+        const freshness=await salesOutreachStillCurrent(env,id);if(!freshness.current)return json({ok:false,error:"Outreach draft is stale and must be reviewed again",reason:freshness.reason},409);
         await ensureQuoteStore(env);const linkedQuote=await env.DB.prepare("SELECT id,status FROM lead_quotes WHERE outreach_id=? LIMIT 1").bind(id).first();
         if(linkedQuote&&linkedQuote.status!=="approved")return json({ok:false,error:"Quote is not approved for explicit sending"},409);
         const result=await sendApprovedTelegramOutreach(env,id);
@@ -9042,6 +9258,7 @@ Context: ${context}`;
       }
 
       if (u.pathname === "/api/sales-knowledge" || u.pathname.startsWith("/api/sales-knowledge/")) return await handleSalesKnowledge(req,env);
+      if (u.pathname === "/api/si" || u.pathname.startsWith("/api/si/")) return await handleSalesIntelligence(req,env,u);
 
       if (u.pathname === "/api/quotes" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);
@@ -9071,8 +9288,20 @@ Context: ${context}`;
       if (u.pathname === "/api/orders/transition" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
         const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),action=String(b.action||"").trim();
-        if(!id||!["confirm","cancel"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
-        try{return json({ok:true,order:await transitionLeadOrder(env,id,action,String(b.actor||"admin"),b.reason)});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+        if(!id||!["confirm","cancel","ship","fulfill"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
+        try{return json({ok:true,order:await transitionLeadOrder(env,id,action,"authenticated_owner",b.reason,{carrier:b.carrier,tracking_reference:b.tracking_reference,shipped_at:b.shipped_at,delivered_at:b.delivered_at}),payment_engine:false});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+      if (u.pathname === "/api/orders/payments" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureOrderStore(env);const id=String(u.searchParams.get("order_id")||"").trim();if(!id)return json({ok:false,error:"order_id is required"},400);const r=await env.DB.prepare("SELECT * FROM lead_order_payments WHERE order_id=? ORDER BY recorded_at,id").bind(id).all();return json({ok:true,items:r.results||[],payment_engine:false});
+      }
+      if (u.pathname === "/api/orders/payments" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);try{return json({ok:true,...(await recordOrderPayment(env,await req.json().catch(()=>({})),"authenticated_owner"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+      if (u.pathname === "/api/orders/payments/reverse" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);try{return json({ok:true,...(await reverseOrderPayment(env,await req.json().catch(()=>({})),"authenticated_owner"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+      if (u.pathname === "/api/revenue/followups/run" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);try{return json({ok:true,...(await prepareOwnerRecordedPaymentRecoveryDrafts(env))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
       }
       if (u.pathname === "/api/commercial-price-items" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);const r=await env.DB.prepare("SELECT * FROM commercial_price_items ORDER BY product_key,version DESC LIMIT 300").all();return json({ok:true,items:r.results||[]});
