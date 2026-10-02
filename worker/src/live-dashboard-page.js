@@ -909,6 +909,12 @@ async function sendCommand(){
  commandRequestId=commandRequestId||("cmd-"+crypto.randomUUID());
  $("commandStatus").textContent="در حال تحلیل فرمان…";
  const d=await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw,command_id:commandRequestId})});
+ if(d.read_only){
+  const s=d.status||{},mods=Object.entries(s.controls?.modules||{}).map(([k,v])=>k+": "+(v===false?"OFF":"ON")).join(" · "),tasks=Object.entries(s.tasks||{}).map(([k,v])=>k+" "+v).join(" · ");
+  $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ گزارش فقط‌خواندنی · هیچ Task ساخته یا اجرا نشد.</span><div class='mini'>MASTER: "+esc(String(s.controls?.master||"—").toUpperCase())+" · "+esc(mods||"—")+"</div><div class='mini'>Tasks: "+esc(tasks||"0")+"</div>":"<span class='bad'>✕ "+esc(d.error||"Status unavailable")+"</span>";
+  commandRequestId=null;
+  return;
+ }
  if(d.knowledge_router){
   const x=d.interpretation||{},request=d.request||{};
   const detail="Intent: "+esc(x.intent||"—")+" · "+esc(x.operation||"—")+" · "+esc(x.domain||"—")+" / "+esc(x.attribute||"—")+" · "+esc(x.market||"—");

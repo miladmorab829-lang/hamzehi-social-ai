@@ -5102,9 +5102,25 @@ function knowledgeCommandOperation(raw){
   if(/(?:تغییر|به\s*روز|غيّر|غير|\bupdate\b|\bchange\b)/i.test(s))return {operation:"UPDATE",intent:"UPDATE"};
   if(/(?:هم\s+.*(?:اضافه|داریم)|(?:اضافه|add).*\b(?:also|too)\b|(?:also|too)\s+(?:add|have)|\bexpand\b)/i.test(s))return {operation:"EXPAND",intent:"EXPAND"};
   if(/(?:یاد\s*بگیر|علّمني|علمني|\bteach\b)/i.test(s))return {operation:"ADD",intent:"TEACH"};
-  if(/(?:قانون.*(?:فروش|تخفیف)|\bsales\s+rule\b|\badd\s+rule\b)/i.test(s))return {operation:"ADD",intent:"ADD_SALES_RULE"};
-  if(/(?:مذاکره|\bnegotiat)/i.test(s))return {operation:"ADD",intent:"CHANGE_NEGOTIATION_BEHAVIOR"};
-  return {operation:"ADD",intent:"ADD_PRODUCT_KNOWLEDGE"};
+  if(/(?:اضافه\s*(?:کن|کنید|بکن|شود|بشه)|ثبت\s*(?:کن|کنید)|أضف|اضف|\badd\b)/i.test(s))return {operation:"ADD",intent:"ADD_PRODUCT_KNOWLEDGE"};
+  // No explicit knowledge action: never default to a mutation.
+  return null;
+}
+// A negated clause ("don't change …", "هیچ پیامی ارسال نکن") is a constraint, never a knowledge action or target.
+const KNOWLEDGE_NEGATED_CLAUSE=/(?:^|[\s‌])(?:هیچ|بدون|نباید|ن(?:کن|کنید|ده|دهید|فرست|فرستید|زن|شود|سازید|ساز))(?=$|[\s‌])|(?:^|\s)(?:لا|لن)(?=\s)|\b(?:don'?t|do\s+not|never|without|no|not)\b/i;
+function knowledgeCommandAffirmative(command){
+  return command.split(/[.!؟?؛;،,\n]+/).map(x=>x.trim()).filter(x=>x&&!KNOWLEDGE_NEGATED_CLAUSE.test(x)).join(" ");
+}
+const READ_ONLY_REPORT_TERMS=/(?:^|[\s‌])(?:وضعیت|گزارش|خلاصه)|(?:^|\s)(?:الحالة|تقرير)|\b(?:status|report|summary|overview)\b/i;
+const READ_ONLY_CONSTRAINTS=/(?:فقط\s*(?:گزارش|وضعیت)|هیچ\s*(?:task|تسک|وظیفه)|\bread[-\s]?only\b|\bno\s+tasks?\b|\bonly\s+report\b)/i;
+const OPERATIONAL_ACTION_TERMS=/(?:بررسی\s*کن|تحلیل\s*کن|اجرا\s*کن|شروع\s*کن|متوقف\s*کن|فعال\s*کن|ارسال\s*کن|بفرست|منتشر\s*کن|\b(?:run|scan|start|stop|pause|resume|send|publish|analy[sz]e|check)\b)/i;
+// Status/report requests are read-only unless they also carry an explicit, non-negated action.
+function isReadOnlyStatusCommand(raw){
+  const command=knowledgeCommandText(raw);if(!command)return false;
+  const affirmative=knowledgeCommandAffirmative(command);
+  if(knowledgeCommandOperation(affirmative))return false;
+  if(READ_ONLY_CONSTRAINTS.test(command))return true;
+  return READ_ONLY_REPORT_TERMS.test(command)&&!OPERATIONAL_ACTION_TERMS.test(affirmative);
 }
 function knowledgeCommandMarket(raw){
   const s=raw.toLowerCase();
@@ -5142,11 +5158,19 @@ function knowledgeCommandValue(raw,domain,attribute,entity){
   return {value:(quoted?.[1]||s).trim()||null};
 }
 export function parseSalesKnowledgeCommand(raw){
-  const command=knowledgeCommandText(raw);
-  if(!command||command.length>2000)return {recognized:false,error:"A bounded owner command is required"};
+  const original=knowledgeCommandText(raw);
+  if(!original||original.length>2000)return {recognized:false,error:"A bounded owner command is required"};
+  if(isReadOnlyStatusCommand(original))return {recognized:false,read_only:true};
+  const command=knowledgeCommandAffirmative(original);
   const knowledgeSignal=/(?:مدل|جعبه|رنگ|سایز|اندازه|موک|حداقل سفارش|تخفیف|زمان تولید|محدودیت تولید|ارسال|حمل|پرداخت|بیعانه|قیمت|قانون فروش|مذاکره|تصویر|عکس|موديل|الموديل|لون|سعر|خصم|شحن|انتاج|\bproduct\b|\bmodel\b|\bcolor\b|\bsize\b|\bmoq\b|\bminimum order\b|\bdiscount\b|\bproduction\b|\bshipping\b|\bpayment\b|\bdeposit\b|\bprice\b|\bsales rule\b|\bnegotiat|\bvisual\b|\bmedia\b|\bteach\b)/i.test(command);
   if(!knowledgeSignal)return {recognized:false};
-  const action=knowledgeCommandOperation(command),entity=knowledgeCommandEntity(command),market=knowledgeCommandMarket(command),s=command.toLowerCase();
+  const action=knowledgeCommandOperation(command);
+  if(!action){
+    // Operational commands that merely mention a sales topic stay with the planner; anything else fails closed.
+    if(OPERATIONAL_ACTION_TERMS.test(command))return {recognized:false};
+    return {recognized:true,confidence:0.3,error:"An explicit knowledge action is required (add, expand, update, replace, correct, deactivate, delete or teach); nothing was changed"};
+  }
+  const entity=knowledgeCommandEntity(command),market=knowledgeCommandMarket(command),s=command.toLowerCase();
   if(/(?:مذاکره|\bnegotiat)/i.test(s))action.intent="CHANGE_NEGOTIATION_BEHAVIOR";
   if(/(?:قانون فروش|\bsales\s+rule\b)/i.test(s))action.intent=["UPDATE","REPLACE"].includes(action.operation)?"CHANGE_SALES_RULE":"ADD_SALES_RULE";
   let domain=null,attribute=null;
@@ -5253,6 +5277,12 @@ async function maybeHandleAutonomyKnowledgeCommand(req,env){
   for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
   let body;try{body=JSON.parse(new TextDecoder().decode(bytes));}catch{return null;}
   if(!body||typeof body!=="object"||typeof body.command!=="string")return null;
+  // Read-only status/report commands get the status snapshot only: no task, execution, knowledge or customer side effect.
+  if(isReadOnlyStatusCommand(body.command)){
+    if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+    const snapshot=await (await handleAutonomy(env,new Request(new URL("/api/autonomy/status",req.url),{method:"GET",headers:{Authorization:req.headers.get("Authorization")||""}}))).json().catch(()=>null);
+    return json({ok:snapshot?.ok===true,read_only:true,tasks_created:0,executed:0,status:snapshot,...(snapshot?.ok?{}:{error:snapshot?.error||"Status unavailable"})});
+  }
   const parsed=parseSalesKnowledgeCommand(body.command);
   if(!parsed.recognized)return null;
   if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
