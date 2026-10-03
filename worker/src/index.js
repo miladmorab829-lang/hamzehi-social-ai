@@ -1749,7 +1749,7 @@ function ownerSegments(text){return String(text||"").split(/[|:\-–—،,\/\t؛
 function ownerDims(text){const m=ownerAscii(text).match(CUSTOMER_DIMENSIONS);if(!m)return {size:null,rest:ownerAscii(text)};return {size:[m[1],m[2],m[3]].filter(Boolean).join("x")+(m[4]?" "+m[4]:""),rest:ownerAscii(text).replace(m[0]," | ")};}
 // Parses one owner line into {kind, ...}. Never guesses: anything unclear is returned as ambiguous with explicit issues.
 // Owner prose (instructions/policy sentences) is import-level guidance and can NEVER become product, size or configuration.
-const OWNER_PROSE=/(?:نگه\s*دار|تغییر\s*نده|ایجاد\s*نشود|انجام\s*نشود|نشود|نکن(?:ید)?|نده(?:ید)?|نباید|باید|هستند|می[‌\s]?باشد|می[‌\s]?شود|لطفاً|لطفا|don'?t|do\s+not|must|should|please)(?![\p{L}])|[«»]/iu;
+const OWNER_PROSE=/(?:نگه\s*دار|تغییر\s*نده|ایجاد\s*نشود|انجام\s*نشود|نشود|نکن(?:ید)?|نده(?:ید)?|نباید|باید|هستند|می[‌\s]?باشد|می[‌\s]?شود|حفظ\s*(?:شود|کن|گردد|بماند)|لطفاً|لطفا|don'?t|do\s+not|must|should|please)(?![\p{L}])|[«»]/iu;
 // "No price" markers: the configuration exists but the owner supplied no authoritative price (never price 0, never borrowed).
 const OWNER_NO_PRICE=/(?:بدون\s*قیمت|قیمت\s*ندارد|فاقد\s*قیمت|بدون\s*نرخ|استعلام(?:\s*شود)?|تماس\s*بگیرید|no\s*price|not\s*priced|بدون\s*سعر)/iu;
 const OWNER_SIZE_LABEL=/^(?:سایز|اندازه|ابعاد|size|dimensions?|قياس|المقاس)$/iu;
@@ -1914,9 +1914,10 @@ function ownerStructureText(text,market){
   }
   // A no-price row and a priced row for the very same key contradict each other: shown to the owner, never merged.
   for(const row of items.filter(x=>x.no_price&&x.product_key&&byKey.has(x.product_key))){row.parse_status="ambiguous";row.issues.push({code:"priced_elsewhere_in_submission"});}
-  // Catalog facts implied by clear rows (priced or not): one proposal per product+size and product+configuration.
+  // Catalog facts come ONLY from clear rows with an authoritative numeric price: the owner priced that exact combination.
+  // A no-price row says nothing about availability, so it never proposes a size/configuration fact.
   const facts=new Map();
-  for(const row of items.filter(x=>x.item_type==="price_row"&&x.parse_status==="parsed")){
+  for(const row of items.filter(x=>x.item_type==="price_row"&&x.parse_status==="parsed"&&!x.no_price&&x.price_minor!=null)){
     if(row.size)facts.set(`size|${row.product_name}|${row.size}`,{item_type:"product_fact",parse_status:"parsed",product_name:row.product_name,fact_domain:"size",fact_attribute:"available_size",fact_value:row.size,market,raw_line:row.raw_line,issues:[]});
     if(row.configuration)facts.set(`cfg|${row.product_name}|${row.configuration}`,{item_type:"product_fact",parse_status:"parsed",product_name:row.product_name,fact_domain:"product",fact_attribute:"configuration",fact_value:row.configuration,market,raw_line:row.raw_line,issues:[]});
   }
