@@ -35,7 +35,7 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 
 <section class="card section">
 <div class="title"><div><h2>🤖 AI COMMAND CENTER</h2><div class="hint">فرمان طبیعی بنویس. نمونه: «تلگرام را بررسی کن، ولی اینستاگرام را فعلاً متوقف کن و فرصت‌های تبلیغاتی را پیدا کن.»</div></div><span class="tag">ADMIN CONTROLLED</span></div>
-<div class="command" style="margin-top:11px"><textarea id="command" class="input" rows="4" style="min-height:90px" placeholder="دستور عملیاتی، دانش فروش، لیست قیمت یا کاتالوگ را اینجا بنویس یا پیست کن…"></textarea><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button></div>
+<div class="command" style="margin-top:11px"><textarea id="command" class="input" rows="4" style="min-height:90px" placeholder="دستور عملیاتی، دانش فروش، لیست قیمت یا کاتالوگ را اینجا بنویس یا پیست کن…"></textarea><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button><button class="btn" onclick="teachKnowledge()" title="Teach the system a business fact, rule or relation in natural language (owner review required)">TEACH KNOWLEDGE</button></div>
 <div class="tools" style="margin-top:8px"><label class="hint">بازار دانش/قیمت: <select id="commandMarket" class="input" style="width:auto;display:inline-block"><option>IRAN</option><option>ARAB</option><option>GLOBAL</option></select></label><label class="btn">📷 تصاویر واقعی محصول (حداکثر ۸ · JPEG/PNG/WEBP · هر کدام تا ۵MB)<input id="commandImages" type="file" accept="image/jpeg,image/png,image/webp" multiple style="display:none" onchange="renderCommandImages()"></label><span id="commandImageInfo" class="hint"></span></div>
 <div id="commandImageList" class="rows"></div>
 <div class="examples">
@@ -379,9 +379,9 @@ function clearToken(){
 const DASHBOARD_REQUEST_TIMEOUT_MS=10000;
 async function api(path,opt={}){
  const controller=new AbortController();
- const timer=setTimeout(()=>controller.abort(),DASHBOARD_REQUEST_TIMEOUT_MS);
+ const timer=setTimeout(()=>controller.abort(),opt.timeoutMs||DASHBOARD_REQUEST_TIMEOUT_MS);
  try{
-  const r=await fetch(path,{...opt,signal:controller.signal,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});
+  const r=await fetch(path,{...opt,timeoutMs:undefined,signal:controller.signal,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});
   const d=await r.json().catch(()=>null);
   if(!d||typeof d!=="object")return {ok:false,error:"Invalid JSON response",status:r.status};
   if(!r.ok)return {...d,ok:false,error:d.error||("Request failed (HTTP "+r.status+")"),status:r.status};
@@ -491,9 +491,50 @@ async function loadSalesKnowledge(){
   const selected=$("knowledgeDomain").value;$("knowledgeDomain").innerHTML=Object.keys(knowledgeFields).map(x=>"<option>"+esc(x)+"</option>").join("");
   if(knowledgeFields[selected])$("knowledgeDomain").value=selected;knowledgeAttributes();
   $("knowledgeFacts").innerHTML=knowledgeFacts.map((x,i)=>knowledgeFactCard(x)+"<div class='tools'><button class='btn' data-knowledge='history' data-index='"+i+"'>HISTORY</button>"+(x.status!=="tombstoned"?"<button class='btn' data-knowledge='target' data-index='"+i+"'>SELECT EXACT REVISION</button>":"")+"</div>").join("")||"<div class='hint'>No approved knowledge yet.</div>";
-  $("knowledgeRequests").innerHTML=knowledgeRequests.map((x,i)=>"<div class='row'><b>"+esc(x.operation)+" · "+esc(x.entity_key)+" · "+esc(x.attribute)+"</b><div>"+esc(x.status)+" · "+esc(x.sensitivity)+" · "+esc(x.market)+"</div><div>Old:</div><pre style='white-space:pre-wrap'>"+esc(x.old_value_json??"(no previous fact)")+"</pre><div>Proposed:</div><pre style='white-space:pre-wrap'>"+esc(x.new_value_json)+"</pre><div>"+esc(x.conflict_json)+"</div><small>Target "+esc(x.target_fact_id||"none")+" / v"+esc(x.target_version??"—")+" · "+esc(x.effective_from||"no start")+" → "+esc(x.effective_until||"no end")+" · Reviewed "+esc(x.reviewed_by||"—")+" "+esc(x.reviewed_at||"")+"</small><div class='tools'>"+(x.status==="pending_review"?"<button class='btn' data-knowledge='approve' data-index='"+i+"'>REVIEW & APPROVE</button>":"")+(["pending_review","conflict"].includes(x.status)?"<button class='btn danger' data-knowledge='reject' data-index='"+i+"'>REJECT</button>":"")+(x.status==="approved"?"<button class='btn primary' data-knowledge='apply' data-index='"+i+"'>APPLY REVIEWED CHANGE</button>":"")+"</div></div>").join("")||"<div class='hint'>No proposals.</div>";
+  $("knowledgeRequests").innerHTML=knowledgeRequests.map((x,i)=>"<div class='row'><b>"+esc(x.operation)+" · "+esc(x.entity_key)+" · "+esc(x.attribute)+"</b><div>"+esc(x.status)+" · "+esc(x.sensitivity)+" · "+esc(x.market)+"</div><div>Old:</div><pre style='white-space:pre-wrap'>"+esc(x.old_value_json??"(no previous fact)")+"</pre><div>Proposed:</div><pre style='white-space:pre-wrap'>"+esc(x.new_value_json)+"</pre><div>"+knowledgeStructuredHtml(x)+"</div><div>"+esc(x.conflict_json)+"</div><small>Target "+esc(x.target_fact_id||"none")+" / v"+esc(x.target_version??"—")+" · "+esc(x.effective_from||"no start")+" → "+esc(x.effective_until||"no end")+" · Reviewed "+esc(x.reviewed_by||"—")+" "+esc(x.reviewed_at||"")+"</small><div class='tools'>"+(x.status==="pending_review"?"<button class='btn' data-knowledge='approve' data-index='"+i+"'>REVIEW & APPROVE</button>":"")+(["pending_review","conflict"].includes(x.status)&&x.domain==="knowledge"?"<button class='btn' data-knowledge='correct' data-index='"+i+"'>CORRECT</button>":"")+(["pending_review","conflict"].includes(x.status)?"<button class='btn danger' data-knowledge='reject' data-index='"+i+"'>REJECT</button>":"")+(x.status==="approved"?"<button class='btn primary' data-knowledge='apply' data-index='"+i+"'>APPLY REVIEWED CHANGE</button>":"")+"</div></div>").join("")||"<div class='hint'>No proposals.</div>";
   status.textContent="Page "+(knowledgeOffset/100+1)+". Review alone does not apply a change.";
  }catch(e){status.textContent=e.message}
+}
+function knowledgeStructuredHtml(x){
+ if(x.domain!=="knowledge")return "";
+ let e=null;try{e=JSON.parse(x.new_value_json)}catch(err){}
+ if(!e||e.schema!=="hamzehi.knowledge.v1")return "";
+ const cond=(e.conditions||[]).map(c=>c.field+" "+c.op+" "+(c.value===undefined?"":JSON.stringify(c.value))).join(" AND ")||"(no conditions)";
+ const rel=e.relation?e.relation.name+": "+Object.entries(e.relation.members).map(p=>p[0]+"="+p[1]).join(" + ")+(e.relation.only_with?" · ONLY WITH "+e.relation.only_with.join(","):""):"";
+ const eff=e.effect?Object.entries(e.effect).map(p=>p[0]+"="+p[1]).join(", "):"";
+ let conf="";try{conf=JSON.parse(x.conflict_json||"[]").map(c=>c.reason+(c.issues?": "+c.issues.join("; "):"")).join(" · ")}catch(err){}
+ return "<div class='mini'><b>"+esc(e.kind)+"</b> · applies to <b>"+esc(x.entity_key)+"</b> · concept <b>"+esc(x.attribute)+"</b> · market <b>"+esc(x.market)+"</b>"+(x.sensitivity==="commercial"?" · <span class='warn'>COMMERCIAL (owner gate stays)</span>":"")+(x.confidence!=null?" · confidence "+esc(x.confidence):"")+"</div>"
+  +(e.value!==undefined?"<div class='mini'>Value: "+esc(JSON.stringify(e.value))+"</div>":"")+(rel?"<div class='mini'>Relation: "+esc(rel)+"</div>":"")
+  +"<div class='mini'>Conditions: "+esc(cond)+"</div>"+(eff?"<div class='mini'>Effect: "+esc(eff)+" (knowledge only; never sent to a customer automatically)</div>":"")
+  +(x.source_text?"<div class='mini'>Owner said: "+esc(x.source_text)+"</div>":"")+(conf?"<div class='mini warn'>Needs attention: "+esc(conf)+"</div>":"");
+}
+async function correctKnowledgeProposal(x){
+ let e={};try{e=JSON.parse(x.new_value_json)||{}}catch(err){}
+ const editable={operation:x.operation,entity_key:x.entity_key==="unresolved"?"":x.entity_key,concept:x.attribute==="needs_clarification"?"":x.attribute,market:x.market,kind:x.attribute==="needs_clarification"?"":e.kind,value:x.attribute==="needs_clarification"?null:e.value,relation:e.relation||null,conditions:e.conditions||[],effect:e.effect||null,keywords:e.keywords||[],labels:e.labels||{}};
+ const txt=prompt("Edit the structured meaning (JSON). Operation ADD/UPDATE/REPLACE/DEACTIVATE/DELETE. The old proposal is rejected as superseded; the corrected one still needs your approval.",JSON.stringify(editable));
+ if(txt===null)return;
+ let c;try{c=JSON.parse(txt)}catch(err){throw Error("Invalid JSON; nothing changed")}
+ const d=await api("/api/sales-knowledge/correct",{method:"POST",timeoutMs:30000,body:JSON.stringify({id:x.id,proposal_hash:x.proposal_hash,corrections:c})});
+ if(!d.ok)throw Error(d.error);
+ await loadSalesKnowledge();$("knowledgeStatus").textContent="Corrected: new proposal "+((d.request||{}).status||"saved")+" — review it below.";
+}
+let teachBusy=false;
+async function teachKnowledge(){
+ const raw=$("command").value.trim();
+ if(!raw){$("commandStatus").innerHTML="<span class='warn'>متن دانش را وارد کنید.</span>";return}
+ if(teachBusy)return;teachBusy=true;
+ commandRequestId=commandRequestId||("cmd-"+crypto.randomUUID());
+ $("commandStatus").textContent="در حال ساختاربندی دانش برای بررسی مالک…";
+ try{
+  const d=await api("/api/sales-knowledge/teach",{method:"POST",timeoutMs:60000,body:JSON.stringify({text:raw,market:$("commandMarket").value,command_id:commandRequestId})});
+  showTeachResult(d);
+ }finally{teachBusy=false}
+}
+function showTeachResult(d){
+ if(d.status==="processing"){$("commandStatus").innerHTML="<span class='warn'>این دانش هنوز در حال پردازش است؛ چند ثانیه بعد دوباره امتحان کنید (دوباره پردازش نمی‌شود).</span>";return}
+ const s=d.summary||{};
+ $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ دانش ساختاربندی شد · Proposals: "+esc(s.proposals||0)+" · Pending review: "+esc(s.pending_review||0)+" · Needs correction: "+esc(s.conflict||0)+(d.redirected_to_price_list?" · "+esc(d.redirected_to_price_list)+" price item(s) belong to the price list import":"")+(d.idempotent?" · ارسال تکراری؛ دوباره پردازش نشد":"")+"</span><div class='mini'>هیچ موردی بدون تأیید مالک فعال نمی‌شود. <a href='#knowledgePanel'>OPEN KNOWLEDGE REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Teaching failed")+"</span>";
+ if(d.ok){commandRequestId=null;loadSalesKnowledge()}
 }
 async function loadKnowledgeHistory(delta=0){
  if(!knowledgeHistoryKey)return;
@@ -526,6 +567,7 @@ $("knowledgePanel").addEventListener("click",async event=>{
    knowledgeHistoryKey=knowledgeFacts[index].fact_key;knowledgeHistoryOffset=0;await loadKnowledgeHistory();return;
   }
   const x=knowledgeRequests[index];if(!x)return;
+  if(action==="correct"){await correctKnowledgeProposal(x);return;}
   if(!confirm(action==="apply"?"Apply this reviewed change? History will be preserved.":action==="approve"?"Confirm the displayed old/proposed values and their business authority?":"Reject this proposal?"))return;
   const body=action==="apply"?{id:x.id,proposal_hash:x.proposal_hash,confirm_apply:true}:{id:x.id,proposal_hash:x.proposal_hash,decision:action,confirm_sensitive:x.sensitivity==="commercial"};
   const d=await api("/api/sales-knowledge/"+(action==="apply"?"apply":"review"),{method:"POST",body:JSON.stringify(body)});if(!d.ok)throw Error(d.error);
@@ -998,7 +1040,8 @@ async function sendCommand(){
  commandRequestId=commandRequestId||("cmd-"+crypto.randomUUID());
  $("commandStatus").textContent=files.length?"در حال ارسال تصاویر و ساختاربندی دانش برای بررسی مالک…":"در حال تحلیل فرمان…";
  // Images (with or without text) always go to the owner knowledge import; large/price-list text is routed there server-side.
- const d=files.length?await submitOwnerKnowledge(raw):await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw,command_id:commandRequestId,market:$("commandMarket").value})});
+ const d=files.length?await submitOwnerKnowledge(raw):await api(A+"/command",{method:"POST",timeoutMs:60000,body:JSON.stringify({command:raw,command_id:commandRequestId,market:$("commandMarket").value})});
+ if(d.knowledge_teach){showTeachResult(d);return}
  if(d.knowledge_import){
   $("commandStatus").innerHTML=d.ok?ownerImportSummaryHtml(d)+"<div class='mini'><a href='#knowledgePanel'>OPEN KNOWLEDGE IMPORT REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Knowledge import failed")+"</span>";
   if(d.ok){commandRequestId=null;$("commandImages").value="";renderCommandImages();ownerImportData=d;renderOwnerImport(d)}

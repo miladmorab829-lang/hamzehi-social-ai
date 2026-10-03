@@ -1,5 +1,6 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
+import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswer, composeRelationAnswer, knowledgeEvidenceValue } from "./knowledge-engine.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -5339,7 +5340,10 @@ const SALES_KNOWLEDGE_COMMERCIAL = new Set(["quantity","production","shipping","
 const SALES_KNOWLEDGE_OPERATIONS = new Set(["ADD","EXPAND","UPDATE","REPLACE","DEACTIVATE","DELETE"]);
 
 function knowledgeFieldType(domain,attribute) {
-  return Object.hasOwn(SALES_KNOWLEDGE_FIELDS,domain)&&Object.hasOwn(SALES_KNOWLEDGE_FIELDS[domain],attribute)?SALES_KNOWLEDGE_FIELDS[domain][attribute]:null;
+  if(Object.hasOwn(SALES_KNOWLEDGE_FIELDS,domain)&&Object.hasOwn(SALES_KNOWLEDGE_FIELDS[domain],attribute))return SALES_KNOWLEDGE_FIELDS[domain][attribute];
+  // Open vocabulary: ANY concept name under the reserved "knowledge" domain is a generic structured record (engine envelope).
+  if(domain===KNOWLEDGE_DOMAIN&&knowledgeIdent(attribute))return "generic";
+  return null;
 }
 // The inbound path called these idempotent CREATE/ALTER setups many times per message (dozens of D1 round trips).
 // They now run once per isolate per bound database; a failure is not memoised, so the next call retries normally.
@@ -5381,6 +5385,7 @@ function knowledgeDate(value) {
 function knowledgeValidateValue(domain,attribute,market,value) {
   const type=knowledgeFieldType(domain,attribute);
   if(!type)throw Error("Unsupported knowledge domain/attribute; final prices belong to the existing price list or owner quote");
+  if(type==="generic"){validateKnowledgeEnvelope(value);return type;}
   if(type==="pricing_authority") {
     if(!((market==="ARAB"&&value==="commercial_price_items")||(market==="IRAN"&&value==="owner_confirmed_quote")))throw Error("Pricing authority cannot be overridden");
   } else if(value!==null) {
@@ -5427,7 +5432,8 @@ async function proposeSalesKnowledge(env,body,context={}) {
   const memberCanonical=type==="member"&&typeof value==="string"?knowledgeCanonical(knowledgeKeyPart(value)):valueJson;
   const valueHash=await knowledgeHash(memberCanonical);
   // Each multi-value member has its own stable key; updates explicitly target that member.
-  const memberKey=target?.member_key||(type==="member"?valueHash:"");
+  const slotHash=type==="generic"?await knowledgeHash(knowledgeCanonical(knowledgeSlot(value))):null;
+  const memberKey=target?.member_key||(type==="member"?valueHash:type==="generic"?slotHash:"");
   const factKey=JSON.stringify([domain,entityType,entityKey,attribute,market,memberKey]);
   const effectiveFrom=retiring?target.effective_from:knowledgeDate(body.effective_from),effectiveUntil=retiring?target.effective_until:knowledgeDate(body.effective_until);
   if(effectiveFrom&&effectiveUntil&&effectiveFrom>=effectiveUntil)throw Error("Effective end must follow start");
@@ -5435,7 +5441,8 @@ async function proposeSalesKnowledge(env,body,context={}) {
   const previous=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
   if(previous){if(previous.proposal_hash!==proposalHash)throw Error("Request ID already belongs to another proposal");return previous;}
   const latest=await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE fact_key=? ORDER BY version DESC LIMIT 1").bind(factKey).first();
-  const conflicts=[];
+  // extraConflicts lets the owner-teaching flow persist an AMBIGUOUS interpretation that can never be approved as-is.
+  const conflicts=[...(context.extraConflicts||[])];
   if(adding&&latest)conflicts.push({reason:latest.status==="active"&&latest.value_hash===valueHash?"duplicate":"existing_fact_requires_explicit_update",fact_id:latest.id,version:latest.version});
   if(target&&(latest?.id!==target.id||target.status==="superseded"||target.status==="tombstoned"))conflicts.push({reason:"stale_or_tombstoned_target",fact_id:latest?.id||null,version:latest?.version||null});
   if(memberKey&&!retiring){
@@ -5450,8 +5457,8 @@ async function proposeSalesKnowledge(env,body,context={}) {
     env.DB.prepare(`INSERT OR IGNORE INTO sales_knowledge_change_requests
       (id,operation,fact_key,domain,entity_type,entity_key,attribute,market,member_key,target_fact_id,target_version,old_value_json,new_value_json,value_hash,effective_from,effective_until,proposal_hash,conflict_json,sensitivity,confidence,status,requested_by,source_type,source_command_id,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admin',?,?,?,?)`)
-      .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),SALES_KNOWLEDGE_COMMERCIAL.has(domain)?"commercial":"standard",parserConfidence,status,context.sourceType||"owner_form",sourceCommandId,t,t),
-    knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain,source_command_id:sourceCommandId,parser_source:context.parserSource||"owner_form",parser_confidence:parserConfidence},t)
+      .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),SALES_KNOWLEDGE_COMMERCIAL.has(domain)||(type==="generic"&&knowledgeIsCommercial(attribute,value))?"commercial":"standard",parserConfidence,status,context.sourceType||"owner_form",sourceCommandId,t,t),
+    knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain,source_command_id:sourceCommandId,parser_source:context.parserSource||"owner_form",parser_confidence:parserConfidence,source_text:context.sourceText?String(context.sourceText).slice(0,2000):undefined},t)
   ]);
   const stored=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
   if(stored.proposal_hash!==proposalHash)throw Error("Concurrent request ID conflict");
@@ -5540,17 +5547,31 @@ async function handleSalesKnowledge(req,env) {
       const facts=history?await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE fact_key=? ORDER BY version DESC LIMIT 100 OFFSET ?").bind(history,offset).all()
         :await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE status<>'superseded' ORDER BY created_at DESC,id DESC LIMIT 100 OFFSET ?").bind(offset).all();
       const requests=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests ORDER BY created_at DESC,id DESC LIMIT 100 OFFSET ?").bind(offset).all();
-      return json({ok:true,facts:facts.results||[],requests:requests.results||[],fields:SALES_KNOWLEDGE_FIELDS,offset,page_size:100});
+      // Owner source text (what was actually said) comes from the proposal audit event, so review shows the original words.
+      const rows=requests.results||[];
+      try{
+        const sourceById=new Map();
+        for(let i=0;i<rows.length;i+=40){
+          const chunk=rows.slice(i,i+40),ev=await env.DB.prepare(`SELECT id,details_json FROM system_events WHERE id IN (${chunk.map(()=>"?").join(",")})`).bind(...chunk.map(r=>"knowledge:"+r.id+":sales_knowledge_proposed")).all();
+          for(const e of ev.results||[])try{const d=JSON.parse(e.details_json);if(d.source_text)sourceById.set(e.id,d.source_text);}catch{}
+        }
+        for(const r of rows)r.source_text=sourceById.get("knowledge:"+r.id+":sales_knowledge_proposed")||null;
+      }catch{}
+      return json({ok:true,facts:facts.results||[],requests:rows,fields:SALES_KNOWLEDGE_FIELDS,offset,page_size:100});
     }
-    if(req.method!=="POST"||![base+"/propose",base+"/review",base+"/apply"].includes(u.pathname))return json({ok:false,error:"Not found"},404);
-    if(Number(req.headers.get("Content-Length")||0)>16384)return json({ok:false,error:"Knowledge request too large"},413);
+    if(req.method!=="POST"||![base+"/propose",base+"/review",base+"/apply",base+"/teach",base+"/correct"].includes(u.pathname))return json({ok:false,error:"Not found"},404);
+    // Teaching bodies may carry a few paragraphs of owner text; every other route keeps the original 16 KB bound.
+    const bodyLimit=u.pathname===base+"/teach"?KNOWLEDGE_TEACH_BODY_BYTES:16384;
+    if(Number(req.headers.get("Content-Length")||0)>bodyLimit)return json({ok:false,error:"Knowledge request too large"},413);
     // Bound bodies even when Content-Length is omitted.
     const reader=req.body?.getReader();if(!reader)throw Error("JSON body is required");
     const chunks=[];let size=0;
-    while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>16384){await reader.cancel();throw Error("Knowledge request too large");}chunks.push(value);}
+    while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>bodyLimit){await reader.cancel();throw Error("Knowledge request too large");}chunks.push(value);}
     const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
     const body=JSON.parse(new TextDecoder().decode(bytes));
     await ensureSalesKnowledgeStore(env);
+    if(u.pathname===base+"/teach"){const taught=await teachKnowledge(env,body);return json(taught.body,taught.status);}
+    if(u.pathname===base+"/correct")return json({ok:true,...await correctSalesKnowledge(env,body)});
     const result=u.pathname.endsWith("/propose")?await proposeSalesKnowledge(env,body):u.pathname.endsWith("/review")?await reviewSalesKnowledge(env,body):await applySalesKnowledge(env,body);
     return json({ok:true,request:result});
   } catch(error) {
@@ -5558,6 +5579,151 @@ async function handleSalesKnowledge(req,env) {
     const missing=/no such table/i.test(message);
     return json({ok:false,error:missing?"Knowledge schema unavailable; migrate before deployment":sanitizeOperationalError(message)},missing?503:400);
   }
+}
+
+
+// ================= OWNER TEACHING: natural language / structured records → versioned proposals =================
+// Owner input → (AI extraction OR direct structured records) → deterministic normalization/validation → proposals through the
+// existing versioned review flow. Nothing is ever authoritative until the owner approves AND applies it. Ambiguous or
+// unresolvable interpretations are stored as non-approvable "needs clarification" proposals that the owner CORRECTs.
+const KNOWLEDGE_TEACH_BODY_BYTES=65536;
+const KNOWLEDGE_DECLARATIVE=/(?:است|هستند|می[‌\s]?باشد|مجاز|ممنوع|دارد|دارند|داریم|ندارد|ندارند|نیست|باشد|شود|بشود|\bis\b|\bare\b|\bonly\b|\bmust\b|\ballowed\b)[\s.!؟?]*$/iu;
+function typedKnowledgeCatalog(){return Object.entries(SALES_KNOWLEDGE_FIELDS).filter(([d])=>d!=="pricing").flatMap(([d,fields])=>Object.entries(fields).map(([a,t])=>`${d}.${a} (${t})`));}
+async function extractKnowledgeWithAI(env,text,market){
+  if(!env.OPENAI_API_KEY)return {error:"ai_unavailable"};
+  try{
+    const r=await customerMediaFetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:String(env.OPENAI_MODEL||"gpt-5.6-luna"),input:[{role:"user",content:[{type:"input_text",text:knowledgeExtractionPrompt({text,market,typedFields:typedKnowledgeCatalog()})}]}]})},25000);
+    if(!r.ok)return {error:`ai_http_${Number(r.status)||0}`};
+    const parsed=parseCustomerVisionJson(responseText(await r.json().catch(()=>({}))));
+    return Array.isArray(parsed?.records)?{records:parsed.records}:{error:"ai_unparseable"};
+  }catch(error){return {error:error?.name==="AbortError"?"ai_timeout":"ai_error"};}
+}
+// UPDATE/REPLACE/DEACTIVATE/DELETE must hit the exact active revision: same slot first, else the single active record of that concept.
+async function findKnowledgeTarget(env,{domain,entityType,entityKey,attribute,market,memberKey,memberKeys}){
+  let key;try{key=knowledgeKeyPart(entityKey);}catch{return {target:null,candidates:0};}
+  const base="SELECT * FROM sales_knowledge_facts WHERE status='active' AND domain=? AND entity_type=? AND entity_key=? AND attribute=? AND market=?";
+  for(const candidate of (memberKeys||[memberKey]).filter(Boolean)){const exact=(await env.DB.prepare(base+" AND member_key=?").bind(domain,entityType,key,attribute,market,candidate).all()).results||[];if(exact.length===1)return {target:exact[0]};}
+  const all=(await env.DB.prepare(base).bind(domain,entityType,key,attribute,market).all()).results||[];
+  return all.length===1?{target:all[0]}:{target:null,candidates:all.length};
+}
+async function proposeTaughtKnowledge(env,rec,{id,sourceText,sourceCommandId}){
+  const context={sourceType:"owner_teach",parserSource:"owner_teach",parserConfidence:rec.confidence,sourceCommandId:sourceCommandId||null,sourceText};
+  const unresolved=async(issues)=>{
+    const interpretation=JSON.stringify({operation:rec.operation,kind:rec.kind,entity:rec.entity_key,concept:rec.concept,typed:rec.typed||null,envelope:rec.envelope||null,value:rec.value??null}).slice(0,1800);
+    return proposeSalesKnowledge(env,{id,operation:"ADD",domain:KNOWLEDGE_DOMAIN,entity_type:"business",entity_key:"unresolved",attribute:"needs_clarification",market:rec.market||"GLOBAL",
+      value:{schema:KNOWLEDGE_SCHEMA,kind:"fact",value:"needs_clarification",priority:50,conditions:[],keywords:[],labels:{}}},
+      {...context,extraConflicts:[{reason:"ambiguous_interpretation",issues:(issues||[]).slice(0,8),interpretation}]});
+  };
+  if(rec.issues?.length||(!rec.typed&&!rec.envelope))return unresolved(rec.issues?.length?rec.issues:["record_invalid"]);
+  const domain=rec.typed?rec.typed.domain:KNOWLEDGE_DOMAIN,attribute=rec.typed?rec.typed.attribute:rec.concept,value=rec.typed?rec.value:rec.envelope;
+  const type=knowledgeFieldType(domain,attribute);
+  if(!type||type==="pricing_authority")return unresolved(["typed_field_unknown"]);
+  const body={id,operation:rec.operation,domain,entity_type:rec.entity_type,entity_key:rec.entity_key,attribute,market:rec.market,value};
+  if(rec.effective_from)body.effective_from=rec.effective_from;
+  if(rec.effective_until)body.effective_until=rec.effective_until;
+  if(["UPDATE","REPLACE","DEACTIVATE","DELETE"].includes(rec.operation)){
+    let memberKey=null,memberKeys=null;
+    try{
+      if(type==="generic"){
+        memberKey=await knowledgeHash(knowledgeCanonical(knowledgeSlot(value)));
+        // A bare scalar for a multi-value concept ("deactivate cream") names ONE member of that concept.
+        const scalarFact=value.value!==undefined&&!value.multi&&!value.relation&&!value.conditions?.length&&!value.effect&&["fact","capability","availability"].includes(value.kind);
+        memberKeys=scalarFact?[await knowledgeHash(knowledgeCanonical(knowledgeSlot({...value,multi:true}))),memberKey]:[memberKey];
+      }
+      else if(type==="member"&&typeof value==="string")memberKey=await knowledgeHash(knowledgeCanonical(knowledgeKeyPart(value)));
+    }catch{}
+    const found=await findKnowledgeTarget(env,{domain,entityType:rec.entity_type,entityKey:rec.entity_key,attribute,market:rec.market,memberKey,memberKeys});
+    if(!found.target)return unresolved([found.candidates>1?"target_ambiguous":"target_not_found"]);
+    body.target_fact_id=found.target.id;body.target_version=found.target.version;
+    if(["DEACTIVATE","DELETE"].includes(rec.operation))delete body.value;
+  }
+  try{return await proposeSalesKnowledge(env,body,context);}
+  catch(error){return unresolved([sanitizeOperationalError(error?.message||error).slice(0,200)]);}
+}
+async function teachView(env,ids){
+  const out=[];
+  for(let i=0;i<ids.length;i+=40){
+    const chunk=ids.slice(i,i+40);
+    out.push(...((await env.DB.prepare(`SELECT id,operation,domain,entity_type,entity_key,attribute,market,status,sensitivity,confidence,conflict_json,new_value_json,old_value_json,proposal_hash FROM sales_knowledge_change_requests WHERE id IN (${chunk.map(()=>"?").join(",")}) ORDER BY id`).bind(...chunk).all()).results||[]));
+  }
+  const count=s=>out.filter(x=>x.status===s).length;
+  return {status:"proposed",proposals:out,summary:{proposals:out.length,pending_review:count("pending_review"),conflict:count("conflict"),approved:count("approved"),applied:count("applied")}};
+}
+async function teachKnowledge(env,body){
+  await ensureSalesKnowledgeStore(env);
+  const market=["IRAN","ARAB","GLOBAL"].includes(String(body?.market||"").toUpperCase())?String(body.market).toUpperCase():"GLOBAL";
+  const text=typeof body?.text==="string"?body.text.normalize("NFKC").trim():"",direct=Array.isArray(body?.records)?body.records:null;
+  if(!text&&!direct)return {status:400,body:{ok:false,error:"text or records is required"}};
+  if(text.length>KNOWLEDGE_LIMITS.text)return {status:413,body:{ok:false,error:`Owner knowledge text exceeds ${KNOWLEDGE_LIMITS.text} characters; use the knowledge import for large lists`}};
+  if(direct&&direct.length>KNOWLEDGE_LIMITS.records)return {status:413,body:{ok:false,error:`At most ${KNOWLEDGE_LIMITS.records} records per submission`}};
+  const commandId=typeof body?.command_id==="string"&&/^[a-zA-Z0-9_-]{8,60}$/.test(body.command_id)?body.command_id:null;
+  // Idempotency + cost control: one submission = one ledger event = at most ONE AI call, even on double tap / retry / parallel requests.
+  const hash=await knowledgeHash(JSON.stringify({text,market,records:direct||null})),eventId="knowledge-teach:"+hash,idBase=hash.slice(0,20);
+  const prior=await env.DB.prepare("SELECT details_json,created_at FROM system_events WHERE id=?").bind(eventId).first();
+  const processing={status:202,body:{ok:true,knowledge_teach:true,status:"processing",idempotent:true}};
+  if(prior){
+    let d={};try{d=JSON.parse(prior.details_json);}catch{}
+    if(d.status==="done")return {status:200,body:{ok:true,knowledge_teach:true,idempotent:true,...await teachView(env,d.proposal_ids||[]),redirected_to_price_list:d.redirected_to_price_list||0}};
+    if(Date.parse(prior.created_at)>Date.now()-120000)return processing;
+    await env.DB.prepare("UPDATE system_events SET created_at=? WHERE id=?").bind(now(),eventId).run();
+  }else{
+    const claim=await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Owner knowledge teaching',?,?)").bind(eventId,"knowledge_teach",JSON.stringify({status:"processing"}),now()).run();
+    if(!claim.meta?.changes)return processing;
+  }
+  const release=()=>env.DB.prepare("DELETE FROM system_events WHERE id=? AND details_json LIKE '%processing%'").bind(eventId).run().catch(()=>{});
+  let records=direct;
+  if(!records){
+    const ai=await extractKnowledgeWithAI(env,text,market);
+    if(ai.error){await release();return {status:ai.error==="ai_unavailable"?503:502,body:{ok:false,knowledge_teach:true,error:ai.error==="ai_unavailable"?"AI extraction is unavailable; submit structured records or use the review form. Nothing was changed.":"Knowledge extraction failed ("+ai.error+"); nothing was changed."}};}
+    records=ai.records;
+  }
+  const norm=normalizeKnowledgeInput(records,{market});
+  if(!norm.records.length){await release();return {status:422,body:{ok:false,knowledge_teach:true,error:"No knowledge could be extracted from this input; nothing was changed."}};}
+  const ids=[];let redirected=0;
+  const sourceText=text||JSON.stringify(direct).slice(0,2000);
+  for(let i=0;i<norm.records.length;i++){
+    const rec=norm.records[i];
+    // Prices belong to the existing versioned price list (owner price import), never to generic knowledge.
+    if(rec.issues.includes("price_belongs_to_price_list")){redirected++;continue;}
+    const proposal=await proposeTaughtKnowledge(env,rec,{id:`teach-${idBase}-${String(i+1).padStart(2,"0")}`,sourceText,sourceCommandId:commandId});
+    ids.push(proposal.id);
+  }
+  await env.DB.prepare("UPDATE system_events SET details_json=? WHERE id=?").bind(JSON.stringify({status:"done",proposal_ids:ids,redirected_to_price_list:redirected,market}),eventId).run();
+  try{await audit(env,"knowledge_teach_proposed","Owner teaching produced knowledge proposals for review",{event:eventId,proposals:ids.length,redirected_to_price_list:redirected});}catch{}
+  return {status:200,body:{ok:true,knowledge_teach:true,idempotent:false,...await teachView(env,ids),redirected_to_price_list:redirected,command_id:commandId}};
+}
+// CORRECT: the owner changes the structured meaning BEFORE approval. A new proposal is created from the corrected record and
+// the displayed one is rejected as superseded (history stays); nothing becomes authoritative until the new one is approved.
+const KNOWLEDGE_CORRECTABLE=["operation","entity_key","entity_type","concept","market","kind","value","relation","conditions","effect","priority","keywords","labels","context_field","unit","currency","effective_from","effective_until"];
+async function correctSalesKnowledge(env,body){
+  knowledgeOnlyKeys(body,["id","proposal_hash","corrections"]);
+  const id=knowledgeId(body.id),old=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
+  if(!old||old.proposal_hash!==body.proposal_hash)throw Error("Correction must identify the exact displayed proposal");
+  if(!["pending_review","conflict"].includes(old.status))throw Error("Only a pending or conflicting proposal can be corrected");
+  const c=body.corrections;
+  if(!c||typeof c!=="object"||Array.isArray(c)||!Object.keys(c).length||Object.keys(c).some(k=>!KNOWLEDGE_CORRECTABLE.includes(k)))throw Error("Provide supported correction fields");
+  let oldValue=null;try{oldValue=JSON.parse(old.new_value_json);}catch{}
+  const generic=old.domain===KNOWLEDGE_DOMAIN,e=generic&&oldValue?.schema===KNOWLEDGE_SCHEMA?oldValue:{};
+  const pick=(key,fallback)=>Object.hasOwn(c,key)?c[key]:fallback;
+  const unresolvedOld=old.attribute==="needs_clarification";
+  const raw={operation:c.operation||old.operation,entity:{type:c.entity_type||old.entity_type,key:pick("entity_key",unresolvedOld?"":old.entity_key)},market:c.market||old.market,confidence:1,effective_from:pick("effective_from",old.effective_from),effective_until:pick("effective_until",old.effective_until)};
+  if(generic){
+    raw.kind=c.kind||(unresolvedOld?undefined:e.kind);
+    raw.concept=c.concept||(unresolvedOld?undefined:old.attribute);
+    raw.value=pick("value",unresolvedOld?undefined:e.value);raw.relation=pick("relation",e.relation);raw.conditions=pick("conditions",e.conditions);raw.effect=pick("effect",e.effect);
+    raw.priority=pick("priority",e.priority);raw.keywords=pick("keywords",e.keywords);raw.labels=pick("labels",e.labels);raw.context_field=pick("context_field",e.context_field);raw.unit=pick("unit",e.unit);raw.currency=pick("currency",e.currency);
+    if(e.multi&&!Array.isArray(raw.value))raw.multi=true;
+  }else{raw.typed={domain:old.domain,attribute:old.attribute};raw.value=pick("value",oldValue);}
+  const norm=normalizeKnowledgeInput([raw],{market:old.market});
+  if(norm.records.length!==1)throw Error("Correct one record at a time");
+  const rec=norm.records[0];
+  if(rec.issues.length)throw Error("The corrected record is still incomplete or ambiguous: "+rec.issues.slice(0,3).join("; "));
+  const newId="corr-"+(await knowledgeHash(JSON.stringify({old:old.id,rec}))).slice(0,40);
+  const proposal=await proposeTaughtKnowledge(env,rec,{id:newId,sourceText:`[owner correction of ${old.id}]`,sourceCommandId:old.source_command_id});
+  const t=now();
+  const rejected=await env.DB.prepare("UPDATE sales_knowledge_change_requests SET status='rejected',reviewed_by='admin',reviewed_at=?,review_note=?,updated_at=? WHERE id=? AND proposal_hash=? AND status IN ('pending_review','conflict')").bind(t,("Superseded by owner correction "+proposal.id).slice(0,1000),t,old.id,old.proposal_hash).run();
+  try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Owner corrected a knowledge proposal',?,?)").bind("knowledge:"+old.id+":corrected","sales_knowledge_corrected",JSON.stringify({superseded:old.id,replacement:proposal.id,status:proposal.status}),t).run();}catch{}
+  return {request:proposal,superseded:old.id,superseded_changed:!!rejected.meta?.changes};
 }
 
 // P0-7B deliberately recognizes a small, allowlisted subset of owner language.
@@ -5772,8 +5938,18 @@ async function maybeHandleAutonomyKnowledgeCommand(req,env){
     return json({ok:snapshot?.ok===true,read_only:true,tasks_created:0,executed:0,status:snapshot,...(snapshot?.ok?{}:{error:snapshot?.error||"Status unavailable"})});
   }
   const parsed=parseSalesKnowledgeCommand(body.command);
-  if(!parsed.recognized)return null;
+  // A declarative owner statement the fixed router does not recognise at all (e.g. "ترکیب مشکی با روبان طلایی مجاز است") is still
+  // business knowledge: the generic engine handles it. Operational commands (imperatives/module words) never take this path.
+  const genericOnly=!parsed.recognized&&!parsed.read_only&&!!env.OPENAI_API_KEY&&auth(req,env)&&looksLikeKnowledgeStatement(body.command)&&!OPERATIONAL_ACTION_TERMS.test(body.command)&&KNOWLEDGE_DECLARATIVE.test(String(body.command).trim());
+  if(!parsed.recognized&&!genericOnly)return null;
   if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+  // Owner business statements the fixed router cannot place ("no explicit action") are taught through the GENERIC engine:
+  // AI extraction → structured, validated proposals → owner review. If extraction is unavailable, the original clarification stays.
+  if((genericOnly||(parsed.error&&!parsed.requires_phase&&!parsed.pricing_redirect))&&env.OPENAI_API_KEY&&looksLikeKnowledgeStatement(body.command)){
+    const taught=await teachKnowledge(env,{text:body.command,market:body.market,command_id:body.command_id});
+    if(taught.body.ok)return json(taught.body,taught.status);
+    if(genericOnly)return null;
+  }
   try{return json({ok:true,...await routeSalesKnowledgeCommand(env,body)});}
   catch(error){return json({ok:false,knowledge_router:true,error:sanitizeOperationalError(error?.message||error)},400);}
 }
@@ -6307,7 +6483,7 @@ function salesBrainDraft(action,language){const ar=language==="Iraqi Arabic";con
 // Short, natural inbound replies (1–2 sentences). They never state a price, discount, MOQ, capability, timing or terms;
 // the only echoed facts are the customer's own integer quantity and an allow-listed printing finish.
 const SALES_BRAIN_NATURAL_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
-const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","commercial_owner_review_required","approved_moq_missing"]);
+const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","commercial_owner_review_required","approved_moq_missing","approved_knowledge_missing"]);
 const SALES_BRAIN_FACT_LABELS={product_interest:["مدل","الموديل"],requested_quantity:["تعداد","العدد"],requested_size:["سایز","القياس"],printing:["نوع چاپ","نوع الطباعة"],branding:["لوگو","الشعار"],destination:["مقصد","الوجهة"],exterior_color:["رنگ","اللون"],interior_color:["رنگ","اللون"]};
 function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,repeat=false,quantity=null,printing=null,waitingOn=null,recorded=[],moq=null}={}){
   const ar=language==="Iraqi Arabic";
@@ -6465,6 +6641,7 @@ function ownerEscalationReason(brain){
   const reason=String(brain?.needs_owner_reason||"");
   if(reason==="authoritative_price_required")return "unsupported_price";
   if(reason==="approved_moq_missing")return "unclear_moq";
+  if(reason==="approved_knowledge_missing")return "missing_business_knowledge";
   if(reason==="commercial_owner_review_required")return "unusual_commercial_terms";
   if(reason==="ambiguous_customer_identity")return "ambiguous_customer_identity";
   if(reason==="unsupported_commercial_claim"||reason==="unsupported_numeric_claim")return "unsupported_factual_claim";
@@ -6487,7 +6664,7 @@ async function ensureOwnerDecisionForEscalation(env,escalation,brain={}){
     conversation_id:escalation.conversation_id||null,
     market:brain.market||null,
     question:escalation.unresolved_question,
-    known:{escalation_id:escalation.id,reason_code:escalation.reason_code,context_summary:escalation.context_summary},
+    known:{escalation_id:escalation.id,reason_code:escalation.reason_code,context_summary:escalation.context_summary,applicable_rules:(brain?.business_context?.applicable_rules||[]).slice(0,5),owner_gate_note:"Approved rules are shown as knowledge only; they never authorise a customer-facing commercial promise."},
     missing:[escalation.unresolved_question],
     recommendation:"Resolve this customer case only, or submit a separate versioned Sales Knowledge proposal for review.",
     risk:"This is a runtime-blocking customer case; it cannot activate reusable knowledge by itself.",
@@ -6640,7 +6817,7 @@ async function runSalesNegotiationBrain(env,inboxId){
   const marketDecision=determineQuoteMarket({ownerMarket:leadMeta.market,leadCountry:leadMeta.country,destination:memory.destination});
   const conversationMarket=["IRAN","ARAB"].includes(marketDecision.market)?marketDecision.market:null,knowledgeMarkets=conversationMarket?[conversationMarket,"GLOBAL"]:["GLOBAL"];
   const marketClause=` AND market IN (${knowledgeMarkets.map(()=>"?").join(",")})`;
-  const model=String(memory.product_interest||"").trim(),knowledge=(await env.DB.prepare("SELECT id,version,domain,entity_key,attribute,market,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND (entity_key='global' OR (?<>'' AND entity_key=?))"+marketClause+" ORDER BY created_at DESC LIMIT 100").bind(model,model,...knowledgeMarkets).all()).results||[];
+  const model=String(memory.product_interest||"").trim(),knowledge=(await env.DB.prepare("SELECT id,version,domain,entity_key,attribute,market,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain<>'knowledge' AND (entity_key='global' OR (?<>'' AND entity_key=?))"+marketClause+" ORDER BY created_at DESC LIMIT 100").bind(model,model,...knowledgeMarkets).all()).results||[];
   // Customer images of THIS lead+conversation only. A resolved image satisfies "which product/model" as a reference; its
   // observation is advisory visual context and never an authoritative fact for the validator.
   let imageReference={status:"none",images:[],image_count:0};try{imageReference=await resolveCustomerImageReference(env,row);}catch{}
@@ -6658,6 +6835,39 @@ async function runSalesNegotiationBrain(env,inboxId){
   if(imageCategory&&imageCategory!=="unknown")try{likelyVisualMatches=((await retrieveEligibleVisualProductMedia(env,[{type:"category",value:visualAttributeValue(imageCategory).normalized}],3)).items||[]).map(x=>({visual_media_id:x.id,match_type:"likely_visual_match",basis:"category",attributes:Object.fromEntries((x.attributes||[]).filter(a=>a.status==="active").map(a=>[a.attribute_type,a.normalized_value]))}));}catch{}
   const requirementRules=(await env.DB.prepare(`SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN ('pricing','product','configuration','size','strategy') AND (entity_key='global'${productKeys.length?` OR entity_key IN (${productKeys.map(()=>"?").join(",")})`:""})${marketClause} ORDER BY created_at DESC LIMIT 100`).bind(...productKeys,...knowledgeMarkets).all()).results||[];
   const requirements=resolveSalesRequirements(requirementRules,productKeys);
+  // ---- GENERIC BUSINESS KNOWLEDGE (data-driven; no per-concept code) ----
+  // Approved records of THIS market + GLOBAL → match the product by exact name / owner-taught alias only → recognise values the
+  // owner taught in the customer's own words → evaluate approved rules/relations generically. This returns KNOWLEDGE, never
+  // permission: commercial effects never reach a customer reply and every owner gate below is unchanged.
+  const kgNow=now();
+  const kgRows=(await env.DB.prepare("SELECT id,version,domain,entity_type,entity_key,attribute,market,member_key,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain=?"+marketClause+" AND (effective_from IS NULL OR effective_from<=?) AND (effective_until IS NULL OR effective_until>?) ORDER BY created_at DESC LIMIT 600").bind(KNOWLEDGE_DOMAIN,...knowledgeMarkets,kgNow,kgNow).all()).results||[];
+  const kgRecords=hydrateKnowledgeRecords(kgRows);
+  const kgEntities=resolveKnowledgeEntities(kgRecords,[model,imageCategory]);
+  const kgScope=kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||kgEntities.matched.includes(r.entity_key));
+  const kgVocabulary=knowledgeVocabulary(kgScope);
+  const kgHistory=[...context.filter(x=>x.direction==="inbound"&&x.id!==row.id).map(x=>x.message),row.message];
+  const kgCurrent=recognizeKnowledgeContext([row.message],kgVocabulary),kgRecognized={...recognizeKnowledgeContext(kgHistory,kgVocabulary)};
+  const kgContext={market:conversationMarket,product:[model,imageCategory].filter(Boolean),quantity:Number.isSafeInteger(knownQuantity)&&knownQuantity>0?knownQuantity:undefined,size:memory.requested_size,exterior_color:memory.exterior_color,interior_color:memory.interior_color,printing:memory.printing,branding:memory.branding,destination:memory.destination,stage,language,message:row.message,...kgRecognized};
+  if(!kgContext.color&&(memory.exterior_color||memory.interior_color))kgContext.color=memory.exterior_color||memory.interior_color;
+  for(const key of Object.keys(kgContext))if(kgContext[key]===undefined||kgContext[key]===null||kgContext[key]==="")delete kgContext[key];
+  const kgEval=evaluateKnowledgeRules(kgScope,kgContext,{entities:kgEntities.matched}),kgRelations=checkKnowledgeRelations(kgScope,kgContext,{entities:kgEntities.matched,current:kgCurrent});
+  const kgIntentExcluded=["asks_price","asks_moq","asks_shipping","negotiating","objection_price","quote_requested","accepted","rejected"].includes(intent);
+  const kgQuestions=kgIntentExcluded?[]:matchKnowledgeQuestion(row.message,kgScope,{entities:kgEntities.matched});
+  let kgAnswer=null;
+  if(!kgIntentExcluded&&!kgRelations.conflict&&kgRelations.matches.length&&Object.keys(kgCurrent).some(f=>Object.hasOwn(kgRelations.matches[0].members,f))){
+    kgAnswer={kind:"relation",text:composeRelationAnswer(kgRelations.matches[0],language),ids:[kgRelations.matches[0].id]};
+  }else if(kgQuestions[0]){
+    const text=composeKnowledgeAnswer(kgQuestions[0],language);
+    if(text)kgAnswer={kind:"values",text,ids:kgQuestions[0].records.map(r=>r.id)};
+  }
+  // Owner-defined hard stops (constraint/prohibition rules that apply now) and combinations the owner never decided go to the owner.
+  const kgHardStop=kgEval.applicable.find(x=>["constraint","prohibition"].includes(x.kind))||null;
+  const kgUnknownRelation=!kgIntentExcluded&&!kgAnswer&&kgRelations.unknown.length>0;
+  const kgEvidenceFacts=salesBrainAuthoritativeFacts({knowledge:kgScope.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))});
+  const kgAnswerFacts=kgAnswer?salesBrainAuthoritativeFacts({knowledge:kgScope.filter(r=>kgAnswer.ids.includes(r.id)).map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))}):[];
+  // Owner-approved product photos linked to the matched product (verified only); the customer's own photo never counts.
+  let kgVisualRefs=[];
+  for(const entity of kgEntities.matched.slice(0,2))try{kgVisualRefs.push(...((await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(entity).normalized}],3)).items||[]).map(x=>x.id));}catch{}
   // An approved standard size/configuration for this product (or globally) satisfies a size requirement.
   let requiredFields=requirements.fields.filter(f=>!(f==="size"&&requirementRules.some(r=>r.domain==="size"&&/standard/i.test(String(r.attribute)))));
   const ordered=applySalesStrategyOrder(requiredFields,requirementRules,productKeys);requiredFields=ordered.fields;
@@ -6685,6 +6895,10 @@ async function runSalesNegotiationBrain(env,inboxId){
   else if(intent==="quote_requested"){action="quote";needsOwner=!known.product_or_model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
   else if(intent==="accepted"){action="accepted";}
   else if(openEscalation){action="wait_for_owner";}
+  // Generic knowledge: owner-defined hard stops and undecided combinations escalate; approved non-commercial facts/relations are answered.
+  else if(kgHardStop)escalate("commercial_owner","commercial_owner_review_required");
+  else if(kgUnknownRelation)escalate("commercial_owner","approved_knowledge_missing");
+  else if(kgAnswer){action="answer_knowledge";}
   else if(imageAmbiguous&&!model&&lastAction!=="ask_image_reference"){action="ask_image_reference";askedField="product_or_model";}
   else if(intent!=="asks_price"&&/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
   else{
@@ -6697,12 +6911,12 @@ async function runSalesNegotiationBrain(env,inboxId){
     else if(!known.product_or_model&&!known.quantity&&intent!=="asks_price")action="owner_followup";
     else escalate("price_owner","authoritative_price_required");
   }
-  const authorityFacts=[...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
-  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:newFacts,moq:answerNumbers[0]??null}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const authorityFacts=[...kgEvidenceFacts,...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
+  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:newFacts,moq:answerNumbers[0]??null}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
-  const nextBestAction=action?.startsWith("ask_")?"ASK_REQUIRED_FIELD":action==="answer_moq"&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"):[],decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const nextBestAction=action?.startsWith("ask_")?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"):action==="answer_knowledge"?kgAnswerFacts:[],decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
   return result;
@@ -6764,7 +6978,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // for the owner (fail-closed). Proactive outreach never comes through here and keeps its approval flow unchanged.
 // price_owner/commercial_owner/moq_owner qualify ONLY as the validated holding reply (brain.owner_holding_reply): the owner
 // escalation stays open and the actual commercial answer still requires the owner.
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner"]);
 // Loop protection rests on the repetitive/echo guards; this cap only bounds a runaway exchange (natural sales chats are multi-turn).
 const INBOUND_AUTO_SEND_HOURLY_LIMIT=10;
 async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
