@@ -1,5 +1,5 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
-import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES } from "./autonomy-engine.js";
+import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -1617,7 +1617,8 @@ async function ingestVisualProductMedia(env,body){
     const sourceId=String(body.telegram_media_id||"").trim();
     if(!sourceId)throw Error("telegram_media_id is required");
     const source=await env.DB.prepare("SELECT * FROM telegram_media_sources WHERE id=? LIMIT 1").bind(sourceId).first();
-    if(!source||!["vault","archive"].includes(String(source.source_kind||"")))throw Error("Only owned Telegram archive or vault media can be indexed");
+    // 'owner_knowledge' = authenticated owner Command Center uploads; customer media ('customer') is never accepted.
+    if(!source||!["vault","archive","owner_knowledge"].includes(String(source.source_kind||"")))throw Error("Only owned Telegram archive or vault media can be indexed");
     // Legacy rows stored customer private-chat photos as 'archive'; a private chat (positive Telegram id) is never owned media.
     if(source.source_kind==="archive"&&/^[1-9][0-9]*$/.test(String(source.chat_id||"")))throw Error("Customer private-chat media cannot be indexed as product media");
     if(!["photo","video"].includes(String(source.media_type||""))||await generatedVisualParentChain(env,source.id))throw Error("Generated or unsupported media cannot be a real-product candidate");
@@ -1718,6 +1719,392 @@ async function ingestVaultUpload(env,req){
   await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),id,null,'user_upload','none',null,null,String(form.get('tags')||'').slice(0,500),t,t).run();
   await audit(env,'media_vault_uploaded','Media uploaded to Telegram Media Vault',{media_id:id,media_type:type.startsWith('video/')?'video':'photo'});
   return json({ok:true,media_id:id,message_id:messageId,media_type:type.startsWith('video/')?'video':'photo'});
+}
+
+// ==== OWNER KNOWLEDGE IMPORT (Command Center: large price lists, catalogs, rules, owner product images) ====
+// Owner submission → deterministic structuring (no AI for text) → import items → OWNER REVIEW → existing authorities:
+//   price rows      → commercial_price_items (existing immutable price versions; IRAN rows never change IRAN pricing authority)
+//   product facts   → Sales Knowledge (existing versioned propose → review → apply)
+//   rules           → Sales Knowledge text rules (same versioned flow; conflicts stay with the owner)
+//   owner images    → Telegram vault storage (owner-only source_kind) → visual_product_media candidate → verified on approval
+// Nothing becomes authoritative without an explicit owner approval. Customer media can never enter this workflow.
+const OWNER_IMPORT_LIMITS={command_bytes:262144,text_chars:200000,lines:3000,line_chars:500,images:8,image_bytes:5*1024*1024,images_total_bytes:20*1024*1024,body_bytes:21*1024*1024,description_chars:1000};
+const OWNER_IMPORT_REQUIRED_COLUMNS={owner_knowledge_imports:["id","content_hash","client_request_id","market","status","summary_json","created_at","updated_at"],owner_knowledge_import_items:["id","import_id","seq","item_type","parse_status","review_status","product_key","product_name","size","configuration","category","market","currency","price_minor","fact_domain","fact_attribute","fact_value_json","raw_line","issues_json","observation_json","image_id","group_key","linked_item_id","result_ref","history_json","version","reviewed_by","reviewed_at","applied_at","created_at","updated_at"],owner_product_images:["id","sha256","telegram_media_id","visual_media_id","mime_type","file_size","analysis_status","observation_json","error_code","created_at","updated_at"]};
+let ownerImportSchemaVerified=false;
+async function ownerImportStoreReady(env){
+  if(ownerImportSchemaVerified)return true;
+  try{
+    for(const [table,required] of Object.entries(OWNER_IMPORT_REQUIRED_COLUMNS)){const cols=new Set(((await env.DB.prepare(`PRAGMA table_info(${table})`).all()).results||[]).map(c=>String(c.name)));if(!required.every(c=>cols.has(c)))return false;}
+    ownerImportSchemaVerified=true;return true;
+  }catch{return false;}
+}
+function ownerAscii(value){return String(value??"").normalize("NFKC").replace(/[۰-۹]/g,d=>String(PERSIAN_DIGITS.indexOf(d))).replace(/[٠-٩]/g,d=>String(ARABIC_DIGITS.indexOf(d))).replace(/[٬]/g,",").replace(/٫/g,".");}
+async function ownerSha256(data){const digest=await crypto.subtle.digest("SHA-256",typeof data==="string"?new TextEncoder().encode(data):data);return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,"0")).join("");}
+const OWNER_RULE_WORDS=/(?:حداقل|moq|minimum|زمان\s*تولید|مدت\s*تولید|تحویل|ارسال|حمل|پیش[\s‌]*پرداخت|بیعانه|پرداخت|تخفیف|شرایط|قانون|توجه|نکته|خصم|شحن|توصيل|دفع|عربون|الحد\s*الأدنى)/iu;
+const OWNER_TABLE_HEADER=/^(?:[|\s]*(?:محصول|مدل|سایز|ابعاد|اندازه|قیمت|نوع|توضیحات|product|model|size|price|type|منتج|سعر|قياس)[|\s,،:]*)+$/iu;
+const OWNER_PRICE_TOKEN=/(\d{1,3}(?:[,.]\d{3})+|\d+(?:\.\d+)?)\s*(هزار\s*تومان|هزارتومان|هزار|تومان|تومن|ریال|toman|tomans|rial|rials|irr|usd|\$|دلار|دولار|ت(?![\p{L}]))?/giu;
+const OWNER_PRODUCT_NOUN=/(?:جعبه|باکس|پک|کیف|ساک|علب|box|pack|case)/iu;
+const OWNER_QTY_AFTER=/^\s*(?:عدد|تا|تایی|دانه|قطعه|قطعة|حبة|pcs|pieces|units)(?![\p{L}])/iu;
+function ownerSegments(text){return String(text||"").split(/[|:\-–—،,\/\t؛;]+/u).map(x=>x.replace(/\s+/g," ").trim()).filter(x=>x&&/\p{L}/u.test(x));}
+function ownerDims(text){const m=ownerAscii(text).match(CUSTOMER_DIMENSIONS);if(!m)return {size:null,rest:ownerAscii(text)};return {size:[m[1],m[2],m[3]].filter(Boolean).join("x")+(m[4]?" "+m[4]:""),rest:ownerAscii(text).replace(m[0]," | ")};}
+// Parses one owner line into {kind, ...}. Never guesses: anything unclear is returned as ambiguous with explicit issues.
+function parseOwnerKnowledgeLine(line,market,section){
+  const raw=String(line||"").normalize("NFKC").trim();
+  if(!raw)return {kind:"skip"};
+  if(raw.length>OWNER_IMPORT_LIMITS.line_chars||/[\u0000-\u0008\u000b-\u001f]/u.test(raw))return {kind:"rejected",issues:[{code:raw.length>OWNER_IMPORT_LIMITS.line_chars?"line_too_long":"invalid_characters"}]};
+  if(OWNER_TABLE_HEADER.test(raw)||/^[\s|:\-–—=*#_.]+$/u.test(raw))return {kind:"skip"};
+  const {size,rest}=ownerDims(raw);
+  const prices=[];let m;OWNER_PRICE_TOKEN.lastIndex=0;
+  while((m=OWNER_PRICE_TOKEN.exec(rest))){
+    const after=rest.slice(m.index+m[0].length);if(!m[2]&&OWNER_QTY_AFTER.test(after))continue;
+    const unit=String(m[2]||"").toLowerCase(),digits=m[1];
+    const plain=unit==="usd"||unit==="$"||unit==="دلار"||unit==="دولار"?Number(digits.replace(/,/g,"")):Number(digits.replace(/[,.]/g,""));
+    if(!unit&&!(plain>=1000))continue;
+    prices.push({text:m[0],unit,amount:plain,index:m.index});
+  }
+  // Business rules (MOQ, production time, shipping, deposit, payment, discount) are never read as a product price row.
+  if(OWNER_RULE_WORDS.test(raw))return {kind:"rule",text:raw};
+  // When any amount carries an explicit currency, bare numbers (model numbers, years) are not prices.
+  if(prices.some(p=>p.unit))for(let i=prices.length-1;i>=0;i--)if(!prices[i].unit)prices.splice(i,1);
+  if(!prices.length){
+    if(/لیست\s*قیمت|price\s*list|قائمة\s*الأسعار/iu.test(raw))return {kind:"skip"};
+    // A short label naming a product (or ending with ':') sets the product/size context for the following rows; any other
+    // price-less line is shown to the owner as unparsed instead of silently changing the context.
+    const name=ownerSegments(rest).join(" ").trim();
+    if(name&&raw.length<=80&&(OWNER_PRODUCT_NOUN.test(raw)||/[:：]\s*$/u.test(raw)))return {kind:"section",product:name,size};
+    return {kind:"unparsed",issues:[{code:"no_price_or_structure"}]};
+  }
+  const issues=[];
+  if(prices.length>1)issues.push({code:"multiple_prices_in_line",values:prices.map(p=>p.text)});
+  const price=prices[prices.length-1];
+  let currency=null,minor=null;
+  if(/^(?:هزار\s*تومان|هزارتومان|هزار)$/u.test(price.unit)){currency="TOMAN";minor=price.amount*1000;}
+  else if(["تومان","تومن","toman","tomans","ت"].includes(price.unit)){currency="TOMAN";minor=price.amount;}
+  else if(["ریال","rial","rials","irr"].includes(price.unit)){currency="IRR";minor=price.amount;issues.push({code:"rial_not_converted",detail:"Legacy IRR is never converted automatically; correct the amount in Toman"});}
+  else if(["usd","$","دلار","دولار"].includes(price.unit)){currency="USD";minor=Math.round(price.amount*100);}
+  else if(market==="IRAN"){currency="TOMAN";minor=price.amount;issues.push({code:"currency_inferred_from_market"});}
+  else if(market==="ARAB"){issues.push({code:"currency_missing",detail:"State USD explicitly for ARAB prices"});}
+  else issues.push({code:"market_and_currency_missing"});
+  if(currency&&market!=="GLOBAL"&&MARKET_CURRENCY[market]&&currency!==MARKET_CURRENCY[market]&&currency!=="IRR")issues.push({code:"currency_market_mismatch",currency,market});
+  if(market==="GLOBAL")issues.push({code:"market_required_for_price"});
+  if(!Number.isSafeInteger(minor)||minor<=0)issues.push({code:"invalid_price"});
+  const remaining=prices.reduce((s,p)=>s.replace(p.text," | "),rest);
+  const segments=ownerSegments(remaining).filter(x=>!/^(?:قیمت|price|سعر|تومان|تومن|ریال)$/iu.test(x));
+  // A row that names its own product (e.g. "جعبه انگشتر بزرگ 7×7 سه تکه ...") is not attached to the previous section.
+  const ownProduct=segments.length&&OWNER_PRODUCT_NOUN.test(segments[0]);
+  let product=ownProduct?null:section?.product||null,configuration;
+  if(product)configuration=segments.join(" ")||null;
+  else{product=segments[0]||null;configuration=segments.slice(1).join(" ")||null;}
+  if(!product)issues.push({code:"missing_product_identifier"});
+  const finalSize=size||(ownProduct?null:section?.size)||null;
+  const blocking=issues.some(x=>!["currency_inferred_from_market"].includes(x.code));
+  return {kind:"price_row",product,size:finalSize,configuration,currency,price_minor:Number.isSafeInteger(minor)?minor:null,issues,parse_status:blocking?"ambiguous":"parsed"};
+}
+function ownerRuleMapping(text){
+  const t=String(text||"");
+  if(/حداقل|moq|minimum|الحد\s*الأدنى/iu.test(t))return ["quantity","quantity_rule"];
+  if(/زمان\s*تولید|مدت\s*تولید|تولید/iu.test(t))return ["production","timing_rule"];
+  if(/ارسال|حمل|تحویل|شحن|توصيل/iu.test(t))return ["shipping","terms"];
+  if(/پیش[\s‌]*پرداخت|بیعانه|عربون/iu.test(t))return ["deposit","rule"];
+  if(/پرداخت|دفع/iu.test(t))return ["payment","terms"];
+  if(/تخفیف|خصم/iu.test(t))return ["discount","rule"];
+  return ["sales","rule"];
+}
+// Owner image description → proposed product / size / configuration (never invented when absent).
+function parseOwnerImageDescription(text){
+  const raw=String(text||"").normalize("NFKC").trim().slice(0,OWNER_IMPORT_LIMITS.description_chars);
+  if(!raw)return {product:null,size:null,configuration:null};
+  const {size,rest}=ownerDims(raw),segments=ownerSegments(rest);
+  return {product:segments[0]||null,size,configuration:segments.slice(1).join(" ")||null};
+}
+// Matching key that ignores a leading generic noun ("جعبه انگشتر کوچک" ≡ "انگشتر کوچک").
+function ownerProductCore(value){return normalizeProductKey(String(value||"").normalize("NFKC").trim().replace(/^(?:جعبه|باکس|پک)\s*(?:[یي]\s*)?/u,""));}
+function ownerItemKey(product,size,configuration){return normalizeProductKey([product,size,configuration].filter(Boolean).join(" "));}
+function ownerVisionPrompt(){return CUSTOMER_VISION_PROMPT.replace("You analyse ONE image that a customer sent to a packaging and gift-box seller.","You analyse ONE photo that the seller (HAMZEHI BOX) uploaded of its own packaging/gift-box product.");}
+async function analyzeOwnerProductImage(env,bytes,kind){
+  if(!env.OPENAI_API_KEY)return {analysis_status:"unavailable",error_code:"vision_not_configured",observation:null};
+  try{
+    let binary="";for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+    const r=await customerMediaFetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:String(env.OPENAI_MODEL||"gpt-5.6-luna"),input:[{role:"user",content:[{type:"input_text",text:ownerVisionPrompt()},{type:"input_image",image_url:`data:${kind};base64,${btoa(binary)}`}]}]})},20000);
+    binary="";
+    if(!r.ok)return {analysis_status:"failed",error_code:`vision_http_${Number(r.status)||0}`,observation:null};
+    const parsed=parseCustomerVisionJson(responseText(await r.json().catch(()=>({}))));
+    if(!parsed)return {analysis_status:"failed",error_code:"vision_unparseable",observation:null};
+    return {analysis_status:"analyzed",error_code:null,observation:{...sanitizeCustomerVisionObservation(parsed),source:"owner_image",authority:"visual_observation_only"}};
+  }catch(error){return {analysis_status:"failed",error_code:error?.name==="AbortError"?"timeout":"analysis_error",observation:null};}
+}
+// Stores an owner image once (by SHA-256): Telegram vault storage + owner-only source row + unverified visual candidate.
+async function storeOwnerProductImage(env,{bytes,kind,size,sha256,caption}){
+  await ensureTelegramMediaTable(env);
+  const existing=await env.DB.prepare("SELECT * FROM owner_product_images WHERE sha256=? LIMIT 1").bind(sha256).first();
+  if(existing)return {image:existing,reused:true};
+  const chat=vaultChatId(env);
+  if(!chat||!env.TELEGRAM_BOT_TOKEN)return {error:"owner_image_storage_unavailable"};
+  const fd=new FormData();fd.append("chat_id",chat);fd.append("photo",new Blob([bytes],{type:kind}),"owner-product."+kind.split("/")[1]);if(caption)fd.append("caption",String(caption).slice(0,1024));
+  let sent;
+  try{const r=await customerMediaFetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:"POST",body:fd},20000);const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)return {error:"owner_image_storage_failed"};sent=d.result;}catch{return {error:"owner_image_storage_failed"};}
+  const photo=Array.isArray(sent?.photo)?sent.photo[sent.photo.length-1]:null;if(!photo?.file_id)return {error:"owner_image_storage_failed"};
+  const t=now(),mediaId=uid();
+  // source_kind 'owner_knowledge': owned evidence, deliberately NOT 'vault' so marketing pools never pick it up.
+  await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,chat,"",String(sent.message_id||""),String(photo.file_id),String(photo.file_unique_id||""),"photo",String(caption||"").slice(0,1024),"owner_knowledge",t,t).run();
+  const source=await env.DB.prepare("SELECT id FROM telegram_media_sources WHERE chat_id=? AND message_id=? AND file_id=? LIMIT 1").bind(chat,String(sent.message_id||""),String(photo.file_id)).first();
+  const analysis=await analyzeOwnerProductImage(env,bytes,kind);
+  let visualId=null;try{visualId=(await ingestVisualProductMedia(env,{platform:"telegram",telegram_media_id:source?.id||mediaId})).item.id;}catch{}
+  const imageId="owner-image-"+uid();
+  await env.DB.prepare("INSERT OR IGNORE INTO owner_product_images(id,sha256,telegram_media_id,visual_media_id,mime_type,file_size,analysis_status,observation_json,error_code,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(imageId,sha256,source?.id||mediaId,visualId,kind,size,analysis.analysis_status,analysis.observation?JSON.stringify(analysis.observation):null,analysis.error_code,t,t).run();
+  return {image:await env.DB.prepare("SELECT * FROM owner_product_images WHERE sha256=? LIMIT 1").bind(sha256).first(),reused:false};
+}
+function ownerStructureText(text,market){
+  const items=[],lines=String(text||"").replace(/\r\n?/g,"\n").split("\n").slice(0,OWNER_IMPORT_LIMITS.lines);let section=null;
+  for(const line of lines){
+    const p=parseOwnerKnowledgeLine(line,market,section);
+    if(p.kind==="skip")continue;
+    if(p.kind==="section"){section={product:p.product,size:p.size};continue;}
+    if(p.kind==="price_row")items.push({item_type:"price_row",parse_status:p.parse_status,product_name:p.product,size:p.size,configuration:p.configuration,currency:p.currency,price_minor:p.price_minor,market,raw_line:line.trim(),issues:p.issues});
+    else if(p.kind==="rule"){const [domain,attribute]=ownerRuleMapping(p.text);items.push({item_type:"rule",parse_status:"parsed",fact_domain:domain,fact_attribute:attribute,fact_value:p.text,market,raw_line:line.trim(),issues:[]});}
+    else items.push({item_type:"unparsed",parse_status:p.kind==="rejected"?"rejected":"ambiguous",market,raw_line:line.trim().slice(0,OWNER_IMPORT_LIMITS.line_chars),issues:p.issues||[]});
+  }
+  // Duplicate / conflicting rows inside one submission are never silently merged.
+  const byKey=new Map();
+  for(const item of items.filter(x=>x.item_type==="price_row"&&x.product_name)){item.product_key=ownerItemKey(item.product_name,item.size,item.configuration);(byKey.get(item.product_key)||byKey.set(item.product_key,[]).get(item.product_key)).push(item);}
+  for(const group of byKey.values())if(group.length>1){
+    const distinct=new Set(group.map(x=>`${x.currency}:${x.price_minor}`));
+    group.forEach((x,i)=>{if(distinct.size>1){x.parse_status="ambiguous";x.issues.push({code:"conflicting_prices_in_submission"});}else if(i>0){x.parse_status="rejected";x.issues.push({code:"duplicate_row_in_submission"});}});
+  }
+  // Catalog facts implied by clear price rows: one proposal per product+size and product+configuration (no duplicates).
+  const facts=new Map();
+  for(const row of items.filter(x=>x.item_type==="price_row"&&x.parse_status==="parsed")){
+    if(row.size)facts.set(`size|${row.product_name}|${row.size}`,{item_type:"product_fact",parse_status:"parsed",product_name:row.product_name,fact_domain:"size",fact_attribute:"available_size",fact_value:row.size,market,raw_line:row.raw_line,issues:[]});
+    if(row.configuration)facts.set(`cfg|${row.product_name}|${row.configuration}`,{item_type:"product_fact",parse_status:"parsed",product_name:row.product_name,fact_domain:"product",fact_attribute:"configuration",fact_value:row.configuration,market,raw_line:row.raw_line,issues:[]});
+  }
+  return [...items,...facts.values()];
+}
+async function ownerImportReadBody(req){
+  const type=String(req.headers.get("Content-Type")||"").toLowerCase(),declared=Number(req.headers.get("Content-Length")||NaN);
+  if(type.startsWith("multipart/form-data")){
+    // Multipart is buffered by the runtime: require an explicit, bounded Content-Length before reading anything.
+    if(!Number.isFinite(declared))return {error:"Content-Length is required for uploads",status:411};
+    if(declared>OWNER_IMPORT_LIMITS.body_bytes)return {error:"Owner knowledge upload is too large",status:413};
+    const form=await req.formData().catch(()=>null);if(!form)return {error:"Invalid multipart body",status:400};
+    const files=form.getAll("images").filter(x=>x&&typeof x==="object"&&"arrayBuffer" in x),descriptions=form.getAll("descriptions").map(x=>String(x||""));
+    return {text:String(form.get("text")||""),market:String(form.get("market")||""),client_request_id:String(form.get("client_request_id")||""),files,descriptions};
+  }
+  if(Number.isFinite(declared)&&declared>OWNER_IMPORT_LIMITS.command_bytes)return {error:"Owner knowledge text is too large",status:413};
+  const reader=req.body?.getReader();if(!reader)return {error:"Body is required",status:400};
+  const chunks=[];let size=0;
+  while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>OWNER_IMPORT_LIMITS.command_bytes){await reader.cancel();return {error:"Owner knowledge text is too large",status:413};}chunks.push(value);}
+  const bytes=new Uint8Array(size);let o=0;for(const c of chunks){bytes.set(c,o);o+=c.length;}
+  let body;try{body=JSON.parse(new TextDecoder().decode(bytes));}catch{return {error:"Invalid JSON",status:400};}
+  return {text:String(body?.text??body?.command??""),market:String(body?.market||""),client_request_id:String(body?.client_request_id||body?.command_id||""),files:[],descriptions:[]};
+}
+async function runOwnerKnowledgeImport(env,{text,market,client_request_id,files,descriptions}){
+  if(!(await ownerImportStoreReady(env)))return {status:503,body:{ok:false,error:"Owner knowledge import requires migration G (owner knowledge import tables); nothing was stored"}};
+  market=["IRAN","ARAB","GLOBAL"].includes(String(market||"").toUpperCase())?String(market).toUpperCase():"IRAN";
+  text=String(text||"").normalize("NFKC");
+  if(text.length>OWNER_IMPORT_LIMITS.text_chars)return {status:413,body:{ok:false,error:`Owner knowledge text exceeds ${OWNER_IMPORT_LIMITS.text_chars} characters`}};
+  if(files.length>OWNER_IMPORT_LIMITS.images)return {status:413,body:{ok:false,error:`At most ${OWNER_IMPORT_LIMITS.images} images per submission`}};
+  if(!text.trim()&&!files.length)return {status:400,body:{ok:false,error:"Text or at least one image is required"}};
+  const clientId=/^[A-Za-z0-9_-]{8,80}$/.test(client_request_id)?client_request_id:null;
+  // Validate every image before any storage or paid analysis.
+  const images=[];let total=0;
+  for(let i=0;i<files.length;i++){
+    const file=files[i],declaredType=String(file.type||"").toLowerCase();
+    if(!/^image\/(?:jpeg|png|webp)$/.test(declaredType))return {status:415,body:{ok:false,error:`Image ${i+1}: only JPEG, PNG or WEBP are accepted`}};
+    if(Number(file.size)>OWNER_IMPORT_LIMITS.image_bytes)return {status:413,body:{ok:false,error:`Image ${i+1} exceeds ${OWNER_IMPORT_LIMITS.image_bytes/1024/1024}MB`}};
+    total+=Number(file.size)||0;if(total>OWNER_IMPORT_LIMITS.images_total_bytes)return {status:413,body:{ok:false,error:"Total image size exceeds the upload limit"}};
+    const bytes=new Uint8Array(await file.arrayBuffer()),kind=customerImageKind(bytes);
+    if(!kind||bytes.length>OWNER_IMPORT_LIMITS.image_bytes)return {status:415,body:{ok:false,error:`Image ${i+1} is not a valid JPEG/PNG/WEBP file`}};
+    images.push({bytes,kind,size:bytes.length,sha256:await ownerSha256(bytes),description:String(descriptions[i]||"").normalize("NFKC").trim().slice(0,OWNER_IMPORT_LIMITS.description_chars)});
+  }
+  const contentHash=await ownerSha256(knowledgeCanonical({market,text:text.trim(),images:images.map(x=>[x.sha256,x.description])}));
+  // Idempotency: same content (or same client request id) → the existing import; no new storage or AI calls.
+  const prior=await env.DB.prepare("SELECT * FROM owner_knowledge_imports WHERE content_hash=? OR (?<>'' AND client_request_id=?) LIMIT 1").bind(contentHash,clientId||"",clientId||"").first();
+  if(prior){
+    if(prior.content_hash!==contentHash)return {status:409,body:{ok:false,error:"This request id was already used for different content"}};
+    const stale=prior.status==="processing"&&Date.parse(prior.updated_at)<Date.now()-120000;
+    if(!stale)return {status:200,body:{ok:true,knowledge_import:true,idempotent:true,...await ownerImportView(env,prior.id)}};
+  }
+  const importId=prior?.id||"owner-import-"+uid(),t=now();
+  if(prior)await env.DB.prepare("UPDATE owner_knowledge_imports SET updated_at=? WHERE id=? AND status='processing' AND updated_at=?").bind(t,prior.id,prior.updated_at).run();
+  else{
+    await env.DB.prepare("INSERT OR IGNORE INTO owner_knowledge_imports(id,content_hash,client_request_id,market,status,summary_json,created_at,updated_at) VALUES(?,?,?,?,'processing','{}',?,?)").bind(importId,contentHash,clientId,market,t,t).run();
+    const owner=await env.DB.prepare("SELECT * FROM owner_knowledge_imports WHERE content_hash=? LIMIT 1").bind(contentHash).first();
+    if(owner?.id!==importId)return {status:200,body:{ok:true,knowledge_import:true,idempotent:true,...await ownerImportView(env,owner.id)}};
+  }
+  const items=ownerStructureText(text,market);
+  // Images: stored once per SHA-256 and analysed once (concurrently, each bounded); each becomes a visual proposal.
+  const stored=await Promise.all(images.map(img=>storeOwnerProductImage(env,{...img,caption:img.description})));
+  const priceRows=items.filter(x=>x.item_type==="price_row"&&x.product_name);
+  const groupFacts=new Set();
+  images.forEach((img,i)=>{
+    const s=stored[i],desc=parseOwnerImageDescription(img.description),issues=[];
+    if(s.error){items.push({item_type:"visual",parse_status:"rejected",market,raw_line:img.description,issues:[{code:s.error}],product_name:desc.product,size:desc.size,configuration:desc.configuration});return;}
+    let observation=null;try{observation=JSON.parse(s.image.observation_json||"null");}catch{}
+    const category=observation?.likely_product_category&&observation.likely_product_category!=="unknown"?observation.likely_product_category:null;
+    if(!desc.product)issues.push({code:"product_not_named",detail:"Name the product/model before approval; nothing is inferred from the image"});
+    if(s.image.analysis_status!=="analyzed")issues.push({code:"vision_"+s.image.analysis_status});
+    const groupKey=desc.product?ownerItemKey(desc.product,desc.size,desc.configuration):"image:"+img.sha256;
+    let linked=null;
+    if(desc.product){
+      const pk=ownerProductCore(desc.product),candidates=priceRows.filter(r=>ownerProductCore(r.product_name)===pk&&(!desc.size||r.size===desc.size)&&(!desc.configuration||normalizeProductKey(r.configuration)===normalizeProductKey(desc.configuration)));
+      if(candidates.length===1)linked=candidates[0];
+      else if(candidates.length>1)issues.push({code:"ambiguous_price_link",detail:"Several price rows match this image; specify size/configuration",rows:candidates.map(r=>r.raw_line).slice(0,6)});
+    }
+    items.push({item_type:"visual",parse_status:desc.product&&!issues.some(x=>x.code==="ambiguous_price_link")?"parsed":"ambiguous",market,product_name:desc.product,size:desc.size,configuration:desc.configuration,category,raw_line:img.description,issues,image_id:s.image.id,observation:observation,group_key:groupKey,linked:linked,reused_image:s.reused});
+    // Same product photographed from several angles: catalog facts are proposed once per product group.
+    if(desc.product&&!priceRows.some(r=>ownerProductCore(r.product_name)===ownerProductCore(desc.product))){
+      if(desc.size&&!groupFacts.has("s|"+groupKey)){groupFacts.add("s|"+groupKey);items.push({item_type:"product_fact",parse_status:"parsed",product_name:desc.product,fact_domain:"size",fact_attribute:"available_size",fact_value:desc.size,market,raw_line:img.description,issues:[]});}
+      if(desc.configuration&&!groupFacts.has("c|"+groupKey)){groupFacts.add("c|"+groupKey);items.push({item_type:"product_fact",parse_status:"parsed",product_name:desc.product,fact_domain:"product",fact_attribute:"configuration",fact_value:desc.configuration,market,raw_line:img.description,issues:[]});}
+    }
+  });
+  // Existing active prices are shown, never overwritten silently (approval creates a NEW immutable version).
+  for(const row of items.filter(x=>x.item_type==="price_row"&&x.product_key&&["IRAN","ARAB"].includes(market))){
+    const active=await env.DB.prepare("SELECT id,unit_price_minor,currency,version FROM commercial_price_items WHERE market=? AND product_key=? AND active=1 ORDER BY version DESC LIMIT 1").bind(market,row.product_key).first().catch(()=>null);
+    if(active)row.issues.push(active.unit_price_minor===row.price_minor&&active.currency===row.currency?{code:"same_as_active_price",price_item_id:active.id,version:active.version}:{code:"replaces_active_price",price_item_id:active.id,version:active.version,active_price_minor:active.unit_price_minor,currency:active.currency});
+  }
+  const rows=items.map((x,i)=>({...x,id:importId+":"+String(i+1).padStart(5,"0"),seq:i+1}));
+  const idOf=new Map(rows.map(r=>[r,r.id]));
+  const statements=rows.map(r=>env.DB.prepare(`INSERT OR IGNORE INTO owner_knowledge_import_items(id,import_id,seq,item_type,parse_status,review_status,product_key,product_name,size,configuration,category,market,currency,price_minor,fact_domain,fact_attribute,fact_value_json,raw_line,issues_json,observation_json,image_id,group_key,linked_item_id,result_ref,history_json,version,created_at,updated_at)
+    VALUES(?,?,?,?,?,'pending_review',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,'[]',1,?,?)`).bind(r.id,importId,r.seq,r.item_type,r.parse_status,r.product_name?ownerItemKey(r.product_name,r.size,r.configuration):null,r.product_name||null,r.size||null,r.configuration||null,r.category||null,market,r.currency||null,r.price_minor??null,r.fact_domain||null,r.fact_attribute||null,r.fact_value!==undefined?JSON.stringify(r.fact_value):null,String(r.raw_line||"").slice(0,OWNER_IMPORT_LIMITS.line_chars),JSON.stringify(r.issues||[]),r.observation?JSON.stringify(r.observation):null,r.image_id||null,r.group_key||null,r.linked?idOf.get(rows.find(x=>x.raw_line===r.linked.raw_line&&x.item_type==="price_row"))||null:null,t,t));
+  for(let i=0;i<statements.length;i+=50)await env.DB.batch(statements.slice(i,i+50));
+  const summary=ownerImportSummary(rows);
+  await env.DB.prepare("UPDATE owner_knowledge_imports SET status='analyzed',summary_json=?,updated_at=? WHERE id=?").bind(JSON.stringify(summary),now(),importId).run();
+  try{await audit(env,"owner_knowledge_import_analyzed","Owner knowledge submission structured for review",{import_id:importId,market,...summary});}catch{}
+  return {status:200,body:{ok:true,knowledge_import:true,idempotent:false,...await ownerImportView(env,importId)}};
+}
+function ownerImportSummary(rows){
+  const count=f=>rows.filter(f).length;
+  return {items:rows.length,price_rows:count(x=>x.item_type==="price_row"),product_facts:count(x=>x.item_type==="product_fact"),visuals:count(x=>x.item_type==="visual"),rules:count(x=>x.item_type==="rule"),unparsed:count(x=>x.item_type==="unparsed"),parsed:count(x=>x.parse_status==="parsed"),ambiguous:count(x=>x.parse_status==="ambiguous"),rejected:count(x=>x.parse_status==="rejected"),conflicts:count(x=>(x.issues||[]).some(i=>/conflict|replaces_active_price|mismatch/.test(i.code)))};
+}
+async function ownerImportView(env,importId){
+  const imp=await env.DB.prepare("SELECT * FROM owner_knowledge_imports WHERE id=? LIMIT 1").bind(importId).first();
+  const items=(await env.DB.prepare(`SELECT i.*,img.telegram_media_id,img.analysis_status AS image_analysis_status,img.visual_media_id FROM owner_knowledge_import_items i LEFT JOIN owner_product_images img ON img.id=i.image_id WHERE i.import_id=? ORDER BY i.seq`).bind(importId).all()).results||[];
+  let summary={};try{summary=JSON.parse(imp?.summary_json||"{}");}catch{}
+  return {import_id:importId,import:imp,summary,items:items.map(x=>({...x,thumbnail_url:x.telegram_media_id?`/media/telegram?id=${encodeURIComponent(x.telegram_media_id)}`:null}))};
+}
+// ---- Owner review of import items → existing authorities ----
+async function applyOwnerKnowledgeItem(env,item){
+  if(item.item_type==="price_row"){
+    if(!["IRAN","ARAB"].includes(item.market))throw Error("Select IRAN or ARAB for a price");
+    if(item.currency!==MARKET_CURRENCY[item.market])throw Error(`${item.market} prices must be in ${MARKET_CURRENCY[item.market]}`);
+    if(!Number.isSafeInteger(item.price_minor)||item.price_minor<=0||!item.product_key)throw Error("A valid product and price are required");
+    const active=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE market=? AND product_key=? AND active=1 ORDER BY version DESC LIMIT 1").bind(item.market,item.product_key).first();
+    if(active&&active.unit_price_minor===item.price_minor&&active.currency===item.currency)return {result_ref:`commercial_price_items:${active.id}:unchanged`};
+    const created=await createPriceItemVersion(env,{market:item.market,base_id:active?.id||undefined,product_key:item.product_key,product_name:[item.product_name,item.size,item.configuration].filter(Boolean).join(" · "),currency:item.currency,unit_price_minor:item.price_minor},"admin");
+    return {result_ref:`commercial_price_items:${created.id}:v${created.version}`};
+  }
+  if(item.item_type==="product_fact"||item.item_type==="rule"){
+    await ensureSalesKnowledgeStore(env);
+    let value=null;try{value=JSON.parse(item.fact_value_json);}catch{}
+    const member=knowledgeFieldType(item.fact_domain,item.fact_attribute)==="member";
+    const requestId=("owner-import-"+item.id).replace(/[^A-Za-z0-9_-]/g,"-").slice(0,80);
+    const proposal=await proposeSalesKnowledge(env,{id:requestId,operation:member?"EXPAND":"ADD",domain:item.fact_domain,entity_type:item.item_type==="rule"?"business":"model",entity_key:item.item_type==="rule"?"global":item.product_name,attribute:item.fact_attribute,market:item.market==="GLOBAL"?"GLOBAL":item.market,value},{sourceType:"owner_import",parserSource:"owner_import",parserConfidence:1});
+    if(proposal.status==="conflict"){const reasons=(()=>{try{return JSON.parse(proposal.conflict_json).map(x=>x.reason)}catch{return []}})();if(reasons.every(r=>r==="duplicate"||r==="duplicate_member"))return {result_ref:`sales_knowledge:already_active`};return {result_ref:`sales_knowledge_change_requests:${proposal.id}:conflict`,conflict:true};}
+    const reviewed=await reviewSalesKnowledge(env,{id:proposal.id,decision:"approve",proposal_hash:proposal.proposal_hash,confirm_sensitive:true,note:"Approved from owner knowledge import review"});
+    const applied=await applySalesKnowledge(env,{id:reviewed.id,proposal_hash:reviewed.proposal_hash,confirm_apply:true});
+    return {result_ref:`sales_knowledge_facts:${applied.result_fact_id}`};
+  }
+  if(item.item_type==="visual"){
+    const image=await env.DB.prepare("SELECT * FROM owner_product_images WHERE id=? LIMIT 1").bind(item.image_id||"").first();
+    if(!image?.visual_media_id)throw Error("Owner image is not available as a visual candidate");
+    const attributes=[{type:"model",value:item.product_name},...(item.size?[{type:"size",value:item.size}]:[]),...(item.configuration?[{type:"other",value:item.configuration}]:[]),...(item.category?[{type:"category",value:item.category}]:[])];
+    const current=(await env.DB.prepare("SELECT attribute_type,version FROM visual_product_media_attributes WHERE visual_media_id=? AND status='active'").bind(image.visual_media_id).all()).results||[];
+    await updateVisualProductAttributes(env,{visual_media_id:image.visual_media_id,attributes:attributes.map(a=>({...a,expected_version:current.find(c=>c.attribute_type===a.type)?.version}))});
+    const media=await env.DB.prepare("SELECT version FROM visual_product_media WHERE id=? LIMIT 1").bind(image.visual_media_id).first();
+    const verified=await transitionVisualProductMedia(env,{id:image.visual_media_id,action:"verify",expected_version:media.version});
+    return {result_ref:`visual_product_media:${verified.id}:verified`};
+  }
+  throw Error("This item has no structured knowledge to approve; correct or reject it");
+}
+const OWNER_ITEM_CORRECTABLE=["product_name","size","configuration","category","price_minor","currency","market","fact_value"];
+async function reviewOwnerKnowledgeItem(env,body){
+  if(!(await ownerImportStoreReady(env)))throw Error("Owner knowledge import requires migration G");
+  const id=String(body?.id||""),action=String(body?.action||""),version=Number(body?.expected_version);
+  if(!id||!["approve","reject","correct"].includes(action)||!Number.isSafeInteger(version))throw Error("id, expected_version and a valid action are required");
+  const item=await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE id=? LIMIT 1").bind(id).first();
+  if(!item)throw Error("Import item not found");
+  if(item.version!==version)throw Error("Item changed since it was displayed; refresh");
+  if(["applied","rejected"].includes(item.review_status))return item;
+  const t=now();
+  if(action==="reject"){
+    if(item.item_type==="visual"){const image=await env.DB.prepare("SELECT visual_media_id FROM owner_product_images WHERE id=?").bind(item.image_id||"").first();const media=image?.visual_media_id?await env.DB.prepare("SELECT version,candidate_status FROM visual_product_media WHERE id=?").bind(image.visual_media_id).first():null;if(media&&media.candidate_status==="candidate")try{await transitionVisualProductMedia(env,{id:image.visual_media_id,action:"reject",expected_version:media.version});}catch{}}
+    await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status='rejected',reviewed_by='admin',reviewed_at=?,version=version+1,updated_at=? WHERE id=? AND version=?").bind(t,t,id,version).run();
+    return await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE id=?").bind(id).first();
+  }
+  if(action==="correct"){
+    const c=body?.corrections||{};if(Object.keys(c).some(k=>!OWNER_ITEM_CORRECTABLE.includes(k)))throw Error("Unsupported correction field");
+    const next={product_name:item.product_name,size:item.size,configuration:item.configuration,category:item.category,price_minor:item.price_minor,currency:item.currency,market:item.market,fact_value_json:item.fact_value_json};
+    for(const k of ["product_name","size","configuration","category"])if(k in c){const v=String(c[k]??"").normalize("NFKC").trim();if(v.length>240)throw Error(k+" is too long");next[k]=v||null;}
+    if("size" in c&&next.size){const d=ownerDims(next.size);if(d.size)next.size=d.size;}
+    if("price_minor" in c){const v=Number(ownerAscii(c.price_minor).replace(/,/g,""));if(!Number.isSafeInteger(v)||v<=0)throw Error("Price must be a positive whole amount in the market's minor unit");next.price_minor=v;}
+    if("currency" in c){if(!["TOMAN","USD"].includes(String(c.currency).toUpperCase()))throw Error("Currency must be TOMAN or USD");next.currency=String(c.currency).toUpperCase();}
+    if("market" in c){if(!["IRAN","ARAB","GLOBAL"].includes(String(c.market).toUpperCase()))throw Error("Invalid market");next.market=String(c.market).toUpperCase();}
+    if("fact_value" in c){const v=String(c.fact_value??"").normalize("NFKC").trim();if(!v||v.length>2000)throw Error("Fact value is required");next.fact_value_json=JSON.stringify(v);}
+    const productOk=item.item_type==="rule"||!!next.product_name,priceOk=item.item_type!=="price_row"||(Number.isSafeInteger(next.price_minor)&&next.currency===MARKET_CURRENCY[next.market]);
+    let history=[];try{history=JSON.parse(item.history_json||"[]");}catch{}
+    history.push({at:t,by:"admin",before:{product_name:item.product_name,size:item.size,configuration:item.configuration,category:item.category,price_minor:item.price_minor,currency:item.currency,market:item.market,fact_value_json:item.fact_value_json}});
+    // A correction resolves ambiguity only when the corrected item is complete; it never approves anything by itself.
+    const r=await env.DB.prepare("UPDATE owner_knowledge_import_items SET product_name=?,size=?,configuration=?,category=?,price_minor=?,currency=?,market=?,fact_value_json=?,product_key=?,parse_status=?,issues_json=?,history_json=?,version=version+1,updated_at=? WHERE id=? AND version=? AND review_status='pending_review'")
+      .bind(next.product_name,next.size,next.configuration,next.category,next.price_minor,next.currency,next.market,next.fact_value_json,next.product_name?ownerItemKey(next.product_name,next.size,next.configuration):null,productOk&&priceOk?"parsed":"ambiguous",JSON.stringify(productOk&&priceOk?[{code:"corrected_by_owner"}]:[{code:"still_incomplete"}]),JSON.stringify(history.slice(-20)),t,id,version).run();
+    if(!r.meta?.changes)throw Error("Concurrent correction conflict");
+    return await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE id=?").bind(id).first();
+  }
+  if(item.parse_status!=="parsed")throw Error("Ambiguous or rejected entries must be corrected before approval");
+  if(item.item_type==="price_row"&&body?.confirm_commercial!==true)throw Error("Explicit commercial confirmation is required for prices");
+  const claimed=await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status='approved',reviewed_by='admin',reviewed_at=?,version=version+1,updated_at=? WHERE id=? AND version=? AND review_status='pending_review'").bind(t,t,id,version).run();
+  if(!claimed.meta?.changes)throw Error("Concurrent review conflict");
+  try{
+    const result=await applyOwnerKnowledgeItem(env,{...item,review_status:"approved"});
+    await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status=?,result_ref=?,applied_at=?,updated_at=? WHERE id=?").bind(result.conflict?"approved":"applied",result.result_ref,result.conflict?null:now(),now(),id).run();
+    try{await audit(env,"owner_knowledge_item_applied","Owner approved an imported knowledge item",{item_id:id,item_type:item.item_type,result_ref:result.result_ref});}catch{}
+  }catch(error){
+    // Keep the owner's decision visible but nothing half-applied: return the item to review with the reason.
+    await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status='pending_review',issues_json=?,version=version+1,updated_at=? WHERE id=?").bind(JSON.stringify([{code:"apply_failed",detail:sanitizeOperationalError(error?.message||error)}]),now(),id).run();
+    throw error;
+  }
+  return await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE id=?").bind(id).first();
+}
+async function handleOwnerKnowledge(req,env){
+  if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+  const u=new URL(req.url);
+  try{
+    if(u.pathname==="/api/owner-knowledge/import"&&req.method==="POST"){
+      const body=await ownerImportReadBody(req);if(body.error)return json({ok:false,error:body.error},body.status);
+      const result=await runOwnerKnowledgeImport(env,body);return json(result.body,result.status);
+    }
+    if(!(await ownerImportStoreReady(env)))return json({ok:false,error:"Owner knowledge import requires migration G"},503);
+    if(u.pathname==="/api/owner-knowledge/imports"&&req.method==="GET"){
+      const id=String(u.searchParams.get("id")||"");
+      if(id)return json({ok:true,...await ownerImportView(env,id)});
+      const r=await env.DB.prepare("SELECT id,market,status,summary_json,created_at FROM owner_knowledge_imports ORDER BY created_at DESC LIMIT 20").all();
+      return json({ok:true,imports:(r.results||[]).map(x=>{let s={};try{s=JSON.parse(x.summary_json||"{}")}catch{}return {...x,summary:s};})});
+    }
+    if(u.pathname==="/api/owner-knowledge/items/review"&&req.method==="POST"){
+      const b=await req.json().catch(()=>null);return json({ok:true,item:await reviewOwnerKnowledgeItem(env,b)});
+    }
+    if(u.pathname==="/api/owner-knowledge/imports/approve-parsed"&&req.method==="POST"){
+      // Bulk approval covers only clean parsed items; ambiguous, rejected and conflicting rows always stay with the owner.
+      const b=await req.json().catch(()=>null),id=String(b?.import_id||"");
+      if(!id||b?.confirm_commercial!==true)return json({ok:false,error:"import_id and explicit commercial confirmation are required"},400);
+      const items=(await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE import_id=? AND review_status='pending_review' AND parse_status='parsed' ORDER BY seq").bind(id).all()).results||[];
+      const done=[],failed=[];
+      for(const item of items){
+        let issues=[];try{issues=JSON.parse(item.issues_json||"[]")}catch{}
+        // Business rules (MOQ, deposit, shipping, ...) and anything conflicting or replacing an active price need individual review.
+        if(item.item_type==="rule"||issues.some(i=>/conflict|replaces_active_price|mismatch|ambiguous/.test(i.code))){failed.push({id:item.id,reason:"needs_individual_review"});continue;}
+        try{await reviewOwnerKnowledgeItem(env,{id:item.id,action:"approve",expected_version:item.version,confirm_commercial:true});done.push(item.id);}catch(error){failed.push({id:item.id,reason:sanitizeOperationalError(error?.message||error)});}
+      }
+      return json({ok:true,approved:done.length,held:failed});
+    }
+    return json({ok:false,error:"Not found"},404);
+  }catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+}
+// Text-only owner knowledge arriving through /api/autonomy/command (price lists, catalogs, rules).
+function looksLikeOwnerKnowledgeImport(text){
+  const lines=String(text||"").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  if(String(text||"").length>4096)return true;
+  const priced=lines.filter(l=>{const p=parseOwnerKnowledgeLine(l,"IRAN",{product:"x"});return p.kind==="price_row";}).length;
+  return lines.length>=2&&priced>=2;
 }
 const MAX_WEEKLY_FINAL_VIDEO_BYTES=20*1024*1024;
 function finalVideoValidationError(message,details={}){
@@ -5294,13 +5681,15 @@ async function maybeHandleAutonomyKnowledgeCommand(req,env){
   if(req.method!=="POST"||new URL(req.url).pathname!=="/api/autonomy/command")return null;
   const copy=req.clone(),reader=copy.body?.getReader();
   if(!reader)return null;
+  // Unauthenticated bodies stay capped at 4 KB; only the authenticated owner may send large knowledge (bounded).
+  const owner=auth(req,env),limit=owner?OWNER_IMPORT_LIMITS.command_bytes:4096;
   const chunks=[];let length=0;
   try{
     while(true){
       const {done,value}=await reader.read();
       if(done)break;
       length+=value.byteLength;
-      if(length>4096){await reader.cancel();return json({ok:false,error:"Command body is too large"},413);}
+      if(length>limit){await reader.cancel();return json({ok:false,error:owner?`Command body is too large (owner limit ${Math.round(limit/1024)} KB)`:"Command body is too large"},413);}
       chunks.push(value);
     }
   }catch{return null;}
@@ -5308,6 +5697,12 @@ async function maybeHandleAutonomyKnowledgeCommand(req,env){
   for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
   let body;try{body=JSON.parse(new TextDecoder().decode(bytes));}catch{return null;}
   if(!body||typeof body!=="object"||typeof body.command!=="string")return null;
+  // Price lists / catalogs / large owner text are knowledge imports: structured for owner review, never sent to the task
+  // planner (no AI planning call, no Task, no customer message, no Quote/Order).
+  if(owner&&(length>4096||looksLikeOwnerKnowledgeImport(body.command))){
+    const result=await runOwnerKnowledgeImport(env,{text:body.command,market:body.market,client_request_id:String(body.command_id||""),files:[],descriptions:[]});
+    return json(result.body,result.status);
+  }
   // Read-only status/report commands get the status snapshot only: no task, execution, knowledge or customer side effect.
   if(isReadOnlyStatusCommand(body.command)){
     if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
@@ -6188,6 +6583,10 @@ async function runSalesNegotiationBrain(env,inboxId){
   // it never becomes a product fact, a price input or verified product knowledge.
   let imageCategory=null;try{imageCategory=JSON.parse((imageReference.images||[]).find(x=>x.id===imageRefId)?.observation_json||"null")?.likely_product_category||null;}catch{}
   const productKeys=[...new Set([model,imageCategory].filter(x=>x&&x!=="unknown").map(salesBrainProductKey).filter(Boolean))];
+  // Customer photo vs owner-APPROVED product photos: a category-level LIKELY visual match only. It is never an exact match,
+  // never a commercial fact, and never sent to the customer as verified evidence of their item.
+  let likelyVisualMatches=[];
+  if(imageCategory&&imageCategory!=="unknown")try{likelyVisualMatches=((await retrieveEligibleVisualProductMedia(env,[{type:"category",value:visualAttributeValue(imageCategory).normalized}],3)).items||[]).map(x=>({visual_media_id:x.id,match_type:"likely_visual_match",basis:"category",attributes:Object.fromEntries((x.attributes||[]).filter(a=>a.status==="active").map(a=>[a.attribute_type,a.normalized_value]))}));}catch{}
   const requirementRules=(await env.DB.prepare(`SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN ('pricing','product','configuration','size','strategy') AND (entity_key='global'${productKeys.length?` OR entity_key IN (${productKeys.map(()=>"?").join(",")})`:""}) ORDER BY created_at DESC LIMIT 100`).bind(...productKeys).all()).results||[];
   const requirements=resolveSalesRequirements(requirementRules,productKeys);
   // An approved standard size/configuration for this product (or globally) satisfies a size requirement.
@@ -6234,7 +6633,7 @@ async function runSalesNegotiationBrain(env,inboxId){
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
   const nextBestAction=action?.startsWith("ask_")?"ASK_REQUIRED_FIELD":action==="answer_moq"&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"):[],decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"):[],decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
   return result;
@@ -6768,10 +7167,14 @@ async function createPriceItemVersion(env,body,actor="admin"){
   const productName=String(body.product_name??base?.product_name??"").trim(),productKey=normalizeProductKey(body.product_key??base?.product_key??productName),sku=String(body.sku??base?.sku??"").trim()||null,currency=String(body.currency??base?.currency??"").trim().toUpperCase(),unit=safeCommercialInteger(body.unit_price_minor??base?.unit_price_minor,{nullable:false}),moq=safeCommercialInteger(Object.prototype.hasOwnProperty.call(body,"moq")?body.moq:base?.moq,{nullable:true,positive:true});
   if(!productName||!productKey||!currency)throw Error("Product, product key and currency are required");
   if(base&&productKey!==base.product_key)throw Error("A new price version must retain the original product key");
-  const latest=await env.DB.prepare("SELECT MAX(version) AS version FROM commercial_price_items WHERE market='ARAB' AND product_key=?").bind(productKey).first(),version=Number(latest?.version||0)+1,t=now(),id=uid();
+  // Default market stays ARAB. IRAN versions come only from owner-approved imports and never change IRAN pricing authority
+  // (owner_confirmed_quote); every quote/price lookup keeps filtering market='ARAB'.
+  const market=body.market==="IRAN"?"IRAN":"ARAB";if(base&&base.market!==market)throw Error("A new price version must keep its market");
+  if(market==="IRAN"&&currency!=="TOMAN")throw Error("IRAN prices must be in TOMAN");
+  const latest=await env.DB.prepare("SELECT MAX(version) AS version FROM commercial_price_items WHERE market=? AND product_key=?").bind(market,productKey).first(),version=Number(latest?.version||0)+1,t=now(),id=uid();
   const effectiveFrom=body.effective_from==null?(base?.effective_from||null):String(body.effective_from||"").trim()||null,effectiveUntil=body.effective_until==null?null:String(body.effective_until||"").trim()||null;
   const statements=[];if(base&&body.deactivate_previous!==false)statements.push(env.DB.prepare("UPDATE commercial_price_items SET active=0,updated_at=? WHERE id=?").bind(t,base.id));
-  statements.push(env.DB.prepare("INSERT INTO commercial_price_items(id,product_key,product_name,sku,market,currency,unit_price_minor,moq,version,active,effective_from,effective_until,approved_by,approved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,productKey,productName,sku,"ARAB",currency,unit,moq,version,body.active===false?0:1,effectiveFrom,effectiveUntil,actor,t,t,t));
+  statements.push(env.DB.prepare("INSERT INTO commercial_price_items(id,product_key,product_name,sku,market,currency,unit_price_minor,moq,version,active,effective_from,effective_until,approved_by,approved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,productKey,productName,sku,market,currency,unit,moq,version,body.active===false?0:1,effectiveFrom,effectiveUntil,actor,t,t,t));
   await env.DB.batch(statements);await audit(env,"commercial_price_version_created","Owner created immutable commercial price version",{price_item_id:id,product_key:productKey,version,active:body.active===false?0:1});return await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=?").bind(id).first();
 }
 
@@ -9826,6 +10229,7 @@ Context: ${context}`;
       }
 
       if (u.pathname === "/api/sales-knowledge" || u.pathname.startsWith("/api/sales-knowledge/")) return await handleSalesKnowledge(req,env);
+      if (u.pathname.startsWith("/api/owner-knowledge/")) return await handleOwnerKnowledge(req,env);
       if (u.pathname === "/api/si" || u.pathname.startsWith("/api/si/")) return await handleSalesIntelligence(req,env,u);
 
       if (u.pathname === "/api/quotes" && req.method === "GET") {

@@ -35,7 +35,9 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 
 <section class="card section">
 <div class="title"><div><h2>🤖 AI COMMAND CENTER</h2><div class="hint">فرمان طبیعی بنویس. نمونه: «تلگرام را بررسی کن، ولی اینستاگرام را فعلاً متوقف کن و فرصت‌های تبلیغاتی را پیدا کن.»</div></div><span class="tag">ADMIN CONTROLLED</span></div>
-<div class="command" style="margin-top:11px"><input id="command" class="input" placeholder="دستور عملیاتی یا دانش فروش را اینجا بنویس…"><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button></div>
+<div class="command" style="margin-top:11px"><textarea id="command" class="input" rows="4" style="min-height:90px" placeholder="دستور عملیاتی، دانش فروش، لیست قیمت یا کاتالوگ را اینجا بنویس یا پیست کن…"></textarea><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button></div>
+<div class="tools" style="margin-top:8px"><label class="hint">بازار دانش/قیمت: <select id="commandMarket" class="input" style="width:auto;display:inline-block"><option>IRAN</option><option>ARAB</option><option>GLOBAL</option></select></label><label class="btn">📷 تصاویر واقعی محصول (حداکثر ۸ · JPEG/PNG/WEBP · هر کدام تا ۵MB)<input id="commandImages" type="file" accept="image/jpeg,image/png,image/webp" multiple style="display:none" onchange="renderCommandImages()"></label><span id="commandImageInfo" class="hint"></span></div>
+<div id="commandImageList" class="rows"></div>
 <div class="examples">
 <div class="example" onclick="setCmd('تلگرام را بررسی کن و مشتری‌های جدید را تحلیل کن')"><b>📥 Telegram + CRM</b><span>بررسی پیام و تحلیل مشتری</span></div>
 <div class="example" onclick="setCmd('واتساپ را بررسی کن ولی فعلاً هیچ اقدامی انجام نده')"><b>🛑 WhatsApp observe</b><span>فقط مشاهده و عدم اقدام</span></div>
@@ -63,6 +65,9 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 <div id="knowledgeStatus" class="hint" role="status"></div>
 <div class="tools"><button class="btn" onclick="knowledgeOffset=Math.max(0,knowledgeOffset-100);loadSalesKnowledge()">PREVIOUS PAGE</button><button class="btn" onclick="knowledgeOffset+=100;loadSalesKnowledge()">NEXT PAGE</button></div>
 <div class="title"><h3>Owner Review · Old → Proposed</h3></div><div id="knowledgeRequests" class="rows"></div>
+<div class="title" style="margin-top:12px"><h3>📥 Knowledge Imports · Price lists, catalogs & owner product photos</h3><button class="btn" onclick="loadOwnerImports()">REFRESH IMPORTS</button></div>
+<div class="hint">هیچ قیمت، مشخصات یا عکسی بدون تأیید مالک فعال نمی‌شود. موارد مبهم باید اصلاح شوند. قیمت ایران مرجع تأییدشده است و مرجع قیمت‌دهی (Quote مالک) را تغییر نمی‌دهد.</div>
+<div id="ownerImportStatus" class="hint" role="status"></div><div id="ownerImports" class="rows"></div>
 <div class="title"><h3>Knowledge · Current revisions</h3></div><div id="knowledgeFacts" class="rows"></div>
 <div class="title"><h3>Revision History</h3></div><div id="knowledgeHistory" class="rows"></div>
 <div class="tools"><button class="btn" onclick="loadKnowledgeHistory(-100)">PREVIOUS HISTORY</button><button class="btn" onclick="loadKnowledgeHistory(100)">NEXT HISTORY</button></div>
@@ -904,16 +909,92 @@ async function photoRunNow(){
 }
 async function masterAction(action){$("masterHelp").textContent="در حال اجرای "+action+"…";const d=await api(A+"/master",{method:"POST",body:JSON.stringify({action})});$("masterHelp").innerHTML=d.ok?"<span class='ok'>✓ MASTER → "+esc(action)+" · وضعیت ثبت شد.</span>":"<span class='bad'>✕ "+esc(d.error||"unknown")+"</span>";await refreshAll()}
 async function moduleToggle(module,enabled){const d=await api(A+"/module",{method:"POST",body:JSON.stringify({module,enabled})});if(!d.ok)alert(d.error||"خطا");await loadStatus()}
+let ownerImportData=null,ownerImportBusy=false;
+function renderCommandImages(){
+ const files=Array.from($("commandImages").files||[]);
+ $("commandImageInfo").innerHTML=files.length>8?"<span class='bad'>حداکثر ۸ تصویر در هر ارسال</span>":files.length?esc(files.length+" تصویر · برای هر تصویر مدل، سایز و ساختار را بنویسید (خالی = فقط مشاهده تصویر، بدون حدس مدل)"):"";
+ $("commandImageList").innerHTML=files.slice(0,8).map((f,i)=>"<div class='row' style='display:flex;gap:10px;align-items:center'><img alt='' src='"+esc(URL.createObjectURL(f))+"' style='width:64px;height:64px;object-fit:cover;border-radius:8px'><input class='input' id='commandImageDesc-"+i+"' placeholder='مثال: انگشتر کوچک، 5×5، سه تکه'></div>").join("");
+}
+async function submitOwnerKnowledge(raw){
+ const files=Array.from($("commandImages").files||[]);
+ const fd=new FormData();fd.append("text",raw);fd.append("market",$("commandMarket").value);fd.append("client_request_id",commandRequestId);
+ files.forEach((f,i)=>{fd.append("images",f,f.name||("image-"+i));fd.append("descriptions",(($("commandImageDesc-"+i)||{}).value||"").trim())});
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),120000);
+ try{const r=await fetch("/api/owner-knowledge/import",{method:"POST",headers:hdr(),body:fd,signal:controller.signal});const d=await r.json().catch(()=>null);if(!d||typeof d!=="object")return {ok:false,error:"Invalid response (HTTP "+r.status+")"};return r.ok?d:{...d,ok:false}}
+ catch(e){return {ok:false,error:e&&e.name==="AbortError"?"Upload timed out":String((e&&e.message)||e)}}
+ finally{clearTimeout(timer)}
+}
+function ownerImportSummaryHtml(d){const s=d.summary||{};return "<span class='ok'>✓ دانش برای بررسی مالک ساختاربندی شد"+(d.idempotent?" · ارسال تکراری بود؛ دوباره پردازش نشد":"")+"</span><div class='mini'>Price rows: "+esc(s.price_rows||0)+" · Product facts: "+esc(s.product_facts||0)+" · Photos: "+esc(s.visuals||0)+" · Rules: "+esc(s.rules||0)+" · Unparsed: "+esc(s.unparsed||0)+" · Parsed: "+esc(s.parsed||0)+" · Ambiguous: "+esc(s.ambiguous||0)+" · Rejected: "+esc(s.rejected||0)+" · Conflicts: "+esc(s.conflicts||0)+" · هیچ موردی بدون تأیید مالک فعال نشده است.</div>"}
+function ownerIssueText(x){let a=[];try{a=JSON.parse(x.issues_json||"[]")}catch(e){}return a.map(i=>i.code+(i.detail?": "+i.detail:"")+(i.active_price_minor!=null?" (active "+i.active_price_minor+" "+(i.currency||"")+")":"")).join(" · ")}
+function ownerObservationText(x){let o=null;try{o=JSON.parse(x.observation_json||"null")}catch(e){}if(!o)return "";return "AI visual observation (advisory, not authoritative): "+[o.visual_summary,(o.visible_features||[]).join(", "),(o.visible_colors||[]).join(", "),"category "+(o.likely_product_category||"unknown"),"uncertainty "+(o.uncertainty||"—")].filter(Boolean).join(" · ")}
+function renderOwnerImport(d){
+ const items=d.items||[];
+ $("ownerImportStatus").innerHTML=ownerImportSummaryHtml(d)+"<div class='tools'><button class='btn primary' data-oimp='approve-parsed'>APPROVE ALL CLEAN PARSED ITEMS</button></div>";
+ $("ownerImports").innerHTML=items.map((x,i)=>{
+  const pending=x.review_status==="pending_review",price=x.price_minor!=null?(x.price_minor+" "+(x.currency||"")):"",fact=x.fact_value_json?((x.fact_domain||"")+"."+(x.fact_attribute||"")+" = "+x.fact_value_json):"";
+  return "<div class='row'>"+(x.thumbnail_url?"<img alt='' src='"+esc(x.thumbnail_url)+"' style='width:96px;height:96px;object-fit:cover;border-radius:8px;float:left;margin-right:10px'>":"")
+   +"<b>"+esc(x.item_type)+" · "+esc(x.parse_status)+" · "+esc(x.review_status)+"</b>"
+   +"<div class='mini'>Product/model: "+esc(x.product_name||"—")+" · Size: "+esc(x.size||"—")+" · Configuration: "+esc(x.configuration||"—")+(x.category?" · Category: "+esc(x.category):"")+" · Market: "+esc(x.market)+(price?" · Price: "+esc(price):"")+(fact?" · "+esc(fact):"")+"</div>"
+   +(x.raw_line?"<div class='mini'>Owner input: "+esc(x.raw_line)+"</div>":"")
+   +(ownerObservationText(x)?"<div class='mini'>"+esc(ownerObservationText(x))+"</div>":"")
+   +(ownerIssueText(x)?"<div class='mini warn'>"+esc(ownerIssueText(x))+"</div>":"")
+   +(x.result_ref?"<div class='mini ok'>"+esc(x.result_ref)+"</div>":"")
+   +(pending?"<div class='tools' style='clear:both'>"+(x.parse_status==="parsed"?"<button class='btn primary' data-oimp='approve' data-index='"+i+"'>APPROVE</button>":"")+"<button class='btn' data-oimp='correct' data-index='"+i+"'>CORRECT</button><button class='btn danger' data-oimp='reject' data-index='"+i+"'>REJECT</button></div>":"<div style='clear:both'></div>")+"</div>";
+ }).join("")||"<div class='hint'>No items.</div>";
+}
+async function loadOwnerImports(id){
+ const status=$("ownerImportStatus");
+ try{
+  let importId=id||(ownerImportData&&ownerImportData.import_id);
+  if(!importId){const l=await api("/api/owner-knowledge/imports");if(!l.ok)throw Error(l.error||"Imports unavailable");importId=l.imports&&l.imports[0]&&l.imports[0].id;if(!importId){$("ownerImports").innerHTML="<div class='hint'>No knowledge imports yet.</div>";status.textContent="";return}}
+  const d=await api("/api/owner-knowledge/imports?id="+encodeURIComponent(importId));if(!d.ok)throw Error(d.error||"Import unavailable");
+  ownerImportData=d;renderOwnerImport(d);
+ }catch(e){status.textContent=e.message}
+}
+document.addEventListener("click",async ev=>{
+ const b=ev.target&&ev.target.closest?ev.target.closest("[data-oimp]"):null;if(!b||ownerImportBusy||!ownerImportData)return;
+ const action=b.dataset.oimp,x=(ownerImportData.items||[])[Number(b.dataset.index)];
+ ownerImportBusy=true;b.disabled=true;
+ try{
+  let d;
+  if(action==="approve-parsed"){
+   if(!confirm("Approve every CLEAN parsed item? Ambiguous, conflicting and price-replacing rows stay for individual review. Approved prices become owner-approved price versions."))return;
+   d=await api("/api/owner-knowledge/imports/approve-parsed",{method:"POST",body:JSON.stringify({import_id:ownerImportData.import_id,confirm_commercial:true})});if(!d.ok)throw Error(d.error);
+   await loadOwnerImports(ownerImportData.import_id);$("ownerImportStatus").insertAdjacentHTML("beforeend","<div class='mini ok'>Approved "+esc(d.approved)+" · held for individual review "+esc((d.held||[]).length)+"</div>");return;
+  }
+  if(!x)return;
+  if(action==="correct"){
+   const c={},ask=(k,label,cur)=>{const before=cur==null?"":String(cur),v=prompt(label,before);if(v!==null&&v!==before)c[k]=v};
+   if(x.item_type==="rule"||x.item_type==="product_fact"){let cur="";try{cur=JSON.parse(x.fact_value_json||"null")||""}catch(e){}ask("fact_value","Value",cur);if(x.item_type==="product_fact")ask("product_name","Product / model",x.product_name)}
+   else{ask("product_name","Product / model",x.product_name);ask("size","Size (e.g. 5x5)",x.size);ask("configuration","Configuration",x.configuration);if(x.item_type==="visual")ask("category","Category",x.category);if(x.item_type==="price_row"){ask("price_minor","Price (whole Toman, or US cents)",x.price_minor);ask("currency","Currency (TOMAN / USD)",x.currency);ask("market","Market (IRAN / ARAB)",x.market)}}
+   if(!Object.keys(c).length)return;
+   d=await api("/api/owner-knowledge/items/review",{method:"POST",body:JSON.stringify({id:x.id,action:"correct",expected_version:x.version,corrections:c})});
+  }else{
+   if(!confirm(action==="approve"?(x.item_type==="price_row"?"Approve this price as a NEW owner-approved price version (previous versions are kept)?":"Approve this item as authoritative knowledge?"):"Reject this item?"))return;
+   d=await api("/api/owner-knowledge/items/review",{method:"POST",body:JSON.stringify({id:x.id,action:action,expected_version:x.version,confirm_commercial:action==="approve"})});
+  }
+  if(!d.ok)throw Error(d.error);
+  await loadOwnerImports(ownerImportData.import_id);
+ }catch(e){$("ownerImportStatus").insertAdjacentHTML("beforeend","<div class='mini bad'>"+esc(e.message)+"</div>")}finally{ownerImportBusy=false;b.disabled=false}
+});
 let commandRequestId=null;
 async function sendCommand(){
- const raw=$("command").value.trim();
- if(!raw){
-  $("commandStatus").innerHTML="<span class='warn'>لطفاً ابتدا دستور را وارد کنید.</span>";
+ const raw=$("command").value.trim(),files=Array.from($("commandImages").files||[]);
+ if(!raw&&!files.length){
+  $("commandStatus").innerHTML="<span class='warn'>لطفاً ابتدا دستور، دانش یا تصویر را وارد کنید.</span>";
   return;
  }
+ if(files.length>8){$("commandStatus").innerHTML="<span class='bad'>حداکثر ۸ تصویر در هر ارسال</span>";return}
  commandRequestId=commandRequestId||("cmd-"+crypto.randomUUID());
- $("commandStatus").textContent="در حال تحلیل فرمان…";
- const d=await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw,command_id:commandRequestId})});
+ $("commandStatus").textContent=files.length?"در حال ارسال تصاویر و ساختاربندی دانش برای بررسی مالک…":"در حال تحلیل فرمان…";
+ // Images (with or without text) always go to the owner knowledge import; large/price-list text is routed there server-side.
+ const d=files.length?await submitOwnerKnowledge(raw):await api(A+"/command",{method:"POST",body:JSON.stringify({command:raw,command_id:commandRequestId,market:$("commandMarket").value})});
+ if(d.knowledge_import){
+  $("commandStatus").innerHTML=d.ok?ownerImportSummaryHtml(d)+"<div class='mini'><a href='#knowledgePanel'>OPEN KNOWLEDGE IMPORT REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Knowledge import failed")+"</span>";
+  if(d.ok){commandRequestId=null;$("commandImages").value="";renderCommandImages();ownerImportData=d;renderOwnerImport(d)}
+  return;
+ }
+ if(!d.ok&&files.length){$("commandStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Knowledge import failed")+"</span>";return}
  if(d.read_only){
   const s=d.status||{},mods=Object.entries(s.controls?.modules||{}).map(([k,v])=>k+": "+(v===false?"OFF":"ON")).join(" · "),tasks=Object.entries(s.tasks||{}).map(([k,v])=>k+" "+v).join(" · ");
   $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ گزارش فقط‌خواندنی · هیچ Task ساخته یا اجرا نشد.</span><div class='mini'>MASTER: "+esc(String(s.controls?.master||"—").toUpperCase())+" · "+esc(mods||"—")+"</div><div class='mini'>Tasks: "+esc(tasks||"0")+"</div>":"<span class='bad'>✕ "+esc(d.error||"Status unavailable")+"</span>";
