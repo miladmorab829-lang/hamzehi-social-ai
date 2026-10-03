@@ -4716,6 +4716,9 @@ async function handleTelegramWebhook(env,req){
   const internalChat=targets.some(x=>x===username||x===chatId);
   const privateCustomerChat=!internalChat&&m.chat.type==='private'&&!!m.from&&m.from.is_bot!==true&&String(m.from.id||'')===chatId&&!!normalizeTelegramPrivateChatId(chatId);
   const providerSenderId=String(m.from?.id||(privateCustomerChat?m.chat.id:'')||''),providerUsername=String(m.from?.username||(m.chat.type==='private'?m.chat.username:'')||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;
+  // Store the raw Telegram media reference first, so a customer photo is visible to this same turn's image resolver.
+  const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
+  if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':(m.chat.type==='private'&&!internalChat)?'customer':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   await ensureLeadOutreachStore(env);
   const unlinkedInbound={leadId:null,conversationId:null,contactId:null};
   let linked=privateCustomerChat?await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo}):unlinkedInbound;
@@ -4746,8 +4749,6 @@ async function handleTelegramWebhook(env,req){
     catch(error){try { await audit(env,"negotiation_reply_retry_failed","Persisted inbound reply recovery failed safely",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)}); } catch {}}
     else if(!internalChat)try{await ensureAmbiguousTelegramIdentityEscalation(env,ex.id);}catch(error){try{await audit(env,"owner_escalation_retry_failed","Unlinked Telegram inbound remained stored after escalation retry failure",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }
-  const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
-  if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':(m.chat.type==='private'&&!internalChat)?'customer':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   return json({ok:true,media_received:!!media});
 }
 
@@ -5582,11 +5583,15 @@ function customerImageOrdinal(value){
 const CUSTOMER_IMAGE_DEICTIC=/(?:^|[\s،,.؟?!])(?:[اإ][یي]ن|هم[یي]ن|[اإ][یي]نو|هم[یي]نو|[اإ][یي]نا|[اإ][یي]نها|همون|همان|هذا|هذه|هاي|هذي|نفس|نفسه|نفسها)(?=$|[\s‌،,.؟?!:؛;])|\b(?:this|that|it|same|these|those)\b/u;
 const CUSTOMER_IMAGE_MODEL_REFERENCE=/(?:[اإ][یي]ن|هم[یي]ن|همون|همان|هذا|هذه|نفس|this|that|same)\s*(?:مدل|موديل|الموديل|model)/u;
 async function resolveCustomerImageReference(env,row){
-  if(!(await customerMediaStoreReady(env)))return {status:"none",images:[],image_count:0,schema_ready:false};
-  const since=new Date(Date.parse(row.created_at||now())-CUSTOMER_IMAGE_WINDOW_MS).toISOString();
-  const images=((await env.DB.prepare(`SELECT m.id,m.inbox_message_id,m.media_group_id,m.analysis_status,m.observation_json,m.telegram_message_id,i.created_at AS message_created_at
+  const since=new Date(Date.parse(row.created_at||now())-CUSTOMER_IMAGE_WINDOW_MS).toISOString(),ready=await customerMediaStoreReady(env);
+  // Without the (migration-created) customer-media table, the image REFERENCE still works from this same conversation's
+  // own customer photos in telegram_media_sources (no analysis/observation): reference only, never visual knowledge.
+  const images=((await env.DB.prepare(ready?`SELECT m.id,m.inbox_message_id,m.media_group_id,m.analysis_status,m.observation_json,m.telegram_message_id,i.created_at AS message_created_at
     FROM conversation_customer_media m JOIN inbox_messages i ON i.id=m.inbox_message_id AND i.lead_id=m.lead_id AND i.conversation_id=m.conversation_id
-    WHERE m.lead_id=? AND m.conversation_id=? AND i.created_at>=? AND i.created_at<=? ORDER BY CAST(m.telegram_message_id AS INTEGER) ASC,i.created_at ASC LIMIT 50`).bind(row.lead_id,row.conversation_id,since,row.created_at||now()).all()).results||[]).slice(-10);
+    WHERE m.lead_id=? AND m.conversation_id=? AND i.created_at>=? AND i.created_at<=? ORDER BY CAST(m.telegram_message_id AS INTEGER) ASC,i.created_at ASC LIMIT 50`
+    :`SELECT t.id,i.id AS inbox_message_id,NULL AS media_group_id,'unavailable' AS analysis_status,NULL AS observation_json,t.message_id AS telegram_message_id,i.created_at AS message_created_at
+    FROM inbox_messages i JOIN telegram_media_sources t ON t.chat_id=i.provider_conversation_id AND i.external_id=(t.chat_id||':'||t.message_id)
+    WHERE i.lead_id=? AND i.conversation_id=? AND i.platform='telegram' AND t.source_kind='customer' AND t.media_type='photo' AND i.created_at>=? AND i.created_at<=? ORDER BY CAST(t.message_id AS INTEGER) ASC,i.created_at ASC LIMIT 50`).bind(row.lead_id,row.conversation_id,since,row.created_at||now()).all()).results||[]).slice(-10);
   const base={image_count:images.length,images};
   const current=images.find(x=>x.inbox_message_id===row.id);
   if(current)return {...base,status:"resolved",basis:"current_message",media_id:current.id};
@@ -5645,6 +5650,8 @@ function extractUnitQuantity(text){
   const n=knowledgeCommandNumber(plain.replace(/[,٬]/g,""));
   return n!==null&&n>0?n:null;
 }
+// A named product TYPE ("جعبه ساعت", "علبة مجوهرات", "watch box") answers "which product"; a bare "این جعبه" does not.
+const CUSTOMER_PRODUCT_TYPE=/(?:جعبه|باکس)\s*(?:[یي]\s*)?(?:ساعت|جواهرات|جواهر|انگشتر|گردنبند|دستبند|گوشواره|طلا|سکه|عطر|ادکلن|هدیه|کادو|شکلات|آجیل|خرما|شیرینی|زعفران|عسل|چای|قهوه|کراوات|عینک|خودکار|لوازم\s*آرایش|آرایشی|موبایل|کفش|لباس)(?![\p{L}])|علب(?:ة|ه)\s+(?:ساعات|ساعة|ساعه|مجوهرات|خاتم|ذهب|عطور|عطر|هدايا|هدية|شوكولاتة|شوكولاته|تمور|تمر|حلويات|نظارات)(?![\p{L}])|\b(?:watch|jewelry|jewellery|ring|necklace|perfume|gift|chocolate|dates|sweets|cosmetics?|glasses|pen)\s+box(?:es)?\b/iu;
 function extractConversationMemoryFacts(message,intent,inboxId){
   const text=String(message||"").normalize("NFKC").trim().slice(0,2000),facts=[];
   if(!text)return facts;
@@ -5657,6 +5664,7 @@ function extractConversationMemoryFacts(message,intent,inboxId){
   // "این مدل" / "مدل دوم" refer to a customer image, not a product name: never store that phrase as product_interest.
   const product=customerImageOrdinal(text)!==null||CUSTOMER_IMAGE_MODEL_REFERENCE.test(customerImageText(text))?null:text.match(/(?:product|model|محصول|مدل|منتج|موديل)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(product)add("product_interest",product);
+  else{const productType=text.match(CUSTOMER_PRODUCT_TYPE)?.[0];if(productType)add("product_interest",productType.replace(/\s+/g," ").trim());}
   const destination=text.match(/(?:destination|ship(?:ping)?\s+to|مقصد|ارسال\s+به|الوجهة|شحن\s+(?:الى|إلى))\s*[:：=-]?\s*([^\n،,؛;؟?]{2,180})/iu)?.[1];
   if(destination)add("destination",destination);
   const size=text.match(/(?:size|dimensions?|سایز|اندازه|قياس)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
@@ -5785,7 +5793,10 @@ async function getNegotiationConversationContext(env,leadId,conversationId) {
 }
 
 const SALES_BRAIN_STAGES=new Set(["lead","contacted","customer_replied","needs_discovery","product_interest","quantity_discovery","size_discovery","color_discussion","printing_discussion","asks_price","asks_moq","asks_shipping","asks_discount","price_objection","negotiating","quote_requested","quote_ready","quote_sent","customer_accepted","customer_rejected"]);
-function salesBrainLanguage(message,leadNotes){const text=String(message||"");if(/[\u067e\u0686\u0698\u06af\u06a9\u06cc]/u.test(text))return "Persian";if(/[\u0600-\u06ff]/u.test(text))return "Iraqi Arabic";return outreachLanguage(parseLeadNotes({notes:leadNotes}));}
+// Script-specific letters decide. Script-neutral text ("\u0633\u0644\u0627\u0645", "\u0645\u0645\u0646\u0648\u0646") follows the customer's own earlier unambiguous inbound
+// messages in this conversation, then the lead market (IRAN \u2192 Persian, ARAB \u2192 Iraqi Arabic) \u2014 never a guess from shared letters.
+function salesBrainScriptLanguage(value){const text=String(value||"");if(/[\u067e\u0686\u0698\u06af\u06a9\u06cc]/u.test(text))return "Persian";if(/[\u0629\u0649\u0623\u0625\u0624\u0626\u064a\u0643]/u.test(text))return "Iraqi Arabic";return null;}
+function salesBrainLanguage(message,leadNotes,history=[]){const direct=salesBrainScriptLanguage(message);if(direct)return direct;for(const earlier of history){const language=salesBrainScriptLanguage(earlier);if(language)return language;}return outreachLanguage(parseLeadNotes({notes:leadNotes}));}
 function salesBrainStage(intent,memory){
   const product=memory.product_interest||memory.customer_image_reference,quantity=memory.requested_quantity;
   if(intent==="accepted")return "customer_accepted";if(intent==="rejected")return "customer_rejected";
@@ -6065,7 +6076,7 @@ async function runSalesNegotiationBrain(env,inboxId){
   const memories=(await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all()).results||[];
   const memory={};for(const fact of memories)if(!(fact.memory_key in memory))try{memory[fact.memory_key]=JSON.parse(fact.value_json)}catch{}
   const postSaleOrder=await findPostSaleOrder(env,row.lead_id,row.conversation_id);
-  const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message),language=salesBrainLanguage(row.message,row.lead_notes),orderStatusAsked=!!postSaleOrder&&(ORDER_STATUS_QUESTION.test(String(row.message||""))||(postSaleOrder.status!=="fulfilled"&&(intent==="asks_shipping"||intent==="other"))),stage=orderStatusAsked?`order_${postSaleOrder.status}`:salesBrainStage(intent,memory);
+  const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message),language=salesBrainLanguage(row.message,row.lead_notes,context.filter(x=>x.direction==="inbound"&&x.id!==row.id).reverse().map(x=>x.message)),orderStatusAsked=!!postSaleOrder&&(ORDER_STATUS_QUESTION.test(String(row.message||""))||(postSaleOrder.status!=="fulfilled"&&(intent==="asks_shipping"||intent==="other"))),stage=orderStatusAsked?`order_${postSaleOrder.status}`:salesBrainStage(intent,memory);
   const model=String(memory.product_interest||"").trim(),knowledge=(await env.DB.prepare("SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND (entity_key='global' OR (?<>'' AND entity_key=?)) ORDER BY created_at DESC LIMIT 100").bind(model,model).all()).results||[];
   // Customer images of THIS lead+conversation only. A resolved image satisfies "which product/model" as a reference; its
   // observation is advisory visual context and never an authoritative fact for the validator.
@@ -6074,7 +6085,19 @@ async function runSalesNegotiationBrain(env,inboxId){
   const knownQuantity=memory.requested_quantity,quantityValid=Number.isSafeInteger(knownQuantity)&&knownQuantity>0,missing=[];if(!model&&!imageRefId)missing.push("product_or_model");if(!quantityValid)missing.push("quantity");
   const detailMissing=[];if(!memory.requested_size)detailMissing.push("size");if(!memory.printing&&!memory.branding)detailMissing.push("customization");if(!memory.destination)detailMissing.push("destination");
   let action=imageAmbiguous?"ask_image_reference":!model&&!imageRefId?"ask_product":!quantityValid?"ask_quantity":"ask_details",needsOwner=false,needsOwnerReason=null,visuals=[];
+  // Earlier Sales Brain decisions of THIS conversation (PK lookups): the brain never repeats a discovery question the customer
+  // has already been asked; it advances to the next genuinely missing requirement instead.
+  const priorDecisions=[];
+  for(const prev of (await env.DB.prepare("SELECT id FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id<>? AND created_at<=? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,row.id,row.created_at||now()).all()).results||[]){
+    const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+prev.id).first();
+    if(event?.details_json)try{const d=JSON.parse(event.details_json);if(d.lead_id===row.lead_id&&d.conversation_id===row.conversation_id)priorDecisions.push({action:d.next_sales_action,missing:[...(d.missing_required_facts||[]),...(d.missing_detail_facts||[])]});}catch{}
+  }
+  const askedBefore=a=>priorDecisions.some(d=>d.action===a||(a==="ask_product"&&d.action==="price_discovery"&&d.missing.includes("product_or_model"))),lastAction=priorDecisions[0]?.action||null,productAskedBefore=askedBefore("ask_product");
+  let repetitionAdvanced=null;
   if(orderStatusAsked){action="order_status";missing.length=0;}
+  else if(intent==="rejected"){action="acknowledge_rejection";}
+  // A price question before product/quantity are known is discovery (no price can exist yet); with both known it is owner-only.
+  else if(intent==="asks_price"&&(missing.includes("quantity")||missing.includes("product_or_model")||imageAmbiguous)){action="price_discovery";}
   else if(intent==="asks_price"){action="price_owner";needsOwner=true;needsOwnerReason="authoritative_price_required";}
   else if(intent==="asks_moq"){const moq=knowledge.find(x=>x.domain==="quantity"&&x.attribute==="moq");action=moq&&model?"ask_details":"moq_owner";needsOwner=!moq;needsOwnerReason=needsOwner?"approved_moq_missing":null;}
   else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price"){action="commercial_owner";needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
@@ -6082,9 +6105,13 @@ async function runSalesNegotiationBrain(env,inboxId){
   else if(intent==="accepted"){action="accepted";}
   else if(/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
   const authorityFacts=[...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
-  const discoveryAction=["ask_image_reference","ask_product","ask_quantity","ask_details","price_owner"].includes(action);
-  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):imageAmbiguous&&discoveryAction?salesBrainDraft("ask_image_reference",language):action==="price_owner"?salesBrainDiscoveryDraft("price",language,[...missing,...detailMissing],currentImage):action==="ask_quantity"?salesBrainDiscoveryDraft("quantity",language,[],currentImage):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  if(action==="ask_product"&&productAskedBefore){repetitionAdvanced="ask_product";action=!quantityValid&&lastAction!=="ask_quantity"?"ask_quantity":"ask_details";}
+  else if(action==="ask_quantity"&&(lastAction==="ask_quantity"||(lastAction==="price_discovery"&&priorDecisions[0].missing.includes("quantity")&&!currentImage))){repetitionAdvanced="ask_quantity";action="ask_details";}
+  else if(action==="ask_image_reference"&&lastAction==="ask_image_reference"){repetitionAdvanced="ask_image_reference";action="ask_details";}
+  const priceMissing=[...missing,...detailMissing].filter(x=>!(x==="product_or_model"&&productAskedBefore));
+  const discoveryAction=["ask_image_reference","ask_product","ask_quantity","ask_details","price_owner","price_discovery"].includes(action);
+  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):imageAmbiguous&&discoveryAction&&!repetitionAdvanced?salesBrainDraft("ask_image_reference",language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="price_owner"||action==="price_discovery"?salesBrainDiscoveryDraft("price",language,action==="price_owner"?[...missing,...detailMissing]:priceMissing,currentImage):action==="ask_quantity"?salesBrainDiscoveryDraft("quantity",language,[],currentImage):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),repetition_advanced_from:repetitionAdvanced,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
   return result;
@@ -6128,7 +6155,52 @@ async function processNegotiationInbound(env,inboxId) {
   await audit(env,"negotiation_reply_draft_created","Linked inbound reply prepared for owner review",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,intent,language,context_message_count:context.length,quote_request:quoteRequest,sales_brain_needs_owner:brain.needs_owner});
   if(intent==="quote_requested")try{await ensureQuoteFromInbox(env,inboxId);}catch(error){try{await audit(env,"lead_quote_creation_failed","Inbound reply remained stored after quote creation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   if(intent==="accepted"||intent==="rejected")try{await recordQuoteDecisionFromInbound(env,inboxId,intent);}catch(error){try{await audit(env,"lead_quote_decision_link_failed","Quote decision could not be deterministically linked",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
-  return {processed:true,idempotent:outreach.id!==outreachId,intent,language,outreach};
+  // Safe auto-reply only for the draft THIS call created (a Telegram redelivery never re-sends; it returns above).
+  let autoSend=null;
+  if(outreach.id===outreachId&&outreach.status==="draft")try{autoSend=await autoSendSafeInboundReply(env,{row,brain,outreach,recipient});}catch(error){autoSend={sent:false,reason:"auto_send_error"};try{await audit(env,"inbound_auto_reply_failed","Inbound auto-reply failed safely; draft kept for owner review",{outreach_id:outreach.id,inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+  return {processed:true,idempotent:outreach.id!==outreachId,intent,language,outreach,auto_send:autoSend};
+}
+
+// Established PRIVATE inbound conversations: safe discovery/clarification replies are sent without per-turn owner review.
+// Anything commercial (price, discount, MOQ, shipping, payment, quote, acceptance) or any validator/owner flag stays a draft
+// for the owner (fail-closed). Proactive outreach never comes through here and keeps its approval flow unchanged.
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_details","ask_image_reference","price_discovery"]);
+const INBOUND_AUTO_SEND_HOURLY_LIMIT=4;
+async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
+  if(String(env.INBOUND_AUTO_REPLY||"on").toLowerCase()==="off")return "inbound_auto_reply_disabled";
+  if(!(await autonomyMasterGate(env)))return "autonomy_master_off";
+  if(row.platform!=="telegram"||row.conversation_platform!=="telegram"||outreach.channel!=="telegram")return "unsupported_channel";
+  const chat=normalizeTelegramPrivateChatId(row.provider_conversation_id);
+  // Reply only into the same private chat the customer wrote from (a group/channel id is never a private customer chat).
+  if(!chat||String(recipient)!==chat||String(row.provider_sender_id||"")!==chat||String(outreach.recipient)!==chat)return "not_private_customer_chat";
+  if(!brain||brain.needs_owner)return "owner_required";
+  if(brain.validation?.valid!==true||!validateSalesBrainDraft(outreach.message,{authoritativeFacts:[]}).valid)return "validator_blocked";
+  if(!INBOUND_AUTO_SEND_ACTIONS.has(brain.next_sales_action))return "action_requires_owner_review";
+  if(!brain.draft_customer_reply||outreach.message!==brain.draft_customer_reply||outreach.inbox_message_id!==row.id)return "draft_not_from_validated_brain";
+  await ensureOwnerEscalationStore(env);
+  // While an owner decision is pending in this conversation, the conversation waits for it (no autonomous replies).
+  if(await env.DB.prepare("SELECT id FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' LIMIT 1").bind(row.lead_id,row.conversation_id).first())return "open_owner_escalation";
+  const recent=(await env.DB.prepare("SELECT id,message,status,approved_by,created_at FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND id<>? ORDER BY created_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id,outreach.id).all()).results||[];
+  const key=salesBrainClaimText(outreach.message),inboundKey=salesBrainClaimText(row.message);
+  if(recent.slice(0,3).some(x=>salesBrainClaimText(x.message)===key))return "repetitive_reply";
+  // Bot self-loop guard: an inbound that merely echoes one of our own recent replies is never answered automatically.
+  if(inboundKey&&recent.some(x=>salesBrainClaimText(x.message)===inboundKey))return "echo_of_outbound";
+  const hourAgo=new Date(Date.now()-3600000).toISOString();
+  if(recent.filter(x=>x.approved_by==="inbound_auto_policy"&&String(x.created_at)>=hourAgo).length>=INBOUND_AUTO_SEND_HOURLY_LIMIT)return "auto_send_rate_limited";
+  return null;
+}
+async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient}){
+  const reason=await inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}),base={outreach_id:outreach.id,inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id};
+  if(reason){
+    if(reason!=="owner_required")await env.DB.prepare("UPDATE lead_outreach SET error_code='inbound_auto_send_blocked',error_detail=?,updated_at=? WHERE id=? AND status='draft' AND error_code IS NULL").bind(reason,now(),outreach.id).run();
+    try{await audit(env,"inbound_auto_reply_held","Inbound reply held for owner review",{...base,reason});}catch{}
+    return {sent:false,reason};
+  }
+  const t=now(),approved=await env.DB.prepare("UPDATE lead_outreach SET status='approved',approved_at=?,approved_by='inbound_auto_policy',updated_at=? WHERE id=? AND status='draft' AND inbox_message_id=? AND error_code IS NULL AND message=?").bind(t,t,outreach.id,row.id,outreach.message).run();
+  if(!Number(approved?.meta?.changes))return {sent:false,reason:"draft_changed"};
+  const result=await sendApprovedTelegramOutreach(env,outreach.id);
+  try{await audit(env,result.ok?"inbound_auto_reply_sent":"inbound_auto_reply_send_failed",result.ok?"Safe inbound reply auto-sent":"Safe inbound auto-reply did not complete",{...base,status:result.status||null,action:brain.next_sales_action});}catch{}
+  return {sent:!!result.ok,status:result.status||null};
 }
 
 const QUOTE_STATUSES=new Set(["draft","needs_details","requires_owner_review","waiting_for_owner_price","waiting_for_price_match","quote_ready","pending_approval","approved","sent","accepted","rejected","expired"]);
@@ -9037,7 +9109,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         await ensureLeadOutreachStore(env);
         const mediaReady = await customerMediaStoreReady(env);
-        const r = await env.DB.prepare(`SELECT i.*,l.name AS lead_name,o.id AS outreach_id,o.status AS outreach_status,o.message AS outreach_message,o.language AS outreach_language${mediaReady ? ",cm.analysis_status AS media_status,cm.media_group_id AS media_group_id" : ""}
+        const r = await env.DB.prepare(`SELECT i.*,l.name AS lead_name,o.id AS outreach_id,o.status AS outreach_status,o.message AS outreach_message,o.language AS outreach_language,o.approved_by AS outreach_approved_by,o.error_code AS outreach_error_code,o.error_detail AS outreach_error_detail${mediaReady ? ",cm.analysis_status AS media_status,cm.media_group_id AS media_group_id" : ""}
           FROM inbox_messages i LEFT JOIN leads l ON l.id=i.lead_id LEFT JOIN lead_outreach o ON o.inbox_message_id=i.id${mediaReady ? " LEFT JOIN conversation_customer_media cm ON cm.inbox_message_id=i.id" : ""}
           ORDER BY i.created_at DESC LIMIT 200`).all();
         return json({ ok: true, items: r.results || [] });
