@@ -191,6 +191,26 @@ function normalizeOne(raw,defaultMarket){
   const core=buildEnvelopeCore(rawCore,probeIssues);emit(core);records[0].issues.push(...probeIssues);
   return records;
 }
+// ---- relation guards (fail-closed): a statement that links two values must never become a plain value/fact ----
+// A single value that still contains the link ("مشکی فقط با روبان طلایی", "black only with gold ribbon") is a collapsed relation.
+const RELATIONAL_VALUE=/(?:فقط\s*(?:با|برای|روی)|\bonly\s+(?:with|for|on)\b|\s(?:با|روی)\s+.+\s(?:مجاز|ممنوع)(?:\s|$)|\b(?:incompatible\s+with|forbidden\s+with|allowed\s+with|requires)\b)/iu;
+// The owner's sentence itself reads as "A <link> B <allowed|forbidden|exclusive>".
+const RELATIONAL_STATEMENT=/(?:فقط\s*(?:با|برای|روی)|(?:با|روی)\s+\S+(?:\s+\S+){0,3}\s+(?:مجاز|ممنوع|قابل\s*استفاده|سازگار|ناسازگار)|ترکیب\s*(?:می[‌\s]?شود|شود)|\bonly\s+(?:with|for|on)\b|\bincompatible\b|\brequires?\b|\bsupports?\b)/iu;
+export function knowledgeValueLooksRelational(value){return typeof value==="string"&&RELATIONAL_VALUE.test(knowledgeText(value))||typeof value==="string"&&RELATIONAL_VALUE.test(value);}
+export function knowledgeStatementLooksRelational(text){return RELATIONAL_STATEMENT.test(String(text||"").normalize("NFKC"));}
+// Marks records that collapsed a relation. The owner CORRECTs them into a real relation; they are never approvable as-is.
+export function applyRelationalGuards(records,text){
+  const list=records||[];
+  for(const r of list){
+    const v=r.typed?r.value:r.envelope?.value;
+    if(knowledgeValueLooksRelational(v))r.issues.push("value_contains_relational_clause: express it as a relation between two values");
+  }
+  if(text&&knowledgeStatementLooksRelational(text)&&list.length&&!list.some(r=>r.envelope?.relation||["rule","constraint","prohibition"].includes(r.kind)&&!r.typed)){
+    for(const r of list)if(r.typed||["fact","capability","availability"].includes(r.kind))r.issues.push("relational_statement_without_relation: the statement links two values but no relation was extracted");
+  }
+  for(const r of list)r.issues=[...new Set(r.issues)];
+  return list;
+}
 export function normalizeKnowledgeInput(rawRecords,{market="GLOBAL"}={}){
   const list=Array.isArray(rawRecords)?rawRecords:[];
   if(!list.length)return {records:[],issues:["no_records"]};
@@ -205,7 +225,7 @@ export function normalizeKnowledgeInput(rawRecords,{market="GLOBAL"}={}){
   }
   return {records,issues:list.length>KNOWLEDGE_LIMITS.records?["too_many_records"]:[]};
 }
-export function knowledgeExtractionPrompt({text,market,typedFields}){
+export function knowledgeExtractionPrompt({text,market,typedFields,knownFields}){
   return [
     "You convert ONE owner statement about the packaging / gift-box business HAMZEHI BOX into structured knowledge records.",
     "Return ONLY a JSON object {\"records\":[...]} (at most 25 records). The statement may be Persian, Arabic or English.",
@@ -224,7 +244,12 @@ export function knowledgeExtractionPrompt({text,market,typedFields}){
     " \"unit\":null,\"market\":\"IRAN|ARAB|GLOBAL|null\" (null when the owner did not restrict the market),\"priority\":50,",
     " \"keywords\":[\"words customers use when asking about this, in the owner's language(s)\"],\"labels\":{\"fa\":\"\",\"ar\":\"\",\"en\":\"\"},\"confidence\":0.0,\"ambiguities\":[]}",
     "Rules: never output prices, costs, fees or money amounts (they belong to the price list). Percentages and counts are numbers. For a text trigger use a condition {\"field\":\"message\",\"op\":\"contains\",\"value\":\"...\"}.",
-    "Typed fields (use typed ONLY for a plain value of these): "+(typedFields||[]).join("; "),
+    "RELATIONS: if the statement links two or more attribute values — A with B, A only with B, A only for/on B, A requires B, A supports B, A is allowed/forbidden/incompatible with B, A combines with B — it is a RELATION: kind \"relation\", relation.members = ONE entry per side, keyed by the ROLE the owner names for that side (e.g. color, ribbon_color, printing, size, product, model, material, finish, insert, accessory — use the owner's own role words), value = that side's value. NEVER put such a statement in \"typed\", and NEVER copy a clause like \"A only with B\" into a single value.",
+    "Semantics: \"A only with / only for / only on B\" → A is the anchor and B's role goes in relation.only_with. Allowed pairs: value true. Forbidden / incompatible pairs: value false. A side that is the product itself may be the entity or a member (use a member when the statement is about the pair, not about one product).",
+    "If a side, its role or the meaning of the link is unclear, still return the record but add an \"ambiguities\" entry instead of guessing.",
+    "Relation templates (placeholders, not data): {\"kind\":\"relation\",\"concept\":\"allowed_combination\",\"relation\":{\"name\":\"allowed_combination\",\"members\":{\"<roleA>\":\"<A>\",\"<roleB>\":\"<B>\"},\"only_with\":[\"<roleB>\"]},\"value\":true}  and  {\"kind\":\"relation\",\"concept\":\"forbidden_combination\",\"relation\":{\"name\":\"forbidden_combination\",\"members\":{\"<roleA>\":\"<A>\",\"<roleB>\":\"<B>\"}},\"value\":false}",
+    (knownFields&&knownFields.length?"Role/field names already used by approved knowledge — REUSE the same name when the role is the same: "+knownFields.join(", "):"No role/field names exist yet."),
+    "Typed fields (use typed ONLY for a plain single value of these, never for a statement that links two values): "+(typedFields||[]).join("; "),
     "Default market for this submission: "+market,
     "OWNER_TEXT:",
     "<<<",

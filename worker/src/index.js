@@ -1,6 +1,6 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
-import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswer, composeRelationAnswer, knowledgeEvidenceValue } from "./knowledge-engine.js";
+import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswer, composeRelationAnswer, knowledgeEvidenceValue } from "./knowledge-engine.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -5589,14 +5589,26 @@ async function handleSalesKnowledge(req,env) {
 const KNOWLEDGE_TEACH_BODY_BYTES=65536;
 const KNOWLEDGE_DECLARATIVE=/(?:است|هستند|می[‌\s]?باشد|مجاز|ممنوع|دارد|دارند|داریم|ندارد|ندارند|نیست|باشد|شود|بشود|\bis\b|\bare\b|\bonly\b|\bmust\b|\ballowed\b)[\s.!؟?]*$/iu;
 function typedKnowledgeCatalog(){return Object.entries(SALES_KNOWLEDGE_FIELDS).filter(([d])=>d!=="pricing").flatMap(([d,fields])=>Object.entries(fields).map(([a,t])=>`${d}.${a} (${t})`));}
-async function extractKnowledgeWithAI(env,text,market){
+async function extractKnowledgeWithAI(env,text,market,knownFields){
   if(!env.OPENAI_API_KEY)return {error:"ai_unavailable"};
   try{
-    const r=await customerMediaFetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:String(env.OPENAI_MODEL||"gpt-5.6-luna"),input:[{role:"user",content:[{type:"input_text",text:knowledgeExtractionPrompt({text,market,typedFields:typedKnowledgeCatalog()})}]}]})},25000);
+    const r=await customerMediaFetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:String(env.OPENAI_MODEL||"gpt-5.6-luna"),input:[{role:"user",content:[{type:"input_text",text:knowledgeExtractionPrompt({text,market,typedFields:typedKnowledgeCatalog(),knownFields})}]}]})},25000);
     if(!r.ok)return {error:`ai_http_${Number(r.status)||0}`};
     const parsed=parseCustomerVisionJson(responseText(await r.json().catch(()=>({}))));
     return Array.isArray(parsed?.records)?{records:parsed.records}:{error:"ai_unparseable"};
   }catch(error){return {error:error?.name==="AbortError"?"ai_timeout":"ai_error"};}
+}
+async function knowledgeKnownFields(env){
+  try{
+    const rows=(await env.DB.prepare("SELECT value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain=? ORDER BY created_at DESC LIMIT 300").bind(KNOWLEDGE_DOMAIN).all()).results||[];
+    const names=new Set();
+    for(const r of rows)try{const e=JSON.parse(r.value_json);
+      for(const k of Object.keys(e.relation?.members||{}))names.add(k);
+      if(e.context_field)names.add(e.context_field);
+      for(const c of e.conditions||[])if(c.field&&!["message","market","language","stage"].includes(c.field))names.add(c.field);
+    }catch{}
+    return [...names].slice(0,40);
+  }catch{return [];}
 }
 // UPDATE/REPLACE/DEACTIVATE/DELETE must hit the exact active revision: same slot first, else the single active record of that concept.
 async function findKnowledgeTarget(env,{domain,entityType,entityKey,attribute,market,memberKey,memberKeys}){
@@ -5673,11 +5685,15 @@ async function teachKnowledge(env,body){
   const release=()=>env.DB.prepare("DELETE FROM system_events WHERE id=? AND details_json LIKE '%processing%'").bind(eventId).run().catch(()=>{});
   let records=direct;
   if(!records){
-    const ai=await extractKnowledgeWithAI(env,text,market);
+    // Role/field names already used by approved knowledge are shown to the extractor so the same role keeps the same name.
+    const knownFields=await knowledgeKnownFields(env);
+    const ai=await extractKnowledgeWithAI(env,text,market,knownFields);
     if(ai.error){await release();return {status:ai.error==="ai_unavailable"?503:502,body:{ok:false,knowledge_teach:true,error:ai.error==="ai_unavailable"?"AI extraction is unavailable; submit structured records or use the review form. Nothing was changed.":"Knowledge extraction failed ("+ai.error+"); nothing was changed."}};}
     records=ai.records;
   }
   const norm=normalizeKnowledgeInput(records,{market});
+  // Fail-closed: a statement that links two values must not be flattened into a typed/plain fact (owner corrects it into a relation).
+  applyRelationalGuards(norm.records,text);
   if(!norm.records.length){await release();return {status:422,body:{ok:false,knowledge_teach:true,error:"No knowledge could be extracted from this input; nothing was changed."}};}
   const ids=[];let redirected=0;
   const sourceText=text||JSON.stringify(direct).slice(0,2000);
@@ -5717,6 +5733,7 @@ async function correctSalesKnowledge(env,body){
   const norm=normalizeKnowledgeInput([raw],{market:old.market});
   if(norm.records.length!==1)throw Error("Correct one record at a time");
   const rec=norm.records[0];
+  applyRelationalGuards([rec],"");
   if(rec.issues.length)throw Error("The corrected record is still incomplete or ambiguous: "+rec.issues.slice(0,3).join("; "));
   const newId="corr-"+(await knowledgeHash(JSON.stringify({old:old.id,rec}))).slice(0,40);
   const proposal=await proposeTaughtKnowledge(env,rec,{id:newId,sourceText:`[owner correction of ${old.id}]`,sourceCommandId:old.source_command_id});
