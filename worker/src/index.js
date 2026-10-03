@@ -4720,29 +4720,30 @@ async function handleTelegramWebhook(env,req){
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
   if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':(m.chat.type==='private'&&!internalChat)?'customer':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   await ensureLeadOutreachStore(env);
-  const unlinkedInbound={leadId:null,conversationId:null,contactId:null};
+  const unlinkedInbound={leadId:null,conversationId:null,contactId:null},identityStarted=Date.now();
   let linked=privateCustomerChat?await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo}):unlinkedInbound;
   if(privateCustomerChat&&!linked.leadId&&!linked.ambiguous&&!targets.includes(chatId))linked=await createTelegramInboundLead(env,m,{chatId,providerUsername});
   if(privateCustomerChat&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});
   if(!linked.leadId||!linked.conversationId)linked=unlinkedInbound;
+  const identityMs=Date.now()-identityStarted;
   const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();
   if(!ex){
     const t=now(),inboxId=uid();
     await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(inboxId,'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'other','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();
     // A linked private customer's image is attached to this inbox row and analysed (bounded, once) BEFORE the Sales Brain runs.
-    let customerMedia=null;
+    let customerMedia=null;const mediaStarted=Date.now();
     if(privateCustomerChat&&linked.leadId&&linked.conversationId)try{customerMedia=await recordCustomerConversationMedia(env,{m,body,inboxId,leadId:linked.leadId,conversationId:linked.conversationId,chatId});}catch(error){try{await audit(env,"customer_image_record_failed","Customer image stayed unanalysed; inbound continues text-only",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
     if(customerMedia?.album_follower){
       try{await captureConversationSalesMemory(env,inboxId);}catch{}
     }else if(linked.leadId&&linked.conversationId){
-      try { await processNegotiationInbound(env,inboxId); }
+      try { await processNegotiationInbound(env,inboxId,{identity_ms:identityMs,media_ms:Date.now()-mediaStarted}); }
       catch(error){
         try { await audit(env,"negotiation_reply_draft_failed","Inbound reply was stored but negotiation enrichment failed",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)}); } catch {}
       }
     }else if(!internalChat)try{await ensureAmbiguousTelegramIdentityEscalation(env,inboxId);}catch(error){try{await audit(env,"owner_escalation_creation_failed","Unlinked Telegram inbound remained stored after escalation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }else{
     const existing=await env.DB.prepare("SELECT lead_id,conversation_id FROM inbox_messages WHERE id=? LIMIT 1").bind(ex.id).first();
-    let customerMedia=null;
+    let customerMedia=null;const mediaStarted=Date.now();
     if(privateCustomerChat&&existing?.lead_id&&existing?.conversation_id)try{customerMedia=await recordCustomerConversationMedia(env,{m,body,inboxId:ex.id,leadId:existing.lead_id,conversationId:existing.conversation_id,chatId});}catch{}
     if(customerMedia?.album_follower){}
     else if(existing?.lead_id&&existing?.conversation_id)try { await processNegotiationInbound(env,ex.id); }
@@ -4891,7 +4892,17 @@ const SALES_KNOWLEDGE_OPERATIONS = new Set(["ADD","EXPAND","UPDATE","REPLACE","D
 function knowledgeFieldType(domain,attribute) {
   return Object.hasOwn(SALES_KNOWLEDGE_FIELDS,domain)&&Object.hasOwn(SALES_KNOWLEDGE_FIELDS[domain],attribute)?SALES_KNOWLEDGE_FIELDS[domain][attribute]:null;
 }
-async function ensureSalesKnowledgeStore(env) {
+// The inbound path called these idempotent CREATE/ALTER setups many times per message (dozens of D1 round trips).
+// They now run once per isolate per bound database; a failure is not memoised, so the next call retries normally.
+const ENSURED_STORES=new WeakMap();
+async function onceEnsured(env,key,setup){
+  let done=ENSURED_STORES.get(env.DB);if(!done){done=new Map();ENSURED_STORES.set(env.DB,done);}
+  if(!done.has(key))done.set(key,Promise.resolve().then(setup).catch(error=>{done.delete(key);throw error;}));
+  return done.get(key);
+}
+// Idempotent schema setup runs once per isolate per database (see onceEnsured); the body is unchanged.
+async function ensureSalesKnowledgeStore(env){return onceEnsured(env,"SalesKnowledgeStore",()=>ensureSalesKnowledgeStoreNow(env));}
+async function ensureSalesKnowledgeStoreNow(env){
   await env.DB.batch(SALES_KNOWLEDGE_SCHEMA.map(sql=>env.DB.prepare(sql)));
 }
 function knowledgeCanonical(value,depth=0) {
@@ -5340,7 +5351,9 @@ async function ensureLeadContactStore(env) {
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_contacts_lead ON lead_contacts(lead_id)").run();
 }
 
-async function ensureLeadOutreachStore(env) {
+// Idempotent schema setup runs once per isolate per database (see onceEnsured); the body is unchanged.
+async function ensureLeadOutreachStore(env){return onceEnsured(env,"LeadOutreachStore",()=>ensureLeadOutreachStoreNow(env));}
+async function ensureLeadOutreachStoreNow(env){
   await ensureLeadContactStore(env);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_conversations (
     id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, contact_id TEXT, platform TEXT NOT NULL,
@@ -5372,7 +5385,9 @@ async function ensureLeadOutreachStore(env) {
 const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference"]);
 const CONVERSATION_SALES_STAGES=new Set(["new_reply","interested","asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted","rejected","other"]);
 
-async function ensureConversationMemoryStore(env){
+// Idempotent schema setup runs once per isolate per database (see onceEnsured); the body is unchanged.
+async function ensureConversationMemoryStore(env){return onceEnsured(env,"ConversationMemoryStore",()=>ensureConversationMemoryStoreNow(env));}
+async function ensureConversationMemoryStoreNow(env){
   await ensureLeadOutreachStore(env);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS conversation_sales_state (
     conversation_id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,sales_stage TEXT,
@@ -5651,7 +5666,9 @@ function extractUnitQuantity(text){
   return n!==null&&n>0?n:null;
 }
 // A named product TYPE ("جعبه ساعت", "علبة مجوهرات", "watch box") answers "which product"; a bare "این جعبه" does not.
-const CUSTOMER_PRODUCT_TYPE=/(?:جعبه|باکس)\s*(?:[یي]\s*)?(?:ساعت|جواهرات|جواهر|انگشتر|گردنبند|دستبند|گوشواره|طلا|سکه|عطر|ادکلن|هدیه|کادو|شکلات|آجیل|خرما|شیرینی|زعفران|عسل|چای|قهوه|کراوات|عینک|خودکار|لوازم\s*آرایش|آرایشی|موبایل|کفش|لباس)(?![\p{L}])|علب(?:ة|ه)\s+(?:ساعات|ساعة|ساعه|مجوهرات|خاتم|ذهب|عطور|عطر|هدايا|هدية|شوكولاتة|شوكولاته|تمور|تمر|حلويات|نظارات)(?![\p{L}])|\b(?:watch|jewelry|jewellery|ring|necklace|perfume|gift|chocolate|dates|sweets|cosmetics?|glasses|pen)\s+box(?:es)?\b/iu;
+const CUSTOMER_PRODUCT_TYPE=/(?:جعبه|باکس)\s*(?:[یي]\s*)?(?:ساعت|جواهرات|جواهر|انگشتر|گردنبند|دستبند|گوشواره|طلا|سکه|عطر|ادکلن|هدیه|کادو|شکلات|آجیل|خرما|شیرینی|زعفران|عسل|چای|قهوه|کراوات|عینک|خودکار|لوازم\s*آرایش|آرایشی|موبایل|کفش|لباس)(?:[یي])?(?![\p{L}])|علب(?:ة|ه)\s+(?:ساعات|ساعة|ساعه|مجوهرات|خاتم|ذهب|عطور|عطر|هدايا|هدية|شوكولاتة|شوكولاته|تمور|تمر|حلويات|نظارات)(?![\p{L}])|\b(?:watch|jewelry|jewellery|ring|necklace|perfume|gift|chocolate|dates|sweets|cosmetics?|glasses|pen)\s+box(?:es)?\b/iu;
+const CUSTOMER_DIMENSIONS=/(?<![0-9۰-۹٠-٩])([0-9۰-۹٠-٩]{1,4}(?:[.٫][0-9۰-۹٠-٩]+)?)\s*(?:در|x|×|\*|by|في)\s*([0-9۰-۹٠-٩]{1,4}(?:[.٫][0-9۰-۹٠-٩]+)?)(?:\s*(?:در|x|×|\*|by|في)\s*([0-9۰-۹٠-٩]{1,4}(?:[.٫][0-9۰-۹٠-٩]+)?))?(?![0-9۰-۹٠-٩])\s*(cm|mm|سانتی‌?متر|سانتیمتر|سانت|میلی‌?متر|سم|ملم)?/iu;
+const CUSTOMER_DESTINATION_CITY=/(?<![\p{L}])(تهران|مشهد|اصفهان|شیراز|تبریز|کرج|قم|اهواز|کرمانشاه|رشت|یزد|کرمان|همدان|اراک|ارومیه|زاهدان|ساری|بندرعباس|قزوین|کیش|بغداد|البصرة|البصره|بصرة|أربيل|اربيل|النجف|نجف|كربلاء|كربلا|الموصل|موصل|السليمانية|دهوك|كركوك|الحلة|الناصرية|العمارة|الديوانية|الكوت|tehran|baghdad|basra|erbil|najaf|karbala|mashhad|isfahan|shiraz)(?![\p{L}])/iu;
 function extractConversationMemoryFacts(message,intent,inboxId){
   const text=String(message||"").normalize("NFKC").trim().slice(0,2000),facts=[];
   if(!text)return facts;
@@ -5665,15 +5682,16 @@ function extractConversationMemoryFacts(message,intent,inboxId){
   const product=customerImageOrdinal(text)!==null||CUSTOMER_IMAGE_MODEL_REFERENCE.test(customerImageText(text))?null:text.match(/(?:product|model|محصول|مدل|منتج|موديل)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(product)add("product_interest",product);
   else{const productType=text.match(CUSTOMER_PRODUCT_TYPE)?.[0];if(productType)add("product_interest",productType.replace(/\s+/g," ").trim());}
-  const destination=text.match(/(?:destination|ship(?:ping)?\s+to|مقصد|ارسال\s+به|الوجهة|شحن\s+(?:الى|إلى))\s*[:：=-]?\s*([^\n،,؛;؟?]{2,180})/iu)?.[1];
+  const destination=text.match(/(?:destination|ship(?:ping)?\s+to|مقصد|ارسال\s+به|الوجهة|شحن\s+(?:الى|إلى))\s*[:：=-]?\s*([^\n،,؛;؟?]{2,180})/iu)?.[1]||text.match(CUSTOMER_DESTINATION_CITY)?.[1];
   if(destination)add("destination",destination);
-  const size=text.match(/(?:size|dimensions?|سایز|اندازه|قياس)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  // Dimensions are recognised in natural form ("۵ در ۵", "5x5", "20×30×10 سانت") as well as after a size keyword.
+  const dims=text.match(CUSTOMER_DIMENSIONS),size=dims?[dims[1],dims[2],dims[3]].filter(Boolean).map(x=>x.replace(/[۰-۹]/g,d=>String(PERSIAN_DIGITS.indexOf(d))).replace(/[٠-٩]/g,d=>String(ARABIC_DIGITS.indexOf(d))).replace("٫",".")).join("x")+(dims[4]?" "+dims[4]:""):[text.match(/(?:size|dimensions?|سایز|اندازه|قياس)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1]].find(v=>v&&/[0-9۰-۹٠-٩]|کوچک|متوسط|بزرگ|استاندارد|small|medium|large|standard|صغير|كبير/iu.test(v));
   if(size)add("requested_size",size);
   const exterior=text.match(/(?:exterior\s+color|رنگ\s*بیرونی|رنگ\s*خارجی|لون\s*خارجي)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(exterior)add("exterior_color",exterior);
   const interior=text.match(/(?:interior\s+color|رنگ\s*داخلی|لون\s*داخلي)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(interior)add("interior_color",interior);
-  const printing=text.match(/(?:printing|print|چاپ|فویل|طباعة)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  const printing=text.match(/(?:printing|print|چاپ|فویل|طباعة)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1]||text.match(/(طلاکوب|نقره[‌\s]?کوب|gold\s*foil|silver\s*foil|تذهيب|طباعة\s*ذهبية)/iu)?.[1];
   if(printing)add("printing",printing);
   const branding=text.match(/(?:branding|logo|برندینگ|لوگو|شعار)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(branding)add("branding",branding);
@@ -5829,6 +5847,51 @@ function salesBrainDraft(action,language){const ar=language==="Iraqi Arabic";con
   visual:"نمونه‌های واقعی منطبق با مشخصات شما بررسی می‌شوند و فقط نمونه‌های تأییدشده پس از بررسی ارائه خواهند شد.",
   ask_image_reference:"تصاویر شما دریافت شد. لطفاً بفرمایید منظورتان کدام تصویر است، مثلاً تصویر اول یا دوم؟"
 };return p[action]||p.ask_details;}
+// Short, natural inbound replies (1–2 sentences). They never state a price, discount, MOQ, capability, timing or terms;
+// the only echoed facts are the customer's own integer quantity and an allow-listed printing finish.
+const SALES_BRAIN_NATURAL_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
+const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","commercial_owner_review_required","approved_moq_missing"]);
+const SALES_BRAIN_FACT_LABELS={product_interest:["مدل","الموديل"],requested_quantity:["تعداد","العدد"],requested_size:["سایز","القياس"],printing:["نوع چاپ","نوع الطباعة"],branding:["لوگو","الشعار"],destination:["مقصد","الوجهة"],exterior_color:["رنگ","اللون"],interior_color:["رنگ","اللون"]};
+function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,repeat=false,quantity=null,printing=null,waitingOn=null,recorded=[],moq=null}={}){
+  const ar=language==="Iraqi Arabic";
+  const finish=/طلاکوب|gold\s*foil|تذهيب|ذهبي/iu.test(String(printing||""))?(ar?"طباعة ذهبية":"طلاکوب"):/نقره[‌\s]?کوب|silver\s*foil/iu.test(String(printing||""))?(ar?"طباعة فضية":"نقره‌کوب"):null;
+  const digits=n=>ar?String(n):String(n).replace(/[0-9]/g,d=>PERSIAN_DIGITS[d]);
+  const qty=Number.isSafeInteger(quantity)&&quantity>0?digits(quantity):null;
+  // While waiting for the owner, name what the customer just added, so each acknowledgement is specific (and never a repeat).
+  const labels=[...new Set(recorded.map(f=>SALES_BRAIN_FACT_LABELS[f]?.[ar?1:0]).filter(Boolean))];
+  const list=labels.length<2?labels.join(""):labels.slice(0,-1).join("، ")+(ar?" و":" و ")+labels[labels.length-1];
+  const waiting=waitingOn==="unsupported_price"?(ar?"السعر قيد المراجعة وراح أرجعلك.":"قیمت در حال بررسیه و خبرتون می‌دم."):(ar?"الموضوع قيد المراجعة وراح أرجعلك.":"موضوع در حال بررسیه و خبرتون می‌دم.");
+  const t=ar?{
+    ask_product:repeat?"بس كولي شنو نوع العلبة اللي تريدها؟":"شنو نوع العلبة اللي تريدها؟",
+    ask_quantity:repeat?"بس كولي شكد العدد؟":"شكد العدد اللي تحتاجه؟",
+    ask_size:repeat?"بس كولي القياس المطلوب؟":"شنو القياس اللي تريده؟",
+    ask_customization:"تريد طباعة أو شعار على العلبة؟",
+    ask_destination:"وين يكون التسليم؟",
+    ask_color:"شنو اللون اللي تريده؟",
+    answer_moq:Number.isSafeInteger(moq)?`أقل كمية للطلب ${digits(moq)} قطعة.`:"",
+    price_owner:qty?`تم تسجيل طلب ${qty} قطعة${finish?` ب${finish}`:""}. راح أتأكد من السعر الدقيق وأرجعلك.`:"أكيد، راح أتأكد من السعر الدقيق وأرجعلك.",
+    commercial_owner:"أكيد، راح أراجع الموضوع وأرجعلك.",
+    moq_owner:"أكيد، راح أتأكد من الحد الأدنى للطلب وأرجعلك.",
+    wait_for_owner:(list?`شكراً، سجلت ${list}. `:"")+waiting,
+    owner_followup:"الموضوع قيد المراجعة وراح أرجعلك."
+  }:{
+    ask_product:repeat?"فقط بفرمایید چه مدل جعبه‌ای مدنظرتونه؟":"چه مدل جعبه‌ای مدنظرتونه؟",
+    ask_quantity:repeat?"فقط بفرمایید چند عدد لازم دارید؟":"چند عدد لازم دارید؟",
+    ask_size:repeat?"فقط سایزش رو بفرمایید.":"چه سایزی مدنظرتونه؟",
+    ask_customization:"چاپ یا لوگو هم روی جعبه می‌خواید؟",
+    ask_destination:"برای کدوم شهر می‌خواید؟",
+    ask_color:"چه رنگی مدنظرتونه؟",
+    answer_moq:Number.isSafeInteger(moq)?`حداقل سفارش ${digits(moq)} عدده.`:"",
+    price_owner:qty?`سفارش ${qty} عددی${finish?` با چاپ ${finish}`:""} ثبت شد. قیمت دقیقش رو بررسی می‌کنم و خبرتون می‌دم.`:"حتماً، قیمت دقیق رو بررسی می‌کنم و خبرتون می‌دم.",
+    commercial_owner:"حتماً، این مورد رو بررسی می‌کنم و خبرتون می‌دم.",
+    moq_owner:"حتماً، حداقل سفارش رو بررسی می‌کنم و خبرتون می‌دم.",
+    wait_for_owner:(list?`ممنون، ${list} ثبت شد. `:"")+waiting,
+    owner_followup:"موضوع در حال بررسیه و خبرتون می‌دم."
+  };
+  // Acknowledgement prefixes only on questions; holding/answer replies already speak to the customer's request.
+  const ack=action.startsWith("ask_")?(imageAck?(ar?"وصلت الصورة. ":"عکس رسید. "):factsAck?(ar?"تمام، سجلتها. ":"ممنون، ثبت شد. "):""):"";
+  return ack+(t[action]||t.owner_followup);
+}
 // Discovery asks ONLY for what is still missing; known facts (quantity, model, image reference) are never re-asked.
 function salesBrainDiscoveryDraft(kind,language,missing,imageAck){
   const ar=language==="Iraqi Arabic";
@@ -5934,7 +5997,9 @@ async function upgradeOwnerEscalationIdentityColumns(env){
     throw error;
   }
 }
-async function ensureOwnerEscalationStore(env){
+// Idempotent schema setup runs once per isolate per database (see onceEnsured); the body is unchanged.
+async function ensureOwnerEscalationStore(env){return onceEnsured(env,"OwnerEscalationStore",()=>ensureOwnerEscalationStoreNow(env));}
+async function ensureOwnerEscalationStoreNow(env){
   await env.DB.batch(OWNER_ESCALATION_SCHEMA.map(sql=>env.DB.prepare(sql)));
   await upgradeOwnerEscalationIdentityColumns(env);
   await env.DB.batch(OWNER_ESCALATION_SCHEMA.slice(1).map(sql=>env.DB.prepare(sql)));
@@ -6063,6 +6128,40 @@ function orderAuthoritativeFacts(order){
   const categories=order.status==="confirmed"||order.status==="partially_paid"||order.status==="paid"?["payment","shipping"]:["shipping"];
   return categories.map(category=>({category,values}));
 }
+// ---- Knowledge-driven requirements (no global sales questionnaire) ----
+// Which customer facts must be known before the next commercial step comes ONLY from owner-approved Sales Knowledge:
+//   A. domain pricing / attribute required_fields          (product-specific beats global)
+//   B. domain product|configuration / attribute required_fields
+//   C. any other pricing rule whose value carries required_fields
+//   D. otherwise a conservative generic minimum: what is being bought (a product name/type or a customer image) + quantity.
+// Size, destination, printing, logo, color, … are never required by default; customer-volunteered values are still remembered.
+const SALES_REQUIREMENT_FIELDS={product:"product_or_model",model:"product_or_model",product_or_model:"product_or_model",product_type:"product_or_model",quantity:"quantity",qty:"quantity",size:"size",dimensions:"size",dimension:"size",printing:"customization",print:"customization",logo:"customization",branding:"customization",customization:"customization",finish:"customization",destination:"destination",city:"destination",shipping_destination:"destination",color:"color",colour:"color"};
+function salesBrainProductKey(value){return String(value||"").normalize("NFKC").trim().toLowerCase().replace(/[\s‌_-]+/g,"_").replace(/^_+|_+$/g,"").slice(0,80);}
+function salesRequirementList(value){const list=Array.isArray(value)?value:Array.isArray(value?.required_fields)?value.required_fields:null;if(!list)return null;const fields=[...new Set(list.map(x=>SALES_REQUIREMENT_FIELDS[String(x).toLowerCase().trim()]).filter(Boolean))];return fields.length?fields:null;}
+function resolveSalesRequirements(rules,productKeys){
+  const parse=r=>{try{return JSON.parse(r.value_json)}catch{return null}};
+  const applies=r=>r.entity_key==="global"||productKeys.includes(r.entity_key);
+  const tiers=[["A_pricing_required_fields",r=>r.domain==="pricing"&&r.attribute==="required_fields"],["B_product_configuration_required_fields",r=>(r.domain==="product"||r.domain==="configuration")&&r.attribute==="required_fields"],["C_pricing_rule",r=>r.domain==="pricing"&&r.attribute!=="required_fields"&&Array.isArray(parse(r)?.required_fields)]];
+  for(const [source,matches] of tiers){
+    const candidates=rules.filter(r=>matches(r)&&applies(r)).sort((a,b)=>Number(b.entity_key!=="global")-Number(a.entity_key!=="global"));
+    for(const rule of candidates){const fields=salesRequirementList(parse(rule));if(fields)return {fields,source,authoritative:true,rule:{id:rule.id,version:rule.version,entity_key:rule.entity_key}};}
+  }
+  return {fields:["product_or_model","quantity"],source:"D_generic_minimum",authoritative:false,rule:null};
+}
+// Bounded learning hook: an owner-approved strategy fact (domain strategy, attribute question_order) may only REORDER fields
+// that are already required. It can never add a requirement, a price, a discount or any other commercial fact; strategy
+// learned from owner corrections/outcomes must reach it through the normal reviewed Sales Knowledge flow.
+function applySalesStrategyOrder(fields,rules,productKeys){
+  const rule=rules.filter(r=>r.domain==="strategy"&&r.attribute==="question_order"&&(r.entity_key==="global"||productKeys.includes(r.entity_key))).sort((a,b)=>Number(b.entity_key!=="global")-Number(a.entity_key!=="global"))[0];
+  let order=null;try{order=salesRequirementList(JSON.parse(rule?.value_json||"null"));}catch{}
+  if(!order)return {fields,strategy:null};
+  const rank=f=>{const i=order.indexOf(f);return i<0?order.length:i;};
+  return {fields:[...fields].sort((a,b)=>rank(a)-rank(b)),strategy:{id:rule.id,version:rule.version}};
+}
+function salesBrainCustomerGoal(intent,known){
+  return ({asks_price:"price",asks_moq:"moq",asks_shipping:"shipping",negotiating:"terms_or_discount",objection_price:"terms_or_discount",quote_requested:"quote",accepted:"accept",rejected:"decline"})[intent]||(known.quantity||known.product_or_model?"order_inquiry":"general_inquiry");
+}
+
 async function runSalesNegotiationBrain(env,inboxId){
   await ensureConversationMemoryStore(env);await ensureSalesKnowledgeStore(env);await ensureQuoteStore(env);await ensureOwnerEscalationStore(env);
   const prior=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+inboxId).first();
@@ -6082,42 +6181,67 @@ async function runSalesNegotiationBrain(env,inboxId){
   // observation is advisory visual context and never an authoritative fact for the validator.
   let imageReference={status:"none",images:[],image_count:0};try{imageReference=await resolveCustomerImageReference(env,row);}catch{}
   const imageRefId=imageReference.status==="resolved"?imageReference.media_id:imageReference.status==="none"&&typeof memory.customer_image_reference==="string"?memory.customer_image_reference:null,currentImage=imageReference.basis==="current_message",imageAmbiguous=imageReference.status==="ambiguous";
-  const knownQuantity=memory.requested_quantity,quantityValid=Number.isSafeInteger(knownQuantity)&&knownQuantity>0,missing=[];if(!model&&!imageRefId)missing.push("product_or_model");if(!quantityValid)missing.push("quantity");
-  const detailMissing=[];if(!memory.requested_size)detailMissing.push("size");if(!memory.printing&&!memory.branding)detailMissing.push("customization");if(!memory.destination)detailMissing.push("destination");
-  let action=imageAmbiguous?"ask_image_reference":!model&&!imageRefId?"ask_product":!quantityValid?"ask_quantity":"ask_details",needsOwner=false,needsOwnerReason=null,visuals=[];
-  // Earlier Sales Brain decisions of THIS conversation (PK lookups): the brain never repeats a discovery question the customer
-  // has already been asked; it advances to the next genuinely missing requirement instead.
+  const knownQuantity=memory.requested_quantity,quantityValid=Number.isSafeInteger(knownQuantity)&&knownQuantity>0;
+  // ---- Conversation state → ONE next-best action (a salesperson, not a questionnaire).
+  const known={product_or_model:!!model||!!imageRefId,quantity:quantityValid,size:!!memory.requested_size,customization:!!(memory.printing||memory.branding),destination:!!memory.destination,color:!!(memory.exterior_color||memory.interior_color)};
+  // The referenced customer image's advisory category is used ONLY as a lookup key for requirement rules (e.g. ring_box);
+  // it never becomes a product fact, a price input or verified product knowledge.
+  let imageCategory=null;try{imageCategory=JSON.parse((imageReference.images||[]).find(x=>x.id===imageRefId)?.observation_json||"null")?.likely_product_category||null;}catch{}
+  const productKeys=[...new Set([model,imageCategory].filter(x=>x&&x!=="unknown").map(salesBrainProductKey).filter(Boolean))];
+  const requirementRules=(await env.DB.prepare(`SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN ('pricing','product','configuration','size','strategy') AND (entity_key='global'${productKeys.length?` OR entity_key IN (${productKeys.map(()=>"?").join(",")})`:""}) ORDER BY created_at DESC LIMIT 100`).bind(...productKeys).all()).results||[];
+  const requirements=resolveSalesRequirements(requirementRules,productKeys);
+  // An approved standard size/configuration for this product (or globally) satisfies a size requirement.
+  let requiredFields=requirements.fields.filter(f=>!(f==="size"&&requirementRules.some(r=>r.domain==="size"&&/standard/i.test(String(r.attribute)))));
+  const ordered=applySalesStrategyOrder(requiredFields,requirementRules,productKeys);requiredFields=ordered.fields;
+  const missing=requiredFields.filter(x=>!known[x]),detailMissing=[];
+  // Knowledge-required fields may be asked twice; the generic minimum only once (unknown knowledge never becomes interrogation).
+  const maxAsks=requirements.authoritative?2:1;
+  // Earlier decisions of THIS conversation (PK lookups): which single field was already asked, and how often.
   const priorDecisions=[];
   for(const prev of (await env.DB.prepare("SELECT id FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id<>? AND created_at<=? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,row.id,row.created_at||now()).all()).results||[]){
     const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+prev.id).first();
-    if(event?.details_json)try{const d=JSON.parse(event.details_json);if(d.lead_id===row.lead_id&&d.conversation_id===row.conversation_id)priorDecisions.push({action:d.next_sales_action,missing:[...(d.missing_required_facts||[]),...(d.missing_detail_facts||[])]});}catch{}
+    if(event?.details_json)try{const d=JSON.parse(event.details_json);if(d.lead_id===row.lead_id&&d.conversation_id===row.conversation_id)priorDecisions.push({action:d.next_sales_action,asked:d.asked_field||(d.next_sales_action==="ask_product"?"product_or_model":d.next_sales_action==="ask_quantity"?"quantity":null)});}catch{}
   }
-  const askedBefore=a=>priorDecisions.some(d=>d.action===a||(a==="ask_product"&&d.action==="price_discovery"&&d.missing.includes("product_or_model"))),lastAction=priorDecisions[0]?.action||null,productAskedBefore=askedBefore("ask_product");
-  let repetitionAdvanced=null;
-  if(orderStatusAsked){action="order_status";missing.length=0;}
+  const timesAsked=field=>priorDecisions.filter(d=>d.asked===field).length,lastAction=priorDecisions[0]?.action||null;
+  // Facts this turn actually CHANGED (a restated identical value is not new information).
+  const newFacts=((await env.DB.prepare("SELECT f.fact_type FROM conversation_memory_facts f LEFT JOIN conversation_memory_facts p ON p.id=f.supersedes_fact_id WHERE f.lead_id=? AND f.conversation_id=? AND f.source_message_id=? AND (p.id IS NULL OR p.value_hash<>f.value_hash)").bind(row.lead_id,row.conversation_id,row.id).all()).results||[]).map(f=>f.fact_type).filter(t=>!["customer_message","customer_question","unresolved_question","objection","customer_image_reference"].includes(t));
+  // One durable owner escalation per open QUESTION (reason): a repeat waits for it; a different owner-only question gets its own.
+  const openEscalations=(await env.DB.prepare("SELECT id,reason_code FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) ORDER BY created_at DESC LIMIT 20").bind(row.lead_id,row.conversation_id,row.id).all()).results||[],openEscalation=openEscalations[0]||null;
+  const priceAlreadyResolved=ownerCaseDecisions.some(x=>x.reason_code==="unsupported_price");
+  let action=null,askedField=null,needsOwner=false,needsOwnerReason=null,visuals=[],waitingOn=openEscalation?.reason_code||null;const answerNumbers=[];
+  const escalate=(kind,reason)=>{const same=openEscalations.find(e=>e.reason_code===ownerEscalationReason({needs_owner_reason:reason}));if(same){action="wait_for_owner";waitingOn=same.reason_code;return;}action=kind;needsOwner=true;needsOwnerReason=reason;};
+  if(orderStatusAsked){action="order_status";}
   else if(intent==="rejected"){action="acknowledge_rejection";}
-  // A price question before product/quantity are known is discovery (no price can exist yet); with both known it is owner-only.
-  else if(intent==="asks_price"&&(missing.includes("quantity")||missing.includes("product_or_model")||imageAmbiguous)){action="price_discovery";}
-  else if(intent==="asks_price"){action="price_owner";needsOwner=true;needsOwnerReason="authoritative_price_required";}
-  else if(intent==="asks_moq"){const moq=knowledge.find(x=>x.domain==="quantity"&&x.attribute==="moq");action=moq&&model?"ask_details":"moq_owner";needsOwner=!moq;needsOwnerReason=needsOwner?"approved_moq_missing":null;}
-  else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price"){action="commercial_owner";needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
-  else if(intent==="quote_requested"){action="quote";needsOwner=!model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
+  else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price")escalate("commercial_owner","commercial_owner_review_required");
+  else if(intent==="asks_moq"){const moqFact=knowledge.find(x=>x.domain==="quantity"&&x.attribute==="moq");let moqValue=null;try{moqValue=JSON.parse(moqFact?.value_json||"null");}catch{}if(Number.isSafeInteger(moqValue)&&moqValue>0){action="answer_moq";answerNumbers.push(moqValue);}else escalate("moq_owner","approved_moq_missing");}
+  else if(intent==="quote_requested"){action="quote";needsOwner=!known.product_or_model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
   else if(intent==="accepted"){action="accepted";}
-  else if(/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
+  else if(openEscalation){action="wait_for_owner";}
+  else if(imageAmbiguous&&!model&&lastAction!=="ask_image_reference"){action="ask_image_reference";askedField="product_or_model";}
+  else if(intent!=="asks_price"&&/(?:رنگ|لون|color|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
+  else{
+    // Ask ONLY the next required field (bounded); once requirements are met — or cannot be met by asking — the price goes to
+    // the owner. With nothing useful known yet and no buying signal, a human looks at it instead of a forced escalation.
+    // Generic mode: once "what are you buying?" went unanswered, further generic questions are pointless.
+    const next=!requirements.authoritative&&!known.product_or_model&&timesAsked("product_or_model")>=maxAsks?null:missing.find(x=>timesAsked(x)<maxAsks);
+    if(next){askedField=next;action={product_or_model:"ask_product",quantity:"ask_quantity",size:"ask_size",customization:"ask_customization",destination:"ask_destination",color:"ask_color"}[next];}
+    else if(priceAlreadyResolved&&!newFacts.length)action="owner_followup";
+    else if(!known.product_or_model&&!known.quantity&&intent!=="asks_price")action="owner_followup";
+    else escalate("price_owner","authoritative_price_required");
+  }
   const authorityFacts=[...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
-  if(action==="ask_product"&&productAskedBefore){repetitionAdvanced="ask_product";action=!quantityValid&&lastAction!=="ask_quantity"?"ask_quantity":"ask_details";}
-  else if(action==="ask_quantity"&&(lastAction==="ask_quantity"||(lastAction==="price_discovery"&&priorDecisions[0].missing.includes("quantity")&&!currentImage))){repetitionAdvanced="ask_quantity";action="ask_details";}
-  else if(action==="ask_image_reference"&&lastAction==="ask_image_reference"){repetitionAdvanced="ask_image_reference";action="ask_details";}
-  const priceMissing=[...missing,...detailMissing].filter(x=>!(x==="product_or_model"&&productAskedBefore));
-  const discoveryAction=["ask_image_reference","ask_product","ask_quantity","ask_details","price_owner","price_discovery"].includes(action);
-  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):imageAmbiguous&&discoveryAction&&!repetitionAdvanced?salesBrainDraft("ask_image_reference",language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="price_owner"||action==="price_discovery"?salesBrainDiscoveryDraft("price",language,action==="price_owner"?[...missing,...detailMissing]:priceMissing,currentImage):action==="ask_quantity"?salesBrainDiscoveryDraft("quantity",language,[],currentImage):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),repetition_advanced_from:repetitionAdvanced,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:newFacts,moq:answerNumbers[0]??null}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
+  const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
+  const nextBestAction=action?.startsWith("ask_")?"ASK_REQUIRED_FIELD":action==="answer_moq"&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"):[],decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
   return result;
 }
 
-async function processNegotiationInbound(env,inboxId) {
+async function processNegotiationInbound(env,inboxId,timing={}) {
+  const started=Date.now();
   await ensureLeadOutreachStore(env);
   const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,l.stage AS lead_stage,c.contact_id,c.platform AS conversation_platform
     FROM inbox_messages i JOIN leads l ON l.id=i.lead_id
@@ -6143,11 +6267,14 @@ async function processNegotiationInbound(env,inboxId) {
   const recipient=telegramLeadContactChatId(contact);
   if(!recipient)throw Error("Linked Telegram conversation has no sendable numeric contact");
   const context=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);
-  const brain=await runSalesNegotiationBrain(env,inboxId);
+  timing.memory_ms=Date.now()-started;
+  const brainStarted=Date.now(),brain=await runSalesNegotiationBrain(env,inboxId);timing.brain_ms=Date.now()-brainStarted;
+  // A validated holding reply is not an owner-review draft (its owner escalation is already open and durable).
+  const ownerReviewDraft=!!brain.needs_owner&&brain.owner_holding_reply!==true;
   const message=brain.draft_customer_reply||negotiationReplyDraft(intent,language),t=now(),outreachId=uid();
   await env.DB.prepare(`INSERT OR IGNORE INTO lead_outreach
     (id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,error_code,error_detail,created_at,updated_at)
-    VALUES(?,?,?,?,?,'telegram',?,?,?,?,?,?,?,?)`).bind(outreachId,row.lead_id,contact.id,row.conversation_id,inboxId,recipient,message,language,"draft",brain.needs_owner?"sales_brain_needs_owner":null,brain.needs_owner?String(brain.needs_owner_reason||"owner_review_required").slice(0,240):null,t,t).run();
+    VALUES(?,?,?,?,?,'telegram',?,?,?,?,?,?,?,?)`).bind(outreachId,row.lead_id,contact.id,row.conversation_id,inboxId,recipient,message,language,"draft",ownerReviewDraft?"sales_brain_needs_owner":null,ownerReviewDraft?String(brain.needs_owner_reason||"owner_review_required").slice(0,240):null,t,t).run();
   const outreach=await env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
   if(!outreach)throw Error("Negotiation draft could not be persisted");
   await env.DB.prepare("UPDATE inbox_messages SET category=?,reply_suggestion=?,updated_at=? WHERE id=?").bind(intent,outreach.message,now(),inboxId).run();
@@ -6156,16 +6283,22 @@ async function processNegotiationInbound(env,inboxId) {
   if(intent==="quote_requested")try{await ensureQuoteFromInbox(env,inboxId);}catch(error){try{await audit(env,"lead_quote_creation_failed","Inbound reply remained stored after quote creation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   if(intent==="accepted"||intent==="rejected")try{await recordQuoteDecisionFromInbound(env,inboxId,intent);}catch(error){try{await audit(env,"lead_quote_decision_link_failed","Quote decision could not be deterministically linked",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   // Safe auto-reply only for the draft THIS call created (a Telegram redelivery never re-sends; it returns above).
-  let autoSend=null;
+  let autoSend=null;const sendStarted=Date.now();
   if(outreach.id===outreachId&&outreach.status==="draft")try{autoSend=await autoSendSafeInboundReply(env,{row,brain,outreach,recipient});}catch(error){autoSend={sent:false,reason:"auto_send_error"};try{await audit(env,"inbound_auto_reply_failed","Inbound auto-reply failed safely; draft kept for owner review",{outreach_id:outreach.id,inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+  timing.send_ms=Date.now()-sendStarted;timing.negotiation_total_ms=Date.now()-started;
+  // Stage timings only (ids + milliseconds); no message text, tokens or provider payloads.
+  try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound sales pipeline timing',?,?)").bind("inbound-timing:"+inboxId,"inbound_pipeline_timing",JSON.stringify({inbox_message_id:inboxId,conversation_id:row.conversation_id,action:brain.next_sales_action||null,next_best_action:brain.next_best_action||null,auto_sent:!!autoSend?.sent,...timing}),now()).run();}catch{}
   return {processed:true,idempotent:outreach.id!==outreachId,intent,language,outreach,auto_send:autoSend};
 }
 
 // Established PRIVATE inbound conversations: safe discovery/clarification replies are sent without per-turn owner review.
 // Anything commercial (price, discount, MOQ, shipping, payment, quote, acceptance) or any validator/owner flag stays a draft
 // for the owner (fail-closed). Proactive outreach never comes through here and keeps its approval flow unchanged.
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_details","ask_image_reference","price_discovery"]);
-const INBOUND_AUTO_SEND_HOURLY_LIMIT=4;
+// price_owner/commercial_owner/moq_owner qualify ONLY as the validated holding reply (brain.owner_holding_reply): the owner
+// escalation stays open and the actual commercial answer still requires the owner.
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner"]);
+// Loop protection rests on the repetitive/echo guards; this cap only bounds a runaway exchange (natural sales chats are multi-turn).
+const INBOUND_AUTO_SEND_HOURLY_LIMIT=10;
 async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
   if(String(env.INBOUND_AUTO_REPLY||"on").toLowerCase()==="off")return "inbound_auto_reply_disabled";
   if(!(await autonomyMasterGate(env)))return "autonomy_master_off";
@@ -6173,13 +6306,14 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
   const chat=normalizeTelegramPrivateChatId(row.provider_conversation_id);
   // Reply only into the same private chat the customer wrote from (a group/channel id is never a private customer chat).
   if(!chat||String(recipient)!==chat||String(row.provider_sender_id||"")!==chat||String(outreach.recipient)!==chat)return "not_private_customer_chat";
-  if(!brain||brain.needs_owner)return "owner_required";
-  if(brain.validation?.valid!==true||!validateSalesBrainDraft(outreach.message,{authoritativeFacts:[]}).valid)return "validator_blocked";
+  if(!brain||(brain.needs_owner&&brain.owner_holding_reply!==true))return "owner_required";
+  const ownQuantity=brain.customer_known_facts?.requested_quantity;
+  if(brain.validation?.valid!==true||!validateSalesBrainDraft(outreach.message,{allowedNumbers:[...(Number.isSafeInteger(ownQuantity)?[ownQuantity]:[]),...(brain.answer_numbers||[]).filter(Number.isSafeInteger)],authoritativeFacts:brain.knowledge_answer_facts||[]}).valid)return "validator_blocked";
   if(!INBOUND_AUTO_SEND_ACTIONS.has(brain.next_sales_action))return "action_requires_owner_review";
   if(!brain.draft_customer_reply||outreach.message!==brain.draft_customer_reply||outreach.inbox_message_id!==row.id)return "draft_not_from_validated_brain";
   await ensureOwnerEscalationStore(env);
-  // While an owner decision is pending in this conversation, the conversation waits for it (no autonomous replies).
-  if(await env.DB.prepare("SELECT id FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' LIMIT 1").bind(row.lead_id,row.conversation_id).first())return "open_owner_escalation";
+  // While an earlier owner decision is pending, only the brief "still checking" acknowledgement may go out automatically.
+  if(brain.next_sales_action!=="wait_for_owner"&&brain.owner_holding_reply!==true&&await env.DB.prepare("SELECT id FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) LIMIT 1").bind(row.lead_id,row.conversation_id,row.id).first())return "open_owner_escalation";
   const recent=(await env.DB.prepare("SELECT id,message,status,approved_by,created_at FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND id<>? ORDER BY created_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id,outreach.id).all()).results||[];
   const key=salesBrainClaimText(outreach.message),inboundKey=salesBrainClaimText(row.message);
   if(recent.slice(0,3).some(x=>salesBrainClaimText(x.message)===key))return "repetitive_reply";
@@ -6192,7 +6326,7 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
 async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient}){
   const reason=await inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}),base={outreach_id:outreach.id,inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id};
   if(reason){
-    if(reason!=="owner_required")await env.DB.prepare("UPDATE lead_outreach SET error_code='inbound_auto_send_blocked',error_detail=?,updated_at=? WHERE id=? AND status='draft' AND error_code IS NULL").bind(reason,now(),outreach.id).run();
+    if(reason!=="owner_required")await env.DB.prepare("UPDATE lead_outreach SET error_code=?,error_detail=?,updated_at=? WHERE id=? AND status='draft' AND error_code IS NULL").bind(brain?.needs_owner?"sales_brain_needs_owner":"inbound_auto_send_blocked",brain?.needs_owner?String(brain.needs_owner_reason||reason).slice(0,240):reason,now(),outreach.id).run();
     try{await audit(env,"inbound_auto_reply_held","Inbound reply held for owner review",{...base,reason});}catch{}
     return {sent:false,reason};
   }
@@ -6207,7 +6341,9 @@ const QUOTE_STATUSES=new Set(["draft","needs_details","requires_owner_review","w
 const QUOTE_MUTABLE_STATUSES=new Set(["draft","needs_details","requires_owner_review","waiting_for_owner_price","waiting_for_price_match","quote_ready"]);
 const MONEY_FIELDS=["unit_price_minor","discount_minor","shipping_minor","tax_minor","other_fees_minor"];
 
-async function ensureQuoteStore(env){
+// Idempotent schema setup runs once per isolate per database (see onceEnsured); the body is unchanged.
+async function ensureQuoteStore(env){return onceEnsured(env,"QuoteStore",()=>ensureQuoteStoreNow(env));}
+async function ensureQuoteStoreNow(env){
   await ensureLeadOutreachStore(env);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS lead_quotes (
     id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,conversation_id TEXT NOT NULL,inbox_message_id TEXT,outreach_id TEXT,
@@ -9112,7 +9248,10 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const r = await env.DB.prepare(`SELECT i.*,l.name AS lead_name,o.id AS outreach_id,o.status AS outreach_status,o.message AS outreach_message,o.language AS outreach_language,o.approved_by AS outreach_approved_by,o.error_code AS outreach_error_code,o.error_detail AS outreach_error_detail${mediaReady ? ",cm.analysis_status AS media_status,cm.media_group_id AS media_group_id" : ""}
           FROM inbox_messages i LEFT JOIN leads l ON l.id=i.lead_id LEFT JOIN lead_outreach o ON o.inbox_message_id=i.id${mediaReady ? " LEFT JOIN conversation_customer_media cm ON cm.inbox_message_id=i.id" : ""}
           ORDER BY i.created_at DESC LIMIT 200`).all();
-        return json({ ok: true, items: r.results || [] });
+        let items = r.results || [];
+        // Read-only marker: an auto-sent holding reply whose owner escalation is still open.
+        try { const open = new Set(((await env.DB.prepare("SELECT source_message_id FROM owner_escalations WHERE status='open' AND source_message_id IS NOT NULL").all()).results || []).map(x => x.source_message_id)); items = items.map(x => ({ ...x, open_escalation: open.has(x.id) })); } catch {}
+        return json({ ok: true, items });
       }
 
       if (u.pathname === "/api/inbox/negotiation-draft" && req.method === "POST") {
