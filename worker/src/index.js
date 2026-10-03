@@ -2046,7 +2046,9 @@ async function applyOwnerKnowledgeItem(env,item){
     const requestId=("owner-import-"+item.id).replace(/[^A-Za-z0-9_-]/g,"-").slice(0,80);
     const proposal=await proposeSalesKnowledge(env,{id:requestId,operation:member?"EXPAND":"ADD",domain:item.fact_domain,entity_type:item.item_type==="rule"?"business":"model",entity_key:item.item_type==="rule"?"global":item.product_name,attribute:item.fact_attribute,market:item.market==="GLOBAL"?"GLOBAL":item.market,value},{sourceType:"owner_import",parserSource:"owner_import",parserConfidence:1});
     if(proposal.status==="conflict"){const reasons=(()=>{try{return JSON.parse(proposal.conflict_json).map(x=>x.reason)}catch{return []}})();if(reasons.every(r=>r==="duplicate"||r==="duplicate_member"))return {result_ref:`sales_knowledge:already_active`};return {result_ref:`sales_knowledge_change_requests:${proposal.id}:conflict`,conflict:true};}
-    const reviewed=await reviewSalesKnowledge(env,{id:proposal.id,decision:"approve",proposal_hash:proposal.proposal_hash,confirm_sensitive:true,note:"Approved from owner knowledge import review"});
+    // Resume safety: the deterministic request id returns the SAME proposal on retry; never review/apply it twice.
+    if(proposal.status==="applied")return {result_ref:`sales_knowledge_facts:${proposal.result_fact_id}`};
+    const reviewed=proposal.status==="approved"?proposal:await reviewSalesKnowledge(env,{id:proposal.id,decision:"approve",proposal_hash:proposal.proposal_hash,confirm_sensitive:true,note:"Approved from owner knowledge import review"});
     const applied=await applySalesKnowledge(env,{id:reviewed.id,proposal_hash:reviewed.proposal_hash,confirm_apply:true});
     return {result_ref:`sales_knowledge_facts:${applied.result_fact_id}`};
   }
@@ -2129,18 +2131,32 @@ async function handleOwnerKnowledge(req,env){
       const b=await req.json().catch(()=>null);return json({ok:true,item:await reviewOwnerKnowledgeItem(env,b)});
     }
     if(u.pathname==="/api/owner-knowledge/imports/approve-parsed"&&req.method==="POST"){
-      // Bulk approval covers only clean parsed items; ambiguous, rejected and conflicting rows always stay with the owner.
-      const b=await req.json().catch(()=>null),id=String(b?.import_id||"");
+      // Bounded, resumable bulk approval: at most `batch_size` items (default 20, max 30) per request; the dashboard calls
+      // again until `remaining` is 0. Only clean parsed items are eligible: rules, ambiguous/rejected/unparsed, conflicting,
+      // price-replacing and previously failed items always stay for individual owner review. Every step is idempotent.
+      const b=await req.json().catch(()=>null),id=String(b?.import_id||""),limit=Math.min(30,Math.max(1,Math.floor(Number(b?.batch_size)||20)));
       if(!id||b?.confirm_commercial!==true)return json({ok:false,error:"import_id and explicit commercial confirmation are required"},400);
-      const items=(await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE import_id=? AND review_status='pending_review' AND parse_status='parsed' ORDER BY seq").bind(id).all()).results||[];
-      const done=[],failed=[];
-      for(const item of items){
+      const rows=(await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE import_id=? AND parse_status='parsed' AND review_status IN ('pending_review','approved') ORDER BY seq").bind(id).all()).results||[];
+      const staleBefore=new Date(Date.now()-120000).toISOString(),held=[],eligible=[],stalled=[];
+      for(const item of rows){
         let issues=[];try{issues=JSON.parse(item.issues_json||"[]")}catch{}
-        // Business rules (MOQ, deposit, shipping, ...) and anything conflicting or replacing an active price need individual review.
-        if(item.item_type==="rule"||issues.some(i=>/conflict|replaces_active_price|mismatch|ambiguous/.test(i.code))){failed.push({id:item.id,reason:"needs_individual_review"});continue;}
-        try{await reviewOwnerKnowledgeItem(env,{id:item.id,action:"approve",expected_version:item.version,confirm_commercial:true});done.push(item.id);}catch(error){failed.push({id:item.id,reason:sanitizeOperationalError(error?.message||error)});}
+        // An item left 'approved' without a result (interrupted mid-apply) is resumed once it is clearly stale.
+        if(item.review_status==="approved"){if(!item.applied_at&&!item.result_ref&&String(item.updated_at)<staleBefore)stalled.push(item);continue;}
+        if(item.item_type==="rule"||issues.some(i=>/conflict|replaces_active_price|mismatch|ambiguous|priced_elsewhere|apply_failed/.test(i.code)))held.push({id:item.id,reason:"needs_individual_review"});
+        else eligible.push(item);
       }
-      return json({ok:true,approved:done.length,held:failed});
+      const batch=[...stalled,...eligible].slice(0,limit),applied=[],failed=[];
+      for(const item of batch){
+        try{
+          if(item.review_status==="approved"){
+            const result=await applyOwnerKnowledgeItem(env,item),t=now();
+            await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status=?,result_ref=?,applied_at=?,updated_at=? WHERE id=? AND review_status='approved' AND applied_at IS NULL").bind(result.conflict?"approved":"applied",result.result_ref,result.conflict?null:t,t,item.id).run();
+          }else await reviewOwnerKnowledgeItem(env,{id:item.id,action:"approve",expected_version:item.version,confirm_commercial:true});
+          applied.push(item.id);
+        }catch(error){failed.push({id:item.id,reason:sanitizeOperationalError(error?.message||error)});}
+      }
+      const remaining=Math.max(0,stalled.length+eligible.length-batch.length);
+      return json({ok:true,applied:applied.length,approved:applied.length,failed:failed.length,failures:failed,skipped:held.length,held,remaining,batch_size:limit});
     }
     return json({ok:false,error:"Not found"},404);
   }catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}

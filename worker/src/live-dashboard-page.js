@@ -959,8 +959,18 @@ document.addEventListener("click",async ev=>{
   let d;
   if(action==="approve-parsed"){
    if(!confirm("Approve every CLEAN parsed item? Ambiguous, conflicting and price-replacing rows stay for individual review. Approved prices become owner-approved price versions."))return;
-   d=await api("/api/owner-knowledge/imports/approve-parsed",{method:"POST",body:JSON.stringify({import_id:ownerImportData.import_id,confirm_commercial:true})});if(!d.ok)throw Error(d.error);
-   await loadOwnerImports(ownerImportData.import_id);$("ownerImportStatus").insertAdjacentHTML("beforeend","<div class='mini ok'>Approved "+esc(d.approved)+" · held for individual review "+esc((d.held||[]).length)+"</div>");return;
+   // Server applies at most 20 items per request; keep calling until nothing eligible remains. Safe to press again to
+   // resume after a timeout: every step is idempotent and already-applied items are skipped.
+   const importId=ownerImportData.import_id;let applied=0,failed=0,held=0,remaining=1,rounds=0,stopped="";
+   while(remaining>0&&rounds<40){
+    rounds++;d=await api("/api/owner-knowledge/imports/approve-parsed",{method:"POST",body:JSON.stringify({import_id:importId,confirm_commercial:true,batch_size:20})});
+    if(!d.ok){stopped=d.error||"stopped";break}
+    applied+=d.applied||0;failed+=d.failed||0;held=d.skipped||0;remaining=d.remaining||0;
+    b.textContent="APPROVING… "+applied+" applied · "+remaining+" remaining";
+    if(!(d.applied>0))break;
+   }
+   await loadOwnerImports(importId);
+   $("ownerImportStatus").insertAdjacentHTML("beforeend","<div class='mini "+(stopped||failed?"warn":"ok")+"'>Applied "+esc(applied)+" · failed "+esc(failed)+" · held for individual review "+esc(held)+" · remaining "+esc(remaining)+(stopped?" · stopped: "+esc(stopped)+" (press APPROVE ALL again to resume)":"")+"</div>");return;
   }
   if(!x)return;
   if(action==="correct"){
