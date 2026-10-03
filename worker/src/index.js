@@ -4707,10 +4707,19 @@ async function handleTelegramWebhook(env,req){
   const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
   const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const isVault=isImageVault||isVideoVault;
   const isReady=!!readyChatId(env)&& (chatId===readyChatId(env)||username===readyChatId(env).replace(/^@/,'').toLowerCase());
-  const providerSenderId=String(m.from?.id||m.chat.id||''),providerUsername=String(m.from?.username||m.chat.username||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;
+  // Only a private chat with a human sender is a customer identity. A group/channel id, username or title is a shared
+  // space, never one customer: such messages are stored UNLINKED and escalated, and are never matched to a lead.
+  // Owner-configured internal destinations (main/vault/video-vault/ready) are operational chats: they may be stored as
+  // inbox evidence but never enter the customer identity pipeline (no lead, conversation, draft or escalation).
+  const internalChat=targets.some(x=>x===username||x===chatId);
+  const privateCustomerChat=!internalChat&&m.chat.type==='private'&&!!m.from&&m.from.is_bot!==true&&String(m.from.id||'')===chatId&&!!normalizeTelegramPrivateChatId(chatId);
+  const providerSenderId=String(m.from?.id||(privateCustomerChat?m.chat.id:'')||''),providerUsername=String(m.from?.username||(m.chat.type==='private'?m.chat.username:'')||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;
   await ensureLeadOutreachStore(env);
-  let linked=await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo});
-  if(m.chat.type==='private'&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});
+  const unlinkedInbound={leadId:null,conversationId:null,contactId:null};
+  let linked=privateCustomerChat?await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo}):unlinkedInbound;
+  if(privateCustomerChat&&!linked.leadId&&!linked.ambiguous&&!targets.includes(chatId))linked=await createTelegramInboundLead(env,m,{chatId,providerUsername});
+  if(privateCustomerChat&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});
+  if(!linked.leadId||!linked.conversationId)linked=unlinkedInbound;
   const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();
   if(!ex){
     const t=now(),inboxId=uid();
@@ -4720,12 +4729,12 @@ async function handleTelegramWebhook(env,req){
       catch(error){
         try { await audit(env,"negotiation_reply_draft_failed","Inbound reply was stored but negotiation enrichment failed",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)}); } catch {}
       }
-    }else try{await ensureAmbiguousTelegramIdentityEscalation(env,inboxId);}catch(error){try{await audit(env,"owner_escalation_creation_failed","Unlinked Telegram inbound remained stored after escalation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+    }else if(!internalChat)try{await ensureAmbiguousTelegramIdentityEscalation(env,inboxId);}catch(error){try{await audit(env,"owner_escalation_creation_failed","Unlinked Telegram inbound remained stored after escalation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }else{
     const existing=await env.DB.prepare("SELECT lead_id,conversation_id FROM inbox_messages WHERE id=? LIMIT 1").bind(ex.id).first();
     if(existing?.lead_id&&existing?.conversation_id)try { await processNegotiationInbound(env,ex.id); }
     catch(error){try { await audit(env,"negotiation_reply_retry_failed","Persisted inbound reply recovery failed safely",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)}); } catch {}}
-    else try{await ensureAmbiguousTelegramIdentityEscalation(env,ex.id);}catch(error){try{await audit(env,"owner_escalation_retry_failed","Unlinked Telegram inbound remained stored after escalation retry failure",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+    else if(!internalChat)try{await ensureAmbiguousTelegramIdentityEscalation(env,ex.id);}catch(error){try{await audit(env,"owner_escalation_retry_failed","Unlinked Telegram inbound remained stored after escalation retry failure",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
   if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
@@ -6338,7 +6347,7 @@ async function matchInboundLead(env, { platform, providerConversationId, provide
     if(chatId){
       const contacts=await env.DB.prepare("SELECT id,lead_id FROM lead_contacts WHERE contact_type='telegram' AND normalized_value=? AND evidence_status='provider_supplied' AND source IN ('telegram_webhook','telegram_provider') LIMIT 2").bind(chatId).all();
       const unique=[...new Set((contacts.results||[]).map(x=>x.lead_id))];
-      if(unique.length>1)return {leadId:null,conversationId:null,contactId:null};
+      if(unique.length>1)return {leadId:null,conversationId:null,contactId:null,ambiguous:true};
       if(unique.length===1)return {leadId:unique[0],conversationId:null,contactId:(contacts.results||[])[0].id};
     }
   }
@@ -6354,6 +6363,24 @@ async function matchInboundLead(env, { platform, providerConversationId, provide
   try { await env.DB.prepare("INSERT INTO lead_conversations(id,lead_id,contact_id,platform,provider_conversation_id,provider_sender_id,provider_username,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id,leadId,contactId||null,platform,providerConversationId,providerSenderId||null,normalized,"open",t,t).run(); }
   catch { const c=await env.DB.prepare("SELECT id,lead_id,contact_id FROM lead_conversations WHERE platform=? AND provider_conversation_id=? LIMIT 1").bind(platform,providerConversationId).first(); return c?.lead_id===leadId?{leadId,conversationId:c.id,contactId:c.contact_id||contactId}:{leadId:null,conversationId:null,contactId:null}; }
   return {leadId,conversationId:id,contactId};
+}
+
+// A first inbound private message carries a provider-verified, stable Telegram user id. That id is the dedup identity,
+// so the existing P0-1 upsert path creates at most one lead per sender; an identity conflict stays unlinked (fail-closed).
+async function createTelegramInboundLead(env, m, {chatId,providerUsername}) {
+  const none={leadId:null,conversationId:null,contactId:null};
+  const userId=normalizeTelegramPrivateChatId(chatId);
+  if(!userId)return none;
+  const username=normalizeTelegramIdentity(providerUsername);
+  const name=[m?.from?.first_name,m?.from?.last_name].filter(Boolean).join(' ').trim().slice(0,120)||(username?`@${username}`:`Telegram ${userId}`);
+  const meta={source:'telegram_inbound',telegram_user_id:userId};
+  if(username)meta.telegram_username=username;
+  let saved;
+  try { saved=await upsertDiscoveredLead(env,{name,contact:username?`https://t.me/${username}`:`telegram:${userId}`,stage:'new',priority:'normal',source:'telegram_inbound',meta}); }
+  catch(error){ try { await audit(env,'telegram_inbound_lead_failed','Inbound Telegram sender stayed unlinked after lead creation failure',{error:sanitizeOperationalError(error?.message||error)}); } catch {} return none; }
+  if(!saved||saved.conflict||!saved.id)return {...none,ambiguous:true};
+  if(saved.created)await audit(env,'telegram_inbound_lead_created','New lead created from a private Telegram sender',{lead_id:saved.id,has_username:!!username});
+  return {leadId:saved.id,conversationId:null,contactId:null};
 }
 
 async function enrichTelegramInboundContact(env, linked, {chatId,providerSenderId,providerUsername}) {
@@ -6752,7 +6779,8 @@ function collectLeadIdentities(input = {}) {
     ["domain", normalizeLeadDomain(meta.website || meta.url || input.website || input.url || input.contact)],
     ["instagram", normalizeInstagramIdentity(meta.instagram_username || meta.instagram_url || meta.profile || input.instagram)],
     ["email", normalizeLeadEmail(meta.email || input.email || (String(input.contact || "").includes("@") ? input.contact : ""))],
-    ["telegram", normalizeTelegramIdentity(meta.telegram_username || meta.telegram_url || input.telegram)]
+    ["telegram", normalizeTelegramIdentity(meta.telegram_username || meta.telegram_url || input.telegram)],
+    ["telegram_user", normalizeTelegramPrivateChatId(meta.telegram_user_id)]
   ];
   const seen = new Set();
   return candidates.filter(([, value]) => value).map(([type, normalized_value]) => ({
