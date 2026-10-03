@@ -1748,7 +1748,13 @@ const OWNER_QTY_AFTER=/^\s*(?:عدد|تا|تایی|دانه|قطعه|قطعة|ح
 function ownerSegments(text){return String(text||"").split(/[|:\-–—،,\/\t؛;]+/u).map(x=>x.replace(/\s+/g," ").trim()).filter(x=>x&&/\p{L}/u.test(x));}
 function ownerDims(text){const m=ownerAscii(text).match(CUSTOMER_DIMENSIONS);if(!m)return {size:null,rest:ownerAscii(text)};return {size:[m[1],m[2],m[3]].filter(Boolean).join("x")+(m[4]?" "+m[4]:""),rest:ownerAscii(text).replace(m[0]," | ")};}
 // Parses one owner line into {kind, ...}. Never guesses: anything unclear is returned as ambiguous with explicit issues.
-function parseOwnerKnowledgeLine(line,market,section){
+// Owner prose (instructions/policy sentences) is import-level guidance and can NEVER become product, size or configuration.
+const OWNER_PROSE=/(?:نگه\s*دار|تغییر\s*نده|ایجاد\s*نشود|انجام\s*نشود|نشود|نکن(?:ید)?|نده(?:ید)?|نباید|باید|هستند|می[‌\s]?باشد|می[‌\s]?شود|لطفاً|لطفا|don'?t|do\s+not|must|should|please)(?![\p{L}])|[«»]/iu;
+// "No price" markers: the configuration exists but the owner supplied no authoritative price (never price 0, never borrowed).
+const OWNER_NO_PRICE=/(?:بدون\s*قیمت|قیمت\s*ندارد|فاقد\s*قیمت|بدون\s*نرخ|استعلام(?:\s*شود)?|تماس\s*بگیرید|no\s*price|not\s*priced|بدون\s*سعر)/iu;
+const OWNER_SIZE_LABEL=/^(?:سایز|اندازه|ابعاد|size|dimensions?|قياس|المقاس)$/iu;
+function ownerWordCount(text){return String(text||"").trim().split(/\s+/u).filter(Boolean).length;}
+function parseOwnerKnowledgeLine(line,market,section,options={}){
   const raw=String(line||"").normalize("NFKC").trim();
   if(!raw)return {kind:"skip"};
   if(raw.length>OWNER_IMPORT_LIMITS.line_chars||/[\u0000-\u0008\u000b-\u001f]/u.test(raw))return {kind:"rejected",issues:[{code:raw.length>OWNER_IMPORT_LIMITS.line_chars?"line_too_long":"invalid_characters"}]};
@@ -1764,14 +1770,39 @@ function parseOwnerKnowledgeLine(line,market,section){
   }
   // Business rules (MOQ, production time, shipping, deposit, payment, discount) are never read as a product price row.
   if(OWNER_RULE_WORDS.test(raw))return {kind:"rule",text:raw};
+  if(!prices.length&&/لیست\s*قیمت|price\s*list|قائمة\s*الأسعار/iu.test(raw))return {kind:"skip"};
+  // Import metadata lines ("Market: IRAN", "Currency: TOMAN", "بازار: ایران", "واحد پول: تومان") are import-level settings.
+  const meta=raw.match(/^(market|بازار|السوق|currency|واحد\s*پول|ارز|العملة)\s*[:：]\s*(.{1,30})$/iu);
+  if(meta){const key=/^(?:market|بازار|السوق)$/iu.test(meta[1])?"market":"currency",v=meta[2].trim().toLowerCase();
+    const value=key==="market"?(/^(?:iran|ایران)$/u.test(v)?"IRAN":/^(?:arab|iraq|عراق|العراق)$/u.test(v)?"ARAB":/^global$/u.test(v)?"GLOBAL":null):(/^(?:toman|tomans|تومان|تومن)$/u.test(v)?"TOMAN":/^(?:usd|\$|دلار|دولار)$/u.test(v)?"USD":null);
+    return {kind:"instruction",text:raw,meta:{[key]:value||v.toUpperCase()}};}
+  // Instructions / policy prose → import-level instruction (strong markers, or a long price-less sentence without a size).
+  if(OWNER_PROSE.test(raw)||(!prices.length&&!size&&!OWNER_NO_PRICE.test(raw)&&ownerWordCount(raw)>=7))return {kind:"instruction",text:raw};
   // When any amount carries an explicit currency, bare numbers (model numbers, years) are not prices.
   if(prices.some(p=>p.unit))for(let i=prices.length-1;i>=0;i--)if(!prices[i].unit)prices.splice(i,1);
+  const labelSegments=text=>ownerSegments(text).filter(x=>!OWNER_SIZE_LABEL.test(x)&&!/^(?:قیمت|price|سعر|تومان|تومن|ریال)$/iu.test(x));
+  if(!prices.length&&OWNER_NO_PRICE.test(raw)){
+    const segments=labelSegments(rest.replace(OWNER_NO_PRICE," | "));
+    const ownProduct=segments.length>1&&OWNER_PRODUCT_NOUN.test(segments[0]);
+    const product=ownProduct?segments[0]:section?.product||null,configuration=(ownProduct?segments.slice(1):segments).join(" ")||null;
+    const issues=[{code:"no_authoritative_price",detail:"Owner supplied no price for this configuration; nothing is priced or borrowed"}];
+    if(!product)issues.push({code:"missing_product_identifier"});
+    return {kind:"no_price_row",product,size:size||(ownProduct?null:section?.size)||null,configuration,issues,parse_status:product&&configuration?"parsed":"ambiguous"};
+  }
   if(!prices.length){
     if(/لیست\s*قیمت|price\s*list|قائمة\s*الأسعار/iu.test(raw))return {kind:"skip"};
-    // A short label naming a product (or ending with ':') sets the product/size context for the following rows; any other
-    // price-less line is shown to the owner as unparsed instead of silently changing the context.
-    const name=ownerSegments(rest).join(" ").trim();
-    if(name&&raw.length<=80&&(OWNER_PRODUCT_NOUN.test(raw)||/[:：]\s*$/u.test(raw)))return {kind:"section",product:name,size};
+    // Explicit header "<product> — سایز <W×H>": the product is everything before the dash (its own digits/× kept, e.g.
+    // "سرویس 20×20" → "سرویس 20x20"); the size is the labelled part only.
+    const explicit=ownerAscii(raw).match(/^(.+?)\s*[—–-]\s*(?:سایز|اندازه|ابعاد|size|قياس|المقاس)\s*[:：]?\s*(.+)$/iu);
+    if(explicit&&raw.length<=80){const labelled=ownerDims(explicit[2]),productName=explicit[1].replace(/(\d+(?:\.\d+)?)\s*(?:[×x*]|در)\s*(\d+(?:\.\d+)?)/giu,"$1x$2").replace(/\s+/g," ").trim();
+      if(labelled.size&&!ownerSegments(labelled.rest).length&&productName&&/\p{L}/u.test(productName))return {kind:"section",product:productName,size:labelled.size};}
+    // Section header: a short label with a size ("انگشتر کوچک — سایز 5×5"), a product noun, or a trailing ':'.
+    // It sets product + size context for the following rows until the next header.
+    const name=labelSegments(rest).join(" ").trim();
+    if(raw.length<=80&&(size||OWNER_PRODUCT_NOUN.test(raw)||/[:：]\s*$/u.test(raw))){
+      if(name)return {kind:"section",product:name,size};
+      if(size&&section?.product)return {kind:"section",product:section.product,size};
+    }
     return {kind:"unparsed",issues:[{code:"no_price_or_structure"}]};
   }
   const issues=[];
@@ -1782,14 +1813,14 @@ function parseOwnerKnowledgeLine(line,market,section){
   else if(["تومان","تومن","toman","tomans","ت"].includes(price.unit)){currency="TOMAN";minor=price.amount;}
   else if(["ریال","rial","rials","irr"].includes(price.unit)){currency="IRR";minor=price.amount;issues.push({code:"rial_not_converted",detail:"Legacy IRR is never converted automatically; correct the amount in Toman"});}
   else if(["usd","$","دلار","دولار"].includes(price.unit)){currency="USD";minor=Math.round(price.amount*100);}
-  else if(market==="IRAN"){currency="TOMAN";minor=price.amount;issues.push({code:"currency_inferred_from_market"});}
+  else if(market==="IRAN"){currency="TOMAN";minor=price.amount;issues.push({code:options.declaredCurrency==="TOMAN"?"currency_declared_by_owner":"currency_inferred_from_market"});}
   else if(market==="ARAB"){issues.push({code:"currency_missing",detail:"State USD explicitly for ARAB prices"});}
   else issues.push({code:"market_and_currency_missing"});
   if(currency&&market!=="GLOBAL"&&MARKET_CURRENCY[market]&&currency!==MARKET_CURRENCY[market]&&currency!=="IRR")issues.push({code:"currency_market_mismatch",currency,market});
   if(market==="GLOBAL")issues.push({code:"market_required_for_price"});
   if(!Number.isSafeInteger(minor)||minor<=0)issues.push({code:"invalid_price"});
   const remaining=prices.reduce((s,p)=>s.replace(p.text," | "),rest);
-  const segments=ownerSegments(remaining).filter(x=>!/^(?:قیمت|price|سعر|تومان|تومن|ریال)$/iu.test(x));
+  const segments=labelSegments(remaining);
   // A row that names its own product (e.g. "جعبه انگشتر بزرگ 7×7 سه تکه ...") is not attached to the previous section.
   const ownProduct=segments.length&&OWNER_PRODUCT_NOUN.test(segments[0]);
   let product=ownProduct?null:section?.product||null,configuration;
@@ -1797,7 +1828,7 @@ function parseOwnerKnowledgeLine(line,market,section){
   else{product=segments[0]||null;configuration=segments.slice(1).join(" ")||null;}
   if(!product)issues.push({code:"missing_product_identifier"});
   const finalSize=size||(ownProduct?null:section?.size)||null;
-  const blocking=issues.some(x=>!["currency_inferred_from_market"].includes(x.code));
+  const blocking=issues.some(x=>!["currency_inferred_from_market","currency_declared_by_owner"].includes(x.code));
   return {kind:"price_row",product,size:finalSize,configuration,currency,price_minor:Number.isSafeInteger(minor)?minor:null,issues,parse_status:blocking?"ambiguous":"parsed"};
 }
 function ownerRuleMapping(text){
@@ -1855,29 +1886,41 @@ async function storeOwnerProductImage(env,{bytes,kind,size,sha256,caption}){
   return {image:await env.DB.prepare("SELECT * FROM owner_product_images WHERE sha256=? LIMIT 1").bind(sha256).first(),reused:false};
 }
 function ownerStructureText(text,market){
-  const items=[],lines=String(text||"").replace(/\r\n?/g,"\n").split("\n").slice(0,OWNER_IMPORT_LIMITS.lines);let section=null;
+  const items=[],instructions=[],lines=String(text||"").replace(/\r\n?/g,"\n").split("\n").slice(0,OWNER_IMPORT_LIMITS.lines);let section=null;
+  // An owner instruction such as "همه مبالغ تومان هستند" declares the currency of bare amounts (still owner-reviewed).
+  const metas=lines.filter(l=>/^\s*(?:market|بازار|السوق|currency|واحد\s*پول|ارز|العملة)\s*[:：]/iu.test(l)).map(l=>parseOwnerKnowledgeLine(l,market,null).meta).filter(Boolean);
+  const metaCurrency=metas.find(x=>x.currency)?.currency||null,metaMarket=metas.find(x=>x.market)?.market||null;
+  const declaredCurrency=market==="IRAN"&&(metaCurrency==="TOMAN"||lines.some(l=>OWNER_PROSE.test(l)&&/(?:مبالغ|قیمت)/u.test(l)&&/(?:تومان|تومن)/u.test(l)))?"TOMAN":null;
   for(const line of lines){
-    const p=parseOwnerKnowledgeLine(line,market,section);
+    const p=parseOwnerKnowledgeLine(line,market,section,{declaredCurrency});
     if(p.kind==="skip")continue;
     if(p.kind==="section"){section={product:p.product,size:p.size};continue;}
+    if(p.kind==="instruction"){instructions.push(line.trim().slice(0,300));continue;}
     if(p.kind==="price_row")items.push({item_type:"price_row",parse_status:p.parse_status,product_name:p.product,size:p.size,configuration:p.configuration,currency:p.currency,price_minor:p.price_minor,market,raw_line:line.trim(),issues:p.issues});
+    // No-price row: same structure as a price row, price explicitly NOT supplied (null), never 0 and never borrowed.
+    else if(p.kind==="no_price_row")items.push({item_type:"price_row",parse_status:p.parse_status,product_name:p.product,size:p.size,configuration:p.configuration,currency:null,price_minor:null,no_price:true,market,raw_line:line.trim(),issues:p.issues});
     else if(p.kind==="rule"){const [domain,attribute]=ownerRuleMapping(p.text);items.push({item_type:"rule",parse_status:"parsed",fact_domain:domain,fact_attribute:attribute,fact_value:p.text,market,raw_line:line.trim(),issues:[]});}
     else items.push({item_type:"unparsed",parse_status:p.kind==="rejected"?"rejected":"ambiguous",market,raw_line:line.trim().slice(0,OWNER_IMPORT_LIMITS.line_chars),issues:p.issues||[]});
   }
-  // Duplicate / conflicting rows inside one submission are never silently merged.
+  // A list that declares another market/currency than the one selected for this submission is never imported silently.
+  if((metaMarket&&metaMarket!==market)||(metaCurrency&&MARKET_CURRENCY[market]&&metaCurrency!==MARKET_CURRENCY[market]))
+    for(const row of items.filter(x=>x.item_type==="price_row")){row.parse_status="ambiguous";row.issues.push({code:"declared_market_or_currency_mismatch",detail:`List declares ${metaMarket||market}/${metaCurrency||"-"}; submission market is ${market}`});}
+  // Conflicts only between PRICED rows with the same market + product + size + configuration and a different price.
   const byKey=new Map();
-  for(const item of items.filter(x=>x.item_type==="price_row"&&x.product_name)){item.product_key=ownerItemKey(item.product_name,item.size,item.configuration);(byKey.get(item.product_key)||byKey.set(item.product_key,[]).get(item.product_key)).push(item);}
+  for(const item of items.filter(x=>x.item_type==="price_row"&&x.product_name)){item.product_key=ownerItemKey(item.product_name,item.size,item.configuration);if(item.no_price)continue;(byKey.get(item.product_key)||byKey.set(item.product_key,[]).get(item.product_key)).push(item);}
   for(const group of byKey.values())if(group.length>1){
     const distinct=new Set(group.map(x=>`${x.currency}:${x.price_minor}`));
     group.forEach((x,i)=>{if(distinct.size>1){x.parse_status="ambiguous";x.issues.push({code:"conflicting_prices_in_submission"});}else if(i>0){x.parse_status="rejected";x.issues.push({code:"duplicate_row_in_submission"});}});
   }
-  // Catalog facts implied by clear price rows: one proposal per product+size and product+configuration (no duplicates).
+  // A no-price row and a priced row for the very same key contradict each other: shown to the owner, never merged.
+  for(const row of items.filter(x=>x.no_price&&x.product_key&&byKey.has(x.product_key))){row.parse_status="ambiguous";row.issues.push({code:"priced_elsewhere_in_submission"});}
+  // Catalog facts implied by clear rows (priced or not): one proposal per product+size and product+configuration.
   const facts=new Map();
   for(const row of items.filter(x=>x.item_type==="price_row"&&x.parse_status==="parsed")){
     if(row.size)facts.set(`size|${row.product_name}|${row.size}`,{item_type:"product_fact",parse_status:"parsed",product_name:row.product_name,fact_domain:"size",fact_attribute:"available_size",fact_value:row.size,market,raw_line:row.raw_line,issues:[]});
     if(row.configuration)facts.set(`cfg|${row.product_name}|${row.configuration}`,{item_type:"product_fact",parse_status:"parsed",product_name:row.product_name,fact_domain:"product",fact_attribute:"configuration",fact_value:row.configuration,market,raw_line:row.raw_line,issues:[]});
   }
-  return [...items,...facts.values()];
+  const all=[...items,...facts.values()];all.instructions=instructions;return all;
 }
 async function ownerImportReadBody(req){
   const type=String(req.headers.get("Content-Type")||"").toLowerCase(),declared=Number(req.headers.get("Content-Length")||NaN);
@@ -1958,7 +2001,7 @@ async function runOwnerKnowledgeImport(env,{text,market,client_request_id,files,
     }
   });
   // Existing active prices are shown, never overwritten silently (approval creates a NEW immutable version).
-  for(const row of items.filter(x=>x.item_type==="price_row"&&x.product_key&&["IRAN","ARAB"].includes(market))){
+  for(const row of items.filter(x=>x.item_type==="price_row"&&!x.no_price&&x.product_key&&["IRAN","ARAB"].includes(market))){
     const active=await env.DB.prepare("SELECT id,unit_price_minor,currency,version FROM commercial_price_items WHERE market=? AND product_key=? AND active=1 ORDER BY version DESC LIMIT 1").bind(market,row.product_key).first().catch(()=>null);
     if(active)row.issues.push(active.unit_price_minor===row.price_minor&&active.currency===row.currency?{code:"same_as_active_price",price_item_id:active.id,version:active.version}:{code:"replaces_active_price",price_item_id:active.id,version:active.version,active_price_minor:active.unit_price_minor,currency:active.currency});
   }
@@ -1967,14 +2010,14 @@ async function runOwnerKnowledgeImport(env,{text,market,client_request_id,files,
   const statements=rows.map(r=>env.DB.prepare(`INSERT OR IGNORE INTO owner_knowledge_import_items(id,import_id,seq,item_type,parse_status,review_status,product_key,product_name,size,configuration,category,market,currency,price_minor,fact_domain,fact_attribute,fact_value_json,raw_line,issues_json,observation_json,image_id,group_key,linked_item_id,result_ref,history_json,version,created_at,updated_at)
     VALUES(?,?,?,?,?,'pending_review',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,'[]',1,?,?)`).bind(r.id,importId,r.seq,r.item_type,r.parse_status,r.product_name?ownerItemKey(r.product_name,r.size,r.configuration):null,r.product_name||null,r.size||null,r.configuration||null,r.category||null,market,r.currency||null,r.price_minor??null,r.fact_domain||null,r.fact_attribute||null,r.fact_value!==undefined?JSON.stringify(r.fact_value):null,String(r.raw_line||"").slice(0,OWNER_IMPORT_LIMITS.line_chars),JSON.stringify(r.issues||[]),r.observation?JSON.stringify(r.observation):null,r.image_id||null,r.group_key||null,r.linked?idOf.get(rows.find(x=>x.raw_line===r.linked.raw_line&&x.item_type==="price_row"))||null:null,t,t));
   for(let i=0;i<statements.length;i+=50)await env.DB.batch(statements.slice(i,i+50));
-  const summary=ownerImportSummary(rows);
+  const summary={...ownerImportSummary(rows),instructions:(items.instructions||[]).slice(0,50)};
   await env.DB.prepare("UPDATE owner_knowledge_imports SET status='analyzed',summary_json=?,updated_at=? WHERE id=?").bind(JSON.stringify(summary),now(),importId).run();
   try{await audit(env,"owner_knowledge_import_analyzed","Owner knowledge submission structured for review",{import_id:importId,market,...summary});}catch{}
   return {status:200,body:{ok:true,knowledge_import:true,idempotent:false,...await ownerImportView(env,importId)}};
 }
 function ownerImportSummary(rows){
   const count=f=>rows.filter(f).length;
-  return {items:rows.length,price_rows:count(x=>x.item_type==="price_row"),product_facts:count(x=>x.item_type==="product_fact"),visuals:count(x=>x.item_type==="visual"),rules:count(x=>x.item_type==="rule"),unparsed:count(x=>x.item_type==="unparsed"),parsed:count(x=>x.parse_status==="parsed"),ambiguous:count(x=>x.parse_status==="ambiguous"),rejected:count(x=>x.parse_status==="rejected"),conflicts:count(x=>(x.issues||[]).some(i=>/conflict|replaces_active_price|mismatch/.test(i.code)))};
+  return {items:rows.length,price_rows:count(x=>x.item_type==="price_row"&&!x.no_price),no_price_rows:count(x=>x.item_type==="price_row"&&x.no_price),product_facts:count(x=>x.item_type==="product_fact"),visuals:count(x=>x.item_type==="visual"),rules:count(x=>x.item_type==="rule"),unparsed:count(x=>x.item_type==="unparsed"),parsed:count(x=>x.parse_status==="parsed"),ambiguous:count(x=>x.parse_status==="ambiguous"),rejected:count(x=>x.parse_status==="rejected"),conflicts:count(x=>(x.issues||[]).some(i=>/conflict|replaces_active_price|mismatch|priced_elsewhere/.test(i.code)))};
 }
 async function ownerImportView(env,importId){
   const imp=await env.DB.prepare("SELECT * FROM owner_knowledge_imports WHERE id=? LIMIT 1").bind(importId).first();
@@ -1985,6 +2028,8 @@ async function ownerImportView(env,importId){
 // ---- Owner review of import items → existing authorities ----
 async function applyOwnerKnowledgeItem(env,item){
   if(item.item_type==="price_row"){
+    // Approving a no-price row records that the configuration has NO authoritative price: nothing is priced or activated.
+    if(item.price_minor==null)return {result_ref:"no_authoritative_price:recorded"};
     if(!["IRAN","ARAB"].includes(item.market))throw Error("Select IRAN or ARAB for a price");
     if(item.currency!==MARKET_CURRENCY[item.market])throw Error(`${item.market} prices must be in ${MARKET_CURRENCY[item.market]}`);
     if(!Number.isSafeInteger(item.price_minor)||item.price_minor<=0||!item.product_key)throw Error("A valid product and price are required");
@@ -2040,7 +2085,7 @@ async function reviewOwnerKnowledgeItem(env,body){
     if("currency" in c){if(!["TOMAN","USD"].includes(String(c.currency).toUpperCase()))throw Error("Currency must be TOMAN or USD");next.currency=String(c.currency).toUpperCase();}
     if("market" in c){if(!["IRAN","ARAB","GLOBAL"].includes(String(c.market).toUpperCase()))throw Error("Invalid market");next.market=String(c.market).toUpperCase();}
     if("fact_value" in c){const v=String(c.fact_value??"").normalize("NFKC").trim();if(!v||v.length>2000)throw Error("Fact value is required");next.fact_value_json=JSON.stringify(v);}
-    const productOk=item.item_type==="rule"||!!next.product_name,priceOk=item.item_type!=="price_row"||(Number.isSafeInteger(next.price_minor)&&next.currency===MARKET_CURRENCY[next.market]);
+    const productOk=item.item_type==="rule"||!!next.product_name,priceOk=item.item_type!=="price_row"||(next.price_minor==null&&next.currency==null)||(Number.isSafeInteger(next.price_minor)&&next.currency===MARKET_CURRENCY[next.market]);
     let history=[];try{history=JSON.parse(item.history_json||"[]");}catch{}
     history.push({at:t,by:"admin",before:{product_name:item.product_name,size:item.size,configuration:item.configuration,category:item.category,price_minor:item.price_minor,currency:item.currency,market:item.market,fact_value_json:item.fact_value_json}});
     // A correction resolves ambiguity only when the corrected item is complete; it never approves anything by itself.
