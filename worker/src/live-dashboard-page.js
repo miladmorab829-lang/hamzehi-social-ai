@@ -506,7 +506,7 @@ function knowledgeStructuredHtml(x){
  return "<div class='mini'><b>"+esc(e.kind)+"</b> · applies to <b>"+esc(x.entity_key)+"</b> · concept <b>"+esc(x.attribute)+"</b> · market <b>"+esc(x.market)+"</b>"+(x.sensitivity==="commercial"?" · <span class='warn'>COMMERCIAL (owner gate stays)</span>":"")+(x.confidence!=null?" · confidence "+esc(x.confidence):"")+"</div>"
   +(e.value!==undefined?"<div class='mini'>Value: "+esc(JSON.stringify(e.value))+"</div>":"")+(rel?"<div class='mini'>Relation: "+esc(rel)+"</div>":"")
   +"<div class='mini'>Conditions: "+esc(cond)+"</div>"+(eff?"<div class='mini'>Effect: "+esc(eff)+" (knowledge only; never sent to a customer automatically)</div>":"")
-  +(x.source_text?"<div class='mini'>Owner said: "+esc(x.source_text)+"</div>":"")+(conf?"<div class='mini warn'>Needs attention: "+esc(conf)+"</div>":"");
+  +(x.source_text?"<div class='mini'>Owner said: "+esc(x.source_text)+"</div>":"")+(x.notes&&x.notes.length?"<div class='mini'>Notes (not blocking): "+esc(x.notes.join(" · "))+"</div>":"")+(conf?"<div class='mini warn'>Needs attention: "+esc(conf)+"</div>":"");
 }
 async function correctKnowledgeProposal(x){
  let e={};try{e=JSON.parse(x.new_value_json)||{}}catch(err){}
@@ -533,7 +533,8 @@ async function teachKnowledge(){
 function showTeachResult(d){
  if(d.status==="processing"){$("commandStatus").innerHTML="<span class='warn'>این دانش هنوز در حال پردازش است؛ چند ثانیه بعد دوباره امتحان کنید (دوباره پردازش نمی‌شود).</span>";return}
  const s=d.summary||{};
- $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ دانش ساختاربندی شد · Proposals: "+esc(s.proposals||0)+" · Pending review: "+esc(s.pending_review||0)+" · Needs correction: "+esc(s.conflict||0)+(d.redirected_to_price_list?" · "+esc(d.redirected_to_price_list)+" price item(s) belong to the price list import":"")+(d.idempotent?" · ارسال تکراری؛ دوباره پردازش نشد":"")+"</span><div class='mini'>هیچ موردی بدون تأیید مالک فعال نمی‌شود. <a href='#knowledgePanel'>OPEN KNOWLEDGE REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Teaching failed")+"</span>";
+ const cols=(d.collections||[]).map(c=>"<div class='mini'>"+esc(c.entity_key)+" · <b>"+esc(c.concept)+"</b> · "+esc(c.market)+" → "+esc((c.values||[]).join("، "))+" ("+esc((c.values||[]).length)+")</div>").join("");
+ $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ دانش ساختاربندی شد · Proposals: "+esc(s.proposals||0)+" · Pending review: "+esc(s.pending_review||0)+" · Needs correction: "+esc(s.conflict||0)+(d.redirected_to_price_list?" · "+esc(d.redirected_to_price_list)+" price item(s) belong to the price list import":"")+(d.idempotent?" · ارسال تکراری؛ دوباره پردازش نشد":"")+(d.retried?" · نتیجه قبلی ناموفق بود؛ دوباره پردازش شد":"")+"</span>"+cols+"<div class='mini'>هیچ موردی بدون تأیید مالک فعال نمی‌شود. <a href='#knowledgePanel'>OPEN KNOWLEDGE REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Teaching failed")+"</span>";
  if(d.ok){commandRequestId=null;loadSalesKnowledge()}
 }
 async function loadKnowledgeHistory(delta=0){

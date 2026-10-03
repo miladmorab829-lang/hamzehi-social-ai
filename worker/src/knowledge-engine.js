@@ -45,6 +45,29 @@ function num(v){if(typeof v==="number")return Number.isFinite(v)?v:NaN;const t=k
 function escapeRegex(s){return s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");}
 function hasPhrase(text,phrase){const p=knowledgeText(phrase);if(!p||p.length<2)return false;return new RegExp("(?<![\\p{L}\\p{N}])"+escapeRegex(p)+"(?![\\p{L}\\p{N}])","u").test(text);}
 
+// Typed fields that differ from their siblings ONLY by a role the owner has to name (exterior vs interior, the color of what…).
+// A typed claim for one of them is trusted only when the owner's own words (`words`) name that role; otherwise the statement
+// stays a generic fact whose concept is the owner's own collection name — or, if the model gave none, the neutral name below.
+// `role` is the token that marks the guessed role inside a concept/context name. Data, not logic: another role-only typed
+// field is one more entry here.
+const TYPED_ROLE_FIELDS={
+  "color.exterior":{role:"exterior",neutral:"color_options",words:["بیرون","خارج","exterior","outer","outside","external"]},
+  "color.interior":{role:"interior",neutral:"color_options",words:["داخل","درون","interior","inner","inside","internal"]},
+  "color.combination":{role:"combination",neutral:"color_options",words:["ترکیب","مزیج","combination","combo","combined"]},
+  "color.restriction":{role:"restriction",neutral:"color_options",words:["محدود","ممنوع","منع","حظر","قید","restrict","forbid","prohibit","banned"]},
+  "printing.color":{role:"printing",neutral:"color_options",words:["چاپ","فویل","طباعة","printing","print","foil","stamp"]}
+};
+const TYPED_ROLE_PATTERNS=Object.fromEntries(Object.entries(TYPED_ROLE_FIELDS).map(([key,spec])=>[key,new RegExp("(?<![\\p{L}\\p{N}])(?:ال)?(?:"+spec.words.map(escapeRegex).join("|")+")","u")]));
+export function knowledgeTypedRoleNamed(typedKey,text){const pattern=TYPED_ROLE_PATTERNS[typedKey];return !pattern||pattern.test(knowledgeText(text));}
+// The role word names the slot, it is not part of the value: "بیرونی مشکی" → "مشکی".
+export function knowledgeWithoutRoleWords(value,typedKey){
+  const pattern=TYPED_ROLE_PATTERNS[typedKey];
+  if(!pattern||typeof value!=="string")return value;
+  return value.normalize("NFKC").split(/\s+/).filter(w=>w&&!pattern.test(knowledgeText(w))).join(" ").trim();
+}
+// The extraction prompt only offers role-only typed fields the owner actually named, so nothing pulls the model toward a role nobody said.
+export function knowledgeTypedCatalog(typedFields,text){return (typedFields||[]).filter(f=>knowledgeTypedRoleNamed(String(f).split(/\s/)[0],text));}
+
 function cleanCondition(c,issues,i){
   if(!c||typeof c!=="object"||Array.isArray(c)){issues.push(`condition_${i}_invalid`);return null;}
   const field=knowledgeIdent(c.field,40);let op=String(c.op??c.operator??"").trim().toLowerCase();op=OP_ALIASES[op]||op;
@@ -136,12 +159,34 @@ function expandRelationMembers(rel){
   for(const [field,v] of entries){const values=Array.isArray(v)?v:[v];combos=combos.flatMap(c=>values.map(x=>({...c,[field]:x})));if(combos.length>KNOWLEDGE_LIMITS.fanout)return null;}
   return combos;
 }
-function normalizeOne(raw,defaultMarket){
+const listItemsOf=s=>String(s||"").split(/[،,؛;\n]+/u).map(x=>x.trim()).filter(Boolean);
+// The items of a "<name>: A، B، C" statement (short values, no sentences), or null when the text is not a named list.
+function collectionItems(text){
+  const t=String(text||"").normalize("NFKC").trim();
+  if(t.length<8||t.length>KNOWLEDGE_LIMITS.text)return null;
+  const m=t.match(/^([^:：\n]{2,120})[:：]\s*([\s\S]+)$/u);
+  if(!m)return null;
+  const items=listItemsOf(m[2]);
+  return items.length>=2&&items.length<=KNOWLEDGE_LIMITS.fanout&&items.every(x=>x.length<=60&&x.split(/\s+/).length<=4&&!/[!؟?]|\.(?:\s|$)/u.test(x))?items:null;
+}
+function ambiguityText(a){
+  const s=typeof a==="string"?a:a&&typeof a==="object"?String(a.note??a.reason??a.question??a.about??""):"";
+  return cleanString(s,200);
+}
+// A list of values counts each value once (case/Persian-form insensitive); the owner never gets two proposals for one member.
+function uniqueValues(list){
+  const seen=new Set();
+  return list.filter(v=>{const k=typeof v==="string"?knowledgeText(v):JSON.stringify(v);if(seen.has(k))return false;seen.add(k);return true;});
+}
+function normalizeOne(source,defaultMarket,text=""){
+  let raw=source;
   const issues=[];
-  if(!raw||typeof raw!=="object"||Array.isArray(raw))return [{operation:"ADD",issues:["record_invalid"],kind:"fact",entity_type:"business",entity_key:"unresolved",concept:"needs_clarification",market:defaultMarket,envelope:null,typed:null,confidence:null}];
+  if(!raw||typeof raw!=="object"||Array.isArray(raw))return [{operation:"ADD",issues:["record_invalid"],notes:[],kind:"fact",entity_type:"business",entity_key:"unresolved",concept:"needs_clarification",market:defaultMarket,envelope:null,typed:null,confidence:null}];
   const operationRaw=String(raw.operation||"ADD").toUpperCase();let operation=KNOWLEDGE_OPERATIONS.has(operationRaw)?operationRaw:null;
   if(!operation)issues.push("invalid_operation");
-  for(const a of (Array.isArray(raw.ambiguities)?raw.ambiguities:[]).slice(0,5)){const s=cleanString(a,200);if(s)issues.push("ambiguous: "+s);}
+  // Doubts the model voiced are kept apart from structural problems: normalizeKnowledgeInput decides whether a doubt blocks (see settleDoubts).
+  const doubts=(Array.isArray(raw.ambiguities)?raw.ambiguities:[]).slice(0,5).map(ambiguityText).filter(Boolean);
+  const notes=[];
   const entityRaw=raw.entity&&typeof raw.entity==="object"?raw.entity:{};
   let entityKey=cleanString(entityRaw.key??raw.entity_key??"",120)||"";const lowered=knowledgeText(entityKey);
   let entityType=["product","model","business"].includes(entityRaw.type)?entityRaw.type:null;
@@ -150,14 +195,33 @@ function normalizeOne(raw,defaultMarket){
   else if(!entityType||entityType==="business")entityType="product";
   let market=null;
   if(raw.market!==null&&raw.market!==undefined&&raw.market!==""){market=String(raw.market).toUpperCase();if(!KNOWLEDGE_MARKETS.has(market)){issues.push("invalid_market");market=null;}}
-  const typed=raw.typed&&typeof raw.typed==="object"?{domain:knowledgeIdent(raw.typed.domain,40),attribute:knowledgeIdent(raw.typed.attribute,40)}:null;
+  let typed=raw.typed&&typeof raw.typed==="object"?{domain:knowledgeIdent(raw.typed.domain,40),attribute:knowledgeIdent(raw.typed.attribute,40)}:null;
+  // ROLE SCOPING: a typed field that stands for a role (exterior / interior / …) is trusted only when the owner's own words name
+  // that role. Otherwise the model guessed one: the statement stays a generic fact under the owner's own collection name — the
+  // role is never forced, and a concept/context that still carries the guessed role is replaced by a neutral generic name.
+  const roleSpec=typed&&typed.domain&&typed.attribute?TYPED_ROLE_FIELDS[typed.domain+"."+typed.attribute]:null;
+  if(roleSpec&&text&&!knowledgeTypedRoleNamed(typed.domain+"."+typed.attribute,text)){
+    const carriesRole=v=>(knowledgeIdent(v,60)||"").split("_").includes(roleSpec.role),named=knowledgeIdent(raw.concept,60),concept=named&&!carriesRole(named)?named:roleSpec.neutral;
+    raw={...raw,concept,kind:["fact","capability","availability"].includes(String(raw.kind||"").toLowerCase())?raw.kind:"fact"};
+    if(raw.context_field&&carriesRole(raw.context_field))raw.context_field=roleSpec.neutral.replace(/_options$/,"");
+    notes.push("scope_not_named: "+typed.domain+"."+typed.attribute+" was not named by the owner, so this is stored as the generic collection "+concept);
+    typed=null;
+  }
+  // The model sometimes returns a whole list as ONE string ("A، B، C"). Only when that string is exactly the list the owner wrote
+  // after the colon of a named list does it become the collection's values, one per item; any other text is never split.
+  if(!typed&&typeof raw.value==="string"&&text&&["fact","capability","availability"].includes(String(raw.kind||"").toLowerCase())){
+    const owned=collectionItems(text),parts=listItemsOf(raw.value);
+    if(owned&&parts.length>=2&&parts.length===owned.length&&parts.every(x=>owned.some(y=>knowledgeText(y)===knowledgeText(x))))raw={...raw,value:parts};
+  }
   const confidence=typeof raw.confidence==="number"&&raw.confidence>=0&&raw.confidence<=1?raw.confidence:null;
-  const base={operation:operation||"ADD",entity_type:entityType||"business",entity_key:entityKey||"unresolved",market:market||defaultMarket,confidence,issues:[...issues]};
+  const base={operation:operation||"ADD",entity_type:entityType||"business",entity_key:entityKey||"unresolved",market:market||defaultMarket,confidence,issues:[...issues],notes:[...notes]};
+  const mark=r=>({...r,issues:[...base.issues],notes:[...base.notes],ambiguities:[...doubts]});
   if(typed){
     if(!typed.domain||!typed.attribute)base.issues.push("typed_field_invalid");
-    const values=Array.isArray(raw.value)?raw.value:[raw.value];
+    let values=uniqueValues(Array.isArray(raw.value)?raw.value:[raw.value]);
+    if(Array.isArray(raw.value)&&!raw.value.length){base.issues.push("value_missing");values=[undefined];}
     if(values.length>KNOWLEDGE_LIMITS.fanout)base.issues.push("too_many_values");
-    return values.slice(0,KNOWLEDGE_LIMITS.fanout).map(v=>({...base,issues:[...base.issues],kind:"fact",concept:typed.attribute||"needs_clarification",typed,value:v,envelope:null}));
+    return values.slice(0,KNOWLEDGE_LIMITS.fanout).map(v=>mark({...base,kind:"fact",concept:typed.attribute||"needs_clarification",typed,value:v,envelope:null}));
   }
   // conditions may scope the market ("only for Iraq") — that is the market column, not a runtime condition
   const conditionsIn=Array.isArray(raw.conditions)?raw.conditions:[];let scopedMarket=null;
@@ -172,7 +236,7 @@ function normalizeOne(raw,defaultMarket){
   const kind=String(raw.kind||"").toLowerCase();
   const rawCore={...raw,conditions,kind};
   const records=[];
-  const emit=(core,extra={})=>{const r={...base,issues:[...base.issues],kind,concept:concept||"needs_clarification",typed:null,envelope:core};Object.assign(r,extra);records.push(r);};
+  const emit=(core,extra={})=>{const r=mark({...base,kind,concept:concept||"needs_clarification",typed:null,envelope:core});Object.assign(r,extra);records.push(r);};
   const probeIssues=[];
   if(kind==="relation"||(raw.relation&&typeof raw.relation==="object")){
     const combos=expandRelationMembers(raw.relation);
@@ -183,9 +247,12 @@ function normalizeOne(raw,defaultMarket){
     }
     return records;
   }
-  if(Array.isArray(raw.value)&&["fact","capability","availability"].includes(kind)){
-    if(raw.value.length>KNOWLEDGE_LIMITS.fanout)base.issues.push("too_many_values");
-    for(const v of raw.value.slice(0,KNOWLEDGE_LIMITS.fanout)){const issuesLocal=[],core=buildEnvelopeCore({...rawCore,value:v,multi:true},issuesLocal);emit(core);records[records.length-1].issues.push(...issuesLocal);}
+  // A COLLECTION FACT: one concept holding several approved values. One member record per distinct value (so a single member can
+  // later be changed or deactivated); an empty list falls through and fails as value_invalid instead of vanishing.
+  if(Array.isArray(raw.value)&&raw.value.length&&["fact","capability","availability"].includes(kind)){
+    const values=uniqueValues(raw.value);
+    if(values.length>KNOWLEDGE_LIMITS.fanout)base.issues.push("too_many_values");
+    for(const v of values.slice(0,KNOWLEDGE_LIMITS.fanout)){const issuesLocal=[],core=buildEnvelopeCore({...rawCore,value:v,multi:true},issuesLocal);emit(core);records[records.length-1].issues.push(...issuesLocal);}
     return records;
   }
   const core=buildEnvelopeCore(rawCore,probeIssues);emit(core);records[0].issues.push(...probeIssues);
@@ -211,29 +278,75 @@ export function applyRelationalGuards(records,text){
   for(const r of list)r.issues=[...new Set(r.issues)];
   return list;
 }
-export function normalizeKnowledgeInput(rawRecords,{market="GLOBAL"}={}){
+// The model may voice doubts ("ambiguities"). A doubt blocks the proposal when the engine cannot check the structure itself. For a
+// plain, NON-commercial collection/fact whose entity, concept and value(s) are all present, the owner reviews exactly that
+// structure before anything becomes knowledge — so the doubt (typically a refinement the owner never gave) is kept as a visible
+// NOTE instead of a "needs clarification" dead end. Relations, rules, constraints, commercial records and anything with a
+// missing entity/concept/value keep treating every doubt as blocking.
+function settleDoubts(r,typedCommercial){
+  const doubts=r.ambiguities||[];delete r.ambiguities;
+  if(!doubts.length)return;
+  const complete=!r.issues.length&&r.entity_key&&r.entity_key!=="unresolved"&&r.concept&&r.concept!=="needs_clarification";
+  const plain=complete&&(r.typed
+    ?r.value!==undefined&&r.value!==null&&r.value!==""&&!typedCommercial(r.typed.domain)
+    :!!r.envelope&&["fact","capability","availability"].includes(r.kind)&&r.envelope.value!==undefined&&!r.envelope.relation&&!r.envelope.conditions.length&&!r.envelope.effect&&!r.envelope.commercial);
+  if(plain)r.notes.push(...doubts.map(d=>"model_note: "+d));
+  else r.issues.push(...doubts.map(d=>"ambiguous: "+d));
+}
+// Several separate single-value facts for the SAME concept of the same product are the members of one collection: a plain value slot
+// holds exactly one value, so as competing scalars they could never all be approved. The model is asked for one array; if it split
+// the list anyway, the members are recognised here (a lone value stays an ordinary scalar fact).
+function foldCollectionMembers(records){
+  const groups=new Map();
+  for(const r of records){
+    const e=r.envelope;
+    if(!e||r.typed||r.operation!=="ADD"||r.issues.length||!["fact","capability","availability"].includes(r.kind)||e.multi||e.relation||e.effect||e.conditions.length||e.value===undefined||typeof e.value==="boolean")continue;
+    const key=[r.entity_key,r.concept,r.market,r.kind].join("|");
+    (groups.get(key)||groups.set(key,[]).get(key)).push(r);
+  }
+  for(const list of groups.values()){
+    if(list.length<2||new Set(list.map(r=>knowledgeText(r.envelope.value))).size<2)continue;
+    for(const r of list){r.envelope.multi=true;r.notes.push("collection_members: "+list.length+" values of the same concept are stored as one collection");}
+  }
+}
+// ADDING a value ("add A to <collection>", "<collection> also has A") makes it one more MEMBER of that collection — never the
+// single-value slot of the whole concept, which a second added value could only conflict with.
+function joinCollection(r){
+  const e=r.envelope;
+  if(!e||r.typed||r.issues.length||e.multi||!["fact","capability","availability"].includes(r.kind)||e.value===undefined||e.value===null||typeof e.value==="boolean"||e.relation||e.effect||e.conditions.length||e.commercial)return;
+  e.multi=true;
+  r.notes.push("collection_member: the added value joins the collection "+r.concept);
+}
+// additive: the owner's own command says add/expand (decided by the caller from the owner's words, not by the model).
+export function normalizeKnowledgeInput(rawRecords,{market="GLOBAL",text="",typedCommercial=()=>true,additive=false}={}){
   const list=Array.isArray(rawRecords)?rawRecords:[];
   if(!list.length)return {records:[],issues:["no_records"]};
-  const records=[];
-  for(const raw of list.slice(0,KNOWLEDGE_LIMITS.records))for(const r of normalizeOne(raw,KNOWLEDGE_MARKETS.has(market)?market:"GLOBAL"))records.push(r);
+  const records=[],source=String(text||"");
+  for(const raw of list.slice(0,KNOWLEDGE_LIMITS.records))for(const r of normalizeOne(raw,KNOWLEDGE_MARKETS.has(market)?market:"GLOBAL",source))records.push(r);
   for(const r of records){
+    const expanding=!!r.envelope&&r.operation==="EXPAND";
     // generic safety: price-like concept names are rejected; EXPAND is just ADD for generic records
     if(r.envelope&&PRICE_LIKE.test(r.concept))r.issues.push("price_belongs_to_price_list");
     if(r.envelope&&r.operation==="EXPAND")r.operation="ADD";
     if(r.envelope)r.envelope.commercial=knowledgeIsCommercial(r.concept,r.envelope);
-    r.issues=[...new Set(r.issues)];
+    r.notes=r.notes||[];
+    settleDoubts(r,typedCommercial);
+    if((additive||expanding)&&r.operation==="ADD")joinCollection(r);
+    r.issues=[...new Set(r.issues)];r.notes=[...new Set(r.notes)];
   }
+  foldCollectionMembers(records);
   return {records,issues:list.length>KNOWLEDGE_LIMITS.records?["too_many_records"]:[]};
 }
 export function knowledgeExtractionPrompt({text,market,typedFields,knownFields}){
   return [
     "You convert ONE owner statement about the packaging / gift-box business HAMZEHI BOX into structured knowledge records.",
     "Return ONLY a JSON object {\"records\":[...]} (at most 25 records). The statement may be Persian, Arabic or English.",
-    "Never invent anything the owner did not say. If something needed is missing or unclear, add a short string to that record's \"ambiguities\" instead of guessing. Absence is not a fact: never turn a missing price/color/option into \"unavailable\".",
+    "Never invent anything the owner did not say. Absence is not a fact: never turn a missing price/color/option into \"unavailable\".",
+    "AMBIGUITIES: add a short string to a record's \"ambiguities\" ONLY when something essential is truly unknown — which product/entity, what the values ARE (the concept), the value(s) themselves, the market, or the operation — instead of guessing it. An optional detail, refinement or role the owner did not mention is NOT an ambiguity: never add one for it.",
     "Record shape:",
     "{\"operation\":\"ADD|UPDATE|REPLACE|DEACTIVATE|DELETE\" (UPDATE/REPLACE when the owner changes, corrects or replaces earlier knowledge; DEACTIVATE/DELETE when removed),",
     " \"kind\":\"fact|rule|relation|constraint|capability|availability|prohibition\",",
-    " \"typed\":null or {\"domain\":\"<d>\",\"attribute\":\"<a>\"} ONLY when the statement is a plain value for one of the typed fields listed below,",
+    " \"typed\":null or {\"domain\":\"<d>\",\"attribute\":\"<a>\"} ONLY when the statement is ONE plain value for one of the typed fields listed below (a list of values is a COLLECTION: typed null),",
     " \"entity\":{\"type\":\"product|model|business\",\"key\":\"<product or model exactly as the owner wrote it, or global for business-wide knowledge>\"},",
     " \"concept\":\"<snake_case name of what this is about, e.g. standard_colors, printing_options, allowed_combination>\",",
     " \"value\":<string|number|boolean|array of those|null> (an array becomes one record per element),",
@@ -244,12 +357,15 @@ export function knowledgeExtractionPrompt({text,market,typedFields,knownFields})
     " \"unit\":null,\"market\":\"IRAN|ARAB|GLOBAL|null\" (null when the owner did not restrict the market),\"priority\":50,",
     " \"keywords\":[\"words customers use when asking about this, in the owner's language(s)\"],\"labels\":{\"fa\":\"\",\"ar\":\"\",\"en\":\"\"},\"confidence\":0.0,\"ambiguities\":[]}",
     "Rules: never output prices, costs, fees or money amounts (they belong to the price list). Percentages and counts are numbers. For a text trigger use a condition {\"field\":\"message\",\"op\":\"contains\",\"value\":\"...\"}.",
+    "COLLECTIONS: when the owner lists several approved values under one name (\"<collection name>: A, B, C\" — available sizes, ribbon types, printing options, standard materials, allowed accessories, standard colors, anything), return ONE record: kind \"fact\" (\"availability\" or \"capability\" when the owner says they are available or possible), typed null, concept = snake_case of the owner's OWN collection name (e.g. available_sizes, ribbon_types, printing_options, standard_materials, allowed_accessories, standard_colors), value = an ARRAY holding every value exactly as written, labels = the owner's own collection name, keywords = the words customers use for it. Never split a list into several records, and never treat a plain list as a relation or a rule.",
+    "ADDING TO A COLLECTION: when the owner adds value(s) to a list (\"add A to <collection name>\", \"A را به <collection name> اضافه کن\", \"<collection name> هم A دارد\"), return that collection's record with operation ADD and value = an ARRAY of only the added value(s), even for a single value — never the whole list and never UPDATE.",
+    "SCOPE: put a role or sub-category (which part, side, layer or purpose the values are for) into the concept ONLY when the owner's text names it — then the concept carries that role. When the owner named none, NEVER choose one, never use a typed field that stands for a role, and never ask which role is meant: the owner's own collection name is already the complete concept.",
     "RELATIONS: if the statement links two or more attribute values — A with B, A only with B, A only for/on B, A requires B, A supports B, A is allowed/forbidden/incompatible with B, A combines with B — it is a RELATION: kind \"relation\", relation.members = ONE entry per side, keyed by the ROLE the owner names for that side (e.g. color, ribbon_color, printing, size, product, model, material, finish, insert, accessory — use the owner's own role words), value = that side's value. NEVER put such a statement in \"typed\", and NEVER copy a clause like \"A only with B\" into a single value.",
     "Semantics: \"A only with / only for / only on B\" → A is the anchor and B's role goes in relation.only_with. Allowed pairs: value true. Forbidden / incompatible pairs: value false. A side that is the product itself may be the entity or a member (use a member when the statement is about the pair, not about one product).",
     "If a side, its role or the meaning of the link is unclear, still return the record but add an \"ambiguities\" entry instead of guessing.",
     "Relation templates (placeholders, not data): {\"kind\":\"relation\",\"concept\":\"allowed_combination\",\"relation\":{\"name\":\"allowed_combination\",\"members\":{\"<roleA>\":\"<A>\",\"<roleB>\":\"<B>\"},\"only_with\":[\"<roleB>\"]},\"value\":true}  and  {\"kind\":\"relation\",\"concept\":\"forbidden_combination\",\"relation\":{\"name\":\"forbidden_combination\",\"members\":{\"<roleA>\":\"<A>\",\"<roleB>\":\"<B>\"}},\"value\":false}",
     (knownFields&&knownFields.length?"Role/field names already used by approved knowledge — REUSE the same name when the role is the same: "+knownFields.join(", "):"No role/field names exist yet."),
-    "Typed fields (use typed ONLY for a plain single value of these, never for a statement that links two values): "+(typedFields||[]).join("; "),
+    "Typed fields (use typed ONLY for a plain single value of these, never for a list and never for a statement that links two values): "+knowledgeTypedCatalog(typedFields,text).join("; "),
     "Default market for this submission: "+market,
     "OWNER_TEXT:",
     "<<<",
@@ -260,6 +376,27 @@ export function knowledgeExtractionPrompt({text,market,typedFields,knownFields})
 export function looksLikeKnowledgeStatement(text){
   const t=String(text||"").trim();
   return t.length>=8&&t.length<=KNOWLEDGE_LIMITS.text;
+}
+// "<collection name>: A، B، C" — a named list of short values is business knowledge by itself; it needs no verb and no sales keyword.
+export function knowledgeLooksLikeCollection(text){return !!collectionItems(text);}
+// One logical collection = the member proposals that share entity, concept, market and operation. The versioned store keeps one
+// row per member (so one member can later be changed or deactivated); the owner is shown — and decides on — the collection as a whole.
+export function knowledgeCollections(proposals){
+  const groups=new Map();
+  for(const p of proposals||[]){
+    if(p.attribute==="needs_clarification")continue;
+    let e=null;try{e=JSON.parse(p.new_value_json);}catch{continue;}
+    const generic=p.domain===KNOWLEDGE_DOMAIN&&e&&e.schema===KNOWLEDGE_SCHEMA;
+    if(generic&&(!e.multi||e.value===undefined||e.value===null))continue;
+    if(!generic&&(e===null||typeof e==="object"))continue;
+    const key=[generic?"g":p.domain,p.entity_key,p.attribute,p.market,p.operation].join("|");
+    const g=groups.get(key)||groups.set(key,{generic,entity_key:p.entity_key,entity_type:p.entity_type,domain:p.domain,concept:p.attribute,market:p.market,operation:p.operation,kind:generic?e.kind:"fact",labels:generic?e.labels||{}:{},values:[],proposal_ids:[],statuses:{}}).get(key);
+    const value=generic?e.value:e;
+    if(g.proposal_ids.includes(p.id))continue;
+    g.values.push(value);g.proposal_ids.push(p.id);g.statuses[p.status]=(g.statuses[p.status]||0)+1;
+  }
+  // a typed member field is only a "collection" once it holds more than one value
+  return [...groups.values()].filter(g=>g.generic||g.values.length>1).map(({generic,...g})=>g);
 }
 
 // ---- retrieval ----
@@ -388,16 +525,20 @@ export function knowledgeLooksLikeQuestion(text){return QUESTION.test(knowledgeT
 export function matchKnowledgeQuestion(message,records,{entities=[]}={}){
   const text=knowledgeText(message);
   if(!knowledgeLooksLikeQuestion(message))return [];
-  const groups=new Map();
+  const groups=new Map(),answerable=[];
   for(const r of records){
     const e=r.envelope;
     if(e.relation||e.conditions.length||e.effect||!["fact","capability","availability"].includes(e.kind)||ALIAS_CONCEPTS.has(r.concept))continue;
     if(knowledgeIsCommercial(r.concept,e)||!inScope(r,entities))continue;
+    answerable.push(r);
     const words=[...e.keywords,...Object.values(e.labels),...r.concept.split("_").filter(w=>w.length>=3)];
     const hits=words.filter(w=>hasPhrase(text,w)).length;if(!hits)continue;
     const key=knowledgeText(r.entity_key)+"|"+r.concept,g=groups.get(key)||groups.set(key,{key,entity:r.entity_key,concept:r.concept,records:[],score:0}).get(key);
     g.records.push(r);g.score=Math.max(g.score,hits);
   }
+  // A matched concept is answered with ALL its approved values for that product: a member added later (taught with other or no
+  // keywords) still belongs to the same collection.
+  for(const r of answerable){const g=groups.get(knowledgeText(r.entity_key)+"|"+r.concept);if(g&&!g.records.includes(r))g.records.push(r);}
   const specific=g=>Number(knowledgeText(g.entity)!=="global");
   return [...groups.values()].sort((a,b)=>b.score-a.score||specific(b)-specific(a)).slice(0,2);
 }

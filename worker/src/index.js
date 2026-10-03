@@ -1,6 +1,6 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
-import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswer, composeRelationAnswer, knowledgeEvidenceValue } from "./knowledge-engine.js";
+import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswer, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords } from "./knowledge-engine.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -5440,6 +5440,13 @@ async function proposeSalesKnowledge(env,body,context={}) {
   const proposalHash=await knowledgeHash(knowledgeCanonical({operation,factKey,valueJson,target:target?.id||null,version:target?.version||null,effectiveFrom,effectiveUntil}));
   const previous=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
   if(previous){if(previous.proposal_hash!==proposalHash)throw Error("Request ID already belongs to another proposal");return previous;}
+  // Owner teaching only: a proposal for this exact fact (or this exact collection member, whatever its descriptive metadata) that is
+  // already waiting for review or approved-but-not-applied is reused — rewording or resending a statement never stacks a second copy.
+  if(context.reusePending&&adding){
+    const memberReuse=type==="generic"&&value?.multi===true?1:0;
+    const same=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE status IN ('pending_review','approved') AND operation=? AND (proposal_hash=? OR (fact_key=? AND ?=1)) ORDER BY created_at,id LIMIT 1").bind(operation,proposalHash,factKey,memberReuse).first();
+    if(same)return same;
+  }
   const latest=await env.DB.prepare("SELECT * FROM sales_knowledge_facts WHERE fact_key=? ORDER BY version DESC LIMIT 1").bind(factKey).first();
   // extraConflicts lets the owner-teaching flow persist an AMBIGUOUS interpretation that can never be approved as-is.
   const conflicts=[...(context.extraConflicts||[])];
@@ -5458,7 +5465,7 @@ async function proposeSalesKnowledge(env,body,context={}) {
       (id,operation,fact_key,domain,entity_type,entity_key,attribute,market,member_key,target_fact_id,target_version,old_value_json,new_value_json,value_hash,effective_from,effective_until,proposal_hash,conflict_json,sensitivity,confidence,status,requested_by,source_type,source_command_id,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admin',?,?,?,?)`)
       .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),SALES_KNOWLEDGE_COMMERCIAL.has(domain)||(type==="generic"&&knowledgeIsCommercial(attribute,value))?"commercial":"standard",parserConfidence,status,context.sourceType||"owner_form",sourceCommandId,t,t),
-    knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain,source_command_id:sourceCommandId,parser_source:context.parserSource||"owner_form",parser_confidence:parserConfidence,source_text:context.sourceText?String(context.sourceText).slice(0,2000):undefined},t)
+    knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain,source_command_id:sourceCommandId,parser_source:context.parserSource||"owner_form",parser_confidence:parserConfidence,source_text:context.sourceText?String(context.sourceText).slice(0,2000):undefined,notes:Array.isArray(context.notes)&&context.notes.length?context.notes.slice(0,8).map(x=>String(x).slice(0,300)):undefined},t)
   ]);
   const stored=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
   if(stored.proposal_hash!==proposalHash)throw Error("Concurrent request ID conflict");
@@ -5549,14 +5556,7 @@ async function handleSalesKnowledge(req,env) {
       const requests=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests ORDER BY created_at DESC,id DESC LIMIT 100 OFFSET ?").bind(offset).all();
       // Owner source text (what was actually said) comes from the proposal audit event, so review shows the original words.
       const rows=requests.results||[];
-      try{
-        const sourceById=new Map();
-        for(let i=0;i<rows.length;i+=40){
-          const chunk=rows.slice(i,i+40),ev=await env.DB.prepare(`SELECT id,details_json FROM system_events WHERE id IN (${chunk.map(()=>"?").join(",")})`).bind(...chunk.map(r=>"knowledge:"+r.id+":sales_knowledge_proposed")).all();
-          for(const e of ev.results||[])try{const d=JSON.parse(e.details_json);if(d.source_text)sourceById.set(e.id,d.source_text);}catch{}
-        }
-        for(const r of rows)r.source_text=sourceById.get("knowledge:"+r.id+":sales_knowledge_proposed")||null;
-      }catch{}
+      try{await attachKnowledgeProposalContext(env,rows);}catch{}
       return json({ok:true,facts:facts.results||[],requests:rows,fields:SALES_KNOWLEDGE_FIELDS,offset,page_size:100});
     }
     if(req.method!=="POST"||![base+"/propose",base+"/review",base+"/apply",base+"/teach",base+"/correct"].includes(u.pathname))return json({ok:false,error:"Not found"},404);
@@ -5588,6 +5588,8 @@ async function handleSalesKnowledge(req,env) {
 // unresolvable interpretations are stored as non-approvable "needs clarification" proposals that the owner CORRECTs.
 const KNOWLEDGE_TEACH_BODY_BYTES=65536;
 const KNOWLEDGE_DECLARATIVE=/(?:است|هستند|می[‌\s]?باشد|مجاز|ممنوع|دارد|دارند|داریم|ندارد|ندارند|نیست|باشد|شود|بشود|\bis\b|\bare\b|\bonly\b|\bmust\b|\ballowed\b)[\s.!؟?]*$/iu;
+// Words of the operational modules the task planner owns (see autonomy-engine fallbackPlan): a named list that mentions one is a planner command.
+const PLANNER_MODULE_TERMS=/(?:تلگرام|واتساپ|اینستاگرام|اینستا|وبسایت|سایت|لید|تبلیغ|اسپانسر|رپورتاژ|محتوا|پست|استوری|ویدیو|عکس|تصویر|یادگیری|درآمد|فروش|مشتری|\b(?:telegram|whatsapp|instagram|website|crm|ads?|content|story|media|video|photo|learning|revenue)\b)/iu;
 function typedKnowledgeCatalog(){return Object.entries(SALES_KNOWLEDGE_FIELDS).filter(([d])=>d!=="pricing").flatMap(([d,fields])=>Object.entries(fields).map(([a,t])=>`${d}.${a} (${t})`));}
 async function extractKnowledgeWithAI(env,text,market,knownFields){
   if(!env.OPENAI_API_KEY)return {error:"ai_unavailable"};
@@ -5619,7 +5621,7 @@ async function findKnowledgeTarget(env,{domain,entityType,entityKey,attribute,ma
   return all.length===1?{target:all[0]}:{target:null,candidates:all.length};
 }
 async function proposeTaughtKnowledge(env,rec,{id,sourceText,sourceCommandId}){
-  const context={sourceType:"owner_teach",parserSource:"owner_teach",parserConfidence:rec.confidence,sourceCommandId:sourceCommandId||null,sourceText};
+  const context={sourceType:"owner_teach",parserSource:"owner_teach",parserConfidence:rec.confidence,sourceCommandId:sourceCommandId||null,sourceText,notes:rec.notes||[],reusePending:true};
   const unresolved=async(issues)=>{
     const interpretation=JSON.stringify({operation:rec.operation,kind:rec.kind,entity:rec.entity_key,concept:rec.concept,typed:rec.typed||null,envelope:rec.envelope||null,value:rec.value??null}).slice(0,1800);
     return proposeSalesKnowledge(env,{id,operation:"ADD",domain:KNOWLEDGE_DOMAIN,entity_type:"business",entity_key:"unresolved",attribute:"needs_clarification",market:rec.market||"GLOBAL",
@@ -5652,14 +5654,33 @@ async function proposeTaughtKnowledge(env,rec,{id,sourceText,sourceCommandId}){
   try{return await proposeSalesKnowledge(env,body,context);}
   catch(error){return unresolved([sanitizeOperationalError(error?.message||error).slice(0,200)]);}
 }
+// What review needs besides the stored proposal: the owner's own words and the non-blocking notes extraction left behind. Both live in
+// the proposal's audit event (no schema of their own), so a replayed or listed proposal shows exactly what the first one showed.
+async function attachKnowledgeProposalContext(env,rows,{source=true}={}){
+  const byId=new Map();
+  for(let i=0;i<rows.length;i+=40){
+    const chunk=rows.slice(i,i+40),ev=await env.DB.prepare(`SELECT id,details_json FROM system_events WHERE id IN (${chunk.map(()=>"?").join(",")})`).bind(...chunk.map(r=>"knowledge:"+r.id+":sales_knowledge_proposed")).all();
+    for(const e of ev.results||[])try{byId.set(e.id,JSON.parse(e.details_json));}catch{}
+  }
+  for(const r of rows){const d=byId.get("knowledge:"+r.id+":sales_knowledge_proposed")||{};if(source)r.source_text=d.source_text||null;r.notes=Array.isArray(d.notes)?d.notes:[];}
+}
 async function teachView(env,ids){
   const out=[];
+  ids=[...new Set(ids)];
   for(let i=0;i<ids.length;i+=40){
     const chunk=ids.slice(i,i+40);
     out.push(...((await env.DB.prepare(`SELECT id,operation,domain,entity_type,entity_key,attribute,market,status,sensitivity,confidence,conflict_json,new_value_json,old_value_json,proposal_hash FROM sales_knowledge_change_requests WHERE id IN (${chunk.map(()=>"?").join(",")}) ORDER BY id`).bind(...chunk).all()).results||[]));
   }
+  try{await attachKnowledgeProposalContext(env,out,{source:false});}catch{}
   const count=s=>out.filter(x=>x.status===s).length;
-  return {status:"proposed",proposals:out,summary:{proposals:out.length,pending_review:count("pending_review"),conflict:count("conflict"),approved:count("approved"),applied:count("applied")}};
+  return {status:"proposed",proposals:out,collections:knowledgeCollections(out),summary:{proposals:out.length,pending_review:count("pending_review"),conflict:count("conflict"),approved:count("approved"),applied:count("applied")}};
+}
+const KNOWLEDGE_TEACH_MAX_ATTEMPTS=5;
+// A finished teaching whose proposals are ALL dead ends (needs clarification, or rejected) may be run again when the owner resends the
+// very same statement. Anything pending, approved, applied or a real duplicate keeps its original result.
+function knowledgeTeachResultIsDead(view){
+  const list=view.proposals||[];
+  return list.length>0&&list.every(p=>p.status==="rejected"||(p.status==="conflict"&&p.attribute==="needs_clarification"));
 }
 async function teachKnowledge(env,body){
   await ensureSalesKnowledgeStore(env);
@@ -5673,16 +5694,34 @@ async function teachKnowledge(env,body){
   const hash=await knowledgeHash(JSON.stringify({text,market,records:direct||null})),eventId="knowledge-teach:"+hash,idBase=hash.slice(0,20);
   const prior=await env.DB.prepare("SELECT details_json,created_at FROM system_events WHERE id=?").bind(eventId).first();
   const processing={status:202,body:{ok:true,knowledge_teach:true,status:"processing",idempotent:true}};
+  let attempt=1,previousDetails=null,supersede=[];
+  const deadEnds=view=>view.proposals.filter(p=>p.status==="conflict"&&p.attribute==="needs_clarification").map(p=>p.id);
   if(prior){
     let d={};try{d=JSON.parse(prior.details_json);}catch{}
-    if(d.status==="done")return {status:200,body:{ok:true,knowledge_teach:true,idempotent:true,...await teachView(env,d.proposal_ids||[]),redirected_to_price_list:d.redirected_to_price_list||0}};
-    if(Date.parse(prior.created_at)>Date.now()-120000)return processing;
-    await env.DB.prepare("UPDATE system_events SET created_at=? WHERE id=?").bind(now(),eventId).run();
+    if(d.status==="done"){
+      const view=await teachView(env,d.proposal_ids||[]);
+      // Same statement again: the finished result is returned as it was — unless every proposal of it was a dead end, in which case
+      // the owner is retrying it (e.g. after the extraction improved) and it runs again, once, under a new proposal namespace.
+      if(!(knowledgeTeachResultIsDead(view)&&(Number(d.attempt)||1)<KNOWLEDGE_TEACH_MAX_ATTEMPTS))return {status:200,body:{ok:true,knowledge_teach:true,idempotent:true,...view,redirected_to_price_list:d.redirected_to_price_list||0}};
+      attempt=(Number(d.attempt)||1)+1;
+      // The re-run is claimed atomically: of several simultaneous resends exactly one proceeds.
+      const claimed=await env.DB.prepare("UPDATE system_events SET details_json=?,created_at=? WHERE id=? AND details_json=?").bind(JSON.stringify({status:"processing",attempt,previous_details:prior.details_json}),now(),eventId,prior.details_json).run();
+      if(!claimed.meta?.changes)return processing;
+      previousDetails=prior.details_json;supersede=deadEnds(view);
+    }else{
+      if(Date.parse(prior.created_at)>Date.now()-120000)return processing;
+      await env.DB.prepare("UPDATE system_events SET created_at=? WHERE id=?").bind(now(),eventId).run();
+      attempt=Number(d.attempt)||1;previousDetails=typeof d.previous_details==="string"?d.previous_details:null;
+      if(previousDetails)try{supersede=deadEnds(await teachView(env,JSON.parse(previousDetails).proposal_ids||[]));}catch{}
+    }
   }else{
     const claim=await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Owner knowledge teaching',?,?)").bind(eventId,"knowledge_teach",JSON.stringify({status:"processing"}),now()).run();
     if(!claim.meta?.changes)return processing;
   }
-  const release=()=>env.DB.prepare("DELETE FROM system_events WHERE id=? AND details_json LIKE '%processing%'").bind(eventId).run().catch(()=>{});
+  // A failed attempt gives the claim back: a first attempt leaves no trace, a re-run restores the finished result it was replacing.
+  const release=()=>(previousDetails
+    ?env.DB.prepare("UPDATE system_events SET details_json=? WHERE id=? AND details_json LIKE '%processing%'").bind(previousDetails,eventId).run()
+    :env.DB.prepare("DELETE FROM system_events WHERE id=? AND details_json LIKE '%processing%'").bind(eventId).run()).catch(()=>{});
   let records=direct;
   if(!records){
     // Role/field names already used by approved knowledge are shown to the extractor so the same role keeps the same name.
@@ -5691,22 +5730,38 @@ async function teachKnowledge(env,body){
     if(ai.error){await release();return {status:ai.error==="ai_unavailable"?503:502,body:{ok:false,knowledge_teach:true,error:ai.error==="ai_unavailable"?"AI extraction is unavailable; submit structured records or use the review form. Nothing was changed.":"Knowledge extraction failed ("+ai.error+"); nothing was changed."}};}
     records=ai.records;
   }
-  const norm=normalizeKnowledgeInput(records,{market});
+  // The owner's own words are passed along: a typed role (exterior/interior…) the owner never named is not trusted (see normalizeOne),
+  // and an explicit add/expand verb makes an added value one more member of its collection.
+  const verb=text?knowledgeCommandOperation(knowledgeCommandAffirmative(knowledgeCommandText(text))):null;
+  const norm=normalizeKnowledgeInput(records,{market,text,typedCommercial:domain=>SALES_KNOWLEDGE_COMMERCIAL.has(domain),additive:["ADD_PRODUCT_KNOWLEDGE","EXPAND"].includes(verb?.intent)});
   // Fail-closed: a statement that links two values must not be flattened into a typed/plain fact (owner corrects it into a relation).
   applyRelationalGuards(norm.records,text);
   if(!norm.records.length){await release();return {status:422,body:{ok:false,knowledge_teach:true,error:"No knowledge could be extracted from this input; nothing was changed."}};}
   const ids=[];let redirected=0;
   const sourceText=text||JSON.stringify(direct).slice(0,2000);
+  const prefix=`teach-${idBase}-${attempt>1?"a"+attempt+"-":""}`;
   for(let i=0;i<norm.records.length;i++){
     const rec=norm.records[i];
     // Prices belong to the existing versioned price list (owner price import), never to generic knowledge.
     if(rec.issues.includes("price_belongs_to_price_list")){redirected++;continue;}
-    const proposal=await proposeTaughtKnowledge(env,rec,{id:`teach-${idBase}-${String(i+1).padStart(2,"0")}`,sourceText,sourceCommandId:commandId});
+    const proposal=await proposeTaughtKnowledge(env,rec,{id:`${prefix}${String(i+1).padStart(2,"0")}`,sourceText,sourceCommandId:commandId});
     ids.push(proposal.id);
   }
-  await env.DB.prepare("UPDATE system_events SET details_json=? WHERE id=?").bind(JSON.stringify({status:"done",proposal_ids:ids,redirected_to_price_list:redirected,market}),eventId).run();
-  try{await audit(env,"knowledge_teach_proposed","Owner teaching produced knowledge proposals for review",{event:eventId,proposals:ids.length,redirected_to_price_list:redirected});}catch{}
-  return {status:200,body:{ok:true,knowledge_teach:true,idempotent:false,...await teachView(env,ids),redirected_to_price_list:redirected,command_id:commandId}};
+  // The dead ends of the result this re-run replaces are closed (rejected, history kept) so the review queue shows only the live one.
+  const superseded=[];
+  if(supersede.length){
+    const t=now();
+    for(const oldId of supersede){
+      const closed=await env.DB.prepare("UPDATE sales_knowledge_change_requests SET status='rejected',reviewed_by='admin',reviewed_at=?,review_note=?,updated_at=? WHERE id=? AND status='conflict' AND attribute='needs_clarification'").bind(t,"Superseded by a re-run of the same owner statement",t,oldId).run();
+      if(!closed.meta?.changes)continue;
+      superseded.push(oldId);
+      try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Owner reviewed knowledge proposal',?,?)").bind("knowledge:"+oldId+":review","sales_knowledge_rejected",JSON.stringify({request_id:oldId,decision:"reject",actor:"admin",reason:"superseded_by_rerun",attempt}),t).run();}catch{}
+    }
+  }
+  const proposalIds=[...new Set(ids)];
+  await env.DB.prepare("UPDATE system_events SET details_json=? WHERE id=?").bind(JSON.stringify({status:"done",proposal_ids:proposalIds,redirected_to_price_list:redirected,market,attempt}),eventId).run();
+  try{await audit(env,"knowledge_teach_proposed","Owner teaching produced knowledge proposals for review",{event:eventId,proposals:proposalIds.length,redirected_to_price_list:redirected,attempt});}catch{}
+  return {status:200,body:{ok:true,knowledge_teach:true,idempotent:false,...(attempt>1?{retried:true,attempt,superseded}:{}),...await teachView(env,proposalIds),redirected_to_price_list:redirected,command_id:commandId}};
 }
 // CORRECT: the owner changes the structured meaning BEFORE approval. A new proposal is created from the corrected record and
 // the displayed one is rejected as superseded (history stays); nothing becomes authoritative until the new one is approved.
@@ -5785,19 +5840,57 @@ function isReadOnlyStatusCommand(raw){
   if(READ_ONLY_CONSTRAINTS.test(command))return true;
   return READ_ONLY_REPORT_TERMS.test(command)&&!OPERATIONAL_ACTION_TERMS.test(affirmative);
 }
+// The market the command itself names, or null. A command that names none keeps the market the owner selected (never a silent GLOBAL).
 function knowledgeCommandMarket(raw){
   const s=raw.toLowerCase();
   if(/(?:ایران|\biran\b)/i.test(s))return "IRAN";
   if(/(?:عراق|\biraq\b|عربی|عرب|\barab\b)/i.test(s))return "ARAB";
-  return "GLOBAL";
+  return null;
 }
+// The words by which the fixed router recognises a field. ONE table serves three jobs — it picks the domain in parseSalesKnowledgeCommand,
+// it tells a model name from the field it was given with, and it rejects a name that still holds one — so the name capture can no longer
+// lag behind the domain list (only the knowledgeSignal gate in parseSalesKnowledgeCommand keeps a list of its own).
+const KNOWLEDGE_FIELD_WORDS={
+  pricing:/(?:قیمت|سعر|\bprice\b)/i,
+  moq:/(?:موک|\bmoq\b|\bminimum\s+order\b|حداقل سفارش)/i,
+  discount:/(?:تخفیف|خصم|\bdiscount\b)/i,
+  timing:/(?:زمان تولید|\bproduction\s*(?:time|timing)\b|\blead time\b)/i,
+  constraint:/(?:محدودیت تولید|\bproduction\s*(?:constraint|limit)\b|\bcapacity\b)/i,
+  shipping:/(?:ارسال|حمل|شحن|\bshipping\b)/i,
+  payment:/(?:پرداخت|\bpayment\b)/i,
+  deposit:/(?:بیعانه|\bdeposit\b)/i,
+  printing:/(?:چاپ|فویل|\bprinting\b|\bfoil\b|\bbranding\b)/i,
+  size:/(?:سایز|اندازه|\bsize\b)/i,
+  color:/(?:رنگ|لون|\bcolou?rs?\b)/i,
+  sales:/(?:قانون فروش|\bsales\s+rule\b)/i,
+  negotiation:/(?:مذاکره|\bnegotiat)/i,
+  visual:/(?:تصویر|عکس|\bvisual\b|\bmedia\b)/i
+};
+const KNOWLEDGE_FIELD_LIST=Object.values(KNOWLEDGE_FIELD_WORDS);
+const KNOWLEDGE_FIELD_WORD_SCAN=KNOWLEDGE_FIELD_LIST.map(re=>new RegExp(re.source,"gi"));
+// The particles and verbs that end a model name, matched from the start of a word. The English ones are the verbs knowledgeCommandOperation
+// reads plus from/to: the old English-only name pattern listed them but never ran (the Persian one also matches "model"), so
+// "for model X add size 5x5" captured "X add size 5x5".
+const KNOWLEDGE_NAME_STOPS=/(?:را|رو|هم|رنگ|color|لون|موک|moq|حداقل|از|به|اضافه|تغییر|اصلاح|جایگزین|حذف|غیرفعال|delete|replace|update|deactivate|(?:add|change|correct|remove|disable|expand|teach|also|too|from|to)\b)/i;
+// The text after «مدل» up to the first of them (matched from the start of a word, as before).
+const KNOWLEDGE_MODEL_NAME=new RegExp("(?:برای\\s*)?(?:مدل(?:\\s+(?:جعبه|box))?|model|موديل|الموديل)\\s+(.+?)(?=\\s+"+KNOWLEDGE_NAME_STOPS.source+"|$)","i");
+// A capture that BEGINS with one of them as a whole word is no name at all («برای مدل also add …»).
+const KNOWLEDGE_NAME_IS_STOP=new RegExp("^"+KNOWLEDGE_NAME_STOPS.source+"$","i");
 function knowledgeCommandEntity(raw){
   const s=knowledgeCommandText(raw);
-  const fa=s.match(/(?:برای\s*)?(?:مدل(?:\s+(?:جعبه|box))?|model|موديل|الموديل)\s+(.+?)(?=\s+(?:را|رو|هم|رنگ|color|لون|موک|moq|حداقل|از|به|اضافه|تغییر|اصلاح|جایگزین|حذف|غیرفعال|delete|replace|update|deactivate)|$)/i);
-  const en=s.match(/(?:for\s+|to\s+)?model\s+([a-z0-9][a-z0-9 _-]{0,100}?)(?=\s+(?:color|moq|from|to|add|change|correct|replace|delete|deactivate)\b|$)/i);
-  const value=(fa?.[1]||en?.[1]||"").trim();
-  if(value)return {entity_type:"model",entity_key:value};
-  return {entity_type:"business",entity_key:"global"};
+  const named=(s.match(KNOWLEDGE_MODEL_NAME)?.[1]||"").trim();
+  if(!named)return {entity_type:"business",entity_key:"global"};
+  if(KNOWLEDGE_NAME_IS_STOP.test(named.split(" ")[0]))return {entity_type:"model",entity_key:null,entity_rejected:named};
+  const holdsField=v=>KNOWLEDGE_FIELD_LIST.some(re=>re.test(v))||!!knowledgeCommandOperation(v);
+  if(!holdsField(named))return {entity_type:"model",entity_key:named};
+  // The capture holds a field word (size, printing, shipping …) or an action: «برای مدل X سایز 5x5 اضافه کن» is model X plus the field it is
+  // about, but «برای مدل سایز 5x5 اضافه کن» names no model, and «برای مدل قاب عکس …» or «کیف حمل ارسال …» have a field word inside the name.
+  // The name is split off ONLY when the capture holds exactly ONE field word and the command is about exactly one field (the name is what
+  // stands before that word, at the start of a word); every other case is rejected, so no product is ever made up from field text.
+  const hits=KNOWLEDGE_FIELD_WORD_SCAN.flatMap(re=>[...named.matchAll(re)].map(m=>m.index));
+  const name=hits.length===1&&hits[0]>0&&/\s/.test(named[hits[0]-1])?named.slice(0,hits[0]).trim():"";
+  if(name&&!holdsField(name)&&KNOWLEDGE_FIELD_LIST.filter(re=>re.test(s)).length===1)return {entity_type:"model",entity_key:name};
+  return {entity_type:"model",entity_key:null,entity_rejected:named};
 }
 function knowledgeCommandValue(raw,domain,attribute,entity){
   const s=knowledgeCommandText(raw),lower=s.toLowerCase();
@@ -5820,7 +5913,35 @@ function knowledgeCommandValue(raw,domain,attribute,entity){
   const quoted=s.match(/[«"]([^»"]+)[»"]/);
   return {value:(quoted?.[1]||s).trim()||null};
 }
-export function parseSalesKnowledgeCommand(raw){
+// ---- Generic vs fixed: the fixed router keeps only commands it fully understands with an explicitly named typed field. ----
+// A color is a typed field only for a role the owner NAMES; the role words live in the knowledge engine (TYPED_ROLE_FIELDS).
+const LEGACY_COLOR_ROLES=["exterior","interior","combination"];
+const LEGACY_LIST_VALUE=/[،,؛;]|(?:^|\s)(?:و|یا|and|or)(?:\s|$)/u;
+// A plain color value has no link, target or product word inside it ("مشکی", "navy", "مشکی-طلایی" — not "مشکی با روبان طلایی").
+const LEGACY_VALUE_STRUCTURE=/(?:^|\s)(?:با|فقط|روی|بدون|برای|به|از|مدل|جعبه|باکس|with|only|on|without|for|to|from|model|box)(?:\s|$)/u;
+// Every word a simple fixed color command may contain besides its role, value and «مدل X» target (normalized by knowledgeText).
+const LEGACY_COLOR_COMMAND_WORDS=new Set(["را","رو","هم","به","برای","لطفا","یک","اضافه","کن","کنید","بکن","شود","بشه","ثبت","داریم","رنگ","رنگها","ها","های","لون","الوان","ألوان","the","to","for","of","a","an","please","also","too","add","expand","أضف","اضف","color","colour","colors","colours","ایران","iran","عراق","iraq","العراق","عرب","عربی","arab","بازار","market"]);
+const LEGACY_MODEL_MARKERS=["مدل","model","مودیل","المودیل","للمودیل","للمودل","جعبه","box"];
+function legacyColorCommandUnderstood(command,parsed){
+  const words=v=>knowledgeText(v).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const value=knowledgeText(parsed.value);
+  if(!value||LEGACY_LIST_VALUE.test(value)||LEGACY_VALUE_STRUCTURE.test(value))return false;
+  const known=new Set([...LEGACY_COLOR_COMMAND_WORDS,...words(parsed.value),...(parsed.entity_type==="business"?[]:[...words(parsed.entity_key),...LEGACY_MODEL_MARKERS])]);
+  // Any other word (a product named without «مدل», a collection name, a second role …) is more than this router understands.
+  return words(command).every(w=>known.has(w)||knowledgeTypedRoleNamed("color."+parsed.attribute,w));
+}
+const GENERIC_COMMAND_REASONS={
+  color_role_not_named:"No color role (exterior, interior or combination) was named, so this is generic business knowledge for the knowledge engine; it is never assumed to be exterior. Nothing was changed.",
+  list_of_values:"Several values were given; a list is taught through the knowledge engine as one collection. Nothing was changed.",
+  not_fully_understood:"This command says more than the fixed router understands (for example a product named without «مدل», a collection name or a linked value); it is taught through the knowledge engine. Nothing was changed.",
+  model_not_clear:"The model name could not be told apart from the field it was given with (no model was named, or a field word such as size, printing or shipping sits inside the name), so no product was guessed; it is taught through the knowledge engine. Nothing was changed."
+};
+// Generic business knowledge goes to the generic engine (AI extraction → validated proposals → owner review). Without that engine the
+// owner gets a clarification: the fixed router never guesses a role, a list or a target for it.
+function genericKnowledgeCommand(parsed,reason){
+  return {...parsed,generic:true,generic_reason:reason,confidence:0.5,error:GENERIC_COMMAND_REASONS[reason]};
+}
+export function parseSalesKnowledgeCommand(raw,{market:selected}={}){
   const original=knowledgeCommandText(raw);
   if(!original||original.length>2000)return {recognized:false,error:"A bounded owner command is required"};
   if(isReadOnlyStatusCommand(original))return {recognized:false,read_only:true};
@@ -5833,31 +5954,43 @@ export function parseSalesKnowledgeCommand(raw){
     if(OPERATIONAL_ACTION_TERMS.test(command))return {recognized:false};
     return {recognized:true,confidence:0.3,error:"An explicit knowledge action is required (add, expand, update, replace, correct, deactivate, delete or teach); nothing was changed"};
   }
-  const entity=knowledgeCommandEntity(command),market=knowledgeCommandMarket(command),s=command.toLowerCase();
-  if(/(?:مذاکره|\bnegotiat)/i.test(s))action.intent="CHANGE_NEGOTIATION_BEHAVIOR";
-  if(/(?:قانون فروش|\bsales\s+rule\b)/i.test(s))action.intent=["UPDATE","REPLACE"].includes(action.operation)?"CHANGE_SALES_RULE":"ADD_SALES_RULE";
+  const entity=knowledgeCommandEntity(command),s=command.toLowerCase();
+  // Market: the one the command names, else the one the owner selected for it, else GLOBAL (only when none was given at all).
+  const namedMarket=knowledgeCommandMarket(command),selectedMarket=["IRAN","ARAB","GLOBAL"].includes(String(selected||"").toUpperCase())?String(selected).toUpperCase():null;
+  const market=namedMarket||selectedMarket||"GLOBAL",marketSource=namedMarket?"command":selectedMarket?"selected":"default";
+  if(KNOWLEDGE_FIELD_WORDS.negotiation.test(s))action.intent="CHANGE_NEGOTIATION_BEHAVIOR";
+  if(KNOWLEDGE_FIELD_WORDS.sales.test(s))action.intent=["UPDATE","REPLACE"].includes(action.operation)?"CHANGE_SALES_RULE":"ADD_SALES_RULE";
   let domain=null,attribute=null;
-  if(/(?:قیمت|سعر|\bprice\b)/i.test(s)){domain="pricing";attribute="authority";}
-  else if(/(?:موک|\bmoq\b|\bminimum\s+order\b|حداقل سفارش)/i.test(s)){domain="quantity";attribute="moq";}
-  else if(/(?:تخفیف|خصم|\bdiscount\b)/i.test(s)){domain="discount";attribute="rule";}
-  else if(/(?:زمان تولید|\bproduction\s*(?:time|timing)\b|\blead time\b)/i.test(s)){domain="production";attribute="timing_rule";}
-  else if(/(?:محدودیت تولید|\bproduction\s*(?:constraint|limit)\b|\bcapacity\b)/i.test(s)){domain="production";attribute="constraint";}
-  else if(/(?:ارسال|حمل|شحن|\bshipping\b)/i.test(s)){domain="shipping";attribute="terms";}
-  else if(/(?:پرداخت|\bpayment\b)/i.test(s)){domain="payment";attribute="terms";}
-  else if(/(?:بیعانه|\bdeposit\b)/i.test(s)){domain="deposit";attribute="rule";}
-  else if(/(?:چاپ|فویل|\bprinting\b|\bfoil\b|\bbranding\b)/i.test(s)){domain="printing";attribute=/فویل|foil/i.test(s)?"method":"limitation";}
-  else if(/(?:سایز|اندازه|\bsize\b)/i.test(s)){domain="size";attribute="available_size";}
-  else if(/(?:رنگ ترکیبی|\bcolor combination\b)/i.test(s)){domain="color";attribute="combination";}
-  else if(/(?:رنگ داخلی|\binterior color\b)/i.test(s)){domain="color";attribute="interior";}
-  else if(/(?:رنگ|لون|\bcolor\b)/i.test(s)){domain="color";attribute="exterior";}
-  else if(/(?:قانون فروش|\bsales\s+rule\b)/i.test(s)){domain="sales";attribute="rule";}
-  else if(/(?:مذاکره|\bnegotiat)/i.test(s)){domain="negotiation";attribute="behavior";}
-  else if(/(?:تصویر|عکس|\bvisual\b|\bmedia\b)/i.test(s))return {recognized:true,requires_phase:"visual_knowledge",intent:"ADD_VISUAL_KNOWLEDGE",operation:"ADD",confidence:0.85,error:"Visual knowledge requires the dedicated real-media indexing phase"};
+  if(KNOWLEDGE_FIELD_WORDS.pricing.test(s)){domain="pricing";attribute="authority";}
+  else if(KNOWLEDGE_FIELD_WORDS.moq.test(s)){domain="quantity";attribute="moq";}
+  else if(KNOWLEDGE_FIELD_WORDS.discount.test(s)){domain="discount";attribute="rule";}
+  else if(KNOWLEDGE_FIELD_WORDS.timing.test(s)){domain="production";attribute="timing_rule";}
+  else if(KNOWLEDGE_FIELD_WORDS.constraint.test(s)){domain="production";attribute="constraint";}
+  else if(KNOWLEDGE_FIELD_WORDS.shipping.test(s)){domain="shipping";attribute="terms";}
+  else if(KNOWLEDGE_FIELD_WORDS.payment.test(s)){domain="payment";attribute="terms";}
+  else if(KNOWLEDGE_FIELD_WORDS.deposit.test(s)){domain="deposit";attribute="rule";}
+  else if(KNOWLEDGE_FIELD_WORDS.printing.test(s)){domain="printing";attribute=/فویل|foil/i.test(s)?"method":"limitation";}
+  else if(KNOWLEDGE_FIELD_WORDS.size.test(s)){domain="size";attribute="available_size";}
+  // A color is a typed field only for ONE role the owner names (exterior / interior / combination). No role, several roles or another
+  // role (ribbon, print, …) is generic business knowledge: a color is never silently "exterior".
+  else if(KNOWLEDGE_FIELD_WORDS.color.test(s)){const roles=LEGACY_COLOR_ROLES.filter(role=>knowledgeTypedRoleNamed("color."+role,command));domain="color";attribute=roles.length===1?roles[0]:null;}
+  else if(KNOWLEDGE_FIELD_WORDS.sales.test(s)){domain="sales";attribute="rule";}
+  else if(KNOWLEDGE_FIELD_WORDS.negotiation.test(s)){domain="negotiation";attribute="behavior";}
+  else if(KNOWLEDGE_FIELD_WORDS.visual.test(s))return {recognized:true,requires_phase:"visual_knowledge",intent:"ADD_VISUAL_KNOWLEDGE",operation:"ADD",confidence:0.85,error:"Visual knowledge requires the dedicated real-media indexing phase"};
   else if(/(?:مدل|جعبه|\bproduct\b|\bmodel\b)/i.test(s)){domain="product";attribute="name";}
   else return {recognized:true,confidence:0.4,error:"The knowledge domain or attribute is not allowlisted"};
-  const parsed={recognized:true,intent:action.intent,operation:action.operation,domain,attribute,market,...entity,confidence:0.96};
+  const parsed={recognized:true,intent:action.intent,operation:action.operation,domain,attribute,market,market_source:marketSource,...entity,confidence:0.96};
+  // A model name that cannot be told apart from the field it was given with is never turned into a product (pricing never uses the entity:
+  // it is redirected below before anything is created).
+  if(entity.entity_rejected&&domain!=="pricing")return genericKnowledgeCommand(parsed,"model_not_clear");
+  if(domain==="color"&&!attribute)return genericKnowledgeCommand(parsed,"color_role_not_named");
   Object.assign(parsed,knowledgeCommandValue(command,domain,attribute,entity));
+  if(domain==="color"&&typeof parsed.value==="string")parsed.value=knowledgeWithoutRoleWords(parsed.value,"color."+attribute)||null;
   if(["DELETE","DEACTIVATE"].includes(parsed.operation))parsed.value=null;
+  // A list for a multi-value field is a collection: the generic engine keeps every value (never one joined member). Separators are
+  // read from the owner's original words too, because the affirmative filter above re-joins clauses split on commas with spaces.
+  if(parsed.value!==null&&knowledgeFieldType(domain,attribute)==="member"&&[parsed.value,knowledgeCommandValue(original,domain,attribute,entity).value].some(v=>typeof v==="string"&&LEGACY_LIST_VALUE.test(knowledgeText(v))))return genericKnowledgeCommand(parsed,"list_of_values");
+  if(domain==="color"&&["ADD","EXPAND"].includes(parsed.operation)&&parsed.value&&!legacyColorCommandUnderstood(command,parsed))return genericKnowledgeCommand(parsed,"not_fully_understood");
   if(domain==="pricing")parsed.pricing_redirect=true;
   if(!parsed.value&&!["DELETE","DEACTIVATE"].includes(parsed.operation))parsed.error="The proposed value is not clear enough for a review request";
   if(entity.entity_type==="business"&&domain==="product")parsed.error="The target model or product is required";
@@ -5886,7 +6019,7 @@ async function createKnowledgeRouterConflict(env,parsed,reason,matches,context){
   return await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
 }
 export async function routeSalesKnowledgeCommand(env,body){
-  const raw=knowledgeCommandText(body?.command),parsed=parseSalesKnowledgeCommand(raw);
+  const raw=knowledgeCommandText(body?.command),parsed=parseSalesKnowledgeCommand(raw,{market:body?.market});
   if(!parsed.recognized)return {handled:false};
   const commandId=typeof body?.command_id==="string"&&/^[a-zA-Z0-9_-]{8,60}$/.test(body.command_id)?body.command_id:"cmd-"+uid();
   const context={proposalId:"knowledge-"+commandId,sourceCommandId:commandId,sourceType:"owner_command_router",parserSource:"deterministic",parserConfidence:parsed.confidence||null,raw_command:raw};
@@ -5954,14 +6087,17 @@ async function maybeHandleAutonomyKnowledgeCommand(req,env){
     const snapshot=await (await handleAutonomy(env,new Request(new URL("/api/autonomy/status",req.url),{method:"GET",headers:{Authorization:req.headers.get("Authorization")||""}}))).json().catch(()=>null);
     return json({ok:snapshot?.ok===true,read_only:true,tasks_created:0,executed:0,status:snapshot,...(snapshot?.ok?{}:{error:snapshot?.error||"Status unavailable"})});
   }
-  const parsed=parseSalesKnowledgeCommand(body.command);
+  const parsed=parseSalesKnowledgeCommand(body.command,{market:body.market});
   // A declarative owner statement the fixed router does not recognise at all (e.g. "ترکیب مشکی با روبان طلایی مجاز است") is still
   // business knowledge: the generic engine handles it. Operational commands (imperatives/module words) never take this path.
-  const genericOnly=!parsed.recognized&&!parsed.read_only&&!!env.OPENAI_API_KEY&&auth(req,env)&&looksLikeKnowledgeStatement(body.command)&&!OPERATIONAL_ACTION_TERMS.test(body.command)&&KNOWLEDGE_DECLARATIVE.test(String(body.command).trim());
+  // A named list ("<collection name>: A، B، C") is knowledge as well, with or without a sales keyword or a verb — unless it talks about
+  // one of the operational modules the task planner owns, in which case it stays with the planner exactly as before.
+  const genericOnly=!parsed.recognized&&!parsed.read_only&&!!env.OPENAI_API_KEY&&auth(req,env)&&looksLikeKnowledgeStatement(body.command)&&!OPERATIONAL_ACTION_TERMS.test(body.command)&&(KNOWLEDGE_DECLARATIVE.test(String(body.command).trim())||(knowledgeLooksLikeCollection(body.command)&&!PLANNER_MODULE_TERMS.test(body.command)));
   if(!parsed.recognized&&!genericOnly)return null;
   if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
-  // Owner business statements the fixed router cannot place ("no explicit action") are taught through the GENERIC engine:
-  // AI extraction → structured, validated proposals → owner review. If extraction is unavailable, the original clarification stays.
+  // Owner business statements the fixed router cannot place ("no explicit action", or generic knowledge such as an unscoped color,
+  // a list or more than it understands) are taught through the GENERIC engine: AI extraction → structured, validated proposals →
+  // owner review, in the market the owner selected. If extraction is unavailable, the original clarification stays.
   if((genericOnly||(parsed.error&&!parsed.requires_phase&&!parsed.pricing_redirect))&&env.OPENAI_API_KEY&&looksLikeKnowledgeStatement(body.command)){
     const taught=await teachKnowledge(env,{text:body.command,market:body.market,command_id:body.command_id});
     if(taught.body.ok)return json(taught.body,taught.status);
