@@ -968,11 +968,12 @@ async function submitOwnerKnowledge(raw){
  finally{clearTimeout(timer)}
 }
 function ownerImportSummaryHtml(d){const s=d.summary||{};return "<span class='ok'>✓ دانش برای بررسی مالک ساختاربندی شد"+(d.idempotent?" · ارسال تکراری بود؛ دوباره پردازش نشد":"")+"</span><div class='mini'>Price rows: "+esc(s.price_rows||0)+" · No-price rows: "+esc(s.no_price_rows||0)+" · Product facts: "+esc(s.product_facts||0)+" · Photos: "+esc(s.visuals||0)+" · Rules: "+esc(s.rules||0)+" · Unparsed: "+esc(s.unparsed||0)+" · Parsed: "+esc(s.parsed||0)+" · Ambiguous: "+esc(s.ambiguous||0)+" · Rejected: "+esc(s.rejected||0)+" · Conflicts: "+esc(s.conflicts||0)+" · هیچ موردی بدون تأیید مالک فعال نشده است.</div>"+((s.instructions||[]).length?"<div class='mini'>Owner instructions (kept as guidance, never product data): "+(s.instructions||[]).map(esc).join(" · ")+"</div>":"")}
+function ownerReviewCountsHtml(d){const c=d.review_counts;if(!c)return "";return "<div class='mini'>Review now: pending "+esc(c.pending_review||0)+" · applied "+esc(c.applied||0)+" · rejected "+esc(c.rejected||0)+((c.approved||0)?" · being applied "+esc(c.approved):"")+"</div>"}
 function ownerIssueText(x){let a=[];try{a=JSON.parse(x.issues_json||"[]")}catch(e){}return a.map(i=>i.code+(i.detail?": "+i.detail:"")+(i.active_price_minor!=null?" (active "+i.active_price_minor+" "+(i.currency||"")+")":"")).join(" · ")}
 function ownerObservationText(x){let o=null;try{o=JSON.parse(x.observation_json||"null")}catch(e){}if(!o)return "";return "AI visual observation (advisory, not authoritative): "+[o.visual_summary,(o.visible_features||[]).join(", "),(o.visible_colors||[]).join(", "),"category "+(o.likely_product_category||"unknown"),"uncertainty "+(o.uncertainty||"—")].filter(Boolean).join(" · ")}
 function renderOwnerImport(d){
  const items=d.items||[];
- $("ownerImportStatus").innerHTML=ownerImportSummaryHtml(d)+"<div class='tools'><button class='btn primary' data-oimp='approve-parsed'>APPROVE ALL CLEAN PARSED ITEMS</button></div>";
+ $("ownerImportStatus").innerHTML=ownerImportSummaryHtml(d)+"<div class='tools'><button class='btn primary' data-oimp='approve-parsed'>APPROVE ALL CLEAN PARSED ITEMS</button><button class='btn danger' data-oimp='reject-all'>REJECT ALL</button></div>"+ownerReviewCountsHtml(d);
  $("ownerImports").innerHTML=items.map((x,i)=>{
   const pending=x.review_status==="pending_review",price=x.price_minor!=null?(x.price_minor+" "+(x.currency||"")):x.item_type==="price_row"?"NOT SUPPLIED (no authoritative price)":"",fact=x.fact_value_json?((x.fact_domain||"")+"."+(x.fact_attribute||"")+" = "+x.fact_value_json):"";
   return "<div class='row'>"+(x.thumbnail_url?"<img alt='' src='"+esc(x.thumbnail_url)+"' style='width:96px;height:96px;object-fit:cover;border-radius:8px;float:left;margin-right:10px'>":"")
@@ -985,6 +986,8 @@ function renderOwnerImport(d){
    +(pending?"<div class='tools' style='clear:both'>"+(x.parse_status==="parsed"?"<button class='btn primary' data-oimp='approve' data-index='"+i+"'>APPROVE</button>":"")+"<button class='btn' data-oimp='correct' data-index='"+i+"'>CORRECT</button><button class='btn danger' data-oimp='reject' data-index='"+i+"'>REJECT</button></div>":"<div style='clear:both'></div>")+"</div>";
  }).join("")||"<div class='hint'>No items.</div>";
 }
+// Confirmation dialog with explicit CANCEL / REJECT ALL buttons (resolves true only for REJECT ALL).
+function ownerConfirmModal(text){return new Promise(res=>{const d=document.createElement("dialog");d.setAttribute("aria-label","Confirm");d.style.cssText="background:#0e1422;color:#eef2f7;border:1px solid #2a3550;border-radius:12px;padding:18px;max-width:440px";d.innerHTML="<p style='margin:0 0 14px'>"+esc(text)+"</p><div class='tools'><button type='button' class='btn' data-choice='cancel'>CANCEL</button><button type='button' class='btn danger' data-choice='ok'>REJECT ALL</button></div>";let done=false;const finish=v=>{if(done)return;done=true;try{d.close()}catch(e){}d.remove();res(v)};d.addEventListener("click",e=>{const c=e.target&&e.target.dataset?e.target.dataset.choice:null;if(c)finish(c==="ok")});d.addEventListener("cancel",e=>{e.preventDefault();finish(false)});document.body.appendChild(d);if(d.showModal)d.showModal();else d.setAttribute("open","");});}
 async function loadOwnerImports(id){
  const status=$("ownerImportStatus");
  try{
@@ -1000,6 +1003,21 @@ document.addEventListener("click",async ev=>{
  ownerImportBusy=true;b.disabled=true;
  try{
   let d;
+  if(action==="reject-all"){
+   // REJECT ALL: a direct owner action on THIS import's remaining review items (exact ids server-side; never natural language).
+   const importId=ownerImportData.import_id,count=(ownerImportData.items||[]).filter(i=>i.review_status==="pending_review").length;
+   if(!(await ownerConfirmModal("Reject all remaining review items in this import?"+(count?" ("+count+" items)":""))))return;
+   let rejected=0,failed=0,already=null,remaining=1,rounds=0,stopped="";
+   while(remaining>0&&rounds<60){
+    rounds++;d=await api("/api/owner-knowledge/imports/reject-remaining",{method:"POST",body:JSON.stringify({import_id:importId,confirm:true,batch_size:30})});
+    if(!d.ok){stopped=d.error||"stopped";break}
+    rejected+=d.rejected||0;failed+=d.failed||0;if(already===null)already=d.already_final||0;remaining=d.remaining_review||0;
+    b.textContent="REJECTING… "+rejected+" rejected · "+remaining+" remaining";
+    if(!(d.rejected>0))break;
+   }
+   await loadOwnerImports(importId);
+   $("ownerImportStatus").insertAdjacentHTML("beforeend","<div class='mini "+(stopped||failed?"warn":"ok")+"'>Rejected: "+esc(rejected)+" · Already final/skipped: "+esc(already||0)+" · Failed: "+esc(failed)+" · Remaining review: "+esc(remaining)+(stopped?" · stopped: "+esc(stopped)+" (press REJECT ALL again to resume)":"")+"</div>");return;
+  }
   if(action==="approve-parsed"){
    if(!confirm("Approve every CLEAN parsed item? Ambiguous, conflicting and price-replacing rows stay for individual review. Approved prices become owner-approved price versions."))return;
    // Server applies at most 20 items per request; keep calling until nothing eligible remains. Safe to press again to

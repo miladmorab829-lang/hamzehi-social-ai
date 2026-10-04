@@ -2027,7 +2027,9 @@ async function ownerImportView(env,importId){
   const imp=await env.DB.prepare("SELECT * FROM owner_knowledge_imports WHERE id=? LIMIT 1").bind(importId).first();
   const items=(await env.DB.prepare(`SELECT i.*,img.telegram_media_id,img.analysis_status AS image_analysis_status,img.visual_media_id FROM owner_knowledge_import_items i LEFT JOIN owner_product_images img ON img.id=i.image_id WHERE i.import_id=? ORDER BY i.seq`).bind(importId).all()).results||[];
   let summary={};try{summary=JSON.parse(imp?.summary_json||"{}");}catch{}
-  return {import_id:importId,import:imp,summary,items:items.map(x=>({...x,thumbnail_url:x.telegram_media_id?`/media/telegram?id=${encodeURIComponent(x.telegram_media_id)}`:null}))};
+  // Live review state of THIS import (the summary above is the parse result at import time).
+  const review_counts={pending_review:0,approved:0,applied:0,rejected:0};for(const x of items)if(x.review_status in review_counts)review_counts[x.review_status]++;
+  return {import_id:importId,import:imp,summary,review_counts,items:items.map(x=>({...x,thumbnail_url:x.telegram_media_id?`/media/telegram?id=${encodeURIComponent(x.telegram_media_id)}`:null}))};
 }
 // ---- Owner review of import items → existing authorities ----
 async function applyOwnerKnowledgeItem(env,item){
@@ -2160,6 +2162,25 @@ async function handleOwnerKnowledge(req,env){
       }
       const remaining=Math.max(0,stalled.length+eligible.length-batch.length);
       return json({ok:true,applied:applied.length,approved:applied.length,failed:failed.length,failures:failed,skipped:held.length,held,remaining,batch_size:limit});
+    }
+    if(u.pathname==="/api/owner-knowledge/imports/reject-remaining"&&req.method==="POST"){
+      // REJECT ALL for ONE import: a direct, deterministic owner action on exact item ids — never natural language, never the
+      // knowledge engine. Only items of THIS import still awaiting review (pending_review: parsed, ambiguous, unparsed, malformed)
+      // are rejected, each through the same version-checked single-item reject. Applied/rejected items are final; an item caught
+      // mid-approval ('approved') is left alone. Bounded per request (default 30, max 50); the dashboard repeats until 0 remain.
+      // Idempotent: a repeat finds nothing pending, rejects nothing and writes no audit row.
+      const b=await req.json().catch(()=>null),id=String(b?.import_id||""),limit=Math.min(50,Math.max(1,Math.floor(Number(b?.batch_size)||30)));
+      if(!id||b?.confirm!==true)return json({ok:false,error:"import_id and explicit confirmation are required"},400);
+      if(!(await env.DB.prepare("SELECT id FROM owner_knowledge_imports WHERE id=? LIMIT 1").bind(id).first()))return json({ok:false,error:"Import not found"},404);
+      const rows=(await env.DB.prepare("SELECT id,version,review_status FROM owner_knowledge_import_items WHERE import_id=? ORDER BY seq").bind(id).all()).results||[];
+      const pending=rows.filter(x=>x.review_status==="pending_review"),batch=pending.slice(0,limit),rejected=[],failed=[];
+      for(const item of batch){
+        try{const r=await reviewOwnerKnowledgeItem(env,{id:item.id,action:"reject",expected_version:item.version});if(r?.review_status==="rejected")rejected.push(item.id);else failed.push({id:item.id,reason:"not_rejected"});}
+        catch(error){failed.push({id:item.id,reason:sanitizeOperationalError(error?.message||error)});}
+      }
+      const remaining=(await env.DB.prepare("SELECT COUNT(*) AS n FROM owner_knowledge_import_items WHERE import_id=? AND review_status='pending_review'").bind(id).first())?.n||0;
+      if(rejected.length)try{await audit(env,"owner_knowledge_import_rejected_remaining","Owner rejected the remaining review items of one knowledge import",{import_id:id,rejected:rejected.length,failed:failed.length,remaining_review:Number(remaining)});}catch{}
+      return json({ok:true,import_id:id,rejected:rejected.length,rejected_ids:rejected,already_final:rows.length-pending.length,failed:failed.length,failures:failed,remaining_review:Number(remaining),batch_size:limit});
     }
     return json({ok:false,error:"Not found"},404);
   }catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
