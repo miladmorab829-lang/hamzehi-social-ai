@@ -592,7 +592,7 @@ export function checkKnowledgeRelations(records,ctx,{entities=[],current=null}={
   const conflict=matches.some(a=>matches.some(b=>a.members&&b.members&&JSON.stringify(a.members)===JSON.stringify(b.members)&&a.allowed!==b.allowed));
   return {matches,unknown,conflict};
 }
-const QUESTION=/[?؟]|(?:^|\s)(?:چه|چی|چند|کدام|کدوم|آیا|هست|هستند|دارید|دارین|دارد|میشه|می شه|می شود|ممکنه|امکان|موجود|شنو|شنهو|اکو|هل|کم|ممکن|یوجد|متوفر|what|which|how|do you|can|is there|are there|available)(?:\s|$)/u;
+const QUESTION=/[?؟]|(?:^|\s)(?:چه|چی|چند|کدام|کدوم|آیا|هست|هستند|دارید|دارین|دارد|میشه|می شه|می شود|ممکنه|امکان|موجود|شنو|شنهو|اکو|هل|کم|ممکن|یوجد|متوفر|عندکم|عدکم|عندک|what|which|how|do you|can|is there|are there|available)(?:\s|$)/u;
 export function knowledgeLooksLikeQuestion(text){return QUESTION.test(knowledgeText(text));}
 // The approved, NON-commercial fact collections in scope, and the ones the customer's question touches (owner keywords/labels/concept words).
 const conceptWords=r=>[...r.envelope.keywords,...Object.values(r.envelope.labels),...r.concept.split("_").filter(w=>w.length>=3)];
@@ -629,10 +629,21 @@ const wordsOf=s=>knowledgeText(s).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 const colorCollection=g=>[g.concept,...g.records.flatMap(r=>Object.values(r.envelope.labels||{}))].some(name=>wordsOf(name).some(w=>COLOR_WORDS.has(w)));
 // The collections one customer question is answered with: the best match — or, for a colour question, all colour collections of the
 // product (+ business-wide), the product's own collection replacing a business-wide one of the same concept.
+// A question that names an approved VALUE but no concept word («عندكم اسود؟», «مشکی دارید؟», «5x5 دارید؟») is answered with the
+// collection(s) that value belongs to; a product's own collection replaces a business-wide one of the same concept. Letter forms
+// that customers mix (أ/ا, ة/ه) do not decide the match.
+const looseText=s=>knowledgeText(s).replace(/[أإآ]/g,"ا").replace(/ة/g,"ه");
+function valueMentionGroups(text,answerable){
+  const t=looseText(text),groups=new Map();
+  for(const r of answerable){const v=r.envelope.value,lv=typeof v==="string"?looseText(v):"";if(lv.length>=2&&(hasPhrase(t,lv)||hasPhrase(t,"ال"+lv)))groups.set(knowledgeText(r.entity_key)+"|"+r.concept,{key:knowledgeText(r.entity_key)+"|"+r.concept,entity:r.entity_key,concept:r.concept,records:[],score:1});}
+  for(const r of answerable){const g=groups.get(knowledgeText(r.entity_key)+"|"+r.concept);if(g)g.records.push(r);}
+  const specific=g=>knowledgeText(g.entity)!=="global",list=[...groups.values()];
+  return list.filter(g=>specific(g)||!list.some(o=>specific(o)&&o.concept===g.concept)).sort((a,b)=>Number(specific(b))-Number(specific(a)));
+}
 export function knowledgeAnswerGroups(message,records,{entities=[]}={}){
   if(!knowledgeLooksLikeQuestion(message))return [];
   const {text,answerable,matched}=questionGroups(message,records,entities),top=matched[0];
-  if(top?!colorCollection(top):!wordsOf(message).some(w=>COLOR_WORDS.has(w)))return top?[top]:[];
+  if(top?!colorCollection(top):!wordsOf(message).some(w=>COLOR_WORDS.has(w)))return top?[top]:valueMentionGroups(text,answerable);
   const all=new Map();
   for(const r of answerable){const key=knowledgeText(r.entity_key)+"|"+r.concept;(all.get(key)||all.set(key,{key,entity:r.entity_key,concept:r.concept,records:[],score:0}).get(key)).records.push(r);}
   const specific=g=>knowledgeText(g.entity)!=="global",colors=[...all.values()].filter(colorCollection);

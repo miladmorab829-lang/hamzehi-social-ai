@@ -365,7 +365,8 @@ export async function openDecision(env,d){
   return {created:decision?.id===id,decision};
 }
 async function recordKnowledgeGap(env,d,decisionId){
-  if(d.payload?.resolution==="learning")return;
+  // A customer's acceptance waiting for owner approval is an approval step, not missing knowledge.
+  if(d.payload?.resolution==="learning"||d.payload?.resolution==="order_candidate")return;
   const fp=gapFingerprint(d),t=now(),gap=await first(env,"SELECT * FROM knowledge_gaps WHERE fingerprint=?",fp);
   if(!gap){await env.DB.prepare(`INSERT OR IGNORE INTO knowledge_gaps(fingerprint,decision_type,product_key,attribute_key,value_text,occurrences,lead_ids_json,examples_json,first_seen,last_seen,status,updated_at)
     VALUES(?,?,?,?,?,1,?,?,?,?,'open',?)`).bind(fp,d.decision_type,d.product_key||null,normKey(d.payload?.attribute)||null,normText(d.payload?.value)||null,JSON.stringify(d.lead_id?[d.lead_id]:[]),JSON.stringify([decisionId]),t,t,t).run();}
@@ -644,6 +645,52 @@ async function buildQuote(env,req,{mode,price=null,unit_price_minor=null,decisio
   const saved=await first(env,"SELECT * FROM lead_quotes WHERE id=?",req.quote_id);
   await auditSafe(env,"sales_quote_prepared","Quote prepared for owner approval (not sent)",{quote_id:saved.id,request_id:req.id,pricing_mode:mode,price_version_id:q.price_version_id,status});
   return saved;
+}
+/* ------------------------------------------- customer price answer (read-only) */
+// The Sales Brain's immediate answer to "how much?": ONLY current, effective, owner-approved rows of THIS market (catalog, attribute
+// schema, configurations, price versions, tier/MOQ/discount settings). No DDL, no decision, no write and no guess: whatever the
+// approved data does not cover comes back as a status the brain turns into one question or a price-only owner escalation.
+export async function siCatalogProducts(env){return await all(env,"SELECT product_key,name,aliases_json FROM product_catalog WHERE status='current'");}
+function pickSetting(rows,key,ctx){for(const scope of scopeCandidates(ctx)){const r=rows.find(x=>x.setting_key===key&&x.scope_key===scope);if(r)return {value:parseJson(r.value_json,null),id:r.id,version:r.version,scope_key:r.scope_key};}return null;}
+export async function siApprovedPrice(env,{market,productKey,texts=[],quantity=null,at=now()}){
+  if(!MARKETS.includes(market))return {status:"market_unknown"};
+  const [product,attributeRows,configurations,prices,settings]=await Promise.all([
+    first(env,"SELECT * FROM product_catalog WHERE product_key=? AND status='current' LIMIT 1",productKey),
+    all(env,"SELECT * FROM product_attribute_schema WHERE product_key=? AND status='current' ORDER BY priority,attribute_key",productKey),
+    all(env,"SELECT * FROM product_configurations WHERE product_key=? AND market IN (?,'*') AND status='current'",productKey,market),
+    all(env,"SELECT * FROM price_versions WHERE market=? AND product_key=? AND status='current'",market,productKey),
+    all(env,"SELECT * FROM business_settings WHERE setting_key IN ('quantity_tier_policy','moq','discount_rule') AND status='current'")
+  ]);
+  if(!product)return {status:"no_product"};
+  const attributes=attributeRows.map(a=>({...a,allowed:parseJson(a.allowed_values_json,[])}));
+  // Customer requirements in conversation order: a later message overrides an earlier one («مشکی» → «نه، قرمز»).
+  const found={};for(const text of texts){const ex=extractRequirements({message:text,attributes});for(const [k,v] of Object.entries(ex.attributes))if(v.value!==null&&v.value!==undefined)found[k]=v.value;}
+  const critical={},missing=[];
+  for(const a of attributes.filter(x=>x.commercial_critical)){const v=found[a.attribute_key]!==undefined?matchAllowedValue(a,found[a.attribute_key]):null;if(v===null)missing.push(a);else critical[a.attribute_key]=v;}
+  const base={product_key:productKey,product_name:product.name,market,currency:MARKET_CURRENCY[market],requirements:critical};
+  if(missing.length){const a=missing[0];return {...base,status:"missing_attribute",attribute:{key:a.attribute_key,label:a.label,kind:a.attribute_kind,question_fa:a.question_fa||null,question_ar:a.question_ar||null,values:a.allowed.map(v=>v.label||v.value)}};}
+  const configKey=configKeyFor(critical);
+  if(!configurations.some(c=>c.config_key===configKey))return {...base,status:"configuration_not_priced",config_key:configKey};
+  const ctx={market,product_key:productKey,config_key:configKey},t=Date.parse(at);
+  const tiers=prices.filter(p=>p.config_key===configKey&&(!p.effective_from||Date.parse(p.effective_from)<=t)&&(!p.effective_until||Date.parse(p.effective_until)>=t)).sort((a,b)=>a.quantity_min-b.quantity_min);
+  if(!tiers.length)return {...base,status:"no_price",config_key:configKey};
+  if(tiers.some(p=>canonicalCurrency(p.currency)!==MARKET_CURRENCY[market]))return {...base,status:"currency_conflict",config_key:configKey};
+  const policy=pickSetting(settings,"quantity_tier_policy",ctx),moqSetting=pickSetting(settings,"moq",ctx),rule=pickSetting(settings,"discount_rule",ctx);
+  const moq=Number.isSafeInteger(Number(tiers[0].moq))&&Number(tiers[0].moq)>0?Number(tiers[0].moq):Number.isSafeInteger(Number(moqSetting?.value))&&Number(moqSetting.value)>0?Number(moqSetting.value):null;
+  // One approved row prices every quantity it covers; several rows need the owner's tier policy (never inferred).
+  const tierOf=q=>tiers.length===1?((q===null||(q>=tiers[0].quantity_min&&(tiers[0].quantity_max===null||q<=tiers[0].quantity_max)))?{status:"matched",price:tiers[0]}:{status:"no_tier"}):policy?resolveTierPrice(tiers,q,policy.value):{status:"policy_missing"};
+  const shared={...base,config_key:configKey,moq,policy:policy?.value||null,tiers:tiers.map(p=>({min:p.quantity_min,max:p.quantity_max,unit_price_minor:p.unit_price_minor,price_version_id:p.id,version:p.version})),
+    discount_rule:rule?.value&&["percent_bp","amount_minor"].includes(rule.value.type)?{type:rule.value.type,value:Number(rule.value.value),min_quantity:rule.value.min_quantity??null,id:rule.id,version:rule.version}:null};
+  const q=Number.isSafeInteger(quantity)&&quantity>0?quantity:null;
+  if(q===null&&tiers.length>1)return {...shared,status:"needs_quantity"};
+  if(q!==null&&moq&&q<moq){const atMoq=tierOf(moq);return {...shared,status:"under_moq",quantity:q,unit_at_moq:atMoq.status==="matched"?atMoq.price.unit_price_minor:null};}
+  const tier=tierOf(q);
+  if(tier.status!=="matched")return {...shared,status:tier.status==="ambiguous"?"tier_conflict":tier.status==="policy_missing"?"policy_missing":"no_tier",quantity:q};
+  const unit=Number(tier.price.unit_price_minor),subtotal=q===null?null:unit*q;
+  if(subtotal!==null&&!Number.isSafeInteger(subtotal))return {...shared,status:"overflow",quantity:q};
+  const r=shared.discount_rule;let discount=null;
+  if(subtotal!==null&&r&&r.value>0&&(!r.min_quantity||q>=r.min_quantity)){const amount=r.type==="percent_bp"?Math.floor(subtotal*r.value/10000):r.value;discount={type:r.type,value:r.value,amount_minor:Math.min(amount,subtotal),rule_id:r.id,rule_version:r.version};}
+  return {...shared,status:"priced",quantity:q,price_version:{id:tier.price.id,version:tier.price.version},unit_price_minor:unit,subtotal_minor:subtotal,discount,total_minor:subtotal===null?null:subtotal-(discount?.amount_minor||0)};
 }
 export async function verifyQuotePriceVersion(env,q){
   if(q.pricing_mode==="custom_owner"){const d=await first(env,"SELECT status,owner_decision FROM owner_decisions WHERE id=?",q.custom_price_decision_id||"");if(!d||d.status!=="RESOLVED")throw Error("Custom price requires a resolved owner pricing decision");return;}
