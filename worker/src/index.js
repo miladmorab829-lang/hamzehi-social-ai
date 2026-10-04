@@ -6702,6 +6702,8 @@ function salesWeakAcceptance(text){return SALES_WEAK_ACCEPTANCE.test(salesNormal
 // A message that is ONLY a salutation («سلام», «سلام وقت بخیر», «هلا», «هلا بيك», «مرحبا», «السلام عليكم», «hi»).
 const SALES_GREETING_WORDS=new Set(["سلام","علیکم","درود","وقت","روز","صبح","عصر","شب","بخیر","هلا","هلو","هلاو","بیک","مرحبا","مرحبتین","السلام","صباح","مساء","الخیر","النور","hi","hello","hey","salam"].map(salesNormal));
 function salesGreetingOnly(text){const words=salesNormal(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean);return words.length>0&&words.length<=5&&words.every(w=>SALES_GREETING_WORDS.has(w));}
+// A colour / size question (also matched against an owner collection's concept, labels and keywords to find products that answer it).
+const SALES_COLOR_QUESTION=/(?<![\p{L}])(?:رنگ|(?:ال|بال|و)?لون|(?:ال)?[أا]لوان|colou?rs?)/iu,SALES_SIZE_QUESTION=/(?<![\p{L}])(?:سایز|اندازه|ابعاد|(?:ال)?مقاس|(?:ال)?قياس|(?:ال)?قياسات|sizes?|dimensions?)/iu;
 // A message that is ONLY thanks («ممنون», «مرسی»، «خیلی ممنون», «شكراً», «تسلم», «thanks»).
 const SALES_THANKS_WORDS=new Set(["ممنون","مرسی","متشکرم","مچکرم","سپاس","سپاسگزارم","تشکر","خیلی","دمت","گرم","شکرا","شکرن","مشکور","تسلم","تسلمون","یسلمو","جزیلا","thanks","thank","you","thx","ty"].map(salesNormal));
 function salesThanksOnly(text){const words=salesNormal(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean);return words.length>0&&words.length<=4&&words.every(w=>SALES_THANKS_WORDS.has(w))&&!words.every(w=>["خیلی","you","گرم"].map(salesNormal).includes(w));}
@@ -6793,7 +6795,10 @@ async function getNegotiationConversationContext(env,leadId,conversationId) {
 const SALES_BRAIN_STAGES=new Set(["lead","contacted","customer_replied","needs_discovery","product_interest","quantity_discovery","size_discovery","color_discussion","printing_discussion","asks_price","asks_moq","asks_shipping","asks_discount","price_objection","negotiating","quote_requested","quote_ready","quote_sent","customer_accepted","customer_rejected"]);
 // Script-specific letters decide. Script-neutral text ("\u0633\u0644\u0627\u0645", "\u0645\u0645\u0646\u0648\u0646") follows the customer's own earlier unambiguous inbound
 // messages in this conversation, then the lead market (IRAN \u2192 Persian, ARAB \u2192 Iraqi Arabic) \u2014 never a guess from shared letters.
-function salesBrainScriptLanguage(value){const text=String(value||"");if(/[\u067e\u0686\u0698\u06af\u06a9\u06cc]/u.test(text))return "Persian";if(/[\u0629\u0649\u0623\u0625\u0624\u0626\u064a\u0643]/u.test(text))return "Iraqi Arabic";return null;}
+// Letters decide first (Persian-only / Arabic-only letters). A message with neither («هلا», «شكو ماكو») is Iraqi Arabic only when it
+// uses an unmistakably Iraqi word; otherwise it carries no language evidence.
+const SALES_IRAQI_WORDS=new Set(["هلا","شلون","شلونك","شلونكم","شكو","ماكو","اكو","احنا","مرحبا","هواية","شنو","شگد"]);
+function salesBrainScriptLanguage(value){const text=String(value||"");if(/[پچژگکی]/u.test(text))return "Persian";if(/[ةىأإؤئيك]/u.test(text))return "Iraqi Arabic";if(text.normalize("NFKC").split(/[^\p{L}]+/u).some(w=>SALES_IRAQI_WORDS.has(w)))return "Iraqi Arabic";return null;}
 // LANGUAGE POLICY (market first; language ≠ market): an IRAN conversation is answered in Persian and an ARAB one in Iraqi Arabic.
 // The customer's own language overrides the market only when it is the ACTIVE conversation language: this message and their previous
 // one are both in it, or we already switched to it and this message is script-neutral or in it. One stray message never flips it.
@@ -6845,7 +6850,7 @@ function salesBrainDraft(action,language){const ar=language==="Iraqi Arabic";con
 };return p[action]||p.ask_details;}
 // Short, natural inbound replies (1–2 sentences). They never state a price, discount, MOQ, capability, timing or terms;
 // a price holding reply only says the price is being checked (never that an order was registered).
-const SALES_BRAIN_NATURAL_ACTIONS=new Set(["greet","thanks","ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
+const SALES_BRAIN_NATURAL_ACTIONS=new Set(["greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
 const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","commercial_owner_review_required","approved_moq_missing","approved_knowledge_missing"]);
 // A bare follow-up about a pending answer ("any news?", "خبری نشد؟", "شنو صار؟", "؟"): no new detail, no question of its own.
 const SALES_BRAIN_STATUS_PING=/(?:خبر(?:ی)?\s*(?:نشد|شد|هست|ندارید|نداری)|چی\s*شد|چه\s*شد|نتیجه\s*(?:چی|چه|شد)|پیگیری|منتظر(?:م|یم|\s*هستم)|هنوز\s*(?:خبری|جوابی)|جواب(?:ی)?\s*(?:ندادی|ندادید|نیومد|نشد)|شنو\s*صار|شصار|[أا]ي\s*خبر|في\s*خبر|ماكو\s*خبر|ننتظر|بانتظار|\bany\s+(?:update|news)\b|\bstill\s+waiting\b|\bwhat\s+happened\b|\bfollowing\s+up\b|^\s*(?:update|news)\s*[?؟]*\s*$|^\s*[?؟]+\s*$)/iu;
@@ -6856,7 +6861,7 @@ const SALES_BRAIN_WAITING_TEXTS={
   fa:{price:["قیمت در حال بررسیه و خبرتون می‌دم.","هنوز قیمت رو بررسی می‌کنم؛ به محض نتیجه خبرتون می‌دم.","پیگیر قیمت هستم و به‌زودی خبرتون می‌دم.","قیمت دقیق هنوز در دست بررسیه؛ خبرتون می‌کنم."],other:["موضوع در حال بررسیه و خبرتون می‌دم.","هنوز در حال بررسیه؛ به محض نتیجه خبرتون می‌دم.","پیگیرش هستم و به‌زودی خبرتون می‌دم.","هنوز در دست بررسیه؛ خبرتون می‌کنم."]},
   ar:{price:["السعر قيد المراجعة وراح أرجعلك.","بعدني أراجع السعر، وأول ما يتأكد أرجعلك.","متابع موضوع السعر وراح أرجعلك قريباً.","السعر الدقيق بعده قيد المراجعة، راح أبلغك."],other:["الموضوع قيد المراجعة وراح أرجعلك.","بعدني أراجع الموضوع، وأول ما يتأكد أرجعلك.","متابع الموضوع وراح أرجعلك قريباً.","الموضوع بعده قيد المراجعة، راح أبلغك."]}
 };
-function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,repeat=false,quantity=null,printing=null,waitingOn=null,recorded=[],moq=null,avoid=[]}={}){
+function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,repeat=false,quantity=null,printing=null,waitingOn=null,recorded=[],moq=null,avoid=[],nextAsk=null,attr=null}={}){
   const ar=language==="Iraqi Arabic";
   const digits=n=>ar?String(n):String(n).replace(/[0-9]/g,d=>PERSIAN_DIGITS[d]);
   const qty=Number.isSafeInteger(quantity)&&quantity>0?digits(quantity):null;
@@ -6903,6 +6908,12 @@ function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,r
     owner_followup:pickWaiting("other")
   };
   // Acknowledgement prefixes only on questions; holding/answer replies already speak to the customer's request.
+  // Natural continuation (conversational turn) and confirmation of new deal details: at most ONE next question, never "checking".
+  const nextQ=nextAsk&&t[nextAsk]?t[nextAsk]:null;
+  if(action==="continue_conversation")return nextQ?(ar?"بالخدمة. ":"در خدمتم. ")+nextQ:(ar?"بالخدمة، إذا عندك أي سؤال تفضل.":"در خدمتم؛ اگه سؤالی دارید بفرمایید.");
+  if(action==="acknowledge_details")return (prefix||(ar?"تمام، سجلتها. ":"ممنون، ثبت شد. "))+(nextQ||(ar?"إذا عندك أي سؤال ثاني تفضل.":"اگه سؤال دیگه‌ای دارید بفرمایید."));
+  // An approved colour / size list that does not exist yet: a specific holding reply while the owner answers it.
+  if(action==="knowledge_owner")return attr==="size"?(ar?"راح أتأكد من القياسات المتوفرة لهالموديل وأرجعلك.":"سایزهای این مدل رو بررسی می‌کنم و خبرتون می‌دم."):attr==="color"?(ar?"راح أتأكد من الألوان المتوفرة لهالموديل وأرجعلك.":"رنگ‌بندی این مدل رو بررسی می‌کنم و خبرتون می‌دم."):t.commercial_owner;
   const ack=action.startsWith("ask_")?(imageAck?(ar?"وصلت الصورة. ":"عکس رسید. "):factsAck?(ar?"تمام، سجلتها. ":"ممنون، ثبت شد. "):""):"";
   return ack+(t[action]||t.owner_followup);
 }
@@ -7264,6 +7275,22 @@ async function salesPriceCatalog(env,market){
     listProducts:[...byKey].map(([key,rows])=>({key,source:"list",name:rows[0].product_name,items:rows,terms:[...new Set(rows.flatMap(x=>[x.product_name,String(x.product_key||"").replace(/-/g," "),x.sku]).filter(Boolean))]}))
   };
 }
+// Owner-taught knowledge products a customer message names («جعبه نیمست ۳ تیکه» names «نیم‌ست ۳ تیکه»): spacing / ZWNJ never decides,
+// whole words only (consecutive words joined equal the product's name). Newest message first; the most specific name wins; two
+// unrelated products in one message resolve nothing.
+function salesMentionedEntities(records,texts){
+  const compact=s=>knowledgeText(s).replace(/[^\p{L}\p{N}]+/gu,"");
+  // c: the name joined; s: the same with the Arabic article dropped from each word («علبة الطقم» = «علبة طقم»).
+  const keys=[...new Set(records.map(r=>r.entity_key).filter(k=>knowledgeText(k)&&knowledgeText(k)!=="global"))].map(key=>({key,c:compact(key),s:knowledgeText(key).split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(salesStripArticle).join("")})).filter(k=>k.c.length>=3);
+  if(!keys.length)return [];
+  for(const text of texts){
+    const words=knowledgeText(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean),hits=new Map();
+    for(const form of [words,words.map(salesStripArticle)])for(let i=0;i<form.length;i++){let joined="";for(let j=i;j<Math.min(form.length,i+6);j++){joined+=form[j];for(const k of keys)if(k.c===joined||k.s===joined)hits.set(k.key,k.c);}}
+    const found=[...hits].filter(([,c])=>![...hits.values()].some(o=>o!==c&&o.length>c.length&&o.includes(c)));
+    if(found.length)return found.length===1?[found[0][0]]:[];
+  }
+  return [];
+}
 // Which product this turn is about: the product named NOW, the answer to our clarification, the deal's product, or one named earlier.
 // A product the customer names now that is not in the approved catalog is never replaced by an older one.
 function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,history,productNamedNow}){
@@ -7356,7 +7383,7 @@ function salesAttributeQuestion(attribute,language){
 function salesClarifyProduct(candidates,language){
   const ar=language==="Iraqi Arabic",names=[...new Set(candidates.map(c=>c.name).filter(Boolean))].slice(0,3);
   const list=names.length<2?names.join(""):names.slice(0,-1).join("، ")+(ar?" لو ":" یا ")+names[names.length-1];
-  return ar?`تقصد ${list}؟`:`منظورتون ${list}ه؟`;
+  return ar?`تقصد ${list}؟`:`منظورتون ${list}${/ه$/u.test(list)?"‌ست":"ه"}؟`;
 }
 // An objection or a discount question answered from approved facts only: the approved discount rule (already applied, or the quantity
 // from which it applies), a cheaper approved quantity tier, or the approved MOQ. null → no approved answer: the owner decides.
@@ -7411,7 +7438,7 @@ function salesActionFor(action,{needsOwner=false,reorder=false}={}){
   return ({answer_knowledge:"ANSWER",answer_moq:"ANSWER",order_status:"ANSWER",visual:"ANSWER",acknowledge_rejection:"ANSWER",clarify_product:"CLARIFY",ask_image_reference:"CLARIFY",
     ask_product:"QUALIFY",ask_quantity:"QUALIFY",ask_size:"QUALIFY",ask_color:"QUALIFY",ask_customization:"QUALIFY",ask_destination:"QUALIFY",ask_details:"QUALIFY",ask_attribute:"QUALIFY",
     answer_price:"QUOTE",quote:"QUOTE",negotiate:"NEGOTIATE",handle_objection:"HANDLE_OBJECTION",accept_offer:"CLOSE",accepted:"OWNER_ESCALATION",
-    wait_for_owner:"FOLLOW_UP",owner_followup:"FOLLOW_UP",price_owner:"OWNER_ESCALATION",commercial_owner:"OWNER_ESCALATION",moq_owner:"OWNER_ESCALATION"})[action]||"ANSWER";
+    wait_for_owner:"FOLLOW_UP",owner_followup:"FOLLOW_UP",price_owner:"OWNER_ESCALATION",commercial_owner:"OWNER_ESCALATION",moq_owner:"OWNER_ESCALATION",knowledge_owner:"OWNER_ESCALATION",acknowledge_details:"QUALIFY",continue_conversation:"ANSWER"})[action]||"ANSWER";
 }
 // Bounded AI understanding (opt-in: SALES_AI_UNDERSTANDING=on): at most ONE small call, only for a text turn the deterministic layer
 // could not read at all. It may only pick an intent from this fixed list — never a fact, a number, a price or reply text.
@@ -7543,7 +7570,14 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const requirements=resolveSalesRequirements(requirementRules,productKeys);
   const rulesStarted=Date.now();
   const kgRecords=hydrateKnowledgeRecords(kgRows);
-  const kgEntities=resolveKnowledgeEntities(kgRecords,[model,imageCategory,pricing?.product?.name].filter(Boolean));
+  // The product this turn is about, for knowledge: the captured name, the photo category, the priced product, or an owner-taught product
+  // the customer named in this or a recent message (in their own spelling). A named knowledge product is a known product.
+  const kgMentioned=salesMentionedEntities(kgRecords,[row.message,...earlierInbound.slice(0,4)]);
+  const kgEntities=resolveKnowledgeEntities(kgRecords,[model,imageCategory,pricing?.product?.name,...kgMentioned].filter(Boolean));
+  if(kgEntities.matched.length)known.product_or_model=true;
+  // The reply to our "which product?" clarification answers the question that was pending (the previous customer message).
+  let lastDecision=null;try{const ev=priorEvents.find(e=>e.id==="sales-brain:"+priorInbox[0]?.id);lastDecision=ev?.details_json?JSON.parse(ev.details_json):null;}catch{}
+  const kgQuestionText=lastDecision?.asked_field==="knowledge_product"&&kgEntities.matched.length&&!knowledgeLooksLikeQuestion(row.message)&&earlierInbound[0]?earlierInbound[0]:row.message;
   const kgScope=kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||kgEntities.matched.includes(r.entity_key));
   const kgVocabulary=knowledgeVocabulary(kgScope);
   const kgHistory=[...context.filter(x=>x.direction==="inbound"&&x.id!==row.id).map(x=>x.message),row.message];
@@ -7553,9 +7587,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   for(const key of Object.keys(kgContext))if(kgContext[key]===undefined||kgContext[key]===null||kgContext[key]==="")delete kgContext[key];
   const kgEval=evaluateKnowledgeRules(kgScope,kgContext,{entities:kgEntities.matched}),kgRelations=checkKnowledgeRelations(kgScope,kgContext,{entities:kgEntities.matched,current:kgCurrent});
   const kgIntentExcluded=["asks_price","asks_moq","asks_shipping","negotiating","objection_price","quote_requested","accepted","rejected"].includes(intent);
-  const kgQuestions=kgIntentExcluded?[]:matchKnowledgeQuestion(row.message,kgScope,{entities:kgEntities.matched});
+  const kgQuestions=kgIntentExcluded?[]:matchKnowledgeQuestion(kgQuestionText,kgScope,{entities:kgEntities.matched});
   // The collections an answer is built from: the best match, or — for a colour question — every colour collection of the product.
-  const kgAnswerGroups=kgIntentExcluded?[]:knowledgeAnswerGroups(row.message,kgScope,{entities:kgEntities.matched});
+  const kgAnswerGroups=kgIntentExcluded?[]:knowledgeAnswerGroups(kgQuestionText,kgScope,{entities:kgEntities.matched});
   let kgAnswer=null;
   // A combination the customer names in THIS message that the owner never decided («سرمه‌ای با روبان طلایی؟») is never answered with a
   // plain value list (that would read as "yes"); it goes to the owner (kgUnknownRelation below). Approved relations are answered first.
@@ -7590,7 +7624,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const newFacts=newFactRows.map(f=>f.fact_type).filter(t=>!["customer_message","customer_question","unresolved_question","objection","customer_image_reference"].includes(t));
   // Deal details the customer STATED this turn (also an unchanged restatement, e.g. «۵۰۰ تا میخوام» again): a price turn even without a price word.
   const statedDeal=[...new Set(turnFactRows.map(f=>f.fact_type).filter(t=>["requested_quantity","product_interest","requested_size","exterior_color","interior_color","printing","branding"].includes(t)))];
-  const priceTurn=["asks_price","quote_requested"].includes(intent)||statedDeal.length>0;
+  // A photo the customer sends now is a product reference, i.e. a deal detail too.
+  if(currentImage&&!statedDeal.includes("customer_image_reference"))statedDeal.push("customer_image_reference");
+  const priceAsked=["asks_price","quote_requested"].includes(intent);
+  // The next useful question of a natural reply: the first optional detail not known yet and never asked in this conversation.
+  const nextOptionalField=()=>["color","size","customization","destination"].find(f=>!known[f]&&timesAsked(f)<1)||null;
   const openEscalation=openEscalations[0]||null;
   // Our last replies in this conversation: a "still checking" acknowledgement never repeats one of them word for word.
   const recentReplies=context.filter(x=>x.direction==="outbound").slice(-3).map(x=>x.message);
@@ -7608,13 +7646,16 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // ---- Sales agent: the approved price of THIS market answers at once; what the approved data does not cover becomes ONE question
   // (which product / which approved option / the destination) or a price-only owner escalation (scoped: other questions continue).
   const pricedNow=!!pricing&&SALES_PRICE_STATUSES_PRICED.has(pricing.status);
-  let priceReply=null,negotiation=null,clarifyCandidates=null,attributeAsk=null;
-  const priceHandled=()=>{
+  let priceReply=null,negotiation=null,clarifyCandidates=null,attributeAsk=null,kgClarify=null;
+  // (An inbound that only echoes one of our own recent replies is never treated as a customer question.)
+  const kgAttrKind=!kgAnswer&&knowledgeLooksLikeQuestion(row.message)&&!recentReplies.some(r=>salesBrainClaimText(r)===salesBrainClaimText(row.message))?(SALES_COLOR_QUESTION.test(String(row.message||""))?"color":SALES_SIZE_QUESTION.test(String(row.message||""))?"size":null):null;
+  // mayEscalate=false (a turn that did not ask for a price): an approved price may still be given, but a missing one is never escalated.
+  const priceHandled=({mayEscalate=true}={})=>{
     if(!pricing)return false;
     if(pricedNow){priceReply=salesPriceReply(pricing,language);if(!priceReply)return false;action="answer_price";return true;}
-    if(pricing.status==="product_ambiguous"){if(timesAsked("product_or_model")>=2){escalate("price_owner","authoritative_price_required");return true;}action="clarify_product";askedField="product_or_model";clarifyCandidates=pricing.candidates.map(c=>({...c,name:salesBrainScriptLanguage(c.name)===language?c.name:c.terms.find(t=>salesBrainScriptLanguage(t)===language)||c.name}));return true;}
-    if(pricing.status==="missing_attribute"){const field="attribute:"+pricing.attribute.key;if(timesAsked(field)>=2){escalate("price_owner","authoritative_price_required");return true;}action="ask_attribute";askedField=field;attributeAsk=pricing.attribute;return true;}
-    if(SALES_PRICE_STATUSES_OWNER.has(pricing.status)||pricing.resolution?.basis==="unpriced_product_named"){escalate("price_owner","authoritative_price_required");return true;}
+    if(pricing.status==="product_ambiguous"){if(timesAsked("product_or_model")>=2){if(!mayEscalate)return false;escalate("price_owner","authoritative_price_required");return true;}action="clarify_product";askedField="product_or_model";clarifyCandidates=pricing.candidates.map(c=>({...c,name:salesBrainScriptLanguage(c.name)===language?c.name:c.terms.find(t=>salesBrainScriptLanguage(t)===language)||c.name}));return true;}
+    if(pricing.status==="missing_attribute"){const field="attribute:"+pricing.attribute.key;if(timesAsked(field)>=2){if(!mayEscalate)return false;escalate("price_owner","authoritative_price_required");return true;}action="ask_attribute";askedField=field;attributeAsk=pricing.attribute;return true;}
+    if(SALES_PRICE_STATUSES_OWNER.has(pricing.status)||pricing.resolution?.basis==="unpriced_product_named"){if(!mayEscalate)return false;escalate("price_owner","authoritative_price_required");return true;}
     if(pricing.status==="market_unknown"&&pricing.catalog&&timesAsked("destination")<1){action="ask_destination";askedField="destination";return true;}
     return false;
   };
@@ -7654,9 +7695,19 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   else if(kgHardStop)escalate("commercial_owner","commercial_owner_review_required");
   else if(kgUnknownRelation)escalate("commercial_owner","approved_knowledge_missing");
   else if(kgAnswer){action="answer_knowledge";}
-  else if((dealChanged||answeringPriceQuestion)&&priceHandled()){}
+  else if((dealChanged||answeringPriceQuestion)&&priceHandled({mayEscalate:answeringPriceQuestion||priceAsked})){}
+  // A colour / size question approved knowledge could not answer: the product is unclear → ONE clarification naming the owner's
+  // products that do have that answer; otherwise the answer is genuinely missing → a scoped owner question with a specific holding
+  // reply. Never a held draft with a generic acknowledgement.
+  else if(kgAttrKind&&!kgIntentExcluded){
+    const attrPattern=kgAttrKind==="color"?SALES_COLOR_QUESTION:SALES_SIZE_QUESTION;
+    const options=kgEntities.matched.length||known.product_or_model?[]:[...new Set(kgRecords.filter(r=>knowledgeText(r.entity_key)!=="global"&&attrPattern.test([r.concept,...Object.values(r.envelope?.labels||{}),...(r.envelope?.keywords||[])].join(" "))).map(r=>r.entity_key))].slice(0,3);
+    if(options.length&&timesAsked("knowledge_product")<1){action="clarify_product";askedField="knowledge_product";kgClarify=(options.some(k=>salesBrainScriptLanguage(k)===language)?options.filter(k=>salesBrainScriptLanguage(k)===language):options).map(k=>({key:k,name:k,terms:[k]}));}
+    else escalate("knowledge_owner","approved_knowledge_missing");
+  }
   else if(imageAmbiguous&&!model&&lastAction!=="ask_image_reference"){action="ask_image_reference";askedField="product_or_model";}
-  else if(intent!=="asks_price"&&/(?<![\p{L}])(?:رنگ|(?:ال|بال|و)?لون|(?:ال)?[أا]لوان|colou?rs?|نمونه|نماذج|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
+  // Real product photos only on an explicit photo / sample request (a colour question is answered or clarified above).
+  else if(intent!=="asks_price"&&/(?:عکس|تصویر|نمونه|نماذج|صور|صورة|photo|picture|sample|show)/iu.test(String(row.message||""))){action="visual";if(model){const v=await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(model).normalized}],4);visuals=v.items||[];}}
   else{
     // Ask ONLY the next required field (bounded); once requirements are met — or cannot be met by asking — the price goes to
     // the owner. With nothing useful known yet and no buying signal, a human looks at it instead of a forced escalation.
@@ -7669,12 +7720,14 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     else if(salesGreetingOnly(row.message)){action="greet";}
     else if(salesThanksOnly(row.message)){action="thanks";}
     // Requirements met: the approved price of this market (when there is one) is the next step, not an owner escalation.
-    else if(known.product_or_model&&priceHandled()){}
+    else if(known.product_or_model&&priceHandled({mayEscalate:priceAsked})){}
     else if(priceAlreadyResolved&&!newFacts.length)action="owner_followup";
-    else if(!known.product_or_model&&!known.quantity&&intent!=="asks_price")action="owner_followup";
-    // An open price question of THIS product is waited on only by a price question or a (re)stated deal detail; any other turn is
-    // not swallowed by it (never conversation-wide).
-    else if(!priceTurn&&openEscalations.some(e=>sameIssue(e,"unsupported_price")))action="owner_followup";
+    // A conversational turn (no price asked, no deal detail) is answered naturally with at most ONE next useful question — never a
+    // held draft, never the price holding text.
+    else if(!priceAsked&&!statedDeal.length){action="continue_conversation";askedField=nextOptionalField();}
+    // Product / quantity / other deal details WITHOUT a price request: confirm them and ask the next useful question. A price is looked
+    // up / escalated only when the customer asks for it (or answers our own price question) — never from the details alone.
+    else if(!priceAsked){action="acknowledge_details";askedField=nextOptionalField();}
     else escalate("price_owner","authoritative_price_required");
   }
   // ---- Sales agent reply + its evidence, and the ORDER CANDIDATE: ONE versioned deal per conversation (memory key order_candidate),
@@ -7683,7 +7736,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(action==="accept_offer")stage="customer_accepted";
   if(action==="answer_price"){salesDraft=priceReply.parts.join(" ");salesTexts=priceReply.texts;}
   else if(action==="negotiate"||action==="handle_objection"){salesDraft=negotiation.parts.join(" ");salesTexts=negotiation.texts;}
-  else if(action==="clarify_product"){salesDraft=salesClarifyProduct(clarifyCandidates,language);salesTexts=clarifyCandidates.map(c=>c.name);}
+  else if(action==="clarify_product"){const options=kgClarify||clarifyCandidates;salesDraft=salesClarifyProduct(options,language);salesTexts=options.map(c=>c.name);}
   else if(action==="ask_attribute"){salesDraft=salesAttributeQuestion(attributeAsk,language);salesTexts=[attributeAsk.label,...(attributeAsk.values||[]),language==="Iraqi Arabic"?attributeAsk.question_ar:attributeAsk.question_fa];}
   else if(action==="answer_moq"&&pricedNow&&answerNumbers[0]===pricing.moq)salesTexts=[salesDigits(pricing.moq,language)];
   const priceSnapshot=salesPriceSnapshot(pricing);
@@ -7717,11 +7770,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A knowledge answer is validated against exactly the approved records it was composed from (kgAnswerFacts); every other draft
   // against all authoritative facts. Both only within this conversation's markets.
   const authorityFacts=[...kgEvidenceFacts,...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
-  const draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();const validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:kgAttrKind}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();const validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   timing.validator_ms=Date.now()-validatorStarted;
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
-  const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
+  const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
   const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   // Bounded self-check of the reply (recorded with the decision; it never adds content).
   result.self_check=salesSelfCheck(draft,{action,ownerPending:needsOwner||openEscalations.length>0||action==="accept_offer"||action==="wait_for_owner"});
@@ -7809,7 +7862,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // escalation stays open and the actual commercial answer still requires the owner.
 // The sales agent's answers (answer_price, negotiate, handle_objection, accept_offer, clarify_product, ask_attribute) are composed
 // ONLY from one owner-approved price record of the conversation's market and are re-validated below against exactly that evidence.
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.
