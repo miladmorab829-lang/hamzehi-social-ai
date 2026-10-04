@@ -1764,8 +1764,30 @@ function ownerWordCount(text){return String(text||"").trim().split(/\s+/u).filte
 // price is normalised. Anything invalid is rejected with the reason — never guessed or partially reinterpreted.
 const OWNER_CANONICAL_MARKETS={iran:"IRAN","ایران":"IRAN",arab:"ARAB",iraq:"ARAB","عراق":"ARAB","العراق":"ARAB"};
 const OWNER_CANONICAL_HEADER=[/^(?:نام\s*محصول|محصول|product(?:\s*name)?|model)$/iu,/^(?:سایز|اندازه|ابعاد|size)$/iu,/^(?:مدل|configuration|config)$/iu,/^(?:قیمت|price)$/iu,/^(?:بازار|market)$/iu];
+// ---- Canonical STANDARD COLOUR format (Teach Knowledge): «COLOR | <option> | <market>». One line = ONE standard exterior-colour
+// option, taught as its own typed fact (color.exterior, business-wide «global», the line's market). Deterministic: no AI, no list in
+// code; the option is kept exactly as written (whitespace normalised only). A line that starts with COLOR but is malformed is
+// rejected with its reason — it never falls through to the generic/AI extraction.
+const OWNER_COLOR_MARKETS={...OWNER_CANONICAL_MARKETS,global:"GLOBAL","سراسری":"GLOBAL"};
+function ownerCanonicalColorLine(line){
+  const raw=String(line||"").normalize("NFKC").trim();
+  if(!/^\|?\s*COLOR\s*(?:\||$)/iu.test(raw))return null;
+  const bordered=/^\s*\|/u.test(raw)&&/\|\s*$/u.test(raw);
+  const cols=(bordered?raw.replace(/^\s*\|/u,"").replace(/\|\s*$/u,""):raw).split("|").map(c=>c.replace(/[\s‏‎]+/gu," ").trim());
+  const reject=(code,detail)=>({kind:"rejected",canonical_color:true,issues:[{code,detail}]});
+  if(cols.length!==3)return reject("canonical_color_column_count",`Expected 3 columns (COLOR | option | market), got ${cols.length}`);
+  const [,option,marketText]=cols;
+  if(!option||!/\p{L}/u.test(option)||option.length>60||/^COLOR$/iu.test(option)||Object.hasOwn(OWNER_COLOR_MARKETS,option.toLowerCase()))return reject("canonical_color_option_invalid","Column 2 must be ONE colour option name (letters, at most 60 characters)");
+  if(/[،,؛;]|(?<![\p{L}])(?:و|and)(?![\p{L}])/iu.test(option))return reject("canonical_color_single_option","Column 2 must be ONE option, not a list or combination (one line per option)");
+  const market=OWNER_COLOR_MARKETS[String(marketText||"").toLowerCase()];
+  if(!market)return reject("canonical_color_market_unsupported",`Column 3 must be IRAN, ARAB or GLOBAL, got "${String(marketText||"").slice(0,30)}"`);
+  return {kind:"color",option,market};
+}
+const ownerHasCanonicalColorLines=text=>String(text||"").split(/\r?\n/).some(l=>!!ownerCanonicalColorLine(l));
 function ownerCanonicalPriceLine(raw){
   if(!raw.includes("|"))return null;
+  // A COLOR line is the canonical colour format (Teach Knowledge), never a price row.
+  if(/^\|?\s*COLOR\s*(?:\||$)/iu.test(raw))return null;
   // Outer border pipes («| a | b | … |») are dropped only when the line has BOTH; a single leading pipe is an empty first column.
   const bordered=/^\s*\|/u.test(raw)&&/\|\s*$/u.test(raw);
   const cols=(bordered?raw.replace(/^\s*\|/u,"").replace(/\|\s*$/u,""):raw).split("|").map(c=>c.replace(/\s+/g," ").trim());
@@ -1793,6 +1815,8 @@ function parseOwnerKnowledgeLine(line,market,section,options={}){
   if(raw.length>OWNER_IMPORT_LIMITS.line_chars||/[\u0000-\u0008\u000b-\u001f]/u.test(raw))return {kind:"rejected",issues:[{code:raw.length>OWNER_IMPORT_LIMITS.line_chars?"line_too_long":"invalid_characters"}]};
   if(OWNER_TABLE_HEADER.test(raw)||/^[\s|:\-–—=*#_.]+$/u.test(raw))return {kind:"skip"};
   // The canonical format is checked FIRST among data lines; a canonical line never falls through to the generic parser below.
+  // A canonical COLOR line belongs to Teach Knowledge: rejected here with that reason (never parsed as a product fact or price).
+  if(ownerCanonicalColorLine(raw))return {kind:"rejected",issues:[{code:"canonical_color_use_teach_knowledge",detail:"COLOR | option | market lines are standard colours: submit them in Teach Knowledge"}]};
   const canonical=ownerCanonicalPriceLine(raw);if(canonical)return canonical;
   const {size,rest}=ownerDims(raw);
   const prices=[];let m;OWNER_PRICE_TOKEN.lastIndex=0;
@@ -5752,6 +5776,24 @@ function knowledgeTeachResultIsDead(view){
   const list=view.proposals||[];
   return list.length>0&&list.every(p=>p.status==="rejected"||(p.status==="conflict"&&p.attribute==="needs_clarification"));
 }
+// Each valid COLOR line → exactly ONE owner-review proposal of ONE typed member: color.exterior · business «global» · the line's
+// market · value = that option only (never the list, never a combination, never a product/generic fact, relation or rule).
+// The proposal id is derived from the option + market, so resending the same lines never stacks copies; an option already approved
+// shows as a duplicate. Any other line in the same submission is reported and NOT interpreted (fail closed: no AI call at all).
+async function teachCanonicalColors(env,text){
+  const lines=String(text).split(/\r?\n/).map(l=>l.trim()).filter(Boolean),ids=[],rejected=[];let parsed=0;
+  for(let i=0;i<lines.length;i++){
+    const c=ownerCanonicalColorLine(lines[i]),at={line:i+1,text:lines[i].slice(0,120)};
+    if(!c){rejected.push({...at,code:"not_a_canonical_color_line",detail:"Only «COLOR | option | market» lines can be sent together; this line was not interpreted"});continue;}
+    if(c.kind!=="color"){rejected.push({...at,...c.issues[0]});continue;}
+    parsed++;
+    const id="color-"+(await knowledgeHash(knowledgeCanonical(["color","exterior","global",c.market,knowledgeKeyPart(c.option)]))).slice(0,32);
+    try{const p=await proposeSalesKnowledge(env,{id,operation:"ADD",domain:"color",entity_type:"business",entity_key:"global",attribute:"exterior",market:c.market,value:c.option},{reusePending:true});if(!ids.includes(p.id))ids.push(p.id);}
+    catch(error){rejected.push({...at,code:"canonical_color_rejected",detail:sanitizeOperationalError(error?.message||error)});}
+  }
+  const view=await teachView(env,ids);
+  return {status:ids.length?200:422,body:{ok:ids.length>0,knowledge_teach:true,canonical_colors:{lines:lines.length,parsed,proposals:ids.length,rejected:rejected.length},rejected,...view,...(ids.length?{}:{error:"No valid «COLOR | option | market» line; nothing was changed."})}};
+}
 async function teachKnowledge(env,body){
   await ensureSalesKnowledgeStore(env);
   const market=["IRAN","ARAB","GLOBAL"].includes(String(body?.market||"").toUpperCase())?String(body.market).toUpperCase():"GLOBAL";
@@ -5759,6 +5801,8 @@ async function teachKnowledge(env,body){
   if(!text&&!direct)return {status:400,body:{ok:false,error:"text or records is required"}};
   if(text.length>KNOWLEDGE_LIMITS.text)return {status:413,body:{ok:false,error:`Owner knowledge text exceeds ${KNOWLEDGE_LIMITS.text} characters; use the knowledge import for large lists`}};
   if(direct&&direct.length>KNOWLEDGE_LIMITS.records)return {status:413,body:{ok:false,error:`At most ${KNOWLEDGE_LIMITS.records} records per submission`}};
+  // Canonical standard colours («COLOR | option | market») are taught deterministically BEFORE any AI extraction: one line = one proposal.
+  if(text&&!direct&&ownerHasCanonicalColorLines(text))return await teachCanonicalColors(env,text);
   const commandId=typeof body?.command_id==="string"&&/^[a-zA-Z0-9_-]{8,60}$/.test(body.command_id)?body.command_id:null;
   // Idempotency + cost control: one submission = one ledger event = at most ONE AI call, even on double tap / retry / parallel requests.
   const hash=await knowledgeHash(JSON.stringify({text,market,records:direct||null})),eventId="knowledge-teach:"+hash,idBase=hash.slice(0,20);
@@ -6188,6 +6232,9 @@ async function maybeHandleAutonomyKnowledgeCommand(req,env){
   if(!body||typeof body!=="object"||typeof body.command!=="string")return null;
   // Price lists / catalogs / large owner text are knowledge imports: structured for owner review, never sent to the task
   // planner (no AI planning call, no Task, no customer message, no Quote/Order).
+  // Canonical standard colours («COLOR | option | market») go to the deterministic Teach Knowledge path — never to the price importer,
+  // the task planner or AI extraction.
+  if(owner&&ownerHasCanonicalColorLines(body.command)){const taught=await teachKnowledge(env,{text:body.command,market:body.market,command_id:body.command_id});return json(taught.body,taught.status);}
   if(owner&&(length>4096||looksLikeOwnerKnowledgeImport(body.command))){
     const result=await runOwnerKnowledgeImport(env,{text:body.command,market:body.market,client_request_id:String(body.command_id||""),files:[],descriptions:[]});
     return json(result.body,result.status);
