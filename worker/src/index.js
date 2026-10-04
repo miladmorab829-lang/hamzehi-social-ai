@@ -7271,8 +7271,8 @@ function salesBrainCustomerGoal(intent,known){
 
 // ================= SALES AGENT: approved price engine, negotiation, offer acceptance, order candidate =================
 // Generic and data-driven: products, prices, tiers, MOQ and discounts come ONLY from owner-approved, current rows of the
-// conversation's market — the SI versioned prices (IRAN and ARAB) and the P0-5 ARAB price list. IRAN list items never price a
-// customer answer (the IRAN pricing authority stays owner-confirmed). Nothing is invented, borrowed from another market or taken from
+// conversation's market — the SI versioned prices (IRAN and ARAB) and that market's approved price list (ARAB P0-5 list and
+// owner-approved import rows; IRAN rows exist only once the owner approved them). Nothing is invented, borrowed from another market or taken from
 // a pending proposal; whatever the approved data does not cover becomes ONE question or a price-only owner escalation.
 
 // A destination city is explicit market evidence (exactly one country; a mixed answer stays undecided).
@@ -7320,18 +7320,33 @@ function salesProductMatch(products,text,{restrict=null}={}){
   }
   return {status:"none"};
 }
-// The priced catalog of ONE market: SI products (both markets) and, for ARAB only, the effective P0-5 price list. A database without
-// the SI tables simply has no SI catalog (no schema change happens in a customer turn).
+// The priced catalog of ONE market: SI products (both markets) and the owner-approved, effective price list of THAT market only
+// (IRAN rows come only from owner-approved imports; ARAB rows from the P0-5 list or imports). A database without the SI tables simply
+// has no SI catalog (no schema change happens in a customer turn). An approved import row is named «محصول · سایز · مدل»: rows of one
+// product are ONE catalog product with variants (size + configuration), so the customer names the product and the variant is chosen
+// from their own words — never guessed.
+function salesListItemEffective(item,market,at=Date.now()){
+  if(!item||Number(item.active)!==1||item.market!==market)return false;
+  const from=item.effective_from?Date.parse(item.effective_from):NaN,to=item.effective_until?Date.parse(item.effective_until):NaN;
+  if((item.effective_from&&!Number.isFinite(from))||(item.effective_until&&!Number.isFinite(to)))return false;
+  return (!Number.isFinite(from)||from<=at)&&(!Number.isFinite(to)||to>=at);
+}
 async function salesPriceCatalog(env,market){
   const list=v=>{try{const x=JSON.parse(v||"[]");return Array.isArray(x)?x.filter(s=>typeof s==="string"):[];}catch{return [];}};
   const [si,items]=await Promise.all([
     siCatalogProducts(env).catch(()=>[]),
-    market==="ARAB"?env.DB.prepare("SELECT * FROM commercial_price_items WHERE market='ARAB' AND active=1").all().then(r=>(r.results||[]).filter(x=>priceItemEffective(x))).catch(()=>[]):Promise.resolve([])
+    ["IRAN","ARAB"].includes(market)?env.DB.prepare("SELECT * FROM commercial_price_items WHERE market=? AND active=1").bind(market).all().then(r=>(r.results||[]).filter(x=>salesListItemEffective(x,market))).catch(()=>[]):Promise.resolve([])
   ]);
-  const byKey=new Map();for(const item of items)(byKey.get(item.product_key)||byKey.set(item.product_key,[]).get(item.product_key)).push(item);
+  const byKey=new Map(),variants=new Map();
+  for(const item of items){
+    const parts=String(item.product_name||"").split(" · ").map(x=>x.trim()).filter(Boolean);
+    if(parts.length>=2){const base=parts[0],v={item,size:parts.length>=3?parts[1]:null,configuration:parts[parts.length-1]},k="list:"+salesNormal(base);(variants.get(k)||variants.set(k,{base,rows:[]}).get(k)).rows.push(v);}
+    else (byKey.get(item.product_key)||byKey.set(item.product_key,[]).get(item.product_key)).push(item);
+  }
   return {
     siProducts:si.map(p=>({key:p.product_key,source:"si",name:p.name,terms:[p.name,String(p.product_key||"").replace(/_/g," "),...list(p.aliases_json)].filter(Boolean)})),
-    listProducts:[...byKey].map(([key,rows])=>({key,source:"list",name:rows[0].product_name,items:rows,terms:[...new Set(rows.flatMap(x=>[x.product_name,String(x.product_key||"").replace(/-/g," "),x.sku]).filter(Boolean))]}))
+    listProducts:[...[...byKey].map(([key,rows])=>({key,source:"list",name:rows[0].product_name,items:rows,terms:[...new Set(rows.flatMap(x=>[x.product_name,String(x.product_key||"").replace(/-/g," "),x.sku]).filter(Boolean))]})),
+      ...[...variants].map(([key,g])=>({key,source:"list",name:g.base,variants:g.rows,items:g.rows.map(v=>v.item),terms:[g.base]}))]
   };
 }
 // Owner-taught knowledge products a customer message names («جعبه نیمست ۳ تیکه» names «نیم‌ست ۳ تیکه»): spacing / ZWNJ never decides,
@@ -7363,14 +7378,42 @@ function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,hist
   for(const text of [memoryProduct,...history]){if(!text)continue;const r=find(text);if(r.status!=="none")return {...r,basis:"conversation"};}
   return {status:"none"};
 }
-function salesListPrice(p,market,quantity){
+// The variant of a grouped list product the customer means: the size (when the product has several) and the configuration, read from
+// their messages, newest first. A configuration counts only as the WHOLE owner phrase («۳ تکه کج», not «۳ تکه» inside it); the longest
+// phrase wins; spoken numbers and «تیکه» are read like digits and «تکه». Nothing determinable → the one missing choice is asked.
+const salesVariantTokens=v=>salesTokens(String(v||"").replace(/تیکه/gu,"تکه")).map(w=>SALES_NUMBER_WORDS.has(w)&&SALES_NUMBER_WORDS.get(w)<10?String(SALES_NUMBER_WORDS.get(w)):w);
+function salesVariantPhraseIn(text,phrase){const words=salesVariantTokens(text),t=salesVariantTokens(phrase);if(!t.length)return false;for(let i=0;i+t.length<=words.length;i++)if(t.every((x,k)=>salesTokenLike(words[i+k],x)))return true;return false;}
+function salesPickVariant(p,texts){
+  let pool=p.variants;const newest=[...(texts||[])].reverse(),dims=s=>ownerDims(s).size;
+  if(new Set(pool.map(v=>dims(v.size||"")||v.size)).size>1){
+    for(const text of newest){const size=dims(text);if(size){const hit=pool.filter(v=>(dims(v.size||"")||v.size)===size);if(hit.length){pool=hit;break;}}}
+    if(new Set(pool.map(v=>dims(v.size||"")||v.size)).size>1)return {missing:{key:"size",label:"سایز",question_fa:"کدوم سایز رو می‌خواید؟ ("+[...new Set(pool.map(v=>v.size))].join("، ")+")",question_ar:"أي قياس تريد؟ ("+[...new Set(pool.map(v=>v.size))].join("، ")+")",values:[...new Set(pool.map(v=>v.size))]}};
+  }
+  if(pool.length===1)return {variant:pool[0]};
+  for(const text of newest){
+    const hits=pool.filter(v=>salesVariantPhraseIn(text,v.configuration));
+    if(!hits.length)continue;
+    const longest=Math.max(...hits.map(v=>salesVariantTokens(v.configuration).length)),best=hits.filter(v=>salesVariantTokens(v.configuration).length===longest);
+    if(best.length===1)return {variant:best[0]};
+    break;
+  }
+  const configs=[...new Set(pool.map(v=>v.configuration))];
+  return {missing:{key:"configuration",label:"مدل",question_fa:"کدوم مدل رو می‌خواید؟ ("+configs.join("، ")+")",question_ar:"أي موديل تريد؟ ("+configs.join("، ")+")",values:configs}};
+}
+function salesListPrice(p,market,quantity,{texts=[]}={}){
   const base={product_key:p.key,product_name:p.name,market,currency:MARKET_CURRENCY[market],source:"list",requirements:{}};
-  if(market!=="ARAB")return {...base,status:"no_price"};
-  if(p.items.length!==1)return {...base,status:"price_conflict"};
-  const item=p.items[0],unit=Number(item.unit_price_minor),moq=Number.isSafeInteger(Number(item.moq))&&Number(item.moq)>0?Number(item.moq):null;
-  if(canonicalCurrency(item.currency)!==MARKET_CURRENCY[market])return {...base,status:"currency_conflict"};
-  if(!Number.isSafeInteger(unit)||unit<=0)return {...base,status:"no_price"};
-  const q=Number.isSafeInteger(quantity)&&quantity>0?quantity:null,shared={...base,moq,policy:null,tiers:[{min:moq||1,max:null,unit_price_minor:unit}],discount_rule:null,price_item:{id:item.id,version:Number(item.version)}};
+  let item=null,name=p.name,requirements={};
+  if(p.variants){
+    const pick=salesPickVariant(p,texts);
+    if(pick.missing)return {...base,status:"missing_attribute",attribute:pick.missing};
+    item=pick.variant.item;requirements={...(pick.variant.size?{size:pick.variant.size}:{}),configuration:pick.variant.configuration};
+    name=[p.name,new Set(p.variants.map(v=>v.size)).size>1?pick.variant.size:null,pick.variant.configuration].filter(Boolean).join(" ");
+  }else{if(p.items.length!==1)return {...base,status:"price_conflict"};item=p.items[0];}
+  const unit=Number(item.unit_price_minor),moq=Number.isSafeInteger(Number(item.moq))&&Number(item.moq)>0?Number(item.moq):null;
+  const priced={...base,product_name:name,requirements};
+  if(canonicalCurrency(item.currency)!==MARKET_CURRENCY[market])return {...priced,status:"currency_conflict"};
+  if(!Number.isSafeInteger(unit)||unit<=0)return {...priced,status:"no_price"};
+  const q=Number.isSafeInteger(quantity)&&quantity>0?quantity:null,shared={...priced,moq,policy:null,tiers:[{min:moq||1,max:null,unit_price_minor:unit}],discount_rule:null,price_item:{id:item.id,version:Number(item.version)}};
   if(q!==null&&moq&&q<moq)return {...shared,status:"under_moq",quantity:q,unit_at_moq:unit};
   const subtotal=q===null?null:unit*q;if(subtotal!==null&&!Number.isSafeInteger(subtotal))return {...shared,status:"overflow",quantity:q};
   return {...shared,status:"priced",quantity:q,unit_price_minor:unit,subtotal_minor:subtotal,discount:null,total_minor:subtotal};
@@ -7387,8 +7430,9 @@ async function salesPricing(env,{market,message,history,chronological,memoryProd
   if(resolution.status==="none")return {status:"product_unknown",resolution};
   if(resolution.status==="ambiguous")return {status:"product_ambiguous",resolution,candidates:resolution.candidates};
   const p=resolution.product;
-  let result=p.source==="si"?{...await siApprovedPrice(env,{market,productKey:p.key,texts:chronological,quantity}).catch(()=>({status:"no_price"})),source:"si"}:salesListPrice(p,market,quantity);
-  if(p.source==="si"&&["no_price","configuration_not_priced"].includes(result.status)&&market==="ARAB"){const twin=catalog.listProducts.find(l=>salesNormal(l.name)===salesNormal(p.name));if(twin)result=salesListPrice(twin,market,quantity);}
+  let result=p.source==="si"?{...await siApprovedPrice(env,{market,productKey:p.key,texts:chronological,quantity}).catch(()=>({status:"no_price"})),source:"si"}:salesListPrice(p,market,quantity,{texts:chronological});
+  // A product SI knows but has not priced may be priced by the same-named approved list of THIS market (IRAN or ARAB; never another).
+  if(p.source==="si"&&["no_price","configuration_not_priced"].includes(result.status)){const twin=catalog.listProducts.find(l=>salesNormal(l.name)===salesNormal(p.name));if(twin)result=salesListPrice(twin,market,quantity,{texts:chronological});}
   const named=result.product_name||p.name,term=resolution.term,inLanguage=t=>!!language&&salesBrainScriptLanguage(t)===language;
   const display=!language||inLanguage(named)?named:term&&inLanguage(term)?term:p.terms.find(inLanguage)||named;
   if(display!==result.product_name)result={...result,product_name:display};
