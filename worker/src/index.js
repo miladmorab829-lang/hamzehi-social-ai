@@ -6280,7 +6280,7 @@ async function ensureLeadOutreachStoreNow(env){
 }
 
 // order_candidate: the ONE structured deal state of the conversation (written by the Sales Brain, versioned by supersession).
-const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference","order_candidate"]);
+const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference","order_candidate","customer_name"]);
 const CONVERSATION_SALES_STAGES=new Set(["new_reply","interested","asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted","rejected","other"]);
 
 // Idempotent schema setup runs once per isolate per database (see onceEnsured); the body is unchanged.
@@ -6748,7 +6748,7 @@ function salesBareQuantity(text){
 }
 // Intent cues on the normalized text (they complete the original patterns; context, not words alone, decides vague replies).
 const SALES_INTENT_CUES={
-  accepted:/(?:^|\s)(?:ثبتش کن|ثبت کن|ثبتش کنید|ثبت کنید|نهاییش کن|ثبتها|سجلها|سووها|سویها|توکلنا|خل نمشی|بزن بریم|انجامش بدید|انجام بدید|انجام بدین|go ahead)(?=\s|$|[،,.!؟?])/u,
+  accepted:/(?:^|\s)(?:ثبتش کن|ثبت کن|ثبتش کنید|ثبت کنید|نهاییش کن|ثبتها|سجلها|سجل الطلب|سجلوها|سجلوه|اعتمدها|اعتمده|اکدها|اکده|سووها|سویها|توکلنا|خل نمشی|بزن بریم|انجامش بدید|انجام بدید|انجام بدین|go ahead)(?=\s|$|[،,.!؟?])/u,
   objection_price:/(?:^|\s)(?:غالیه|غالی|ارخص|ارزونتر|ارزون تر|cheaper)(?=\s|$|[،,.!؟?])/u,
   asks_moq:/(?:^|\s)(?:موک|اقل کمیه|اقل عدد|الحد الادنی)(?=\s|$|[،,.!؟?])/u,
   asks_price:/(?:^|\s)(?:قیمش|قیمشو|قیمتو|چند میشه|چند می شه|چند درمیاد|چند در میاد|چقدر میشه|چقد میشه|بکم|بیشها|بیش الواحد|بیش الحبه|بیش القطعه)(?=\s|$|[،,.!؟?])/u,
@@ -6909,7 +6909,7 @@ function salesBrainDraft(action,language){const ar=language==="Iraqi Arabic";con
 };return p[action]||p.ask_details;}
 // Short, natural inbound replies (1–2 sentences). They never state a price, discount, MOQ, capability, timing or terms;
 // a price holding reply only says the price is being checked (never that an order was registered).
-const SALES_BRAIN_NATURAL_ACTIONS=new Set(["greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
+const SALES_BRAIN_NATURAL_ACTIONS=new Set(["greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
 const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","commercial_owner_review_required","approved_moq_missing","approved_knowledge_missing"]);
 // A bare follow-up about a pending answer ("any news?", "خبری نشد؟", "شنو صار؟", "؟"): no new detail, no question of its own.
 const SALES_BRAIN_STATUS_PING=/(?:خبر(?:ی)?\s*(?:نشد|شد|هست|ندارید|نداری)|چی\s*شد|چه\s*شد|نتیجه\s*(?:چی|چه|شد)|پیگیری|منتظر(?:م|یم|\s*هستم)|هنوز\s*(?:خبری|جوابی)|جواب(?:ی)?\s*(?:ندادی|ندادید|نیومد|نشد)|شنو\s*صار|شصار|[أا]ي\s*خبر|في\s*خبر|ماكو\s*خبر|ننتظر|بانتظار|\bany\s+(?:update|news)\b|\bstill\s+waiting\b|\bwhat\s+happened\b|\bfollowing\s+up\b|^\s*(?:update|news)\s*[?؟]*\s*$|^\s*[?؟]+\s*$)/iu;
@@ -6920,7 +6920,7 @@ const SALES_BRAIN_WAITING_TEXTS={
   fa:{price:["قیمت در حال بررسیه و خبرتون می‌دم.","هنوز قیمت رو بررسی می‌کنم؛ به محض نتیجه خبرتون می‌دم.","پیگیر قیمت هستم و به‌زودی خبرتون می‌دم.","قیمت دقیق هنوز در دست بررسیه؛ خبرتون می‌کنم."],other:["موضوع در حال بررسیه و خبرتون می‌دم.","هنوز در حال بررسیه؛ به محض نتیجه خبرتون می‌دم.","پیگیرش هستم و به‌زودی خبرتون می‌دم.","هنوز در دست بررسیه؛ خبرتون می‌کنم."]},
   ar:{price:["السعر قيد المراجعة وراح أرجعلك.","بعدني أراجع السعر، وأول ما يتأكد أرجعلك.","متابع موضوع السعر وراح أرجعلك قريباً.","السعر الدقيق بعده قيد المراجعة، راح أبلغك."],other:["الموضوع قيد المراجعة وراح أرجعلك.","بعدني أراجع الموضوع، وأول ما يتأكد أرجعلك.","متابع الموضوع وراح أرجعلك قريباً.","الموضوع بعده قيد المراجعة، راح أبلغك."]}
 };
-function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,repeat=false,quantity=null,printing=null,waitingOn=null,recorded=[],moq=null,avoid=[],nextAsk=null,attr=null}={}){
+function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,repeat=false,quantity=null,printing=null,waitingOn=null,recorded=[],moq=null,avoid=[],nextAsk=null,attr=null,details=null,detailNext=null}={}){
   const ar=language==="Iraqi Arabic";
   const digits=n=>ar?String(n):String(n).replace(/[0-9]/g,d=>PERSIAN_DIGITS[d]);
   const qty=Number.isSafeInteger(quantity)&&quantity>0?digits(quantity):null;
@@ -6971,6 +6971,15 @@ function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,r
   const nextQ=nextAsk&&t[nextAsk]?t[nextAsk]:null;
   if(action==="continue_conversation")return nextQ?(ar?"بالخدمة. ":"در خدمتم. ")+nextQ:(ar?"بالخدمة، إذا عندك أي سؤال تفضل.":"در خدمتم؛ اگه سؤالی دارید بفرمایید.");
   if(action==="acknowledge_details")return (prefix||(ar?"تمام، سجلتها. ":"ممنون، ثبت شد. "))+(nextQ||(ar?"إذا عندك أي سؤال ثاني تفضل.":"اگه سؤال دیگه‌ای دارید بفرمایید."));
+  // Order candidate details: one question at a time (name, then city); «اسم نمیپرسید؟» is answered warmly, then asked.
+  if(action==="order_details"){
+    const d=details||{},lead=d.customerAsked?(ar?"أكيد 😊 ":"چرا حتماً 😊 "):"",saved=d.nameRecorded?(ar?"شكراً، سجلت الاسم. ":"ممنون، اسمتون ثبت شد. "):"";
+    if(detailNext==="customer_name"){const ask=ar?"شنو اسمك أو اسم المحل حتى أسجله على الطلب؟":"اسمتون یا نام مجموعه‌تون رو بفرمایید تا روی درخواست ثبت کنم.";
+      // Asked again right after: a shorter wording, so it is never blocked as a repeat.
+      return lead+(!lead&&used.includes(salesBrainClaimText(ask))?(ar?"بس اكتبلي اسمك أو اسم المحل، والباقي مسجل.":"فقط اسمتون یا نام مجموعه‌تون رو بفرمایید؛ بقیه موارد ثبت شده."):ask);}
+    if(detailNext==="destination")return lead+saved+(ar?"وين يكون التسليم؟":"برای کدوم شهر می‌خواید؟");
+    return lead+saved+(ar?"معلومات الطلب كاملة، وراح أبلغك بالتأكيد النهائي قريباً.":"اطلاعات درخواست کامل شد؛ تأیید نهایی رو به‌زودی خبرتون می‌دم.");
+  }
   // An approved colour / size list that does not exist yet: a specific holding reply while the owner answers it.
   if(action==="knowledge_owner")return attr==="size"?(ar?"راح أتأكد من القياسات المتوفرة لهالموديل وأرجعلك.":"سایزهای این مدل رو بررسی می‌کنم و خبرتون می‌دم."):attr==="color"?(ar?"راح أتأكد من الألوان المتوفرة لهالموديل وأرجعلك.":"رنگ‌بندی این مدل رو بررسی می‌کنم و خبرتون می‌دم."):t.commercial_owner;
   const ack=action.startsWith("ask_")?(imageAck?(ar?"وصلت الصورة. ":"عکس رسید. "):factsAck?(ar?"تمام، سجلتها. ":"ممنون، ثبت شد. "):""):"";
@@ -7507,10 +7516,51 @@ function salesNegotiationReply(kind,r,language){
   if(kind==="moq"&&Number.isSafeInteger(r.moq))return {action:"handle_objection",parts:[ar?`أقل كمية لـ ${name} هي ${d(r.moq)} قطعة.`:`حداقل سفارش ${name} ${d(r.moq)} عدده.`],texts:[d(r.moq)]};
   return null;
 }
-function salesAcceptReply(candidate,language){
+// Said ONLY after the order candidate was actually written (see salesEnsureChatOrderCandidate). askName: the first missing order
+// detail is asked right away (one question).
+function salesAcceptReply(candidate,language,{askName=false}={}){
   const ar=language==="Iraqi Arabic",qty=salesDigits(candidate.offer.quantity,language),name=candidate.product?.name||"";
+  if(askName)return ar?`تمام! سجلت طلب ${qty} قطعة من ${name}. شنو اسمك أو اسم المحل حتى أكمل الطلب؟`:`عالیه! درخواست ${qty} عدد ${name} ثبت شد. برای تکمیلش اسم یا نام مجموعه‌تون رو بفرمایید.`;
   return ar?`تمام! سجلت طلب ${qty} قطعة من ${name}، وراح أبلغك بالتأكيد النهائي قريباً.`:`عالیه! درخواست ${qty} عدد ${name} ثبت شد؛ تأیید نهایی رو به‌زودی خبرتون می‌دم.`;
 }
+// The acceptance could NOT be recorded: never claims «ثبت شد»; the owner sees it (needs_owner) and the offer stays open.
+function salesAcceptPendingReply(language){return language==="Iraqi Arabic"?"شكراً على التأكيد، راح أراجع الطلب وأرجعلك بالتأكيد.":"ممنون از تأییدتون؛ درخواست رو برای تأیید نهایی بررسی می‌کنم و خبرتون می‌دم.";}
+// ACCEPTED OFFER → ORDER CANDIDATE: exactly one lead_orders row (status order_candidate) per accepted offer, keyed by a deterministic
+// offer reference in quote_id («chat-offer:<candidate>:<offer hash>»), so a redelivery or retry never adds a second row. The snapshot
+// is the owner-approved price behind the offer; nothing is confirmed, charged or shipped — the owner confirms it in ORDERS.
+const CHAT_OFFER_ACCEPTANCE_SOURCE="telegram_chat_offer";
+async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null}){
+  await ensureOrderStore(env);
+  const offer=candidate.offer||{},price=candidate.price||{},ref=`chat-offer:${candidate.candidate_id}:${offer.offer_hash}`;
+  if(!offer.offer_hash||!Number.isSafeInteger(offer.quantity)||offer.quantity<=0||!Number.isSafeInteger(price.unit_price_minor)||!Number.isSafeInteger(price.total_minor)||!price.currency||!["IRAN","ARAB"].includes(candidate.market))throw Error("Accepted offer snapshot is incomplete");
+  const existing=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(ref).first();
+  if(existing)return {order:existing,created:false};
+  const t=now(),acceptedAt=row.created_at||t,id=uid(),orderNumber=await deterministicOrderNumber(ref,acceptedAt),req=candidate.requirements||{};
+  const product=[candidate.product?.name,req.configuration&&!String(candidate.product?.name||"").includes(req.configuration)?req.configuration:null].filter(Boolean).join(" ")||candidate.product?.key||"product";
+  const priceRef=price.price_version||price.price_item||null,discount=Number.isSafeInteger(price.discount?.amount_minor)?price.discount.amount_minor:0;
+  const summary=`${product} × ${offer.quantity} · ${price.currency} ${price.unit_price_minor}/unit · total ${price.total_minor}${discount?` (discount ${discount})`:""} · customer accepted in chat`;
+  await env.DB.prepare(`INSERT OR IGNORE INTO lead_orders(id,order_number,quote_id,lead_id,conversation_id,quote_outreach_id,acceptance_inbox_message_id,acceptance_provider_message_id,acceptance_source,customer_accepted_at,
+    market,pricing_mode,price_item_id,price_item_version,product,quantity,customization,destination,currency,unit_price_minor,subtotal_minor,discount_minor,shipping_minor,tax_minor,other_fees_minor,total_minor,moq,payment_terms,delivery_terms,approved_quote_text,status,created_at,updated_at)
+    VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,NULL,NULL,?,'order_candidate',?,?)`)
+    .bind(id,orderNumber,ref,row.lead_id,row.conversation_id,row.id,row.external_id||null,CHAT_OFFER_ACCEPTANCE_SOURCE,acceptedAt,candidate.market,price.source==="si"?"si_price_version":"approved_price_list",priceRef?.id||null,priceRef?.version??null,
+      product,offer.quantity,req.configuration||null,destination||null,price.currency,price.unit_price_minor,price.subtotal_minor??price.unit_price_minor*offer.quantity,discount,price.total_minor,price.moq??null,summary,t,t).run();
+  const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(ref).first();
+  if(!order)throw Error("Order candidate could not be persisted");
+  await auditOrderEventOnce(env,`candidate:${order.id}`,"lead_order_candidate_created","Customer accepted the approved chat offer: order candidate created",{order_id:order.id,order_number:order.order_number,offer_ref:ref,lead_id:order.lead_id,acceptance_inbox_message_id:order.acceptance_inbox_message_id,status:"order_candidate"});
+  return {order,created:order.id===id};
+}
+// A customer name given in answer to OUR name question («علی رضایی», «اسمم مریم هست», «فروشگاه نگین», «اسمي علي»). Questions,
+// greetings, thanks and long sentences are never taken as a name.
+function salesCustomerName(text){
+  let t=String(text||"").normalize("NFKC").replace(/\s+/g," ").trim();
+  if(!t||/[?؟]/u.test(t)||salesGreetingOnly(t)||salesThanksOnly(t))return null;
+  t=t.replace(/^(?:اسم\s*من|اسمم|نام\s*من|من|اسمي|انا|أنا|اني|آني)\s+/u,"").replace(/\s+(?:هستم|هست|است|هستیم)\s*[.!]*$/u,"").replace(/[.!]+$/u,"").trim();
+  return t.length>=2&&t.length<=60&&/\p{L}/u.test(t)&&t.split(" ").length<=6?t:null;
+}
+// Words that make a reply a request or a product detail, never a person/business name.
+const SALES_NOT_A_NAME=/(?:^|\s)(?:میخوام|میخواستم|میخایم|میخواهم|میخوایم|هم|دارید|دارین|سایز|رنگ|قیمت|قیمتش|تعداد|عدد|تا|مدل|جعبه|چند|کی|ارسال|اريد|ارید|بیش|شکد|سعر|لون|قیاس|موديل|مودیل|حبه|قطعه)(?=\s|$)/u;
+// «اسم نمیپرسید؟», «اطلاعاتم رو نمیخواید؟», «ما تريد اسمي؟»: the customer asks us to take their details → continue the order flow.
+const SALES_DETAILS_PROMPT=/(?:(?:اسم|نام|اطلاعات|مشخصات)\S*\s*(?:رو|را)?\s*نمی|نمی\S*\s*(?:اسم|نام|اطلاعات|مشخصات)|ما\s*(?:تريد|تسأل|تسال|تاخذ|تأخذ)\s*(?:عن\s*)?(?:اسمي|اسم|معلوماتي)|(?:اسمي|معلوماتي)\s*ما\s*(?:تريد|تحتاج))/u;
 // ORDER CANDIDATE: the one structured deal of the conversation (a versioned conversation-memory fact, not an order and not a payment).
 // spec = what is being bought; an offer is fresh only while the spec AND the approved price behind it are unchanged.
 const salesCandidateSpec=c=>({product:c.product?{key:c.product.key,source:c.product.source}:null,quantity:c.quantity??null,requirements:c.requirements||{},market:c.market||null});
@@ -7541,7 +7591,7 @@ function salesActionFor(action,{needsOwner=false,reorder=false}={}){
   return ({answer_knowledge:"ANSWER",answer_moq:"ANSWER",order_status:"ANSWER",visual:"ANSWER",acknowledge_rejection:"ANSWER",clarify_product:"CLARIFY",ask_image_reference:"CLARIFY",
     ask_product:"QUALIFY",ask_quantity:"QUALIFY",ask_size:"QUALIFY",ask_color:"QUALIFY",ask_customization:"QUALIFY",ask_destination:"QUALIFY",ask_details:"QUALIFY",ask_attribute:"QUALIFY",
     answer_price:"QUOTE",quote:"QUOTE",negotiate:"NEGOTIATE",handle_objection:"HANDLE_OBJECTION",accept_offer:"CLOSE",accepted:"OWNER_ESCALATION",
-    wait_for_owner:"FOLLOW_UP",owner_followup:"FOLLOW_UP",price_owner:"OWNER_ESCALATION",commercial_owner:"OWNER_ESCALATION",moq_owner:"OWNER_ESCALATION",knowledge_owner:"OWNER_ESCALATION",acknowledge_details:"QUALIFY",continue_conversation:"ANSWER"})[action]||"ANSWER";
+    wait_for_owner:"FOLLOW_UP",owner_followup:"FOLLOW_UP",price_owner:"OWNER_ESCALATION",commercial_owner:"OWNER_ESCALATION",moq_owner:"OWNER_ESCALATION",knowledge_owner:"OWNER_ESCALATION",acknowledge_details:"QUALIFY",continue_conversation:"ANSWER",order_details:"CLOSE"})[action]||"ANSWER";
 }
 // Bounded AI understanding (opt-in: SALES_AI_UNDERSTANDING=on): at most ONE small call, only for a text turn the deterministic layer
 // could not read at all. It may only pick an intent from this fixed list — never a fact, a number, a price or reply text.
@@ -7586,7 +7636,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   timing.brain_setup_ms=Date.now()-started;
   // ---- Wave 1: everything that depends only on this inbound row, loaded concurrently (each was a sequential round trip before).
   const wave1=Date.now();
-  const [context,ownerCaseDecisions,memories,postSaleOrder,loadedImageReference,priorInbox,turnFactRows,openEscalations,salesState]=await Promise.all([
+  const [context,ownerCaseDecisions,memories,postSaleOrder,loadedImageReference,priorInbox,turnFactRows,openEscalations,salesState,formalQuoteReply]=await Promise.all([
     Array.isArray(preloaded.context)?preloaded.context:timed("history_ms",getNegotiationConversationContext(env,row.lead_id,row.conversation_id)),
     env.DB.prepare("SELECT id,source_message_id,reason_code,owner_decision,resolved_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='resolved' ORDER BY resolved_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[]),
     timed("memory_load_ms",env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[])),
@@ -7598,7 +7648,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // One durable owner escalation per open QUESTION (reason): a repeat waits for it; a different owner-only question gets its own.
     env.DB.prepare("SELECT id,reason_code,source_message_id FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) ORDER BY created_at DESC LIMIT 20").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
     // The conversation's ACTIVE reply language (language policy) — one keyed read.
-    env.DB.prepare("SELECT language FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null)
+    env.DB.prepare("SELECT language FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null),
+    // A Telegram reply to a SENT FORMAL QUOTE belongs to the formal-quote path (recordQuoteDecisionFromInbound) — never to a chat offer.
+    row.reply_to_provider_message_id?env.DB.prepare("SELECT q.id FROM lead_quotes q JOIN lead_outreach o ON o.id=q.outreach_id WHERE q.lead_id=? AND q.conversation_id=? AND q.status IN ('sent','accepted') AND o.channel='telegram' AND o.status='sent' AND o.provider_message_id=? LIMIT 1").bind(row.lead_id,row.conversation_id,String(row.reply_to_provider_message_id)).first().catch(()=>null):null
   ]);
   // Earlier decisions of THIS conversation (which single field was already asked, and how often): one keyed lookup, not one per message.
   const newFactRows=turnFactRows.filter(f=>Number(f.changed)===1);
@@ -7749,7 +7801,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // ---- Sales agent: the approved price of THIS market answers at once; what the approved data does not cover becomes ONE question
   // (which product / which approved option / the destination) or a price-only owner escalation (scoped: other questions continue).
   const pricedNow=!!pricing&&SALES_PRICE_STATUSES_PRICED.has(pricing.status);
-  let priceReply=null,negotiation=null,clarifyCandidates=null,attributeAsk=null,kgClarify=null;
+  let priceReply=null,negotiation=null,clarifyCandidates=null,attributeAsk=null,kgClarify=null,orderDetails=null;
   // (An inbound that only echoes one of our own recent replies is never treated as a customer question.)
   const kgAttrKind=!kgAnswer&&knowledgeLooksLikeQuestion(row.message)&&!recentReplies.some(r=>salesBrainClaimText(r)===salesBrainClaimText(row.message))?(SALES_COLOR_QUESTION.test(String(row.message||""))?"color":SALES_SIZE_QUESTION.test(String(row.message||""))?"size":null):null;
   // mayEscalate=false (a turn that did not ask for a price): an approved price may still be given, but a missing one is never escalated.
@@ -7770,7 +7822,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const offerFresh=offerOpen&&!!currentOfferHash&&currentOfferHash===dealCandidate.offer.offer_hash;
   // Natural acceptance: an explicit «ثبتش کن» / «سجلها» accepts the open offer; a short vague «باشه» / «تمام» only when that offer
   // was our latest reply. Anything else accepts nothing.
-  const acceptance=offerOpen&&(intent==="accepted"||(salesWeakAcceptance(row.message)&&["answer_price","negotiate"].includes(lastAction)));
+  // (A reply to a sent formal quote is that quote's acceptance: the chat offer never consumes it.)
+  const acceptance=offerOpen&&!formalQuoteReply&&(intent==="accepted"||(salesWeakAcceptance(row.message)&&["answer_price","negotiate"].includes(lastAction)));
   const objectionKind=["objection_price","negotiating"].includes(intent)?(salesObjection(row.message)||(intent==="negotiating"?"discount":"price")):null;
   // A change to the deal (quantity, product, an approved option) or the answer to our own price question re-prices it.
   // It changed only when the priced deal is really different (a detail that does not change the approved price is just remembered);
@@ -7782,7 +7835,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   else if(intent==="rejected"){action="acknowledge_rejection";}
   else if(acceptance&&offerFresh){action="accept_offer";}
   // An acceptance without an open offer for exactly this deal first gets that offer (the customer confirms the exact approved price).
-  else if((acceptance||intent==="accepted")&&pricedNow&&priceHandled()){}
+  else if((acceptance||(intent==="accepted"&&!formalQuoteReply))&&pricedNow&&priceHandled()){}
   // The approved answer to an objection is given once; asked again (e.g. «more discount?»), anything beyond it is the owner's decision.
   else if(objectionKind&&pricedNow&&(negotiation=salesNegotiationReply(objectionKind,pricing,language))&&!recentReplies.some(r=>salesBrainClaimText(r)===salesBrainClaimText(negotiation.parts.join(" ")))){action=negotiation.action;}
   else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price")escalate("commercial_owner","commercial_owner_review_required");
@@ -7818,7 +7871,17 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const next=!requirements.authoritative&&!known.product_or_model&&timesAsked("product_or_model")>=maxAsks?null:missing.find(x=>timesAsked(x)<maxAsks);
     if(next){askedField=next;action={product_or_model:"ask_product",quantity:"ask_quantity",size:"ask_size",customization:"ask_customization",destination:"ask_destination",color:"ask_color"}[next];}
     // An accepted deal waits for the owner's approval; it is not quoted again unless the customer changes it.
-    else if(dealCandidate?.status==="accepted"&&!dealChanged){action="wait_for_owner";waitingOn=null;}
+    // After acceptance the order candidate exists: collect the missing order details ONE at a time (name, then the city if
+    // unknown), never re-asking what is known; a name given in answer to our question is stored. «اسم نمیپرسید؟» continues this.
+    else if(dealCandidate?.status==="accepted"&&!dealChanged){
+      // Only a plain reply to OUR name question is a name: not a message that states a deal detail, has digits or is a request.
+      const nameAnswer=priorDecisions[0]?.asked==="customer_name"&&!statedDeal.length&&intent==="other"&&!/[0-9۰-۹٠-٩]/u.test(String(row.message||""))&&!SALES_NOT_A_NAME.test(salesNormal(row.message))?salesCustomerName(row.message):null;
+      if(nameAnswer){await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"customer_name",memory_key:"customer_name",value:nameAnswer}});memory.customer_name=nameAnswer;}
+      if(memory.destination&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET destination=?,updated_at=? WHERE id=? AND status='order_candidate' AND (destination IS NULL OR destination='')").bind(String(memory.destination).slice(0,120),now(),dealCandidate.order_id).run().catch(()=>null);
+      const nextDetail=!memory.customer_name?"customer_name":!memory.destination?"destination":null,detailsAsked=SALES_DETAILS_PROMPT.test(salesNormal(row.message))||SALES_DETAILS_PROMPT.test(String(row.message||""));
+      if(!nextDetail&&!nameAnswer&&!detailsAsked){if(salesThanksOnly(row.message))action="thanks";else{action="wait_for_owner";waitingOn=null;}}
+      else{action="order_details";askedField=nextDetail;orderDetails={nameRecorded:!!nameAnswer,customerAsked:detailsAsked};}
+    }
     // A plain greeting or thanks is answered as such — never with an old holding text.
     else if(salesGreetingOnly(row.message)){action="greet";}
     else if(salesThanksOnly(row.message)){action="thanks";}
@@ -7840,7 +7903,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(action==="answer_price"){salesDraft=priceReply.parts.join(" ");salesTexts=priceReply.texts;}
   else if(action==="negotiate"||action==="handle_objection"){salesDraft=negotiation.parts.join(" ");salesTexts=negotiation.texts;}
   else if(action==="clarify_product"){const options=kgClarify||clarifyCandidates;salesDraft=salesClarifyProduct(options,language);salesTexts=options.map(c=>c.name);}
-  else if(action==="ask_attribute"){salesDraft=salesAttributeQuestion(attributeAsk,language);salesTexts=[attributeAsk.label,...(attributeAsk.values||[]),language==="Iraqi Arabic"?attributeAsk.question_ar:attributeAsk.question_fa];}
+  // The same option question asked again (e.g. the customer then asks the price) says WHY it is needed instead of repeating itself.
+  else if(action==="ask_attribute"){const question=salesAttributeQuestion(attributeAsk,language),repeat=recentReplies.some(r=>salesBrainClaimText(r)===salesBrainClaimText(question));
+    salesDraft=repeat?(language==="Iraqi Arabic"?`السعر يعتمد على ${attributeAsk.key==="size"?"القياس":"الموديل"}؛ `:`قیمتش به ${attributeAsk.key==="size"?"سایز":"مدل"} بستگی داره؛ `)+question:question;salesTexts=[attributeAsk.label,...(attributeAsk.values||[]),language==="Iraqi Arabic"?attributeAsk.question_ar:attributeAsk.question_fa];}
   else if(action==="answer_moq"&&pricedNow&&answerNumbers[0]===pricing.moq)salesTexts=[salesDigits(pricing.moq,language)];
   const priceSnapshot=salesPriceSnapshot(pricing);
   let candidate=null,candidateWrite=null,acceptanceDecision=null;
@@ -7858,12 +7923,26 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // An ACCEPTED deal is reopened only by a change to that same product (asking about another product never demotes it).
     else if(offer&&pricing&&pricing.status!=="pricing_error"&&currentOfferHash!==offer.offer_hash&&(status!=="accepted"||(!!pricing.product&&pricing.product.key===dealCandidate.product?.key))){status="draft";offer=null;}
     const openIssues=[...(SALES_PRICE_STATUSES_OWNER.has(pricing?.status)?["price"]:[]),...(attributeAsk?["attribute:"+attributeAsk.key]:[]),...(clarifyCandidates?["product"]:[]),...(pricing?.status==="under_moq"?["quantity_below_moq"]:[])];
-    candidate={candidate_id:candidateId,market:conversationMarket,product,quantity,requirements:pricing?.requirements||dealCandidate?.requirements||{},clarify:clarifyCandidates?clarifyCandidates.map(c=>c.key):null,status,offer,price:priceSnapshot||dealCandidate?.price||null,open_issues:openIssues,decision_id:status==="accepted"?dealCandidate?.decision_id||null:null};
+    candidate={candidate_id:candidateId,market:conversationMarket,product,quantity,requirements:pricing?.requirements||dealCandidate?.requirements||{},clarify:clarifyCandidates?clarifyCandidates.map(c=>c.key):null,status,offer,price:priceSnapshot||dealCandidate?.price||null,open_issues:openIssues,decision_id:status==="accepted"?dealCandidate?.decision_id||null:null,
+      // The order candidate (lead_orders) of an accepted deal and the details the customer gave for it.
+      order_id:status==="accepted"?dealCandidate?.order_id||null:null,order_number:status==="accepted"?dealCandidate?.order_number||null:null,
+      customer:{name:memory.customer_name||null,destination:memory.destination||null}};
     // Acceptance opens ONE owner approval for this exact offer (idempotent by fingerprint); nothing is ordered, charged or sent.
     if(action==="accept_offer"){
-      try{await ensureSalesIntelligenceStore(env);acceptanceDecision=await salesOpenAcceptanceDecision(env,{row,candidate});candidate.decision_id=acceptanceDecision?.id||null;}
-      catch{needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
-      salesDraft=salesAcceptReply(candidate,language);salesTexts=[salesDigits(candidate.offer.quantity,language),candidate.product?.name];
+      // The acceptance becomes a REAL order candidate first; only a successful write lets the reply say «ثبت شد».
+      let chatOrder=null;
+      try{chatOrder=(await salesEnsureChatOrderCandidate(env,{row,candidate,destination:memory.destination||null})).order;candidate.order_id=chatOrder.id;candidate.order_number=chatOrder.order_number;}
+      catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be recorded as an order candidate",{lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+      if(chatOrder){
+        try{await ensureSalesIntelligenceStore(env);acceptanceDecision=await salesOpenAcceptanceDecision(env,{row,candidate});candidate.decision_id=acceptanceDecision?.id||null;}
+        catch{needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
+        const askName=!memory.customer_name;if(askName)askedField="customer_name";
+        salesDraft=salesAcceptReply(candidate,language,{askName});salesTexts=[salesDigits(candidate.offer.quantity,language),candidate.product?.name];
+      }else{
+        // Not recorded: the offer stays open (a later acceptance retries), the owner is told, nothing claims registration.
+        candidate.status="offered";candidate.offer={...dealCandidate.offer};needsOwner=true;needsOwnerReason="commercial_owner_review_required";
+        salesDraft=salesAcceptPendingReply(language);salesTexts=[];
+      }
     }
     const {updated_in:_u,...previous}=dealCandidate||{};
     if(!dealCandidate||knowledgeCanonical(previous)!==knowledgeCanonical(candidate))candidateWrite={...candidate,updated_in:row.id};
@@ -7873,11 +7952,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A knowledge answer is validated against exactly the approved records it was composed from (kgAnswerFacts); every other draft
   // against all authoritative facts. Both only within this conversation's markets.
   const authorityFacts=[...kgEvidenceFacts,...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
-  const draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:kgAttrKind}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();const validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();const validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   timing.validator_ms=Date.now()-validatorStarted;
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
-  const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
+  const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details","order_details"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
   const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   // Bounded self-check of the reply (recorded with the decision; it never adds content).
   result.self_check=salesSelfCheck(draft,{action,ownerPending:needsOwner||openEscalations.length>0||action==="accept_offer"||action==="wait_for_owner"});
@@ -7965,7 +8044,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // escalation stays open and the actual commercial answer still requires the owner.
 // The sales agent's answers (answer_price, negotiate, handle_objection, accept_offer, clarify_product, ask_attribute) are composed
 // ONLY from one owner-approved price record of the conversation's market and are re-validated below against exactly that evidence.
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.
@@ -11609,7 +11688,7 @@ Context: ${context}`;
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureOrderStore(env);
         const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,q.status AS quote_status,
             (SELECT COALESCE(SUM(p.amount_minor),0) FROM lead_order_payments p WHERE p.order_id=o.id) AS paid_minor
-          FROM lead_orders o JOIN leads l ON l.id=o.lead_id JOIN lead_quotes q ON q.id=o.quote_id
+          FROM lead_orders o JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_quotes q ON q.id=o.quote_id
           ORDER BY o.created_at DESC LIMIT 200`).all();
         return json({ok:true,items:r.results||[],payment_engine:false,revenue_recognition:false});
       }
