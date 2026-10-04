@@ -1521,7 +1521,9 @@ async function publishScheduled(env){const r=await env.DB.prepare("SELECT * FROM
 async function collectInstagramMetrics(env){if(!env.INSTAGRAM_ACCESS_TOKEN)return;const rows=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='content_published' ORDER BY created_at DESC LIMIT 100").all();for(const row of rows.results||[]){let d;try{d=JSON.parse(row.details_json||'{}')}catch{continue}for(const result of d.results||[]){if(result.platform!=='instagram'||!result.external_id)continue;const u=new URL(`${instagramGraphBase(env)}/${encodeURIComponent(result.external_id)}/insights`);u.searchParams.set('metric','impressions,reach,likes,comments,shares,saved');u.searchParams.set('access_token',env.INSTAGRAM_ACCESS_TOKEN);const r=await fetch(u.toString());if(!r.ok)continue;const data=await r.json().catch(()=>({}));if(data.error||!Array.isArray(data.data))continue;const values={};for(const m of data.data){const v=Array.isArray(m.values)?m.values.at(-1)?.value:m.value;values[m.name]=Number(v||0)}const ex=await env.DB.prepare("SELECT id FROM social_metrics WHERE content_id=? AND platform='instagram' ORDER BY created_at DESC LIMIT 1").bind(d.content_id).first();if(ex)await env.DB.prepare("UPDATE social_metrics SET impressions=?,reach=?,likes=?,comments=?,shares=?,saves=?,metric_date=? WHERE id=?").bind(values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,now().slice(0,10),ex.id).run();else await env.DB.prepare("INSERT INTO social_metrics(id,content_id,platform,impressions,reach,likes,comments,shares,saves,clicks,metric_date,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),d.content_id,'instagram',values.impressions||0,values.reach||0,values.likes||0,values.comments||0,values.shares||0,values.saved||0,0,now().slice(0,10),now()).run()}}}
 
 
-async function ensureTelegramMediaTable(env){
+// Runs on every Telegram webhook: the DDL (and the expected duplicate-column ALTER) is done once per isolate (see onceEnsured).
+async function ensureTelegramMediaTable(env){return onceEnsured(env,"TelegramMediaTable",()=>ensureTelegramMediaTableNow(env));}
+async function ensureTelegramMediaTableNow(env){
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS telegram_media_sources (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, chat_username TEXT, message_id TEXT NOT NULL, file_id TEXT NOT NULL, file_unique_id TEXT, media_type TEXT NOT NULL, caption TEXT, source_kind TEXT NOT NULL DEFAULT 'archive', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(chat_id,message_id,file_id))`).run();
   try{await env.DB.prepare("ALTER TABLE telegram_media_sources ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'archive'").run()}catch{}
 }
@@ -5155,6 +5157,7 @@ async function proxyTelegramMedia(env,req){
 }
 
 async function handleTelegramWebhook(env,req){
+  const webhookStarted=Date.now();
   if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(provided!==expected)return json({ok:false,error:'Unauthorized webhook'},401);
   const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
   const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const isVault=isImageVault||isVideoVault;
@@ -5175,20 +5178,28 @@ async function handleTelegramWebhook(env,req){
   if(privateCustomerChat&&!linked.leadId&&!linked.ambiguous&&!targets.includes(chatId))linked=await createTelegramInboundLead(env,m,{chatId,providerUsername});
   if(privateCustomerChat&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});
   if(!linked.leadId||!linked.conversationId)linked=unlinkedInbound;
-  const identityMs=Date.now()-identityStarted;
+  const identityMs=Date.now()-identityStarted,dedupStarted=Date.now();
   const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();
   if(!ex){
     const t=now(),inboxId=uid();
     await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(inboxId,'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'other','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();
+    const dedupMs=Date.now()-dedupStarted;
     // A linked private customer's image is attached to this inbox row and analysed (bounded, once) BEFORE the Sales Brain runs.
+    // A text-only message never reaches Vision; an image already analysed in this conversation is reused, never re-analysed.
     let customerMedia=null;const mediaStarted=Date.now();
     if(privateCustomerChat&&linked.leadId&&linked.conversationId)try{customerMedia=await recordCustomerConversationMedia(env,{m,body,inboxId,leadId:linked.leadId,conversationId:linked.conversationId,chatId});}catch(error){try{await audit(env,"customer_image_record_failed","Customer image stayed unanalysed; inbound continues text-only",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+    const mediaMs=Date.now()-mediaStarted;
     if(customerMedia?.album_follower){
       try{await captureConversationSalesMemory(env,inboxId);}catch{}
     }else if(linked.leadId&&linked.conversationId){
-      try { await processNegotiationInbound(env,inboxId,{identity_ms:identityMs,media_ms:Date.now()-mediaStarted}); }
+      const timing={webhook_started_at:webhookStarted,identity_ms:identityMs,dedup_ms:dedupMs,media_ms:mediaMs,media_lookup_ms:Math.max(0,mediaMs-(customerMedia?.vision_ms||0)),vision_ms:customerMedia?.vision_called?customerMedia.vision_ms:0,vision_called:!!customerMedia?.vision_called};
+      try { await processNegotiationInbound(env,inboxId,timing); }
       catch(error){
         try { await audit(env,"negotiation_reply_draft_failed","Inbound reply was stored but negotiation enrichment failed",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)}); } catch {}
+        // Telegram is answered 200 either way (a failing update must never stall its queue), so a transient failure is retried
+        // ONCE here. Every step is idempotent: an undecided outcome is resumed, a decided one is never repeated.
+        try { await new Promise(resolve=>setTimeout(resolve,250)); await processNegotiationInbound(env,inboxId,{webhook_started_at:webhookStarted,retried:true}); }
+        catch(retryError){ try { await audit(env,"negotiation_reply_retry_failed","Inbound reply retry failed safely; the message stays visible to the owner",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(retryError?.message||retryError)}); } catch {} }
       }
     }else if(!internalChat)try{await ensureAmbiguousTelegramIdentityEscalation(env,inboxId);}catch(error){try{await audit(env,"owner_escalation_creation_failed","Unlinked Telegram inbound remained stored after escalation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }else{
@@ -6280,12 +6291,14 @@ async function analyzeCustomerMedia(env,mediaId){
   if(!Number(claim?.meta?.changes))return {status:"not_claimed"};
   const media=await env.DB.prepare("SELECT * FROM conversation_customer_media WHERE id=? LIMIT 1").bind(mediaId).first();
   const attempt=Number(media?.analysis_attempts)||0;
+  // provider_called: whether THIS attempt actually reached the paid Vision request (timing/cost evidence; never a retry signal).
+  let providerCalled=false;
   const finish=async(status,errorCode=null,observationJson=null,reusedFrom=null)=>{
     const t=now();
     const done=await env.DB.prepare("UPDATE conversation_customer_media SET analysis_status=?,observation_json=?,error_code=?,reused_from_media_id=?,analyzed_at=?,updated_at=? WHERE id=? AND analysis_status='analyzing' AND analysis_attempts=?").bind(status,observationJson,errorCode,reusedFrom,t,t,mediaId,attempt).run();
-    if(!Number(done?.meta?.changes))return {status:"superseded"};
+    if(!Number(done?.meta?.changes))return {status:"superseded",provider_called:providerCalled};
     try{await audit(env,"customer_image_analysis","Customer conversation image processed",{media_id:mediaId,inbox_message_id:media?.inbox_message_id||null,lead_id:media?.lead_id||null,conversation_id:media?.conversation_id||null,status,error_code:errorCode,reused:!!reusedFrom});}catch{}
-    return {status,error_code:errorCode};
+    return {status,error_code:errorCode,provider_called:providerCalled};
   };
   try{
     if(!media)return {status:"missing"};
@@ -6313,6 +6326,7 @@ async function analyzeCustomerMedia(env,mediaId){
     const marked=await env.DB.prepare("UPDATE conversation_customer_media SET analysis_phase='vision_requested',updated_at=? WHERE id=? AND analysis_status='analyzing' AND analysis_attempts=?").bind(now(),mediaId,attempt).run();
     if(!Number(marked?.meta?.changes))return {status:"superseded"};
     let binary="";for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+    providerCalled=true;
     const vision=await customerMediaFetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:String(env.OPENAI_MODEL||"gpt-5.6-luna"),input:[{role:"user",content:[{type:"input_text",text:CUSTOMER_VISION_PROMPT},{type:"input_image",image_url:`data:${kind};base64,${btoa(binary)}`}]}]})},20000);
     binary="";
     if(!vision.ok)return await finish("failed",`vision_http_${Number(vision.status)||0}`);
@@ -6336,12 +6350,18 @@ async function recordCustomerConversationMedia(env,{m,body,inboxId,leadId,conver
   const row=await env.DB.prepare("SELECT id,media_group_id,telegram_message_id,analysis_status FROM conversation_customer_media WHERE inbox_message_id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(inboxId,leadId,conversationId).first();
   if(!row)return null;
   // A redelivered update re-attempts only through the bounded stale-recovery rules (never a fresh, unconditional retry).
-  if(row.analysis_status==="pending")await analyzeCustomerMedia(env,row.id);
+  // An image that is already analysed (or failed / unsupported) is never sent to Vision again.
+  const visionStarted=Date.now();let visionCalled=false;
+  if(row.analysis_status==="pending")visionCalled=!!(await analyzeCustomerMedia(env,row.id))?.provider_called;
   else if(row.analysis_status==="analyzing")await recoverStaleCustomerMedia(env,{mediaId:row.id,limit:1});
-  const analysis={status:(await env.DB.prepare("SELECT analysis_status FROM conversation_customer_media WHERE id=? LIMIT 1").bind(row.id).first())?.analysis_status||row.analysis_status};
+  const visionMs=Date.now()-visionStarted;
+  // The final status and the album check do not depend on each other: one round trip instead of two.
+  const [status,earlierAlbumItem]=await Promise.all([
+    env.DB.prepare("SELECT analysis_status FROM conversation_customer_media WHERE id=? LIMIT 1").bind(row.id).first(),
+    row.media_group_id?env.DB.prepare("SELECT id FROM conversation_customer_media WHERE lead_id=? AND conversation_id=? AND media_group_id=? AND id<>? AND CAST(telegram_message_id AS INTEGER)<CAST(? AS INTEGER) LIMIT 1").bind(leadId,conversationId,row.media_group_id,row.id,row.telegram_message_id).first():null
+  ]);
   // Later items of one Telegram album belong to the first item's turn: they are stored and analysed but create no extra draft.
-  const albumFollower=!!row.media_group_id&&!!(await env.DB.prepare("SELECT id FROM conversation_customer_media WHERE lead_id=? AND conversation_id=? AND media_group_id=? AND id<>? AND CAST(telegram_message_id AS INTEGER)<CAST(? AS INTEGER) LIMIT 1").bind(leadId,conversationId,row.media_group_id,row.id,row.telegram_message_id).first());
-  return {id:row.id,analysis_status:analysis.status,album_follower:albumFollower};
+  return {id:row.id,analysis_status:status?.analysis_status||row.analysis_status,album_follower:!!earlierAlbumItem,vision_called:visionCalled,vision_ms:visionMs};
 }
 // Stale recovery for rows left 'pending' (never claimed) or 'analyzing' (Worker interrupted) beyond the stale window.
 // Re-attempt ONLY when the interrupted attempt provably never reached the paid Vision call (phase still 'claimed') and the
@@ -6488,9 +6508,11 @@ function extractConversationMemoryFacts(message,intent,inboxId){
 }
 async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMessageId,fact}){
   const valueJson=knowledgeCanonical(fact.value),valueHash=await knowledgeHash(valueJson);
-  const same=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND source_message_id=? AND memory_key=? AND value_hash=? LIMIT 1").bind(conversationId,sourceMessageId,fact.memory_key,valueHash).first();
+  const [same,current]=await Promise.all([
+    env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND source_message_id=? AND memory_key=? AND value_hash=? LIMIT 1").bind(conversationId,sourceMessageId,fact.memory_key,valueHash).first(),
+    env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND memory_key=? AND status='active' LIMIT 1").bind(conversationId,fact.memory_key).first()
+  ]);
   if(same)return {fact:same,idempotent:true};
-  const current=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND memory_key=? AND status='active' LIMIT 1").bind(conversationId,fact.memory_key).first();
   const t=now(),id="conversation-memory-"+uid(),version=(current?.version||0)+1;
   try{
     const statements=[];
@@ -6506,7 +6528,8 @@ async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMes
   if(!stored)throw Error("Conversation memory persistence failed");
   return {fact:stored,idempotent:false};
 }
-async function captureConversationSalesMemory(env,inboxId){
+// out (optional): receives the resolved customer-image reference, so the Sales Brain of the same turn does not resolve it again.
+async function captureConversationSalesMemory(env,inboxId,out=null){
   await ensureConversationMemoryStore(env);
   const row=await env.DB.prepare(`SELECT i.id,i.lead_id,i.conversation_id,i.message,i.category,i.created_at,c.id AS verified_conversation_id
     FROM inbox_messages i JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
@@ -6515,9 +6538,10 @@ async function captureConversationSalesMemory(env,inboxId){
   const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
   const facts=extractConversationMemoryFacts(row.message,intent,row.id),captured=[];
   // The resolved customer image is a conversation-scoped REFERENCE (media id), never a product fact or visual knowledge.
-  let imageReference=null;try{imageReference=await resolveCustomerImageReference(env,row);}catch{}
+  let imageReference=null;try{imageReference=await resolveCustomerImageReference(env,row);if(out)out.imageReference=imageReference;}catch{}
   if(imageReference?.status==="resolved"&&imageReference.media_id)facts.push({fact_type:"customer_image_reference",value:imageReference.media_id,memory_key:"customer_image_reference"});
-  for(const fact of facts)captured.push(await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact}));
+  // Every fact of one message has its own memory key: they are independent and are written concurrently.
+  captured.push(...await Promise.all(facts.map(fact=>upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact}))));
   const t=now();
   await env.DB.prepare(`INSERT INTO conversation_sales_state(conversation_id,lead_id,sales_stage,last_meaningful_inbox_message_id,last_meaningful_at,next_action,version,source_message_id,created_at,updated_at)
     VALUES(?,?,?,?,?,?,1,?,?,?)
@@ -6637,8 +6661,16 @@ function salesBrainDraft(action,language){const ar=language==="Iraqi Arabic";con
 // the only echoed facts are the customer's own integer quantity and an allow-listed printing finish.
 const SALES_BRAIN_NATURAL_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
 const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","commercial_owner_review_required","approved_moq_missing","approved_knowledge_missing"]);
+// A bare follow-up about a pending answer ("any news?", "خبری نشد؟", "شنو صار؟", "؟"): no new detail, no question of its own.
+const SALES_BRAIN_STATUS_PING=/(?:خبر(?:ی)?\s*(?:نشد|شد|هست|ندارید|نداری)|چی\s*شد|چه\s*شد|نتیجه\s*(?:چی|چه|شد)|پیگیری|منتظر(?:م|یم|\s*هستم)|هنوز\s*(?:خبری|جوابی)|جواب(?:ی)?\s*(?:ندادی|ندادید|نیومد|نشد)|شنو\s*صار|شصار|[أا]ي\s*خبر|في\s*خبر|ماكو\s*خبر|ننتظر|بانتظار|\bany\s+(?:update|news)\b|\bstill\s+waiting\b|\bwhat\s+happened\b|\bfollowing\s+up\b|^\s*(?:update|news)\s*[?؟]*\s*$|^\s*[?؟]+\s*$)/iu;
 const SALES_BRAIN_FACT_LABELS={product_interest:["مدل","الموديل"],requested_quantity:["تعداد","العدد"],requested_size:["سایز","القياس"],printing:["نوع چاپ","نوع الطباعة"],branding:["لوگو","الشعار"],destination:["مقصد","الوجهة"],exterior_color:["رنگ","اللون"],interior_color:["رنگ","اللون"]};
-function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,repeat=false,quantity=null,printing=null,waitingOn=null,recorded=[],moq=null}={}){
+// "Still checking" phrasings (first = the original). A follow-up while the owner decides gets one of these, never the exact text of
+// one of our last replies, so a valid follow-up is never suppressed as a repeat.
+const SALES_BRAIN_WAITING_TEXTS={
+  fa:{price:["قیمت در حال بررسیه و خبرتون می‌دم.","هنوز قیمت رو بررسی می‌کنم؛ به محض نتیجه خبرتون می‌دم.","پیگیر قیمت هستم و به‌زودی خبرتون می‌دم.","قیمت دقیق هنوز در دست بررسیه؛ خبرتون می‌کنم."],other:["موضوع در حال بررسیه و خبرتون می‌دم.","هنوز در حال بررسیه؛ به محض نتیجه خبرتون می‌دم.","پیگیرش هستم و به‌زودی خبرتون می‌دم.","هنوز در دست بررسیه؛ خبرتون می‌کنم."]},
+  ar:{price:["السعر قيد المراجعة وراح أرجعلك.","بعدني أراجع السعر، وأول ما يتأكد أرجعلك.","متابع موضوع السعر وراح أرجعلك قريباً.","السعر الدقيق بعده قيد المراجعة، راح أبلغك."],other:["الموضوع قيد المراجعة وراح أرجعلك.","بعدني أراجع الموضوع، وأول ما يتأكد أرجعلك.","متابع الموضوع وراح أرجعلك قريباً.","الموضوع بعده قيد المراجعة، راح أبلغك."]}
+};
+function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,repeat=false,quantity=null,printing=null,waitingOn=null,recorded=[],moq=null,avoid=[]}={}){
   const ar=language==="Iraqi Arabic";
   const finish=/طلاکوب|gold\s*foil|تذهيب|ذهبي/iu.test(String(printing||""))?(ar?"طباعة ذهبية":"طلاکوب"):/نقره[‌\s]?کوب|silver\s*foil/iu.test(String(printing||""))?(ar?"طباعة فضية":"نقره‌کوب"):null;
   const digits=n=>ar?String(n):String(n).replace(/[0-9]/g,d=>PERSIAN_DIGITS[d]);
@@ -6646,7 +6678,11 @@ function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,r
   // While waiting for the owner, name what the customer just added, so each acknowledgement is specific (and never a repeat).
   const labels=[...new Set(recorded.map(f=>SALES_BRAIN_FACT_LABELS[f]?.[ar?1:0]).filter(Boolean))];
   const list=labels.length<2?labels.join(""):labels.slice(0,-1).join("، ")+(ar?" و":" و ")+labels[labels.length-1];
-  const waiting=waitingOn==="unsupported_price"?(ar?"السعر قيد المراجعة وراح أرجعلك.":"قیمت در حال بررسیه و خبرتون می‌دم."):(ar?"الموضوع قيد المراجعة وراح أرجعلك.":"موضوع در حال بررسیه و خبرتون می‌دم.");
+  const prefix=list?(ar?`شكراً، سجلت ${list}. `:`ممنون، ${list} ثبت شد. `):"";
+  const used=(avoid||[]).map(salesBrainClaimText).filter(Boolean);
+  // Prefer a phrasing that none of our last replies contained at all; never one that would equal a recent reply word for word.
+  const pickWaiting=(kind,lead="")=>{const texts=SALES_BRAIN_WAITING_TEXTS[ar?"ar":"fa"][kind];return texts.find(x=>!used.some(r=>r.includes(salesBrainClaimText(x))))||texts.find(x=>!used.includes(salesBrainClaimText(lead+x)))||texts[0];};
+  const waiting=pickWaiting(waitingOn==="unsupported_price"?"price":"other",prefix);
   const t=ar?{
     ask_product:repeat?"بس كولي شنو نوع العلبة اللي تريدها؟":"شنو نوع العلبة اللي تريدها؟",
     ask_quantity:repeat?"بس كولي شكد العدد؟":"شكد العدد اللي تحتاجه؟",
@@ -6658,8 +6694,8 @@ function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,r
     price_owner:qty?`تم تسجيل طلب ${qty} قطعة${finish?` ب${finish}`:""}. راح أتأكد من السعر الدقيق وأرجعلك.`:"أكيد، راح أتأكد من السعر الدقيق وأرجعلك.",
     commercial_owner:"أكيد، راح أراجع الموضوع وأرجعلك.",
     moq_owner:"أكيد، راح أتأكد من الحد الأدنى للطلب وأرجعلك.",
-    wait_for_owner:(list?`شكراً، سجلت ${list}. `:"")+waiting,
-    owner_followup:"الموضوع قيد المراجعة وراح أرجعلك."
+    wait_for_owner:prefix+waiting,
+    owner_followup:pickWaiting("other")
   }:{
     ask_product:repeat?"فقط بفرمایید چه مدل جعبه‌ای مدنظرتونه؟":"چه مدل جعبه‌ای مدنظرتونه؟",
     ask_quantity:repeat?"فقط بفرمایید چند عدد لازم دارید؟":"چند عدد لازم دارید؟",
@@ -6671,8 +6707,8 @@ function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,r
     price_owner:qty?`سفارش ${qty} عددی${finish?` با چاپ ${finish}`:""} ثبت شد. قیمت دقیقش رو بررسی می‌کنم و خبرتون می‌دم.`:"حتماً، قیمت دقیق رو بررسی می‌کنم و خبرتون می‌دم.",
     commercial_owner:"حتماً، این مورد رو بررسی می‌کنم و خبرتون می‌دم.",
     moq_owner:"حتماً، حداقل سفارش رو بررسی می‌کنم و خبرتون می‌دم.",
-    wait_for_owner:(list?`ممنون، ${list} ثبت شد. `:"")+waiting,
-    owner_followup:"موضوع در حال بررسیه و خبرتون می‌دم."
+    wait_for_owner:prefix+waiting,
+    owner_followup:pickWaiting("other")
   };
   // Acknowledgement prefixes only on questions; holding/answer replies already speak to the customer's request.
   const ack=action.startsWith("ask_")?(imageAck?(ar?"وصلت الصورة. ":"عکس رسید. "):factsAck?(ar?"تمام، سجلتها. ":"ممنون، ثبت شد. "):""):"";
@@ -6949,19 +6985,42 @@ function salesBrainCustomerGoal(intent,known){
   return ({asks_price:"price",asks_moq:"moq",asks_shipping:"shipping",negotiating:"terms_or_discount",objection_price:"terms_or_discount",quote_requested:"quote",accepted:"accept",rejected:"decline"})[intent]||(known.quantity||known.product_or_model?"order_inquiry":"general_inquiry");
 }
 
-async function runSalesNegotiationBrain(env,inboxId){
-  await ensureConversationMemoryStore(env);await ensureSalesKnowledgeStore(env);await ensureQuoteStore(env);await ensureOwnerEscalationStore(env);
-  const prior=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+inboxId).first();
-  const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,c.platform AS conversation_platform,c.contact_id
+// preloaded (optional, same turn only): row (with the classified category), context and imageReference already loaded by
+// processNegotiationInbound, and a timing object that receives per-stage milliseconds. Without it every input is loaded here.
+async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
+  const timing=preloaded.timing||{},started=Date.now();
+  // Stage timer for queries that run concurrently: each stage records its own duration (stages overlap within one wave).
+  const timed=(stage,work)=>{const s=Date.now();return Promise.resolve(work).then(value=>{timing[stage]=(timing[stage]||0)+Date.now()-s;return value;});};
+  await Promise.all([ensureConversationMemoryStore(env),ensureSalesKnowledgeStore(env),ensureQuoteStore(env),ensureOwnerEscalationStore(env)]);
+  const preRow=preloaded.row&&preloaded.row.id===inboxId?preloaded.row:null;
+  const [prior,loadedRow]=await Promise.all([
+    env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+inboxId).first(),
+    preRow?null:env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,c.platform AS conversation_platform,c.contact_id
     FROM inbox_messages i JOIN leads l ON l.id=i.lead_id JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
-    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
+    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first()
+  ]);
+  const row=preRow||loadedRow;
   if(!row)return {resolved:false,needs_owner:true,needs_owner_reason:"ambiguous_customer_identity",draft_customer_reply:null};
   if(prior?.details_json)try{const priorResult={...JSON.parse(prior.details_json),idempotent:true},escalation=await ensureOwnerEscalationFromBrain(env,row,priorResult);return escalation?.escalation?{...priorResult,owner_escalation_id:escalation.escalation.id}:priorResult}catch{}
-  const context=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);
-  const ownerCaseDecisions=(await env.DB.prepare("SELECT id,source_message_id,reason_code,owner_decision,resolved_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='resolved' ORDER BY resolved_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id).all()).results||[];
-  const memories=(await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all()).results||[];
+  timing.brain_setup_ms=Date.now()-started;
+  // ---- Wave 1: everything that depends only on this inbound row, loaded concurrently (each was a sequential round trip before).
+  const wave1=Date.now();
+  const [context,ownerCaseDecisions,memories,postSaleOrder,loadedImageReference,priorInbox,newFactRows,openEscalations]=await Promise.all([
+    Array.isArray(preloaded.context)?preloaded.context:timed("history_ms",getNegotiationConversationContext(env,row.lead_id,row.conversation_id)),
+    env.DB.prepare("SELECT id,source_message_id,reason_code,owner_decision,resolved_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='resolved' ORDER BY resolved_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[]),
+    timed("memory_load_ms",env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[])),
+    findPostSaleOrder(env,row.lead_id,row.conversation_id),
+    preloaded.imageReference?null:timed("image_reference_ms",resolveCustomerImageReference(env,row).catch(()=>null)),
+    env.DB.prepare("SELECT id FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id<>? AND created_at<=? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,row.id,row.created_at||now()).all().then(r=>r.results||[]),
+    // Facts this turn actually CHANGED (a restated identical value is not new information).
+    env.DB.prepare("SELECT f.fact_type FROM conversation_memory_facts f LEFT JOIN conversation_memory_facts p ON p.id=f.supersedes_fact_id WHERE f.lead_id=? AND f.conversation_id=? AND f.source_message_id=? AND (p.id IS NULL OR p.value_hash<>f.value_hash)").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
+    // One durable owner escalation per open QUESTION (reason): a repeat waits for it; a different owner-only question gets its own.
+    env.DB.prepare("SELECT id,reason_code FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) ORDER BY created_at DESC LIMIT 20").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[])
+  ]);
+  // Earlier decisions of THIS conversation (which single field was already asked, and how often): one keyed lookup, not one per message.
+  const priorEvents=priorInbox.length?((await env.DB.prepare(`SELECT id,details_json FROM system_events WHERE id IN (${priorInbox.map(()=>"?").join(",")})`).bind(...priorInbox.map(p=>"sales-brain:"+p.id)).all()).results||[]):[];
+  timing.brain_context_ms=Date.now()-wave1;
   const memory={};for(const fact of memories)if(!(fact.memory_key in memory))try{memory[fact.memory_key]=JSON.parse(fact.value_json)}catch{}
-  const postSaleOrder=await findPostSaleOrder(env,row.lead_id,row.conversation_id);
   const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message),language=salesBrainLanguage(row.message,row.lead_notes,context.filter(x=>x.direction==="inbound"&&x.id!==row.id).reverse().map(x=>x.message)),orderStatusAsked=!!postSaleOrder&&(ORDER_STATUS_QUESTION.test(String(row.message||""))||(postSaleOrder.status!=="fulfilled"&&(intent==="asks_shipping"||intent==="other"))),stage=orderStatusAsked?`order_${postSaleOrder.status}`:salesBrainStage(intent,memory);
   // MARKET ISOLATION: approved Sales Knowledge is read only for this conversation's market + GLOBAL, never another market.
   // The market comes from the same explicit evidence as quotes (owner-set lead market, lead country, stated destination);
@@ -6970,10 +7029,10 @@ async function runSalesNegotiationBrain(env,inboxId){
   const marketDecision=determineQuoteMarket({ownerMarket:leadMeta.market,leadCountry:leadMeta.country,destination:memory.destination});
   const conversationMarket=["IRAN","ARAB"].includes(marketDecision.market)?marketDecision.market:null,knowledgeMarkets=conversationMarket?[conversationMarket,"GLOBAL"]:["GLOBAL"];
   const marketClause=` AND market IN (${knowledgeMarkets.map(()=>"?").join(",")})`;
-  const model=String(memory.product_interest||"").trim(),knowledge=(await env.DB.prepare("SELECT id,version,domain,entity_key,attribute,market,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain<>'knowledge' AND (entity_key='global' OR (?<>'' AND entity_key=?))"+marketClause+" ORDER BY created_at DESC LIMIT 100").bind(model,model,...knowledgeMarkets).all()).results||[];
+  const model=String(memory.product_interest||"").trim();
   // Customer images of THIS lead+conversation only. A resolved image satisfies "which product/model" as a reference; its
   // observation is advisory visual context and never an authoritative fact for the validator.
-  let imageReference={status:"none",images:[],image_count:0};try{imageReference=await resolveCustomerImageReference(env,row);}catch{}
+  const imageReference=preloaded.imageReference||loadedImageReference||{status:"none",images:[],image_count:0};
   const imageRefId=imageReference.status==="resolved"?imageReference.media_id:imageReference.status==="none"&&typeof memory.customer_image_reference==="string"?memory.customer_image_reference:null,currentImage=imageReference.basis==="current_message",imageAmbiguous=imageReference.status==="ambiguous";
   const knownQuantity=memory.requested_quantity,quantityValid=Number.isSafeInteger(knownQuantity)&&knownQuantity>0;
   // ---- Conversation state → ONE next-best action (a salesperson, not a questionnaire).
@@ -6982,18 +7041,22 @@ async function runSalesNegotiationBrain(env,inboxId){
   // it never becomes a product fact, a price input or verified product knowledge.
   let imageCategory=null;try{imageCategory=JSON.parse((imageReference.images||[]).find(x=>x.id===imageRefId)?.observation_json||"null")?.likely_product_category||null;}catch{}
   const productKeys=[...new Set([model,imageCategory].filter(x=>x&&x!=="unknown").map(salesBrainProductKey).filter(Boolean))];
+  // ---- Wave 2: approved knowledge of THIS market (+ GLOBAL) and the customer-photo category match, loaded concurrently.
   // Customer photo vs owner-APPROVED product photos: a category-level LIKELY visual match only. It is never an exact match,
   // never a commercial fact, and never sent to the customer as verified evidence of their item.
-  let likelyVisualMatches=[];
-  if(imageCategory&&imageCategory!=="unknown")try{likelyVisualMatches=((await retrieveEligibleVisualProductMedia(env,[{type:"category",value:visualAttributeValue(imageCategory).normalized}],3)).items||[]).map(x=>({visual_media_id:x.id,match_type:"likely_visual_match",basis:"category",attributes:Object.fromEntries((x.attributes||[]).filter(a=>a.status==="active").map(a=>[a.attribute_type,a.normalized_value]))}));}catch{}
-  const requirementRules=(await env.DB.prepare(`SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN ('pricing','product','configuration','size','strategy') AND (entity_key='global'${productKeys.length?` OR entity_key IN (${productKeys.map(()=>"?").join(",")})`:""})${marketClause} ORDER BY created_at DESC LIMIT 100`).bind(...productKeys,...knowledgeMarkets).all()).results||[];
+  // GENERIC BUSINESS KNOWLEDGE (data-driven; no per-concept code): approved records of THIS market + GLOBAL → match the product by
+  // exact name / owner-taught alias only → recognise values the owner taught in the customer's own words → evaluate approved
+  // rules/relations generically. This returns KNOWLEDGE, never permission: commercial effects never reach a customer reply.
+  const wave2=Date.now(),kgNow=now();
+  const [knowledge,requirementRules,kgRows,likelyVisualMatches]=await Promise.all([
+    env.DB.prepare("SELECT id,version,domain,entity_key,attribute,market,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain<>'knowledge' AND (entity_key='global' OR (?<>'' AND entity_key=?))"+marketClause+" ORDER BY created_at DESC LIMIT 100").bind(model,model,...knowledgeMarkets).all().then(r=>r.results||[]),
+    env.DB.prepare(`SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN ('pricing','product','configuration','size','strategy') AND (entity_key='global'${productKeys.length?` OR entity_key IN (${productKeys.map(()=>"?").join(",")})`:""})${marketClause} ORDER BY created_at DESC LIMIT 100`).bind(...productKeys,...knowledgeMarkets).all().then(r=>r.results||[]),
+    env.DB.prepare("SELECT id,version,domain,entity_type,entity_key,attribute,market,member_key,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain=?"+marketClause+" AND (effective_from IS NULL OR effective_from<=?) AND (effective_until IS NULL OR effective_until>?) ORDER BY created_at DESC LIMIT 600").bind(KNOWLEDGE_DOMAIN,...knowledgeMarkets,kgNow,kgNow).all().then(r=>r.results||[]),
+    (async()=>{if(!imageCategory||imageCategory==="unknown")return [];try{return ((await retrieveEligibleVisualProductMedia(env,[{type:"category",value:visualAttributeValue(imageCategory).normalized}],3)).items||[]).map(x=>({visual_media_id:x.id,match_type:"likely_visual_match",basis:"category",attributes:Object.fromEntries((x.attributes||[]).filter(a=>a.status==="active").map(a=>[a.attribute_type,a.normalized_value]))}));}catch{return [];}})()
+  ]);
+  timing.knowledge_ms=Date.now()-wave2;
   const requirements=resolveSalesRequirements(requirementRules,productKeys);
-  // ---- GENERIC BUSINESS KNOWLEDGE (data-driven; no per-concept code) ----
-  // Approved records of THIS market + GLOBAL → match the product by exact name / owner-taught alias only → recognise values the
-  // owner taught in the customer's own words → evaluate approved rules/relations generically. This returns KNOWLEDGE, never
-  // permission: commercial effects never reach a customer reply and every owner gate below is unchanged.
-  const kgNow=now();
-  const kgRows=(await env.DB.prepare("SELECT id,version,domain,entity_type,entity_key,attribute,market,member_key,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain=?"+marketClause+" AND (effective_from IS NULL OR effective_from<=?) AND (effective_until IS NULL OR effective_until>?) ORDER BY created_at DESC LIMIT 600").bind(KNOWLEDGE_DOMAIN,...knowledgeMarkets,kgNow,kgNow).all()).results||[];
+  const rulesStarted=Date.now();
   const kgRecords=hydrateKnowledgeRecords(kgRows);
   const kgEntities=resolveKnowledgeEntities(kgRecords,[model,imageCategory]);
   const kgScope=kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||kgEntities.matched.includes(r.entity_key));
@@ -7019,25 +7082,26 @@ async function runSalesNegotiationBrain(env,inboxId){
   const kgEvidenceFacts=salesBrainAuthoritativeFacts({knowledge:kgScope.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))});
   const kgAnswerFacts=kgAnswer?salesBrainAuthoritativeFacts({knowledge:kgScope.filter(r=>kgAnswer.ids.includes(r.id)).map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))}):[];
   // Owner-approved product photos linked to the matched product (verified only); the customer's own photo never counts.
-  let kgVisualRefs=[];
-  for(const entity of kgEntities.matched.slice(0,2))try{kgVisualRefs.push(...((await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(entity).normalized}],3)).items||[]).map(x=>x.id));}catch{}
+  const kgVisualRefs=(await Promise.all(kgEntities.matched.slice(0,2).map(async entity=>{try{return ((await retrieveEligibleVisualProductMedia(env,[{type:"model",value:visualAttributeValue(entity).normalized}],3)).items||[]).map(x=>x.id);}catch{return [];}}))).flat();
+  timing.rules_ms=Date.now()-rulesStarted;
   // An approved standard size/configuration for this product (or globally) satisfies a size requirement.
   let requiredFields=requirements.fields.filter(f=>!(f==="size"&&requirementRules.some(r=>r.domain==="size"&&/standard/i.test(String(r.attribute)))));
   const ordered=applySalesStrategyOrder(requiredFields,requirementRules,productKeys);requiredFields=ordered.fields;
   const missing=requiredFields.filter(x=>!known[x]),detailMissing=[];
   // Knowledge-required fields may be asked twice; the generic minimum only once (unknown knowledge never becomes interrogation).
   const maxAsks=requirements.authoritative?2:1;
-  // Earlier decisions of THIS conversation (PK lookups): which single field was already asked, and how often.
-  const priorDecisions=[];
-  for(const prev of (await env.DB.prepare("SELECT id FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id<>? AND created_at<=? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,row.id,row.created_at||now()).all()).results||[]){
-    const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+prev.id).first();
+  // Earlier decisions of THIS conversation (loaded in wave 1): which single field was already asked, and how often.
+  const priorDecisions=[],eventsById=new Map(priorEvents.map(e=>[e.id,e]));
+  for(const prev of priorInbox){
+    const event=eventsById.get("sales-brain:"+prev.id);
     if(event?.details_json)try{const d=JSON.parse(event.details_json);if(d.lead_id===row.lead_id&&d.conversation_id===row.conversation_id)priorDecisions.push({action:d.next_sales_action,asked:d.asked_field||(d.next_sales_action==="ask_product"?"product_or_model":d.next_sales_action==="ask_quantity"?"quantity":null)});}catch{}
   }
   const timesAsked=field=>priorDecisions.filter(d=>d.asked===field).length,lastAction=priorDecisions[0]?.action||null;
-  // Facts this turn actually CHANGED (a restated identical value is not new information).
-  const newFacts=((await env.DB.prepare("SELECT f.fact_type FROM conversation_memory_facts f LEFT JOIN conversation_memory_facts p ON p.id=f.supersedes_fact_id WHERE f.lead_id=? AND f.conversation_id=? AND f.source_message_id=? AND (p.id IS NULL OR p.value_hash<>f.value_hash)").bind(row.lead_id,row.conversation_id,row.id).all()).results||[]).map(f=>f.fact_type).filter(t=>!["customer_message","customer_question","unresolved_question","objection","customer_image_reference"].includes(t));
-  // One durable owner escalation per open QUESTION (reason): a repeat waits for it; a different owner-only question gets its own.
-  const openEscalations=(await env.DB.prepare("SELECT id,reason_code FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) ORDER BY created_at DESC LIMIT 20").bind(row.lead_id,row.conversation_id,row.id).all()).results||[],openEscalation=openEscalations[0]||null;
+  const newFacts=newFactRows.map(f=>f.fact_type).filter(t=>!["customer_message","customer_question","unresolved_question","objection","customer_image_reference"].includes(t));
+  const openEscalation=openEscalations[0]||null;
+  // Our last replies in this conversation: a "still checking" acknowledgement never repeats one of them word for word.
+  const recentReplies=context.filter(x=>x.direction==="outbound").slice(-3).map(x=>x.message);
+  const decisionStarted=Date.now();
   const priceAlreadyResolved=ownerCaseDecisions.some(x=>x.reason_code==="unsupported_price");
   let action=null,askedField=null,needsOwner=false,needsOwnerReason=null,visuals=[],waitingOn=openEscalation?.reason_code||null;const answerNumbers=[];
   const escalate=(kind,reason)=>{const same=openEscalations.find(e=>e.reason_code===ownerEscalationReason({needs_owner_reason:reason}));if(same){action="wait_for_owner";waitingOn=same.reason_code;return;}action=kind;needsOwner=true;needsOwnerReason=reason;};
@@ -7047,7 +7111,10 @@ async function runSalesNegotiationBrain(env,inboxId){
   else if(intent==="asks_moq"){const moqFact=knowledge.filter(x=>x.domain==="quantity"&&x.attribute==="moq").sort((a,b)=>Number(b.market===conversationMarket)-Number(a.market===conversationMarket))[0];let moqValue=null;try{moqValue=JSON.parse(moqFact?.value_json||"null");}catch{}if(Number.isSafeInteger(moqValue)&&moqValue>0){action="answer_moq";answerNumbers.push(moqValue);}else escalate("moq_owner","approved_moq_missing");}
   else if(intent==="quote_requested"){action="quote";needsOwner=!known.product_or_model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
   else if(intent==="accepted"){action="accepted";}
-  else if(openEscalation){action="wait_for_owner";}
+  // An open owner decision blocks only ITS issue. A bare follow-up about it ("any news?") waits on it; any other message — a safe
+  // unrelated question, a new detail — is handled normally, and reaches the same escalation again only if it raises the same
+  // owner-only question (escalate() → wait_for_owner, never a second escalation).
+  else if(openEscalation&&!newFacts.length&&!kgQuestions.length&&!Object.keys(kgCurrent).length&&SALES_BRAIN_STATUS_PING.test(String(row.message||"").normalize("NFKC"))){action="wait_for_owner";}
   // Generic knowledge: owner-defined hard stops and undecided combinations escalate; approved non-commercial facts/relations are answered.
   else if(kgHardStop)escalate("commercial_owner","commercial_owner_review_required");
   else if(kgUnknownRelation)escalate("commercial_owner","approved_knowledge_missing");
@@ -7065,64 +7132,84 @@ async function runSalesNegotiationBrain(env,inboxId){
     else escalate("price_owner","authoritative_price_required");
   }
   const authorityFacts=[...kgEvidenceFacts,...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
-  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:newFacts,moq:answerNumbers[0]??null}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language),validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const draft=orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:newFacts,moq:answerNumbers[0]??null,avoid:recentReplies}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();const validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:authorityFacts});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  timing.validator_ms=Date.now()-validatorStarted;
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
   const nextBestAction=action?.startsWith("ask_")?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
   const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"):action==="answer_knowledge"?kgAnswerFacts:[],decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
+  const escalationStarted=Date.now();
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
+  timing.escalation_ms=Date.now()-escalationStarted;
   return result;
 }
 
 async function processNegotiationInbound(env,inboxId,timing={}) {
   const started=Date.now();
   await ensureLeadOutreachStore(env);
-  const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,l.stage AS lead_stage,c.contact_id,c.platform AS conversation_platform
+  // The joined inbound row and a reply already prepared for it do not depend on each other: one concurrent round trip.
+  const [row,existing]=await Promise.all([
+    env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,l.stage AS lead_stage,c.contact_id,c.platform AS conversation_platform
     FROM inbox_messages i JOIN leads l ON l.id=i.lead_id
     JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
-    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
+    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first(),
+    env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first()
+  ]);
+  timing.context_ms=Date.now()-started;
   if(!row||row.platform!=="telegram"||row.conversation_platform!=="telegram")return {processed:false,reason:"unlinked_or_unsupported"};
-  const existing=await env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
   if(existing){
     if(row.reply_suggestion!==existing.message)await env.DB.prepare("UPDATE inbox_messages SET reply_suggestion=?,updated_at=? WHERE id=?").bind(existing.message,now(),inboxId).run();
     const priorIntent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
     try{await captureConversationSalesMemory(env,inboxId);}catch(error){try{await audit(env,"conversation_memory_capture_failed","Linked inbound remained stored after customer-memory capture failure",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
     if(priorIntent==="quote_requested")try{await ensureQuoteFromInbox(env,inboxId);}catch{}
     if(priorIntent==="accepted"||priorIntent==="rejected")try{await recordQuoteDecisionFromInbound(env,inboxId,priorIntent);}catch{}
-    return {processed:true,idempotent:true,outreach:existing};
+    // A Telegram redelivery or the inline retry after a transient failure only COMPLETES an outcome that was never decided (same
+    // validated draft, same CAS-guarded send). An outcome that was decided is never decided or sent twice.
+    const resumed=await resumeInboundOutcome(env,{row,outreach:existing,timing});
+    return {processed:true,idempotent:true,outreach:existing,...(resumed?{auto_send:resumed}:{})};
   }
   const intent=classifyNegotiationIntent(row.message);
   const language=outreachLanguage(parseLeadNotes({notes:row.lead_notes}));
+  // Customer memory reads the classified category, so it is stored first; everything else of this turn runs concurrently.
   await env.DB.prepare("UPDATE inbox_messages SET category=?,updated_at=? WHERE id=? AND lead_id=? AND conversation_id=?").bind(intent,now(),inboxId,row.lead_id,row.conversation_id).run();
-  try{await captureConversationSalesMemory(env,inboxId);}catch(error){try{await audit(env,"conversation_memory_capture_failed","Linked inbound remained stored after customer-memory capture failure",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
-  const nextStage=NEGOTIATION_STAGE_INTENTS.has(intent)?"negotiation":"replied";
-  await env.DB.prepare(`UPDATE leads SET stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified','contacted','replied')`).bind(nextStage,now(),row.lead_id).run();
-  const contact=await env.DB.prepare("SELECT * FROM lead_contacts WHERE id=? AND lead_id=? LIMIT 1").bind(row.contact_id||"",row.lead_id).first();
+  const nextStage=NEGOTIATION_STAGE_INTENTS.has(intent)?"negotiation":"replied",captureOut={},memoryStarted=Date.now();
+  const [,,contact,context]=await Promise.all([
+    captureConversationSalesMemory(env,inboxId,captureOut).catch(async error=>{try{await audit(env,"conversation_memory_capture_failed","Linked inbound remained stored after customer-memory capture failure",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}).finally(()=>{timing.memory_ms=Date.now()-memoryStarted;}),
+    env.DB.prepare(`UPDATE leads SET stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified','contacted','replied')`).bind(nextStage,now(),row.lead_id).run(),
+    env.DB.prepare("SELECT * FROM lead_contacts WHERE id=? AND lead_id=? LIMIT 1").bind(row.contact_id||"",row.lead_id).first(),
+    (async()=>{const s=Date.now(),loaded=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);timing.history_ms=Date.now()-s;return loaded;})()
+  ]);
   const recipient=telegramLeadContactChatId(contact);
   if(!recipient)throw Error("Linked Telegram conversation has no sendable numeric contact");
-  const context=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);
-  timing.memory_ms=Date.now()-started;
-  const brainStarted=Date.now(),brain=await runSalesNegotiationBrain(env,inboxId);timing.brain_ms=Date.now()-brainStarted;
+  // The brain reuses this turn's row (with its classified category), history and resolved image reference instead of reloading them.
+  const brainStarted=Date.now(),brain=await runSalesNegotiationBrain(env,inboxId,{row:{...row,category:intent},context,imageReference:captureOut.imageReference||null,timing});timing.brain_ms=Date.now()-brainStarted;
   // A validated holding reply is not an owner-review draft (its owner escalation is already open and durable).
   const ownerReviewDraft=!!brain.needs_owner&&brain.owner_holding_reply!==true;
-  const message=brain.draft_customer_reply||negotiationReplyDraft(intent,language),t=now(),outreachId=uid();
+  const message=brain.draft_customer_reply||negotiationReplyDraft(intent,language),t=now(),outreachId=uid(),outreachStarted=Date.now();
   await env.DB.prepare(`INSERT OR IGNORE INTO lead_outreach
     (id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,error_code,error_detail,created_at,updated_at)
     VALUES(?,?,?,?,?,'telegram',?,?,?,?,?,?,?,?)`).bind(outreachId,row.lead_id,contact.id,row.conversation_id,inboxId,recipient,message,language,"draft",ownerReviewDraft?"sales_brain_needs_owner":null,ownerReviewDraft?String(brain.needs_owner_reason||"owner_review_required").slice(0,240):null,t,t).run();
   const outreach=await env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
   if(!outreach)throw Error("Negotiation draft could not be persisted");
-  await env.DB.prepare("UPDATE inbox_messages SET category=?,reply_suggestion=?,updated_at=? WHERE id=?").bind(intent,outreach.message,now(),inboxId).run();
   const quoteRequest=intent==="quote_requested"?extractQuoteRequestDetails(row.message):null;
-  await audit(env,"negotiation_reply_draft_created","Linked inbound reply prepared for owner review",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,intent,language,context_message_count:context.length,quote_request:quoteRequest,sales_brain_needs_owner:brain.needs_owner});
+  await Promise.all([
+    env.DB.prepare("UPDATE inbox_messages SET category=?,reply_suggestion=?,updated_at=? WHERE id=?").bind(intent,outreach.message,now(),inboxId).run(),
+    audit(env,"negotiation_reply_draft_created","Linked inbound reply prepared for owner review",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,intent,language,context_message_count:context.length,quote_request:quoteRequest,sales_brain_needs_owner:brain.needs_owner}).catch(()=>{})
+  ]);
   if(intent==="quote_requested")try{await ensureQuoteFromInbox(env,inboxId);}catch(error){try{await audit(env,"lead_quote_creation_failed","Inbound reply remained stored after quote creation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   if(intent==="accepted"||intent==="rejected")try{await recordQuoteDecisionFromInbound(env,inboxId,intent);}catch(error){try{await audit(env,"lead_quote_decision_link_failed","Quote decision could not be deterministically linked",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
-  // Safe auto-reply only for the draft THIS call created (a Telegram redelivery never re-sends; it returns above).
-  let autoSend=null;const sendStarted=Date.now();
-  if(outreach.id===outreachId&&outreach.status==="draft")try{autoSend=await autoSendSafeInboundReply(env,{row,brain,outreach,recipient});}catch(error){autoSend={sent:false,reason:"auto_send_error"};try{await audit(env,"inbound_auto_reply_failed","Inbound auto-reply failed safely; draft kept for owner review",{outreach_id:outreach.id,inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
-  timing.send_ms=Date.now()-sendStarted;timing.negotiation_total_ms=Date.now()-started;
-  // Stage timings only (ids + milliseconds); no message text, tokens or provider payloads.
-  try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound sales pipeline timing',?,?)").bind("inbound-timing:"+inboxId,"inbound_pipeline_timing",JSON.stringify({inbox_message_id:inboxId,conversation_id:row.conversation_id,action:brain.next_sales_action||null,next_best_action:brain.next_best_action||null,auto_sent:!!autoSend?.sent,...timing}),now()).run();}catch{}
+  timing.outreach_ms=Date.now()-outreachStarted;
+  // The ONE customer-visible outcome, only for the draft THIS call created (a redelivery takes the resume path above).
+  let autoSend=null;
+  if(outreach.id===outreachId&&outreach.status==="draft")autoSend=await settleInboundOutcome(env,{row,brain,outreach,recipient,timing});
+  timing.negotiation_total_ms=Date.now()-started;
+  if(Number.isFinite(timing.webhook_started_at))timing.total_ms=Date.now()-timing.webhook_started_at;
+  // Stage timings only (ids, flags + milliseconds); no message text, tokens or provider payloads.
+  const {webhook_started_at,...stages}=timing;
+  try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound sales pipeline timing',?,?)").bind("inbound-timing:"+inboxId,"inbound_pipeline_timing",JSON.stringify({inbox_message_id:inboxId,conversation_id:row.conversation_id,action:brain.next_sales_action||null,next_best_action:brain.next_best_action||null,auto_sent:!!autoSend?.sent,acknowledged:!!autoSend?.acknowledgement?.sent,ai_calls:stages.vision_called?1:0,...stages}),now()).run();}catch{}
+  // An undecided outcome (the auto-send step itself failed) is retried once by the caller; the resume path completes it safely.
+  if(autoSend?.reason==="auto_send_error")throw Error("Inbound outcome was not decided; retry resumes it");
   return {processed:true,idempotent:outreach.id!==outreachId,intent,language,outreach,auto_send:autoSend};
 }
 
@@ -7132,33 +7219,48 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // price_owner/commercial_owner/moq_owner qualify ONLY as the validated holding reply (brain.owner_holding_reply): the owner
 // escalation stays open and the actual commercial answer still requires the owner.
 const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner"]);
-// Loop protection rests on the repetitive/echo guards; this cap only bounds a runaway exchange (natural sales chats are multi-turn).
-const INBOUND_AUTO_SEND_HOURLY_LIMIT=10;
-async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
+// Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
+// acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
+// handed to the owner with ONE acknowledgement per hour instead of a reply per message.
+const INBOUND_AUTO_REPLY_HOURLY_LIMIT=40,INBOUND_AUTO_REPLY_BURST_LIMIT=12,INBOUND_AUTO_REPLY_BURST_MS=2*60*1000;
+// A redelivered inbound may complete an undecided outcome only while it is fresh (old drafts are never sent automatically).
+const INBOUND_RESUME_WINDOW_MS=30*60*1000;
+async function inboundAutomatedReplyCounts(env,row){
+  const hourAgo=new Date(Date.now()-3600000).toISOString(),burstSince=new Date(Date.now()-INBOUND_AUTO_REPLY_BURST_MS).toISOString();
+  const r=await env.DB.prepare("SELECT COUNT(*) AS hour,COALESCE(SUM(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0) AS burst FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND approved_by IN ('inbound_auto_policy','inbound_ack_policy') AND created_at>=?").bind(burstSince,row.lead_id,row.conversation_id,hourAgo).first();
+  return {hour:Number(r?.hour||0),burst:Number(r?.burst||0)};
+}
+// Hard gates for ANY automatic message into a customer chat (a reply or an acknowledgement): the owner's switches and the
+// customer's own private chat only (a group/channel id is never a private customer chat).
+async function inboundSendGateReason(env,{row,outreach,recipient}){
   if(String(env.INBOUND_AUTO_REPLY||"on").toLowerCase()==="off")return "inbound_auto_reply_disabled";
   if(!(await autonomyMasterGate(env)))return "autonomy_master_off";
   if(row.platform!=="telegram"||row.conversation_platform!=="telegram"||outreach.channel!=="telegram")return "unsupported_channel";
   const chat=normalizeTelegramPrivateChatId(row.provider_conversation_id);
-  // Reply only into the same private chat the customer wrote from (a group/channel id is never a private customer chat).
   if(!chat||String(recipient)!==chat||String(row.provider_sender_id||"")!==chat||String(outreach.recipient)!==chat)return "not_private_customer_chat";
+  return null;
+}
+async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
+  const gate=await inboundSendGateReason(env,{row,outreach,recipient});if(gate)return gate;
   if(!brain||(brain.needs_owner&&brain.owner_holding_reply!==true))return "owner_required";
   const ownQuantity=brain.customer_known_facts?.requested_quantity;
   if(brain.validation?.valid!==true||!validateSalesBrainDraft(outreach.message,{allowedNumbers:[...(Number.isSafeInteger(ownQuantity)?[ownQuantity]:[]),...(brain.answer_numbers||[]).filter(Number.isSafeInteger)],authoritativeFacts:brain.knowledge_answer_facts||[]}).valid)return "validator_blocked";
   if(!INBOUND_AUTO_SEND_ACTIONS.has(brain.next_sales_action))return "action_requires_owner_review";
   if(!brain.draft_customer_reply||outreach.message!==brain.draft_customer_reply||outreach.inbox_message_id!==row.id)return "draft_not_from_validated_brain";
-  await ensureOwnerEscalationStore(env);
-  // While an earlier owner decision is pending, only the brief "still checking" acknowledgement may go out automatically.
-  if(brain.next_sales_action!=="wait_for_owner"&&brain.owner_holding_reply!==true&&await env.DB.prepare("SELECT id FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) LIMIT 1").bind(row.lead_id,row.conversation_id,row.id).first())return "open_owner_escalation";
-  const recent=(await env.DB.prepare("SELECT id,message,status,approved_by,created_at FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND id<>? ORDER BY created_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id,outreach.id).all()).results||[];
+  // An open owner decision no longer freezes the whole conversation here: the brain already scoped it (the same issue only ever
+  // yields wait_for_owner / a holding reply; commercial content never reaches this point without the owner).
+  const [recent,counts]=await Promise.all([
+    env.DB.prepare("SELECT id,message,status,approved_by,created_at FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND id<>? ORDER BY created_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id,outreach.id).all().then(r=>r.results||[]),
+    inboundAutomatedReplyCounts(env,row)
+  ]);
   const key=salesBrainClaimText(outreach.message),inboundKey=salesBrainClaimText(row.message);
   if(recent.slice(0,3).some(x=>salesBrainClaimText(x.message)===key))return "repetitive_reply";
   // Bot self-loop guard: an inbound that merely echoes one of our own recent replies is never answered automatically.
   if(inboundKey&&recent.some(x=>salesBrainClaimText(x.message)===inboundKey))return "echo_of_outbound";
-  const hourAgo=new Date(Date.now()-3600000).toISOString();
-  if(recent.filter(x=>x.approved_by==="inbound_auto_policy"&&String(x.created_at)>=hourAgo).length>=INBOUND_AUTO_SEND_HOURLY_LIMIT)return "auto_send_rate_limited";
+  if(counts.hour>=INBOUND_AUTO_REPLY_HOURLY_LIMIT||counts.burst>=INBOUND_AUTO_REPLY_BURST_LIMIT)return "auto_send_rate_limited";
   return null;
 }
-async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient}){
+async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing={}}){
   const reason=await inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}),base={outreach_id:outreach.id,inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id};
   if(reason){
     if(reason!=="owner_required")await env.DB.prepare("UPDATE lead_outreach SET error_code=?,error_detail=?,updated_at=? WHERE id=? AND status='draft' AND error_code IS NULL").bind(brain?.needs_owner?"sales_brain_needs_owner":"inbound_auto_send_blocked",brain?.needs_owner?String(brain.needs_owner_reason||reason).slice(0,240):reason,now(),outreach.id).run();
@@ -7167,9 +7269,75 @@ async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient}){
   }
   const t=now(),approved=await env.DB.prepare("UPDATE lead_outreach SET status='approved',approved_at=?,approved_by='inbound_auto_policy',updated_at=? WHERE id=? AND status='draft' AND inbox_message_id=? AND error_code IS NULL AND message=?").bind(t,t,outreach.id,row.id,outreach.message).run();
   if(!Number(approved?.meta?.changes))return {sent:false,reason:"draft_changed"};
-  const result=await sendApprovedTelegramOutreach(env,outreach.id);
+  const telegramStarted=Date.now(),result=await sendApprovedTelegramOutreach(env,outreach.id);timing.telegram_send_ms=Date.now()-telegramStarted;
   try{await audit(env,result.ok?"inbound_auto_reply_sent":"inbound_auto_reply_send_failed",result.ok?"Safe inbound reply auto-sent":"Safe inbound auto-reply did not complete",{...base,status:result.status||null,action:brain.next_sales_action});}catch{}
   return {sent:!!result.ok,status:result.status||null};
+}
+// A held reply (owner-gated, validator-blocked, a would-be repeat or a capped flood) still gets ONE customer-visible message.
+const INBOUND_ACK_REASONS=new Set(["owner_required","validator_blocked","action_requires_owner_review","draft_not_from_validated_brain","repetitive_reply","auto_send_rate_limited"]);
+// Acknowledgements say only that the message arrived and is being handled: no price, number, capability, timing or promise.
+const INBOUND_ACKNOWLEDGEMENTS={
+  fa:{pending:["پیامتون رسید؛ بررسی می‌کنم و خبرتون می‌دم.","دریافت شد؛ در حال بررسیه و خبرتون می‌دم.","ممنون، پیامتون رسید؛ به‌زودی خبرتون می‌دم.","حتماً، بررسی می‌کنم و نتیجه رو خبرتون می‌دم."],
+    repeat:["جواب این مورد رو کمی قبل فرستادم؛ اگه سؤال دیگه‌ای هست بفرمایید.","این مورد رو بالاتر جواب دادم؛ اگه چیز دیگه‌ای لازم دارید بفرمایید.","همون جواب قبلی برقراره؛ اگه سؤال دیگه‌ای دارید در خدمتم.","پیامتون رسید؛ جوابش در پیام قبلیه. سؤال دیگه‌ای هست؟"],
+    handoff:["پیام‌هاتون رسید؛ همکارم بررسی می‌کنه و به‌زودی خبرتون می‌دیم."]},
+  ar:{pending:["وصلت رسالتك، راح أراجع وأرجعلك.","وصلتني، الموضوع قيد المراجعة وراح أبلغك.","شكراً، رسالتك وصلت وراح أرجعلك قريباً.","أكيد، راح أراجع وأبلغك بالنتيجة."],
+    repeat:["جاوبت على هذا قبل شوية؛ إذا عندك سؤال ثاني تفضل.","هذا جوابه بالرسالة السابقة؛ إذا تحتاج شي ثاني تفضل.","نفس الجواب السابق؛ إذا عندك سؤال ثاني بالخدمة.","وصلت رسالتك؛ الجواب بالرسالة السابقة. عندك سؤال ثاني؟"],
+    handoff:["وصلت رسائلك، زميلي راح يراجعها ونرجعلك قريباً."]}
+};
+// Sent through the same approved-outreach path (status CAS → exactly one Telegram send). One per inbound message (id keyed by the
+// inbound); while a flood/loop is capped, one hand-off per conversation per hour. The owner-review draft itself is untouched.
+async function sendInboundAcknowledgement(env,{row,brain,outreach,recipient,reason}){
+  const gate=await inboundSendGateReason(env,{row,outreach,recipient});if(gate)return {sent:false,reason:gate};
+  const counts=await inboundAutomatedReplyCounts(env,row);
+  const capped=reason==="auto_send_rate_limited"||counts.hour>=INBOUND_AUTO_REPLY_HOURLY_LIMIT||counts.burst>=INBOUND_AUTO_REPLY_BURST_LIMIT;
+  const kind=capped?"handoff":reason==="repetitive_reply"?"repeat":"pending";
+  const language=brain?.detected_language||outreach.language||"Persian",texts=INBOUND_ACKNOWLEDGEMENTS[language==="Iraqi Arabic"?"ar":"fa"][kind];
+  const id=capped?`inbound-handoff-${row.conversation_id}-${new Date().toISOString().slice(0,13)}`:`inbound-ack-${row.id}`;
+  const existing=await env.DB.prepare("SELECT id,status FROM lead_outreach WHERE id=? LIMIT 1").bind(id).first();
+  // A redelivery may only finish a claimed-but-unsent acknowledgement; it never writes or sends a second one.
+  if(existing&&existing.status!=="approved")return {sent:false,reason:capped?"handoff_already_sent":"already_acknowledged",id,kind};
+  if(!existing){
+    const recent=((await env.DB.prepare("SELECT message FROM lead_outreach WHERE lead_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 3").bind(row.lead_id,row.conversation_id).all()).results||[]).map(x=>salesBrainClaimText(x.message));
+    const text=texts.find(x=>!recent.includes(salesBrainClaimText(x)))||texts[0];
+    if(!validateSalesBrainDraft(text,{allowedNumbers:[]}).valid)return {sent:false,reason:"acknowledgement_not_valid",kind};
+    const t=now();
+    await env.DB.prepare("INSERT OR IGNORE INTO lead_outreach(id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,approved_at,approved_by,created_at,updated_at) VALUES(?,?,?,?,NULL,'telegram',?,?,?,'approved',?,'inbound_ack_policy',?,?)").bind(id,row.lead_id,outreach.contact_id,row.conversation_id,recipient,text,language,t,t,t).run();
+  }
+  const result=await sendApprovedTelegramOutreach(env,id);
+  try{await audit(env,result.ok?"inbound_acknowledgement_sent":"inbound_acknowledgement_not_sent",result.ok?"Held inbound reply acknowledged to the customer":"Inbound acknowledgement did not complete",{outreach_id:id,draft_outreach_id:outreach.id,inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,kind,reason,status:result.status||null});}catch{}
+  return {sent:!!result.ok,id,kind,status:result.status||null};
+}
+// Decides and records the ONE customer-visible outcome of a linked inbound: the validated reply, or — when that reply is held —
+// a short acknowledgement. The durable "inbound-outcome" marker means a redelivery/retry never decides it a second time.
+async function settleInboundOutcome(env,{row,brain,outreach,recipient,timing={}}){
+  const sendStarted=Date.now();let outcome;
+  try{outcome=await autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing});}
+  catch(error){outcome={sent:false,reason:"auto_send_error"};try{await audit(env,"inbound_auto_reply_failed","Inbound auto-reply failed safely; draft kept for owner review",{outreach_id:outreach.id,inbox_message_id:row.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+  timing.send_ms=Date.now()-sendStarted;
+  if(!outcome.sent&&INBOUND_ACK_REASONS.has(outcome.reason)){
+    const ackStarted=Date.now();
+    try{outcome.acknowledgement=await sendInboundAcknowledgement(env,{row,brain,outreach,recipient,reason:outcome.reason});}
+    catch(error){outcome.acknowledgement={sent:false,reason:"acknowledgement_error"};try{await audit(env,"inbound_acknowledgement_failed","Inbound acknowledgement failed safely",{outreach_id:outreach.id,inbox_message_id:row.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+    timing.ack_ms=Date.now()-ackStarted;
+  }
+  const visible=outcome.sent?"reply":outcome.acknowledgement?.sent?outcome.acknowledgement.kind==="handoff"?"handoff":"acknowledgement":"none";
+  timing.outcome=visible;
+  if(outcome.reason!=="auto_send_error")try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound customer message outcome',?,?)").bind("inbound-outcome:"+row.id,"inbound_outcome",JSON.stringify({inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,customer_visible:visible,reason:outcome.reason||null,acknowledgement_id:outcome.acknowledgement?.id||null}),now()).run();}catch{}
+  return outcome;
+}
+// Completes the outcome of a RECENT inbound whose first attempt stopped before deciding it. Only an undecided, unedited draft that
+// is still exactly the validated brain draft qualifies; anything already decided, edited by the owner or old is left untouched.
+async function resumeInboundOutcome(env,{row,outreach,timing={}}){
+  if(outreach.status!=="draft"||outreach.error_code||outreach.approved_by)return null;
+  if(!(Date.parse(outreach.created_at||"")>=Date.now()-INBOUND_RESUME_WINDOW_MS))return null;
+  if(await env.DB.prepare("SELECT id FROM system_events WHERE id=? LIMIT 1").bind("inbound-outcome:"+row.id).first())return null;
+  const contact=await env.DB.prepare("SELECT * FROM lead_contacts WHERE id=? AND lead_id=? LIMIT 1").bind(outreach.contact_id||row.contact_id||"",row.lead_id).first();
+  const recipient=telegramLeadContactChatId(contact);
+  if(!recipient)return null;
+  const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
+  const brain=await runSalesNegotiationBrain(env,row.id,{row:{...row,category:intent},timing});
+  if(!brain?.draft_customer_reply||brain.draft_customer_reply!==outreach.message)return null;
+  return settleInboundOutcome(env,{row,brain,outreach,recipient,timing});
 }
 
 const QUOTE_STATUSES=new Set(["draft","needs_details","requires_owner_review","waiting_for_owner_price","waiting_for_price_match","quote_ready","pending_approval","approved","sent","accepted","rejected","expired"]);

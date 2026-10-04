@@ -103,7 +103,15 @@ function applyPlanSafety(plan,raw){
  return {...plan,mode,no_publish:noPublish,blocked_modules:[...blockedModules],blocked_actions:[...blockedActions].map(key=>{const [module,action]=key.split(":");return {module,action}}),tasks};
 }
 
+// The master gate is checked on every inbound auto-reply: the idempotent DDL below runs once per isolate per database, not per
+// call. A failed setup is not memoised, so the next call simply retries it.
+const ENSURED=new WeakMap();
 async function ensure(env){
+ let ready=ENSURED.get(env.DB);
+ if(!ready){ready=ensureNow(env).catch(error=>{ENSURED.delete(env.DB);throw error;});ENSURED.set(env.DB,ready);}
+ return ready;
+}
+async function ensureNow(env){
  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS autonomy_controls(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)`).run();
  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS autonomy_commands(id TEXT PRIMARY KEY,raw_command TEXT NOT NULL,plan_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`).run();
  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS autonomy_tasks(id TEXT PRIMARY KEY,command_id TEXT NOT NULL,module TEXT NOT NULL,action TEXT NOT NULL,status TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 50,payload_json TEXT,result_json TEXT,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,scheduled_at TEXT,started_at TEXT,finished_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)`).run();
