@@ -6280,7 +6280,7 @@ async function ensureLeadOutreachStoreNow(env){
 }
 
 // order_candidate: the ONE structured deal state of the conversation (written by the Sales Brain, versioned by supersession).
-const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference","order_candidate","customer_name"]);
+const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference","order_candidate","customer_name","selected_colors"]);
 const CONVERSATION_SALES_STAGES=new Set(["new_reply","interested","asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted","rejected","other"]);
 
 // Idempotent schema setup runs once per isolate per database (see onceEnsured); the body is unchanged.
@@ -6974,13 +6974,27 @@ function salesBrainNaturalDraft(action,language,{imageAck=false,factsAck=false,r
   // Order candidate details: one question at a time (name, then city); «اسم نمیپرسید؟» is answered warmly, then asked.
   if(action==="order_details"){
     const d=details||{},lead=d.customerAsked?(ar?"أكيد 😊 ":"چرا حتماً 😊 "):"",saved=d.nameRecorded?(ar?"شكراً، سجلت الاسم. ":"ممنون، اسمتون ثبت شد. "):"";
+    // Colours: only the approved options handed in (Business Knowledge), named as the owner wrote them.
+    const and=list=>list.length<2?list.join(""):list.slice(0,-1).join("، ")+(ar?" و":" و ")+list[list.length-1],or=list=>list.slice(0,-1).join("، ")+(ar?" لو ":" یا ")+list[list.length-1];
+    const colours=d.colorsRecorded?.length?(ar?`تمام، سجلت اللون: ${and(d.colorsRecorded)}. `:`ممنون، رنگ ${and(d.colorsRecorded)} ثبت شد. `):"";
+    if(d.colorAmbiguous?.length)return lead+saved+colours+(ar?`تقصد ${or(d.colorAmbiguous[0])}؟`:`منظورتون ${or(d.colorAmbiguous[0])} هست؟`);
     if(detailNext==="customer_name"){const ask=ar?"شنو اسمك أو اسم المحل حتى أسجله على الطلب؟":"اسمتون یا نام مجموعه‌تون رو بفرمایید تا روی درخواست ثبت کنم.";
       // Asked again right after: a shorter wording, so it is never blocked as a repeat.
-      return lead+(!lead&&used.includes(salesBrainClaimText(ask))?(ar?"بس اكتبلي اسمك أو اسم المحل، والباقي مسجل.":"فقط اسمتون یا نام مجموعه‌تون رو بفرمایید؛ بقیه موارد ثبت شده."):ask);}
-    if(detailNext==="destination")return lead+saved+(ar?"وين يكون التسليم؟":"برای کدوم شهر می‌خواید؟");
-    return lead+saved+(ar?"معلومات الطلب كاملة، وراح أبلغك بالتأكيد النهائي قريباً.":"اطلاعات درخواست کامل شد؛ تأیید نهایی رو به‌زودی خبرتون می‌دم.");
+      return lead+colours+(!lead&&used.includes(salesBrainClaimText(ask))?(ar?"بس اكتبلي اسمك أو اسم المحل، والباقي مسجل.":"فقط اسمتون یا نام مجموعه‌تون رو بفرمایید؛ بقیه موارد ثبت شده."):ask);}
+    if(detailNext==="destination")return lead+saved+colours+(ar?"وين يكون التسليم؟":"برای کدوم شهر می‌خواید؟");
+    if(detailNext==="colors"&&d.colorOptions?.length){const o=d.colorOptions,example=o.length>=2?(ar?` (مثلاً ${o[0]} ويا ${o[1]})`:` (مثلاً ${o[0]} با ${o[1]})`):"";
+      return lead+saved+colours+(ar?`شنو اللون اللي تريده؟ الألوان المتوفرة: ${o.join("، ")}. تكدر تختار لون واحد أو تجمع أكثر من لون${example}.`:`رنگ جعبه‌ها رو هم انتخاب کنید؛ رنگ‌های موجود: ${o.join("، ")}. می‌تونید یک رنگ یا ترکیبی از چندتا رو انتخاب کنید${example}.`);}
+    if(d.preOrder)return colours||(ar?"تمام، سجلتها.":"ممنون، ثبت شد.");
+    return lead+saved+colours+(ar?"معلومات الطلب كاملة، وراح أبلغك بالتأكيد النهائي قريباً.":"اطلاعات درخواست کامل شد؛ تأیید نهایی رو به‌زودی خبرتون می‌دم.");
   }
   // An approved colour / size list that does not exist yet: a specific holding reply while the owner answers it.
+  // A colour that is no approved standard option: the owner decides; nothing is confirmed.
+  if(action==="knowledge_owner"&&attr==="special_color"){
+    // Mixed request: the approved colours are confirmed by name; the other one is only said to be non-standard (never named back).
+    const kept=details?.colorsRecorded?.length?details.colorsRecorded:null,list=kept?(kept.length<2?kept[0]:kept.slice(0,-1).join("، ")+(ar?" و":" و ")+kept[kept.length-1]):"";
+    if(kept)return ar?`تمام، سجلت اللون: ${list}. اللون الثاني اللي ذكرته مو من ألواننا القياسية؛ للون الخاص راح أنسق ويا الإدارة وأرجعلك.`:`ممنون، رنگ ${list} ثبت شد. رنگ دیگه‌ای که گفتید جزو رنگ‌های استاندارد ما نیست؛ برای رنگ خاص هماهنگ می‌کنم و خبرتون می‌دم.`;
+    return ar?"هذا اللون مو من ألواننا القياسية؛ للون الخاص راح أنسق ويا الإدارة وأرجعلك.":"این رنگ جزو رنگ‌های استاندارد ما نیست؛ برای رنگ خاص هماهنگ می‌کنم و خبرتون می‌دم.";
+  }
   if(action==="knowledge_owner")return attr==="size"?(ar?"راح أتأكد من القياسات المتوفرة لهالموديل وأرجعلك.":"سایزهای این مدل رو بررسی می‌کنم و خبرتون می‌دم."):attr==="color"?(ar?"راح أتأكد من الألوان المتوفرة لهالموديل وأرجعلك.":"رنگ‌بندی این مدل رو بررسی می‌کنم و خبرتون می‌دم."):t.commercial_owner;
   const ack=action.startsWith("ask_")?(imageAck?(ar?"وصلت الصورة. ":"عکس رسید. "):factsAck?(ar?"تمام، سجلتها. ":"ممنون، ثبت شد. "):""):"";
   return ack+(t[action]||t.owner_followup);
@@ -7427,6 +7441,65 @@ function salesListPrice(p,market,quantity,{texts=[]}={}){
   const subtotal=q===null?null:unit*q;if(subtotal!==null&&!Number.isSafeInteger(subtotal))return {...shared,status:"overflow",quantity:q};
   return {...shared,status:"priced",quantity:q,unit_price_minor:unit,subtotal_minor:subtotal,discount:null,total_minor:subtotal};
 }
+// ---- Standard colour options come ONLY from approved Business Knowledge (typed color.exterior members or an engine-taught
+// exterior-colour collection) of this conversation's markets: the product's own approved colours when the owner set them for that
+// product (a product rule is never widened to every product), otherwise the business-wide (global) standard options. No list in code.
+function salesApprovedColorOptions(records,entities){
+  const colours=(records||[]).filter(r=>r.concept==="exterior_colors"&&!r.envelope?.relation&&!["rule","constraint","prohibition"].includes(r.envelope?.kind));
+  const own=colours.filter(r=>(entities||[]).includes(r.entity_key)),pick=own.length?own:colours.filter(r=>knowledgeText(r.entity_key)==="global");
+  const values=[...pick].reverse().flatMap(r=>{const v=r.envelope?.value;return (Array.isArray(v)?v:[v]).filter(x=>typeof x==="string"&&x.trim()).map(x=>x.trim());});
+  // records: the approved facts the options come from — the evidence a reply naming them is validated against.
+  return {options:[...new Map(values.map(v=>[salesTokens(v).join(" "),v])).values()].filter(v=>salesTokens(v).length),records:pick};
+}
+// «… هم» / «also» adds the named colours to the earlier choice; otherwise a new choice replaces it.
+const SALES_COLOR_ADD=/(?<![\p{L}])(?:هم|همچنین|اضافه|كمان|ويا\s*هذا|also|too)(?![\p{L}])/iu;
+// Words that never name a colour (only used to tell a short colour answer from other words; never a colour list).
+const SALES_COLOR_FILLER=new Set(["و","با","یا","هم","همراه","ترکیب","ترکیبی","ترکیبش","میخوام","میخواهم","می","خوام","خواهم","بشه","باشه","باشن","لطفا","ممنون","مرسی","رنگ","رنگی","رنگش","رنگها","رنگهای","رنگهایی","ها","های","هایی","ی","را","رو","بندی","بیرونی","بیرون","داخلی","داخل","خارجی","جعبه","جعبه‌ها","کادو","درب","در","مورد","الخارجي","الداخلي","الخارجية","الداخلية","العلبة","از","به","برای","تا","هر","کدوم","کدام","همه","چی","چه","چیه","چیا","دارید","دارین","داری","موجود","هست","هستن","میشه","کنید","کن","بزنید","بذارید","ويا","مع","لون","اللون","الوان","ألوان","الالوان","الألوان","اريد","أريد","ابي","أبي","نريد","بس","كمان","يعني","شنو","شني","اي","أي","عندكم","موجودة","متوفرة","المتوفرة","the","and","with","or","color","colour","colors","colours","i","want","please",
+  "عدد","تایی","دونه","حبة","قطعة","pcs","سفارش","ثبت","اضافه","عوض","تغییر","بجای","جای","بذار","بزار","کنم","بکنید","فقط","همین","نه","بله","آره","اوکی","ok","این","اینو","اون","یکی","مرسی","سپاس","تشکر","فرق","فرقی","نمیکنه","نمی","کنه","مهم","نیست","هرچی","خودتون","انتخاب","عادی","ماكو","فرق","عادي","شي","لا","اي","نعم","زين","تمام","سجل","سجلها","غير","بدل"]);
+// The customer's colour choice, read against the approved options only: a whole option name («مشکی سلفون»), or words that name
+// exactly one option («طلایی» → «طلایی سلفون»); words that fit several («مشکی» → «مشکی سلفون» / «مشکی راه راه») are asked back.
+// special: a specific colour the customer names that is no approved option («رنگ بنفش», or a one-word answer to our colour question)
+// → the owner decides; it is never confirmed.
+function salesColorSelection(text,options,{asked=false,known=[]}={}){
+  const out={selected:[],ambiguous:[],special:false,unsupported:[]};
+  const words=salesTokens(text),opts=(options||[]).map(name=>({name,t:salesTokens(name)})).filter(o=>o.t.length);
+  if(!words.length||!opts.length)return out;
+  const used=new Array(words.length).fill(false);
+  for(const o of [...opts].sort((a,b)=>b.t.length-a.t.length))
+    for(let i=0;i+o.t.length<=words.length;i++)if(o.t.every((x,k)=>!used[i+k]&&words[i+k]===x)){o.t.forEach((_,k)=>{used[i+k]=true;});if(!out.selected.includes(o.name))out.selected.push(o.name);}
+  // Words shared by many options (a finish such as «سلفون») or of one or two letters name no colour on their own.
+  const freq=new Map();for(const o of opts)for(const x of new Set(o.t))freq.set(x,(freq.get(x)||0)+1);
+  const naming=x=>x.length>=3&&freq.get(x)<=Math.max(2,Math.floor(opts.length/3));
+  for(let i=0;i<words.length;){
+    if(used[i]||!freq.has(words[i])){i++;continue;}
+    const run=[];let j=i;while(j<words.length&&!used[j]&&freq.has(words[j])){run.push(words[j]);used[j]=true;j++;}i=j;
+    if(!run.some(naming))continue;
+    const hits=opts.filter(o=>run.every(x=>o.t.includes(x)));
+    if(hits.length===1){if(!out.selected.includes(hits[0].name))out.selected.push(hits[0].name);}
+    else if(hits.length>1)out.ambiguous.push(hits.map(o=>o.name));
+  }
+  // The WHOLE request, read as a list («… و …», «… با …», «…، …»): an item that names no approved option at all (only one or two
+  // words that are no filler, number, product / customer detail, city or print/logo term) is a colour the approved list does not
+  // have. Next to a colour choice — or as the answer to our colour question — it is never silently dropped.
+  const knownWords=new Set((known||[]).flatMap(k=>salesTokens(k)));
+  const raw=String(text||"").normalize("NFKC"),question=/[?؟]/u.test(raw);
+  const items=raw.split(/[،,؛;+\/\n]|(?<![\p{L}])(?:و|با|یا|and|with|or|ويا|مع|plus)(?![\p{L}])/iu).map(s=>s.trim()).filter(Boolean);
+  for(const item of items){
+    const t=salesTokens(item);if(!t.length||t.some(x=>freq.has(x)&&naming(x)))continue;
+    if(salesDestinationCountry(item)||SALES_NOT_COLOUR_DETAIL.test(item))continue;
+    // (a finish word of the approved options, e.g. «سلفون», is not itself the unknown colour: «بنفش سلفون» → «بنفش»)
+    const rest=t.filter(x=>!SALES_COLOR_FILLER.has(x)&&!/^[0-9]+$/.test(x)&&!knownWords.has(x)&&!freq.has(x));
+    if(rest.length>=1&&rest.length<=2)out.unsupported.push(rest.join(" "));
+  }
+  const colourContext=out.selected.length||out.ambiguous.length;
+  const cue=raw.match(/(?<![\p{L}])(?:رنگ|(?:ال)?لون|colou?r)(?:ی|ش|ها|های|هایی)?[\s‌]+(?:رنگ\s+)?(\p{L}+)/iu);
+  const named=!colourContext&&cue&&!SALES_COLOR_FILLER.has(salesTokens(cue[1])[0]||"")&&!knowledgeLooksLikeQuestion(cue[1])&&!freq.has(salesTokens(cue[1])[0]||"");
+  if(!question&&(colourContext||asked)&&out.unsupported.length)out.special=true;
+  else if(named){out.special=true;if(!out.unsupported.length)out.unsupported.push(salesTokens(cue[1]).join(" "));}
+  return out;
+}
+// Order details that are not colours (quantity, print / logo, size) — an item naming one of them is never read as a colour.
+const SALES_NOT_COLOUR_DETAIL=/(?:[0-9۰-۹٠-٩]|چاپ|طلاکوب|فویل|لوگو|برند|سایز|اندازه|تعداد|طباعة|شعار|فويل|قياس|مقاس|\b(?:logo|print|foil|size)\b)/iu;
 // ONE read-only pricing pass: the approved catalog of THIS market → the product meant → its approved price for the configuration and
 // quantity (SI first; a product SI knows but has not priced may still be priced by the ARAB list under the same name).
 // The product is named to the customer in the reply language: an approved alias the customer used in that language replaces an
@@ -7529,7 +7602,7 @@ function salesAcceptPendingReply(language){return language==="Iraqi Arabic"?"ش�
 // offer reference in quote_id («chat-offer:<candidate>:<offer hash>»), so a redelivery or retry never adds a second row. The snapshot
 // is the owner-approved price behind the offer; nothing is confirmed, charged or shipped — the owner confirms it in ORDERS.
 const CHAT_OFFER_ACCEPTANCE_SOURCE="telegram_chat_offer";
-async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null,customerName=null}){
+async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null,customerName=null,colors=null}){
   await ensureOrderStore(env);
   const offer=candidate.offer||{},price=candidate.price||{},ref=`chat-offer:${candidate.candidate_id}:${offer.offer_hash}`;
   if(!offer.offer_hash||!Number.isSafeInteger(offer.quantity)||offer.quantity<=0||!Number.isSafeInteger(price.unit_price_minor)||!Number.isSafeInteger(price.total_minor)||!price.currency||!["IRAN","ARAB"].includes(candidate.market))throw Error("Accepted offer snapshot is incomplete");
@@ -7540,10 +7613,10 @@ async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null
   const priceRef=price.price_version||price.price_item||null,discount=Number.isSafeInteger(price.discount?.amount_minor)?price.discount.amount_minor:0;
   const summary=`${product} × ${offer.quantity} · ${price.currency} ${price.unit_price_minor}/unit · total ${price.total_minor}${discount?` (discount ${discount})`:""} · customer accepted in chat`;
   await env.DB.prepare(`INSERT OR IGNORE INTO lead_orders(id,order_number,quote_id,lead_id,conversation_id,quote_outreach_id,acceptance_inbox_message_id,acceptance_provider_message_id,acceptance_source,customer_accepted_at,
-    market,pricing_mode,price_item_id,price_item_version,product,quantity,customization,destination,currency,unit_price_minor,subtotal_minor,discount_minor,shipping_minor,tax_minor,other_fees_minor,total_minor,moq,payment_terms,delivery_terms,approved_quote_text,customer_name,status,created_at,updated_at)
-    VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,NULL,NULL,?,?,'order_candidate',?,?)`)
+    market,pricing_mode,price_item_id,price_item_version,product,quantity,customization,destination,currency,unit_price_minor,subtotal_minor,discount_minor,shipping_minor,tax_minor,other_fees_minor,total_minor,moq,payment_terms,delivery_terms,approved_quote_text,customer_name,colors_json,status,created_at,updated_at)
+    VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,NULL,NULL,?,?,?,'order_candidate',?,?)`)
     .bind(id,orderNumber,ref,row.lead_id,row.conversation_id,row.id,row.external_id||null,CHAT_OFFER_ACCEPTANCE_SOURCE,acceptedAt,candidate.market,price.source==="si"?"si_price_version":"approved_price_list",priceRef?.id||null,priceRef?.version??null,
-      product,offer.quantity,req.configuration||null,destination||null,price.currency,price.unit_price_minor,price.subtotal_minor??price.unit_price_minor*offer.quantity,discount,price.total_minor,price.moq??null,summary,customerName?String(customerName).slice(0,120):null,t,t).run();
+      product,offer.quantity,req.configuration||null,destination||null,price.currency,price.unit_price_minor,price.subtotal_minor??price.unit_price_minor*offer.quantity,discount,price.total_minor,price.moq??null,summary,customerName?String(customerName).slice(0,120):null,Array.isArray(colors)&&colors.length?JSON.stringify(colors):null,t,t).run();
   const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(ref).first();
   if(!order)throw Error("Order candidate could not be persisted");
   await auditOrderEventOnce(env,`candidate:${order.id}`,"lead_order_candidate_created","Customer accepted the approved chat offer: order candidate created",{order_id:order.id,order_number:order.order_number,offer_ref:ref,lead_id:order.lead_id,acceptance_inbox_message_id:order.acceptance_inbox_message_id,status:"order_candidate"});
@@ -7552,11 +7625,12 @@ async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null
 // Repair for a deal that was ACCEPTED but has no order candidate (accepted before candidates were persisted, or a write failed):
 // the ONE order candidate is created from the exact accepted offer snapshot, with the original acceptance message, under the same
 // deterministic reference (an existing row is reused — never a duplicate); the pending owner approval is linked to it.
-async function salesBackfillAcceptedOrder(env,{leadId,conversationId,candidate,destination=null,customerName=null}){
+async function salesBackfillAcceptedOrder(env,{leadId,conversationId,candidate,destination=null,customerName=null,colors=null}){
   const offer=candidate?.offer||{};if(!offer.accepted_in||!offer.offer_hash)return null;
   const acceptance=await env.DB.prepare("SELECT id,external_id,created_at,lead_id,conversation_id FROM inbox_messages WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(offer.accepted_in,leadId,conversationId).first();
   if(!acceptance)return null;
-  const {order}=await salesEnsureChatOrderCandidate(env,{row:acceptance,candidate,destination,customerName});
+  const {order}=await salesEnsureChatOrderCandidate(env,{row:acceptance,candidate,destination,customerName,colors});
+  if(Array.isArray(colors)&&colors.length&&!order.colors_json)await env.DB.prepare("UPDATE lead_orders SET colors_json=?,updated_at=? WHERE id=? AND status='order_candidate' AND colors_json IS NULL").bind(JSON.stringify(colors),now(),order.id).run();
   if(customerName&&!order.customer_name)await env.DB.prepare("UPDATE lead_orders SET customer_name=?,updated_at=? WHERE id=? AND status='order_candidate' AND customer_name IS NULL").bind(String(customerName).slice(0,120),now(),order.id).run();
   await env.DB.prepare("UPDATE owner_decisions SET order_id=?,updated_at=? WHERE decision_type='ORDER_CANDIDATE_APPROVAL' AND conversation_id=? AND fingerprint=? AND (order_id IS NULL OR order_id='')").bind(order.id,now(),conversationId,`ORDER_CANDIDATE|${candidate.candidate_id}|${offer.offer_hash}`).run().catch(()=>null);
   return order;
@@ -7570,9 +7644,9 @@ async function reconcileAcceptedChatOffers(env,{limit=10}={}){
     try{
       let candidate=null;try{candidate=JSON.parse(d.known_json||"{}").order_candidate||null;}catch{}
       if(!candidate?.offer?.accepted_in||!d.lead_id||!d.conversation_id)continue;
-      const facts=((await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND memory_key IN ('customer_name','destination')").bind(d.lead_id,d.conversation_id).all()).results||[]);
+      const facts=((await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND memory_key IN ('customer_name','destination','selected_colors')").bind(d.lead_id,d.conversation_id).all()).results||[]);
       const fact=k=>{const f=facts.find(x=>x.memory_key===k);try{const v=f?JSON.parse(f.value_json):null;return typeof v==="string"&&v.trim()?v.trim():null}catch{return null}};
-      if(await salesBackfillAcceptedOrder(env,{leadId:d.lead_id,conversationId:d.conversation_id,candidate,destination:fact("destination"),customerName:fact("customer_name")}))created++;
+      if(await salesBackfillAcceptedOrder(env,{leadId:d.lead_id,conversationId:d.conversation_id,candidate,destination:fact("destination"),customerName:fact("customer_name"),colors:(()=>{const f=facts.find(x=>x.memory_key==="selected_colors");try{const v=f?JSON.parse(f.value_json):null;return Array.isArray(v)?v.filter(c=>typeof c==="string"):null}catch{return null}})()}))created++;
     }catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be reconciled as an order candidate",{decision_id:d.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }
   return {checked:pending.length,created};
@@ -7724,9 +7798,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const salesPriceIntent=["asks_price","objection_price","negotiating","accepted"].includes(intent)||salesWeakAcceptance(row.message);
   const pricingWanted=!orderStatusAsked&&intent!=="rejected"&&(salesPriceIntent||!!storedCandidate||known.product_or_model||!!conversationMarket);
   const dealCandidate=storedCandidate&&storedCandidate.market===conversationMarket?storedCandidate:null;
+  // The deal's own chosen size / configuration is its oldest context: the conversation window keeps only the last messages, so a
+  // long conversation (name, city, colours, …) never forgets which variant was offered; anything the customer says later overrides it.
+  const dealVariant=Object.values(dealCandidate?.requirements||{}).filter(v=>typeof v==="string"&&v.trim());
   const pricingStarted=Date.now();
   const pricingWork=!pricingWanted?null:(conversationMarket
-    ?salesPricing(env,{market:conversationMarket,message:row.message,history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...earlierInbound].reverse().concat(row.message),memoryProduct:model,candidate:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:newFactRows.some(f=>f.fact_type==="product_interest"),language})
+    ?salesPricing(env,{market:conversationMarket,message:row.message,history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...dealVariant,...[...earlierInbound].reverse(),row.message],memoryProduct:model,candidate:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:newFactRows.some(f=>f.fact_type==="product_interest"),language})
     :salesPriceIntent?salesPriceCatalog(env,"ARAB").then(c=>({status:"market_unknown",catalog:c.siProducts.length+c.listProducts.length>0})):Promise.resolve(null)
   ).catch(()=>({status:"pricing_error"})).then(r=>{timing.pricing_ms=Date.now()-pricingStarted;return r;});
   // ---- Wave 2: approved knowledge of THIS market (+ GLOBAL) and the customer-photo category match, loaded concurrently.
@@ -7768,6 +7845,14 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const kgContext={market:conversationMarket,product:[model,imageCategory].filter(Boolean),quantity:Number.isSafeInteger(knownQuantity)&&knownQuantity>0?knownQuantity:undefined,size:memory.requested_size,exterior_color:memory.exterior_color,interior_color:memory.interior_color,printing:memory.printing,branding:memory.branding,destination:memory.destination,stage,language,message:row.message,...kgRecognized};
   if(!kgContext.color&&(memory.exterior_color||memory.interior_color))kgContext.color=memory.exterior_color||memory.interior_color;
   for(const key of Object.keys(kgContext))if(kgContext[key]===undefined||kgContext[key]===null||kgContext[key]==="")delete kgContext[key];
+  // Approved standard colours (Business Knowledge only). The colours the customer chose are part of the context, so the owner's
+  // product-specific colour / ribbon rules and relations apply to them exactly as to any other recognised value.
+  const colorKnowledge=salesApprovedColorOptions(kgScope,kgEntities.matched),colorOptions=colorKnowledge.options;
+  const colorEvidenceFacts=colorKnowledge.records.length?salesBrainAuthoritativeFacts({knowledge:colorKnowledge.records.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))}):[];
+  const colorPick=salesColorSelection(row.message,colorOptions,{asked:lastDecision?.asked_field==="colors",known:[model,pricing?.product?.name,pricing?.product_name,memory.destination,memory.customer_name].filter(x=>typeof x==="string")});
+  const contextColors=colorPick.selected.length?colorPick.selected:Array.isArray(memory.selected_colors)?memory.selected_colors:[];
+  if(contextColors.length){if(kgContext.exterior_color===undefined)kgContext.exterior_color=contextColors;if(kgContext.color===undefined)kgContext.color=contextColors;}
+  if(colorPick.selected.length&&kgCurrent.exterior_color===undefined)kgCurrent.exterior_color=colorPick.selected;
   const kgEval=evaluateKnowledgeRules(kgScope,kgContext,{entities:kgEntities.matched}),kgRelations=checkKnowledgeRelations(kgScope,kgContext,{entities:kgEntities.matched,current:kgCurrent});
   const kgIntentExcluded=["asks_price","asks_moq","asks_shipping","negotiating","objection_price","quote_requested","accepted","rejected"].includes(intent);
   const kgQuestions=kgIntentExcluded?[]:matchKnowledgeQuestion(kgQuestionText,kgScope,{entities:kgEntities.matched});
@@ -7786,6 +7871,16 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // Owner-defined hard stops (constraint/prohibition rules that apply now) and combinations the owner never decided go to the owner.
   const kgHardStop=kgEval.applicable.find(x=>["constraint","prohibition"].includes(x.kind))||null;
   const kgUnknownRelation=!kgIntentExcluded&&!kgAnswer&&kgRelations.unknown.length>0;
+  // The chosen standard colours are remembered (one or several; «… هم» adds to the earlier choice, otherwise a new choice replaces
+  // it) unless an owner rule or an undecided combination stops them — then the owner decides and nothing is confirmed.
+  // (An answer to our «which one?» colour clarification, or to a partly non-standard request, completes the earlier choice.)
+  let selectedColors=Array.isArray(memory.selected_colors)?memory.selected_colors.filter(c=>typeof c==="string"):[],colorsRecorded=false,colorSpecial=false;
+  if(colorPick.selected.length&&!kgHardStop&&!kgUnknownRelation){
+    const chosen=SALES_COLOR_ADD.test(String(row.message||"").normalize("NFKC"))||lastDecision?.color_choice?.ambiguous?.length||lastDecision?.color_choice?.special?[...new Set([...selectedColors,...colorPick.selected])]:colorPick.selected;
+    if(JSON.stringify(chosen)!==JSON.stringify(selectedColors))await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"selected_colors",memory_key:"selected_colors",value:chosen}});
+    selectedColors=chosen;memory.selected_colors=chosen;colorsRecorded=true;
+  }
+  if(selectedColors.length)known.color=true;
   const kgEvidenceFacts=salesBrainAuthoritativeFacts({knowledge:kgScope.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))});
   const kgAnswerFacts=kgAnswer?salesBrainAuthoritativeFacts({knowledge:kgScope.filter(r=>kgAnswer.ids.includes(r.id)).map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))}):[];
   // Owner-approved product photos linked to the matched product (verified only); the customer's own photo never counts.
@@ -7879,6 +7974,13 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // owner-only question (escalate() → wait_for_owner, never a second escalation).
   else if(openEscalation&&!newFacts.length&&!kgQuestions.length&&!Object.keys(kgCurrent).length&&SALES_BRAIN_STATUS_PING.test(String(row.message||"").normalize("NFKC"))){action="wait_for_owner";}
   // Generic knowledge: owner-defined hard stops and undecided combinations escalate; approved non-commercial facts/relations are answered.
+  // A colour the customer names that is no approved standard option is a special request: the owner decides (never confirmed).
+  // A mixed request («مشکی سلفون و بنفش»): the approved part is kept (memory + the SAME order candidate) and said so; the rest goes
+  // to the owner — the combination as a whole is never confirmed.
+  else if(colorPick.special&&colorOptions.length){
+    escalate("knowledge_owner","approved_knowledge_missing");colorSpecial=true;
+    if(colorsRecorded){orderDetails={colorsRecorded:selectedColors};if(dealCandidate?.status==="accepted"&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET colors_json=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(JSON.stringify(selectedColors),now(),dealCandidate.order_id).run().catch(()=>null);}
+  }
   else if(kgHardStop)escalate("commercial_owner","commercial_owner_review_required");
   else if(kgUnknownRelation)escalate("commercial_owner","approved_knowledge_missing");
   else if(kgAnswer){action="answer_knowledge";}
@@ -7906,21 +8008,29 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // unknown), never re-asking what is known; a name given in answer to our question is stored. «اسم نمیپرسید؟» continues this.
     else if(dealCandidate?.status==="accepted"&&!dealChanged){
       // Only a plain reply to OUR name question is a name: not a message that states a deal detail, has digits or is a request.
-      const nameAnswer=priorDecisions[0]?.asked==="customer_name"&&!statedDeal.length&&intent==="other"&&!/[0-9۰-۹٠-٩]/u.test(String(row.message||""))&&!SALES_NOT_A_NAME.test(salesNormal(row.message))?salesCustomerName(row.message):null;
+      const nameAnswer=priorDecisions[0]?.asked==="customer_name"&&!statedDeal.length&&!colorPick.selected.length&&!colorPick.ambiguous.length&&intent==="other"&&!/[0-9۰-۹٠-٩]/u.test(String(row.message||""))&&!SALES_NOT_A_NAME.test(salesNormal(row.message))?salesCustomerName(row.message):null;
       // A deal accepted before order candidates were persisted (or whose write failed silently) gets its ONE order candidate now,
       // from the exact accepted offer (same deterministic reference → never a duplicate), and the owner decision is linked to it.
       if(!dealCandidate.order_id&&dealCandidate.offer?.accepted_in){
-        try{const accepted=await salesBackfillAcceptedOrder(env,{leadId:row.lead_id,conversationId:row.conversation_id,candidate:dealCandidate,destination:memory.destination||null,customerName:memory.customer_name||null});if(accepted){dealCandidate.order_id=accepted.id;dealCandidate.order_number=accepted.order_number;}}
+        try{const accepted=await salesBackfillAcceptedOrder(env,{leadId:row.lead_id,conversationId:row.conversation_id,candidate:dealCandidate,destination:memory.destination||null,customerName:memory.customer_name||null,colors:selectedColors});if(accepted){dealCandidate.order_id=accepted.id;dealCandidate.order_number=accepted.order_number;}}
         catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be backfilled as an order candidate",{lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
       }
       if(nameAnswer){await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"customer_name",memory_key:"customer_name",value:nameAnswer}});memory.customer_name=nameAnswer;
         // The SAME order candidate carries the name (never a second candidate).
         if(dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET customer_name=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(nameAnswer.slice(0,120),now(),dealCandidate.order_id).run().catch(()=>null);}
       if(memory.destination&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET destination=?,updated_at=? WHERE id=? AND status='order_candidate' AND (destination IS NULL OR destination='')").bind(String(memory.destination).slice(0,120),now(),dealCandidate.order_id).run().catch(()=>null);
-      const nextDetail=!memory.customer_name?"customer_name":!memory.destination?"destination":null,detailsAsked=SALES_DETAILS_PROMPT.test(salesNormal(row.message))||SALES_DETAILS_PROMPT.test(String(row.message||""));
-      if(!nextDetail&&!nameAnswer&&!detailsAsked&&!acceptedAgain){if(salesThanksOnly(row.message))action="thanks";else{action="wait_for_owner";waitingOn=null;}}
-      else{action="order_details";askedField=nextDetail;orderDetails={nameRecorded:!!nameAnswer,customerAsked:detailsAsked};}
+      // The chosen colours are written on the SAME order candidate (never a second one).
+      if(colorsRecorded&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET colors_json=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(JSON.stringify(selectedColors),now(),dealCandidate.order_id).run().catch(()=>null);
+      // Colours come after the name and the city — only when the owner approved standard options (they are offered from knowledge),
+      // never re-asked once chosen, and asked at most twice.
+      const colorAmbiguous=colorPick.ambiguous;
+      const nextDetail=!memory.customer_name?"customer_name":!memory.destination?"destination":colorOptions.length&&(!selectedColors.length||colorAmbiguous.length)&&timesAsked("colors")<2?"colors":null,detailsAsked=SALES_DETAILS_PROMPT.test(salesNormal(row.message))||SALES_DETAILS_PROMPT.test(String(row.message||""));
+      if(!nextDetail&&!nameAnswer&&!detailsAsked&&!acceptedAgain&&!colorsRecorded){if(salesThanksOnly(row.message))action="thanks";else{action="wait_for_owner";waitingOn=null;}}
+      else{action="order_details";askedField=nextDetail;orderDetails={nameRecorded:!!nameAnswer,customerAsked:detailsAsked,colorsRecorded:colorsRecorded?selectedColors:null,colorAmbiguous,colorOptions};}
     }
+    // Standard colours chosen before the deal is accepted: remembered and confirmed (an option that fits several is asked back).
+    // (Colours named inside a price question are only remembered: the price question is answered or escalated as before.)
+    else if(!priceAsked&&(colorsRecorded||colorPick.ambiguous.length)){action="order_details";askedField=colorPick.ambiguous.length?"colors":null;orderDetails={preOrder:true,colorsRecorded:colorsRecorded?selectedColors:null,colorAmbiguous:colorPick.ambiguous,colorOptions};}
     // A plain greeting or thanks is answered as such — never with an old holding text.
     else if(salesGreetingOnly(row.message)){action="greet";}
     else if(salesThanksOnly(row.message)){action="thanks";}
@@ -7960,17 +8070,18 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     else if(priceReply?.offer||negotiation?.offer){if(currentOfferHash&&!(status==="offered"&&offer?.offer_hash===currentOfferHash)){status="offered";offer={offer_hash:currentOfferHash,quantity,price:salesOfferPrice(priceSnapshot),offered_in:row.id};}}
     // The deal or its approved price changed since the offer: the old offer can no longer be accepted.
     // An ACCEPTED deal is reopened only by a change to that same product (asking about another product never demotes it).
-    else if(offer&&pricing&&pricing.status!=="pricing_error"&&currentOfferHash!==offer.offer_hash&&(status!=="accepted"||(!!pricing.product&&pricing.product.key===dealCandidate.product?.key))){status="draft";offer=null;}
+    // (An accepted deal is never reopened only because its price cannot be determined right now.)
+    else if(offer&&pricing&&pricing.status!=="pricing_error"&&currentOfferHash!==offer.offer_hash&&(status!=="accepted"||!!currentOfferHash&&(!!pricing.product&&pricing.product.key===dealCandidate.product?.key))){status="draft";offer=null;}
     const openIssues=[...(SALES_PRICE_STATUSES_OWNER.has(pricing?.status)?["price"]:[]),...(attributeAsk?["attribute:"+attributeAsk.key]:[]),...(clarifyCandidates?["product"]:[]),...(pricing?.status==="under_moq"?["quantity_below_moq"]:[])];
     candidate={candidate_id:candidateId,market:conversationMarket,product,quantity,requirements:pricing?.requirements||dealCandidate?.requirements||{},clarify:clarifyCandidates?clarifyCandidates.map(c=>c.key):null,status,offer,price:priceSnapshot||dealCandidate?.price||null,open_issues:openIssues,decision_id:status==="accepted"?dealCandidate?.decision_id||null:null,
       // The order candidate (lead_orders) of an accepted deal and the details the customer gave for it.
       order_id:status==="accepted"?dealCandidate?.order_id||null:null,order_number:status==="accepted"?dealCandidate?.order_number||null:null,
-      customer:{name:memory.customer_name||null,destination:memory.destination||null}};
+      customer:{name:memory.customer_name||null,destination:memory.destination||null,...(selectedColors.length?{colors:selectedColors}:{})}};
     // Acceptance opens ONE owner approval for this exact offer (idempotent by fingerprint); nothing is ordered, charged or sent.
     if(action==="accept_offer"){
       // The acceptance becomes a REAL order candidate first; only a successful write lets the reply say «ثبت شد».
       let chatOrder=null;
-      try{chatOrder=(await salesEnsureChatOrderCandidate(env,{row,candidate,destination:memory.destination||null,customerName:memory.customer_name||null})).order;candidate.order_id=chatOrder.id;candidate.order_number=chatOrder.order_number;}
+      try{chatOrder=(await salesEnsureChatOrderCandidate(env,{row,candidate,destination:memory.destination||null,customerName:memory.customer_name||null,colors:selectedColors})).order;candidate.order_id=chatOrder.id;candidate.order_number=chatOrder.order_number;}
       catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be recorded as an order candidate",{lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
       if(chatOrder){
         try{await ensureSalesIntelligenceStore(env);acceptanceDecision=await salesOpenAcceptanceDecision(env,{row,candidate});candidate.decision_id=acceptanceDecision?.id||null;}
@@ -7991,12 +8102,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A knowledge answer is validated against exactly the approved records it was composed from (kgAnswerFacts); every other draft
   // against all authoritative facts. Both only within this conversation's markets.
   const authorityFacts=[...kgEvidenceFacts,...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
-  const draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();const validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  const draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();const validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   timing.validator_ms=Date.now()-validatorStarted;
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
   const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details","order_details"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   // Bounded self-check of the reply (recorded with the decision; it never adds content).
   result.self_check=salesSelfCheck(draft,{action,ownerPending:needsOwner||openEscalations.length>0||action==="accept_offer"||action==="wait_for_owner"});
   if(candidateWrite){const s=Date.now();await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"order_candidate",memory_key:"order_candidate",value:candidateWrite}});timing.order_candidate_ms=Date.now()-s;}
@@ -8258,8 +8369,8 @@ async function ensureOrderStore(env){
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_lead ON lead_orders(lead_id)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_conversation ON lead_orders(conversation_id)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_status ON lead_orders(status)").run();
-  // customer_name: the name the customer gave for a chat-accepted order candidate (additive, nullable).
-  for(const column of ["unit_cost_minor INTEGER","shipping_cost_minor INTEGER","other_cost_minor INTEGER","carrier TEXT","tracking_reference TEXT","shipped_at TEXT","delivered_at TEXT","customer_name TEXT"]){
+  // customer_name / colors_json: the name and the chosen standard colours (JSON list) of a chat-accepted order candidate (additive, nullable).
+  for(const column of ["unit_cost_minor INTEGER","shipping_cost_minor INTEGER","other_cost_minor INTEGER","carrier TEXT","tracking_reference TEXT","shipped_at TEXT","delivered_at TEXT","customer_name TEXT","colors_json TEXT"]){
     try{await env.DB.prepare(`ALTER TABLE lead_orders ADD COLUMN ${column}`).run();}
     catch(error){if(!/duplicate column|already exists/i.test(String(error?.message||error)))throw error;}
   }
@@ -8639,7 +8750,8 @@ async function createPriceItemVersion(env,body,actor="admin"){
   if(base&&productKey!==base.product_key)throw Error("A new price version must retain the original product key");
   // Default market stays ARAB. IRAN versions come only from owner-approved imports and never change IRAN pricing authority
   // (owner_confirmed_quote); every quote/price lookup keeps filtering market='ARAB'.
-  const market=body.market==="IRAN"?"IRAN":"ARAB";if(base&&base.market!==market)throw Error("A new price version must keep its market");
+  // A new version of an existing row keeps that row's market (the dashboard's NEW VERSION form sends no market).
+  const market=(body.market??base?.market)==="IRAN"?"IRAN":"ARAB";if(base&&base.market!==market)throw Error("A new price version must keep its market");
   if(market==="IRAN"&&currency!=="TOMAN")throw Error("IRAN prices must be in TOMAN");
   const latest=await env.DB.prepare("SELECT MAX(version) AS version FROM commercial_price_items WHERE market=? AND product_key=?").bind(market,productKey).first(),version=Number(latest?.version||0)+1,t=now(),id=uid();
   const effectiveFrom=body.effective_from==null?(base?.effective_from||null):String(body.effective_from||"").trim()||null,effectiveUntil=body.effective_until==null?null:String(body.effective_until||"").trim()||null;
