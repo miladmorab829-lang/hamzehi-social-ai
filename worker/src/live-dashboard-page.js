@@ -154,6 +154,7 @@ const DASH_SECTIONS={
 <div class="title"><h3>Owner Review · Old → Proposed</h3></div><div id="knowledgeRequests" class="rows"></div>
 <div class="title" style="margin-top:12px"><h3>📥 Knowledge Imports · Price lists, catalogs & owner product photos</h3><button class="btn" onclick="loadOwnerImports()">REFRESH IMPORTS</button></div>
 <div class="hint">هیچ قیمت، مشخصات یا عکسی بدون تأیید مالک فعال نمی‌شود. موارد مبهم باید اصلاح شوند. قیمت ایران مرجع تأییدشده است و مرجع قیمت‌دهی (Quote مالک) را تغییر نمی‌دهد.</div>
+<div class="row" style="margin-top:8px"><b>قالب استاندارد لیست قیمت · Canonical price format</b> <span class="mini">(فقط راهنما — ارسال نمی‌شود · هر خط = یک ردیف قیمت · IRAN = تومان · ARAB = دلار)</span><div class="mini" dir="rtl" style="margin-top:4px"><code>نام محصول | سایز | مدل | قیمت | بازار</code></div><div class="mini" dir="rtl">مثال: <code>انگشتر کوچک | ۵×۵ | ۳ تکه کج | 66000 | IRAN</code></div><div class="mini">در «AI COMMAND CENTER» بالا پیست کنید و PLAN &amp; EXECUTE را بزنید؛ ستون سوم همیشه کامل به‌عنوان «مدل» ثبت می‌شود.</div></div>
 <div id="ownerImportStatus" class="hint" role="status"></div><div id="ownerImports" class="rows"></div>
 <div class="title"><h3>Knowledge · Current revisions</h3></div><div id="knowledgeFacts" class="rows"></div>
 <div class="title"><h3>Revision History</h3></div><div id="knowledgeHistory" class="rows"></div>

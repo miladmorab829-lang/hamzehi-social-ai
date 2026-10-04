@@ -1757,11 +1757,43 @@ const OWNER_PROSE=/(?:نگه\s*دار|تغییر\s*نده|ایجاد\s*نشود|
 const OWNER_NO_PRICE=/(?:بدون\s*قیمت|قیمت\s*ندارد|فاقد\s*قیمت|بدون\s*نرخ|استعلام(?:\s*شود)?|تماس\s*بگیرید|no\s*price|not\s*priced|بدون\s*سعر)/iu;
 const OWNER_SIZE_LABEL=/^(?:سایز|اندازه|ابعاد|size|dimensions?|قياس|المقاس)$/iu;
 function ownerWordCount(text){return String(text||"").trim().split(/\s+/u).filter(Boolean).length;}
+// ---- CANONICAL PRICE FORMAT (one line = one price row, columns fixed by position):
+//   نام محصول | سایز | مدل | قیمت | بازار        e.g.  انگشتر کوچک | ۵×۵ | ۳ تکه کج | 66000 | IRAN
+// A line with 4+ pipes, or with pipes ending in a market, IS a canonical line: it is parsed only here, deterministically, and never
+// reaches the generic parser. Columns are kept as the owner wrote them (the whole third column is the configuration); only the
+// price is normalised. Anything invalid is rejected with the reason — never guessed or partially reinterpreted.
+const OWNER_CANONICAL_MARKETS={iran:"IRAN","ایران":"IRAN",arab:"ARAB",iraq:"ARAB","عراق":"ARAB","العراق":"ARAB"};
+const OWNER_CANONICAL_HEADER=[/^(?:نام\s*محصول|محصول|product(?:\s*name)?|model)$/iu,/^(?:سایز|اندازه|ابعاد|size)$/iu,/^(?:مدل|configuration|config)$/iu,/^(?:قیمت|price)$/iu,/^(?:بازار|market)$/iu];
+function ownerCanonicalPriceLine(raw){
+  if(!raw.includes("|"))return null;
+  // Outer border pipes («| a | b | … |») are dropped only when the line has BOTH; a single leading pipe is an empty first column.
+  const bordered=/^\s*\|/u.test(raw)&&/\|\s*$/u.test(raw);
+  const cols=(bordered?raw.replace(/^\s*\|/u,"").replace(/\|\s*$/u,""):raw).split("|").map(c=>c.replace(/\s+/g," ").trim());
+  const marketLike=c=>Object.hasOwn(OWNER_CANONICAL_MARKETS,String(c||"").toLowerCase());
+  if(cols.length<5&&!marketLike(cols[cols.length-1]))return null;
+  if(cols.length===5&&cols.every((c,i)=>OWNER_CANONICAL_HEADER[i].test(c)))return {kind:"skip"};
+  const reject=(code,detail)=>({kind:"rejected",canonical:true,issues:[{code,detail}]});
+  if(cols.length!==5)return reject("canonical_column_count",`Expected 5 columns (product | size | configuration | price | market), got ${cols.length}`);
+  const [product,size,configuration,priceText,marketText]=cols;
+  if(!product||!/\p{L}/u.test(product))return reject("canonical_product_missing","Column 1 (product) is empty");
+  if(!size)return reject("canonical_size_missing","Column 2 (size) is empty");
+  if(!configuration)return reject("canonical_configuration_missing","Column 3 (configuration) is empty");
+  const market=OWNER_CANONICAL_MARKETS[String(marketText).toLowerCase()];
+  if(!market)return reject("canonical_market_unsupported",`Column 5 must be IRAN or ARAB, got "${marketText.slice(0,30)}"`);
+  // IRAN: whole Toman (thousands commas allowed). ARAB: US dollars with at most 2 decimals, stored in cents.
+  const p=ownerAscii(priceText).replace(/\s+/g,"");let minor=null;
+  if(market==="IRAN"&&/^(?:\d{1,3}(?:,\d{3})+|\d+)$/.test(p))minor=Number(p.replace(/,/g,""));
+  if(market==="ARAB"&&/^\d+(?:\.\d{1,2})?$/.test(p))minor=Math.round(Number(p)*100);
+  if(!Number.isSafeInteger(minor)||minor<=0)return reject("canonical_price_invalid",`Column 4 must be a positive ${market==="IRAN"?"whole Toman amount":"USD amount (max 2 decimals)"}, got "${priceText.slice(0,30)}"`);
+  return {kind:"price_row",canonical:true,product,size,configuration,currency:MARKET_CURRENCY[market],price_minor:minor,market,issues:[],parse_status:"parsed"};
+}
 function parseOwnerKnowledgeLine(line,market,section,options={}){
   const raw=String(line||"").normalize("NFKC").trim();
   if(!raw)return {kind:"skip"};
   if(raw.length>OWNER_IMPORT_LIMITS.line_chars||/[\u0000-\u0008\u000b-\u001f]/u.test(raw))return {kind:"rejected",issues:[{code:raw.length>OWNER_IMPORT_LIMITS.line_chars?"line_too_long":"invalid_characters"}]};
   if(OWNER_TABLE_HEADER.test(raw)||/^[\s|:\-–—=*#_.]+$/u.test(raw))return {kind:"skip"};
+  // The canonical format is checked FIRST among data lines; a canonical line never falls through to the generic parser below.
+  const canonical=ownerCanonicalPriceLine(raw);if(canonical)return canonical;
   const {size,rest}=ownerDims(raw);
   const prices=[];let m;OWNER_PRICE_TOKEN.lastIndex=0;
   while((m=OWNER_PRICE_TOKEN.exec(rest))){
@@ -1899,7 +1931,8 @@ function ownerStructureText(text,market){
     if(p.kind==="skip")continue;
     if(p.kind==="section"){section={product:p.product,size:p.size};continue;}
     if(p.kind==="instruction"){instructions.push(line.trim().slice(0,300));continue;}
-    if(p.kind==="price_row")items.push({item_type:"price_row",parse_status:p.parse_status,product_name:p.product,size:p.size,configuration:p.configuration,currency:p.currency,price_minor:p.price_minor,market,raw_line:line.trim(),issues:p.issues});
+    // A canonical row carries its own market (column 5) and is marked canonical: it is exactly one review item.
+    if(p.kind==="price_row")items.push({item_type:"price_row",parse_status:p.parse_status,product_name:p.product,size:p.size,configuration:p.configuration,currency:p.currency,price_minor:p.price_minor,market:p.canonical?p.market:market,raw_line:line.trim(),issues:p.issues,...(p.canonical?{canonical:true}:{})});
     // No-price row: same structure as a price row, price explicitly NOT supplied (null), never 0 and never borrowed.
     else if(p.kind==="no_price_row")items.push({item_type:"price_row",parse_status:p.parse_status,product_name:p.product,size:p.size,configuration:p.configuration,currency:null,price_minor:null,no_price:true,market,raw_line:line.trim(),issues:p.issues});
     else if(p.kind==="rule"){const [domain,attribute]=ownerRuleMapping(p.text);items.push({item_type:"rule",parse_status:"parsed",fact_domain:domain,fact_attribute:attribute,fact_value:p.text,market,raw_line:line.trim(),issues:[]});}
@@ -1910,17 +1943,19 @@ function ownerStructureText(text,market){
     for(const row of items.filter(x=>x.item_type==="price_row")){row.parse_status="ambiguous";row.issues.push({code:"declared_market_or_currency_mismatch",detail:`List declares ${metaMarket||market}/${metaCurrency||"-"}; submission market is ${market}`});}
   // Conflicts only between PRICED rows with the same market + product + size + configuration and a different price.
   const byKey=new Map();
-  for(const item of items.filter(x=>x.item_type==="price_row"&&x.product_name)){item.product_key=ownerItemKey(item.product_name,item.size,item.configuration);if(item.no_price)continue;(byKey.get(item.product_key)||byKey.set(item.product_key,[]).get(item.product_key)).push(item);}
+  // (A canonical row keeps the size text as written; its identity key uses the normalised size, so «۵×۵» ≡ «5x5». Groups are per market.)
+  for(const item of items.filter(x=>x.item_type==="price_row"&&x.product_name)){item.product_key=ownerItemKey(item.product_name,item.canonical?(ownerDims(item.size).size||item.size):item.size,item.configuration);if(item.no_price)continue;const g=item.market+"|"+item.product_key;(byKey.get(g)||byKey.set(g,[]).get(g)).push(item);}
   for(const group of byKey.values())if(group.length>1){
     const distinct=new Set(group.map(x=>`${x.currency}:${x.price_minor}`));
     group.forEach((x,i)=>{if(distinct.size>1){x.parse_status="ambiguous";x.issues.push({code:"conflicting_prices_in_submission"});}else if(i>0){x.parse_status="rejected";x.issues.push({code:"duplicate_row_in_submission"});}});
   }
   // A no-price row and a priced row for the very same key contradict each other: shown to the owner, never merged.
-  for(const row of items.filter(x=>x.no_price&&x.product_key&&byKey.has(x.product_key))){row.parse_status="ambiguous";row.issues.push({code:"priced_elsewhere_in_submission"});}
+  for(const row of items.filter(x=>x.no_price&&x.product_key&&byKey.has(x.market+"|"+x.product_key))){row.parse_status="ambiguous";row.issues.push({code:"priced_elsewhere_in_submission"});}
   // Catalog facts come ONLY from clear rows with an authoritative numeric price: the owner priced that exact combination.
   // A no-price row says nothing about availability, so it never proposes a size/configuration fact.
   const facts=new Map();
-  for(const row of items.filter(x=>x.item_type==="price_row"&&x.parse_status==="parsed"&&!x.no_price&&x.price_minor!=null)){
+  // A canonical price line is ONE review item only: it never spawns a size or configuration fact (those are taught separately).
+  for(const row of items.filter(x=>x.item_type==="price_row"&&x.parse_status==="parsed"&&!x.no_price&&!x.canonical&&x.price_minor!=null)){
     if(row.size)facts.set(`size|${row.product_name}|${row.size}`,{item_type:"product_fact",parse_status:"parsed",product_name:row.product_name,fact_domain:"size",fact_attribute:"available_size",fact_value:row.size,market,raw_line:row.raw_line,issues:[]});
     if(row.configuration)facts.set(`cfg|${row.product_name}|${row.configuration}`,{item_type:"product_fact",parse_status:"parsed",product_name:row.product_name,fact_domain:"product",fact_attribute:"configuration",fact_value:row.configuration,market,raw_line:row.raw_line,issues:[]});
   }
@@ -2005,14 +2040,15 @@ async function runOwnerKnowledgeImport(env,{text,market,client_request_id,files,
     }
   });
   // Existing active prices are shown, never overwritten silently (approval creates a NEW immutable version).
-  for(const row of items.filter(x=>x.item_type==="price_row"&&!x.no_price&&x.product_key&&["IRAN","ARAB"].includes(market))){
-    const active=await env.DB.prepare("SELECT id,unit_price_minor,currency,version FROM commercial_price_items WHERE market=? AND product_key=? AND active=1 ORDER BY version DESC LIMIT 1").bind(market,row.product_key).first().catch(()=>null);
+  // (Each row is checked in its OWN market — a canonical line names it; every other row has the submission market.)
+  for(const row of items.filter(x=>x.item_type==="price_row"&&!x.no_price&&x.product_key&&["IRAN","ARAB"].includes(x.market))){
+    const active=await env.DB.prepare("SELECT id,unit_price_minor,currency,version FROM commercial_price_items WHERE market=? AND product_key=? AND active=1 ORDER BY version DESC LIMIT 1").bind(row.market,row.product_key).first().catch(()=>null);
     if(active)row.issues.push(active.unit_price_minor===row.price_minor&&active.currency===row.currency?{code:"same_as_active_price",price_item_id:active.id,version:active.version}:{code:"replaces_active_price",price_item_id:active.id,version:active.version,active_price_minor:active.unit_price_minor,currency:active.currency});
   }
   const rows=items.map((x,i)=>({...x,id:importId+":"+String(i+1).padStart(5,"0"),seq:i+1}));
   const idOf=new Map(rows.map(r=>[r,r.id]));
   const statements=rows.map(r=>env.DB.prepare(`INSERT OR IGNORE INTO owner_knowledge_import_items(id,import_id,seq,item_type,parse_status,review_status,product_key,product_name,size,configuration,category,market,currency,price_minor,fact_domain,fact_attribute,fact_value_json,raw_line,issues_json,observation_json,image_id,group_key,linked_item_id,result_ref,history_json,version,created_at,updated_at)
-    VALUES(?,?,?,?,?,'pending_review',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,'[]',1,?,?)`).bind(r.id,importId,r.seq,r.item_type,r.parse_status,r.product_name?ownerItemKey(r.product_name,r.size,r.configuration):null,r.product_name||null,r.size||null,r.configuration||null,r.category||null,market,r.currency||null,r.price_minor??null,r.fact_domain||null,r.fact_attribute||null,r.fact_value!==undefined?JSON.stringify(r.fact_value):null,String(r.raw_line||"").slice(0,OWNER_IMPORT_LIMITS.line_chars),JSON.stringify(r.issues||[]),r.observation?JSON.stringify(r.observation):null,r.image_id||null,r.group_key||null,r.linked?idOf.get(rows.find(x=>x.raw_line===r.linked.raw_line&&x.item_type==="price_row"))||null:null,t,t));
+    VALUES(?,?,?,?,?,'pending_review',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,'[]',1,?,?)`).bind(r.id,importId,r.seq,r.item_type,r.parse_status,r.product_name?(r.product_key||ownerItemKey(r.product_name,r.size,r.configuration)):null,r.product_name||null,r.size||null,r.configuration||null,r.category||null,r.market||market,r.currency||null,r.price_minor??null,r.fact_domain||null,r.fact_attribute||null,r.fact_value!==undefined?JSON.stringify(r.fact_value):null,String(r.raw_line||"").slice(0,OWNER_IMPORT_LIMITS.line_chars),JSON.stringify(r.issues||[]),r.observation?JSON.stringify(r.observation):null,r.image_id||null,r.group_key||null,r.linked?idOf.get(rows.find(x=>x.raw_line===r.linked.raw_line&&x.item_type==="price_row"))||null:null,t,t));
   for(let i=0;i<statements.length;i+=50)await env.DB.batch(statements.slice(i,i+50));
   const summary={...ownerImportSummary(rows),instructions:(items.instructions||[]).slice(0,50)};
   await env.DB.prepare("UPDATE owner_knowledge_imports SET status='analyzed',summary_json=?,updated_at=? WHERE id=?").bind(JSON.stringify(summary),now(),importId).run();
@@ -2189,6 +2225,8 @@ async function handleOwnerKnowledge(req,env){
 function looksLikeOwnerKnowledgeImport(text){
   const lines=String(text||"").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
   if(String(text||"").length>4096)return true;
+  // Even ONE canonical price line (valid or not) goes to the deterministic importer — never to the command planner or Teach Knowledge.
+  if(lines.some(l=>{const c=ownerCanonicalPriceLine(String(l).normalize("NFKC").trim());return !!c&&c.kind!=="skip";}))return true;
   const priced=lines.filter(l=>{const p=parseOwnerKnowledgeLine(l,"IRAN",{product:"x"});return p.kind==="price_row";}).length;
   return lines.length>=2&&priced>=2;
 }
