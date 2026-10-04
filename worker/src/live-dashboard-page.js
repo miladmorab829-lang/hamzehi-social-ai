@@ -1,5 +1,7 @@
-export function liveDashboardHtml(){
-return `<!doctype html><html lang="fa" dir="rtl"><head>
+// Live dashboard: the original Command Center, split into small routed pages (MOVE + ORGANIZE + ROUTE).
+// Every section below is the original markup moved verbatim; one shared script drives every page and loads only
+// the data of the sections the current page renders. Nothing was removed: see DASHBOARD_PAGES for where each section lives.
+const DASH_HEAD=`<!doctype html><html lang="fa" dir="rtl"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HAMZEHI SOCIAL AI · Command Center</title>
 <style>
@@ -18,22 +20,43 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 .timeline{max-height:360px;overflow:auto}.dangerbox{border-color:#5d2b36}.footer{text-align:center;padding:24px 0;color:#667287;font-size:10px}
 @media(max-width:1050px){.channels{grid-template-columns:repeat(2,1fr)}.grid4{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}.examples{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:560px){.wrap{padding:10px}.top{flex-direction:column}.brand{font-size:24px}.channels,.grid4,.examples{grid-template-columns:1fr}.command{grid-template-columns:1fr}}
+/* Routed dashboard: compact navigation + hub cards (UI only). */
+.dnav{display:flex;gap:6px;overflow-x:auto;white-space:nowrap;padding:8px 0;margin-top:10px;border-bottom:1px solid #1a2433;-webkit-overflow-scrolling:touch}.dnav a{color:#cfd8e6;text-decoration:none;border:1px solid #2a3648;border-radius:999px;padding:6px 11px;font-size:12px;font-weight:700;background:#0b111a}.dnav a.cur{background:#e9edf4;color:#070a0f;border-color:#e9edf4}.dnav .back{border-color:#3a4a63}
+.ptitle{display:flex;align-items:center;gap:10px;margin-top:12px}.ptitle h1{font-size:20px;margin:0}
+.navcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}.navcard{display:block;text-decoration:none;color:#eef2f7;background:rgba(11,16,24,.94);border:1px solid #202b3b;border-radius:17px;padding:18px;min-height:112px}.navcard:hover{border-color:#68768d}.navcard b{display:block;font-size:17px;margin-top:6px}.navcard span{display:block;font-size:11px;color:#8793a6;margin-top:6px;line-height:1.7}.navcard i{font-style:normal;font-size:24px}
+@media(max-width:560px){.navcards{grid-template-columns:1fr 1fr}.navcard{min-height:96px;padding:13px}.ptitle h1{font-size:17px}}
 </style></head><body><div class="wrap">
-
-<header class="top">
-<div><div class="ey">HAMZEHI SOCIAL AI · OPERATION CENTER</div><div class="brand">AUTONOMOUS BUSINESS OS</div>
-<div class="sub">مرکز فرمان و نظارت؛ دستور می‌دهی، سیستم Plan می‌سازد، Task ایجاد می‌کند، اجرا را ثبت می‌کند و وضعیت هر بخش را نشان می‌دهد.</div></div>
-<div class="pill" id="masterState">CONNECTING…</div>
-</header>
-
-<section class="grid4 section">
-<div class="card"><div class="k">MASTER</div><div class="num" id="masterValue">—</div><div class="hint">وضعیت کنترل مرکزی</div></div>
-<div class="card"><div class="k">AUTONOMY</div><div class="num" id="autoRate">—</div><div class="hint">نرخ واقعی از Taskهای ثبت‌شده</div><div class="progress"><i id="autoBar"></i></div></div>
-<div class="card"><div class="k">OPEN OPPORTUNITIES</div><div class="num" id="opp">—</div><div class="hint">فرصت‌های واقعی CRM</div></div>
-<div class="card"><div class="k">CONVERSIONS</div><div class="num" id="conv">—</div><div class="hint">Customer / Converted</div></div>
+`;
+const DASH_SECTIONS={
+ auth:`<section class="card section" id="authPanel">
+<div class="title"><div><h2>🔐 ADMIN TOKEN</h2><div class="hint">اتصال امن پنل به Worker</div></div><span id="tokenState" class="tag">NOT SET</span></div>
+<div class="hint" style="margin-top:8px">توکن فقط روی همین مرورگر در localStorage ذخیره می‌شود و در صفحه به‌صورت مخفی نگه داشته می‌شود.</div>
+<div class="command" style="margin-top:10px">
+<input id="adminTokenInput" class="input" type="password" autocomplete="off" placeholder="Admin Token را اینجا وارد کن">
+<div class="tools"><button class="btn primary" onclick="saveToken()">SAVE TOKEN</button><button class="btn danger" onclick="clearToken()">CLEAR</button></div>
+</div>
+<div id="tokenStatus" class="hint" style="margin-top:8px">وضعیت: توکن وارد نشده است.</div>
 </section>
-
-<section class="card section">
+`,
+ catalog:`<section class="card section" id="siKnowledgeSection">
+<div class="title"><div><h2>🗂️ KNOWLEDGE MANAGEMENT · STRUCTURED CATALOG</h2><div class="hint">هر ذخیره یک نسخه جدید می‌سازد و نسخه قبلی در تاریخچه می‌ماند. ایران=TOMAN · عراق=USD (cents) قفل است. قیمت این بخش فقط مرجع است و جایگزین قیمت زنده P0-5 (قیمت مالک ایران / Price List عرب) نمی‌شود.</div></div><button class="btn" onclick="siLoadKnowledge()">↻ REFRESH</button></div>
+<div class="tools" style="margin-top:8px"><select id="siKind" class="input" onchange="siLoadKnowledge()"><option value="product">product</option><option value="attribute">attribute</option><option value="configuration">configuration</option><option value="compatibility">compatibility</option><option value="price">price (reference only · not live pricing)</option><option value="cost">cost</option><option value="setting">setting</option></select><select id="siKStatus" class="input" onchange="siLoadKnowledge()"><option value="current">current</option><option value="all">history</option></select><input id="siKSearch" class="input" placeholder="search" onchange="siLoadKnowledge()"></div>
+<textarea id="siKInput" class="input" style="margin-top:8px;min-height:110px" placeholder="JSON knowledge input"></textarea>
+<div class="tools" style="margin-top:8px"><button class="btn" onclick="siTemplate()">TEMPLATE</button><button class="btn primary" onclick="siSaveKnowledge(false)">SAVE NEW VERSION</button><button class="btn" onclick="siSaveKnowledge(true)">UPDATE EXISTING</button></div>
+<div id="siKLine" class="hint" style="margin-top:8px"></div><div id="siKnowledge" class="rows"></div>
+</section>
+`,
+ channels:`<section class="section">
+<div class="title"><div><h2>📡 CHANNEL CONTROL · کنترل مستقل کانال‌ها</h2><div class="hint">هر کانال جداگانه قابل روشن/خاموش‌کردن است. OFF یعنی Taskهای آن ماژول در Executor جدید مسدود می‌شوند.</div></div></div>
+<div class="channels" style="margin-top:9px">
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="telegramState" class="state">—</span></div><h3>✈️ Telegram</h3><p>Inbox، پاسخ/پیش‌نویس و مسیر محتوای Telegram.</p><div class="actions"><button class="btn" onclick="moduleToggle('telegram',true)">ON</button><button class="btn danger" onclick="moduleToggle('telegram',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="whatsappState" class="state">—</span></div><h3>🟢 WhatsApp</h3><p>رصد Inbox و عملیات ماژول WhatsApp از مسیر Worker.</p><div class="actions"><button class="btn" onclick="moduleToggle('whatsapp',true)">ON</button><button class="btn danger" onclick="moduleToggle('whatsapp',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="instagramState" class="state">—</span></div><h3>◎ Instagram</h3><p>Health و Lead intelligence؛ وضعیت Provider جداگانه قابل مشاهده است.</p><div class="actions"><button class="btn" onclick="moduleToggle('instagram',true)">ON</button><button class="btn danger" onclick="moduleToggle('instagram',false)">OFF / BLOCK</button></div></div>
+<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="websiteState" class="state">—</span></div><h3>🌐 Website</h3><p>Growth scan و پایش رشد وب‌سایت از API موجود.</p><div class="actions"><button class="btn" onclick="moduleToggle('website',true)">ON</button><button class="btn danger" onclick="moduleToggle('website',false)">OFF / BLOCK</button></div></div>
+</div>
+</section>
+`,
+ command:`<section class="card section">
 <div class="title"><div><h2>🤖 AI COMMAND CENTER</h2><div class="hint">فرمان طبیعی بنویس. نمونه: «تلگرام را بررسی کن، ولی اینستاگرام را فعلاً متوقف کن و فرصت‌های تبلیغاتی را پیدا کن.»</div></div><span class="tag">ADMIN CONTROLLED</span></div>
 <div class="command" style="margin-top:11px"><textarea id="command" class="input" rows="4" style="min-height:90px" placeholder="دستور عملیاتی، دانش فروش، لیست قیمت یا کاتالوگ را اینجا بنویس یا پیست کن…"></textarea><button class="btn primary" onclick="sendCommand()">PLAN & EXECUTE</button><button class="btn" onclick="teachKnowledge()" title="Teach the system a business fact, rule or relation in natural language (owner review required)">TEACH KNOWLEDGE</button></div>
 <div class="tools" style="margin-top:8px"><label class="hint">بازار دانش/قیمت: <select id="commandMarket" class="input" style="width:auto;display:inline-block"><option>IRAN</option><option>ARAB</option><option>GLOBAL</option></select></label><label class="btn">📷 تصاویر واقعی محصول (حداکثر ۸ · JPEG/PNG/WEBP · هر کدام تا ۵MB)<input id="commandImages" type="file" accept="image/jpeg,image/png,image/webp" multiple style="display:none" onchange="renderCommandImages()"></label><span id="commandImageInfo" class="hint"></span></div>
@@ -47,8 +70,72 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </div>
 <div id="commandStatus" class="hint" style="margin-top:10px">آماده دریافت دستور.</div>
 </section>
+`,
+ contentApproval:`<section class="card section">
+<div class="title"><div><h2>✅ CONTENT APPROVAL</h2><div class="hint">محتوای تولیدشده تا بررسی و تأیید انسانی منتشر نمی‌شود.</div></div><button class="btn" onclick="loadApprovals()">↻ REFRESH</button></div>
+<div id="approvalStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="approvalItems" class="rows"></div>
+</section>
+`,
+ diagnostic:`<section class="card section">
+<div class="title">
+<div>
+<h2>🔎 AUTONOMY DIAGNOSTIC</h2>
+<div class="hint">خواندن مستقیم وضعیت واقعی Queue، Lock و Content Module از /api/autonomy/status</div>
+</div>
+<button class="btn" onclick="loadDiagnostic()">↻ CHECK</button>
+</div>
 
-<section class="card section" id="knowledgePanel">
+<div class="grid3" style="margin-top:10px">
+<div class="row">
+<b>MASTER</b>
+<div id="diagMaster" class="muted">—</div>
+</div>
+
+<div class="row">
+<b>CONTENT MODULE</b>
+<div id="diagContent" class="muted">—</div>
+</div>
+
+<div class="row">
+<b>TASK COUNTS</b>
+<div id="diagTasks" class="muted">—</div>
+</div>
+</div>
+
+<div class="row" style="margin-top:9px">
+<b>ACTIVE LOCKS</b>
+<div id="diagLocks" class="muted" style="margin-top:6px">در انتظار بررسی…</div>
+</div>
+<div class="row" style="margin-top:9px">
+<b>🔍 LOCKED CONTENT TASK</b>
+<div id="diagLockedTask" class="muted" style="margin-top:6px">
+در انتظار بررسی…
+</div>
+</div>
+<div id="diagStatus" class="hint" style="margin-top:8px">
+هنوز بررسی نشده است.
+</div>
+</section>
+`,
+ errorsCard:`<section class="section">
+<div class="card dangerbox"><div class="title"><h2>🚨 ERRORS & RECOVERY</h2><button class="btn" onclick="loadErrors()">↻</button></div><div id="errors" class="rows">—</div></div>
+</section>
+`,
+ escalations:`<section class="card section" id="ownerEscalationsPanel">
+<div class="title"><div><h2>🧭 OWNER DECISION CENTER · ESCALATIONS</h2><div class="hint">یک صف واحد مالک: موارد مسدودکننده مشتری (Escalation با Decision لینک‌شده) و تصمیم‌های ساختاریافته. Sales Brain بدون تصمیم مالک پاسخ نمی‌دهد. حل‌کردن مورد، هیچ پیام مشتری را خودکار ارسال نمی‌کند.</div></div><button class="btn" onclick="loadOwnerEscalations();siLoadDecisions();siLoadGaps()">REFRESH</button></div>
+<div id="ownerEscalationsStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div class="hint" style="margin-top:10px"><b>BLOCKING CUSTOMER CASES</b> · هر مورد Decision لینک‌شده دارد و فقط از همین‌جا حل می‌شود.</div>
+<div id="ownerEscalationsItems" class="rows"></div>
+<div class="title" style="margin-top:12px"><div class="hint"><b>STRUCTURED DECISIONS</b> · موارد لینک‌شده به Escalation در بالا هستند و اینجا تکرار نمی‌شوند.</div><select id="siDecisionFilter" class="input" onchange="siLoadDecisions()"><option>PENDING</option><option>RESOLVED</option><option>REJECTED</option><option>ALL</option></select></div>
+<div id="siDecisionLine" class="hint">در انتظار دریافت…</div><div id="siDecisions" class="rows"></div>
+<div class="title" style="margin-top:12px"><div class="hint"><b>RECURRING KNOWLEDGE GAPS</b> · فقط پیشنهاد؛ هیچ قانونی خودکار فعال نمی‌شود.</div><button class="btn" onclick="siDetectGaps()">DETECT</button></div>
+<div id="siGaps" class="rows"></div>
+</section>
+`,
+ footer:`<div class="footer">HAMZEHI SOCIAL AI · V10 Professional Operation Center · Real backend state · No fake metrics · No external libraries</div>
+`,
+ knowledge:`<section class="card section" id="knowledgePanel">
 <div class="title"><div><h2>📚 SALES KNOWLEDGE</h2><div class="hint">پیشنهاد ← بررسی مالک ← اعمال. افزودن اطلاعات، اطلاعات قبلی را حذف نمی‌کند. قیمت نهایی از Quote/Price List موجود می‌آید.</div></div><button class="btn" onclick="loadSalesKnowledge()">REFRESH</button></div>
 <div class="grid4" style="margin-top:10px">
 <select class="input" id="knowledgeOperation"><option>ADD</option><option>EXPAND</option><option>UPDATE</option><option>REPLACE</option><option>DEACTIVATE</option><option>DELETE</option></select>
@@ -72,73 +159,15 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 <div class="title"><h3>Revision History</h3></div><div id="knowledgeHistory" class="rows"></div>
 <div class="tools"><button class="btn" onclick="loadKnowledgeHistory(-100)">PREVIOUS HISTORY</button><button class="btn" onclick="loadKnowledgeHistory(100)">NEXT HISTORY</button></div>
 </section>
-
-<section class="card section" id="ownerEscalationsPanel">
-<div class="title"><div><h2>🧭 OWNER DECISION CENTER · ESCALATIONS</h2><div class="hint">یک صف واحد مالک: موارد مسدودکننده مشتری (Escalation با Decision لینک‌شده) و تصمیم‌های ساختاریافته. Sales Brain بدون تصمیم مالک پاسخ نمی‌دهد. حل‌کردن مورد، هیچ پیام مشتری را خودکار ارسال نمی‌کند.</div></div><button class="btn" onclick="loadOwnerEscalations();siLoadDecisions();siLoadGaps()">REFRESH</button></div>
-<div id="ownerEscalationsStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
-<div class="hint" style="margin-top:10px"><b>BLOCKING CUSTOMER CASES</b> · هر مورد Decision لینک‌شده دارد و فقط از همین‌جا حل می‌شود.</div>
-<div id="ownerEscalationsItems" class="rows"></div>
-<div class="title" style="margin-top:12px"><div class="hint"><b>STRUCTURED DECISIONS</b> · موارد لینک‌شده به Escalation در بالا هستند و اینجا تکرار نمی‌شوند.</div><select id="siDecisionFilter" class="input" onchange="siLoadDecisions()"><option>PENDING</option><option>RESOLVED</option><option>REJECTED</option><option>ALL</option></select></div>
-<div id="siDecisionLine" class="hint">در انتظار دریافت…</div><div id="siDecisions" class="rows"></div>
-<div class="title" style="margin-top:12px"><div class="hint"><b>RECURRING KNOWLEDGE GAPS</b> · فقط پیشنهاد؛ هیچ قانونی خودکار فعال نمی‌شود.</div><button class="btn" onclick="siDetectGaps()">DETECT</button></div>
-<div id="siGaps" class="rows"></div>
+`,
+ kpis:`<section class="grid4 section">
+<div class="card"><div class="k">MASTER</div><div class="num" id="masterValue">—</div><div class="hint">وضعیت کنترل مرکزی</div></div>
+<div class="card"><div class="k">AUTONOMY</div><div class="num" id="autoRate">—</div><div class="hint">نرخ واقعی از Taskهای ثبت‌شده</div><div class="progress"><i id="autoBar"></i></div></div>
+<div class="card"><div class="k">OPEN OPPORTUNITIES</div><div class="num" id="opp">—</div><div class="hint">فرصت‌های واقعی CRM</div></div>
+<div class="card"><div class="k">CONVERSIONS</div><div class="num" id="conv">—</div><div class="hint">Customer / Converted</div></div>
 </section>
-
-<section class="card section" id="authPanel">
-<div class="title"><div><h2>🔐 ADMIN TOKEN</h2><div class="hint">اتصال امن پنل به Worker</div></div><span id="tokenState" class="tag">NOT SET</span></div>
-<div class="hint" style="margin-top:8px">توکن فقط روی همین مرورگر در localStorage ذخیره می‌شود و در صفحه به‌صورت مخفی نگه داشته می‌شود.</div>
-<div class="command" style="margin-top:10px">
-<input id="adminTokenInput" class="input" type="password" autocomplete="off" placeholder="Admin Token را اینجا وارد کن">
-<div class="tools"><button class="btn primary" onclick="saveToken()">SAVE TOKEN</button><button class="btn danger" onclick="clearToken()">CLEAR</button></div>
-</div>
-<div id="tokenStatus" class="hint" style="margin-top:8px">وضعیت: توکن وارد نشده است.</div>
-</section>
-
-<section class="card section">
-<div class="title"><div><h2>✅ CONTENT APPROVAL</h2><div class="hint">محتوای تولیدشده تا بررسی و تأیید انسانی منتشر نمی‌شود.</div></div><button class="btn" onclick="loadApprovals()">↻ REFRESH</button></div>
-<div id="approvalStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
-<div id="approvalItems" class="rows"></div>
-</section>
-
-<section class="card section">
-<div class="title"><div><h2>✉️ OUTREACH APPROVAL</h2><div class="hint">پیش‌نویس مشتری فقط برای بررسی است؛ تأیید در این مرحله هیچ پیامی ارسال نمی‌کند.</div></div><button class="btn" onclick="loadOutreachApprovals()">↻ REFRESH</button></div>
-<div id="outreachApprovalStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
-<div id="outreachApprovalItems" class="rows"></div>
-</section>
-
-<section class="card section">
-<div class="title"><div><h2>💬 NEGOTIATION INBOX</h2><div class="hint">پاسخ‌های لینک‌شده، نیت محدود و پیش‌نویس قابل ویرایش. تأیید به‌تنهایی ارسال نمی‌کند.</div></div><button class="btn" onclick="loadNegotiationInbox()">↻ REFRESH</button></div>
-<div id="negotiationInboxStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
-<div id="negotiationInboxItems" class="rows"></div>
-</section>
-
-<section class="card section">
-<div class="title"><div><h2>🧾 QUOTE REQUESTS</h2><div class="hint">قیمت ایران فقط با تأیید مالک؛ قیمت عرب فقط از Price List فعال. NULL یعنی نامشخص و Quote ناقص قابل تأیید نیست.</div></div><button class="btn" onclick="loadQuotes()">↻ REFRESH</button></div>
-<div id="quoteStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div><div id="quoteItems" class="rows"></div>
-</section>
-<section class="card section">
-<div class="title"><div><h2>📦 ORDERS</h2><div class="hint">پذیرش Quote فقط Order Candidate می‌سازد؛ ثبت سفارش قطعی نیازمند تأیید صریح مالک است و به معنی پرداخت نیست.</div></div><button class="btn" onclick="loadOrders()">↻ REFRESH</button></div>
-<div id="orderStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div><div id="orderItems" class="rows"></div>
-</section>
-<section class="card section" id="siMoneySection">
-<div class="title"><div><h2>💰 REVENUE RECOVERY · MONEY AT STAKE</h2><div class="hint">فقط دفتر ثبت‌شده توسط مالک · payment_engine=false · بدون درگاه پرداخت. ارزها جمع یا تبدیل نمی‌شوند. پیش‌نویس‌ها فقط پس از تأیید مالک از Outreach Approval ارسال می‌شوند.</div></div><div class="tools"><button class="btn" onclick="runRevenueFollowupsUi()">PREPARE PAYMENT REQUEST DRAFTS</button><button class="btn" onclick="loadRevenueRecovery()">↻ REFRESH</button></div></div>
-<div id="siMoney" class="rows" style="margin-top:9px"></div>
-<div id="followupStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div><div id="followupResult" class="hint"></div><div id="followupItems" class="rows"></div>
-</section>
-<section class="card section">
-<div class="title"><div><h2>🏷️ ARAB FIXED PRICE LIST</h2><div class="hint">هر تغییر قیمت یک Version جدید می‌سازد؛ هیچ قیمت پیش‌فرضی وجود ندارد.</div></div><button class="btn" onclick="loadPriceItems()">↻ REFRESH</button></div>
-<div class="grid4" style="margin-top:10px"><input id="priceName" class="input" placeholder="Product name"><input id="priceKey" class="input" placeholder="Exact product key"><input id="priceSku" class="input" placeholder="SKU (optional)"><input id="priceCurrency" class="input" placeholder="Currency"><input id="priceUnit" class="input" inputmode="numeric" placeholder="Unit price minor units"><input id="priceMoq" class="input" inputmode="numeric" placeholder="MOQ (optional)"><input id="priceFrom" class="input" placeholder="Effective from ISO"><input id="priceUntil" class="input" placeholder="Effective until ISO"></div>
-<div class="tools" style="margin-top:8px"><button class="btn primary" onclick="createPriceVersion()">ADD OWNER-APPROVED ITEM</button></div><div id="priceStatus" class="hint"></div><div id="priceItems" class="rows"></div>
-</section>
-<section class="card section" id="siKnowledgeSection">
-<div class="title"><div><h2>🗂️ KNOWLEDGE MANAGEMENT · STRUCTURED CATALOG</h2><div class="hint">هر ذخیره یک نسخه جدید می‌سازد و نسخه قبلی در تاریخچه می‌ماند. ایران=TOMAN · عراق=USD (cents) قفل است. قیمت این بخش فقط مرجع است و جایگزین قیمت زنده P0-5 (قیمت مالک ایران / Price List عرب) نمی‌شود.</div></div><button class="btn" onclick="siLoadKnowledge()">↻ REFRESH</button></div>
-<div class="tools" style="margin-top:8px"><select id="siKind" class="input" onchange="siLoadKnowledge()"><option value="product">product</option><option value="attribute">attribute</option><option value="configuration">configuration</option><option value="compatibility">compatibility</option><option value="price">price (reference only · not live pricing)</option><option value="cost">cost</option><option value="setting">setting</option></select><select id="siKStatus" class="input" onchange="siLoadKnowledge()"><option value="current">current</option><option value="all">history</option></select><input id="siKSearch" class="input" placeholder="search" onchange="siLoadKnowledge()"></div>
-<textarea id="siKInput" class="input" style="margin-top:8px;min-height:110px" placeholder="JSON knowledge input"></textarea>
-<div class="tools" style="margin-top:8px"><button class="btn" onclick="siTemplate()">TEMPLATE</button><button class="btn primary" onclick="siSaveKnowledge(false)">SAVE NEW VERSION</button><button class="btn" onclick="siSaveKnowledge(true)">UPDATE EXISTING</button></div>
-<div id="siKLine" class="hint" style="margin-top:8px"></div><div id="siKnowledge" class="rows"></div>
-</section>
-
-<section class="card section">
+`,
+ master:`<section class="card section">
 <div class="title"><div><h2>🎛️ MASTER CONTROL</h2><div class="hint">کنترل فوری کل صف Autonomous. توقف، اجرای Taskهای آماده را کنترل می‌کند.</div></div><button class="btn" onclick="refreshAll()">↻ REFRESH</button></div>
 <div class="tools" style="margin-top:10px">
 <button class="btn primary" onclick="masterAction('on')">▶ START ALL</button>
@@ -149,15 +178,54 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
 </div>
 <div id="masterHelp" class="hint" style="margin-top:9px">START = روشن · PAUSE = توقف موقت صف · STOP/EMERGENCY = خاموشی صف Autonomous. وضعیت واقعی بعد از پاسخ API نمایش داده می‌شود.</div>
 </section>
-
-<section class="section">
-<div class="title"><div><h2>📡 CHANNEL CONTROL · کنترل مستقل کانال‌ها</h2><div class="hint">هر کانال جداگانه قابل روشن/خاموش‌کردن است. OFF یعنی Taskهای آن ماژول در Executor جدید مسدود می‌شوند.</div></div></div>
-<div class="channels" style="margin-top:9px">
-<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="telegramState" class="state">—</span></div><h3>✈️ Telegram</h3><p>Inbox، پاسخ/پیش‌نویس و مسیر محتوای Telegram.</p><div class="actions"><button class="btn" onclick="moduleToggle('telegram',true)">ON</button><button class="btn danger" onclick="moduleToggle('telegram',false)">OFF / BLOCK</button></div></div>
-<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="whatsappState" class="state">—</span></div><h3>🟢 WhatsApp</h3><p>رصد Inbox و عملیات ماژول WhatsApp از مسیر Worker.</p><div class="actions"><button class="btn" onclick="moduleToggle('whatsapp',true)">ON</button><button class="btn danger" onclick="moduleToggle('whatsapp',false)">OFF / BLOCK</button></div></div>
-<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="instagramState" class="state">—</span></div><h3>◎ Instagram</h3><p>Health و Lead intelligence؛ وضعیت Provider جداگانه قابل مشاهده است.</p><div class="actions"><button class="btn" onclick="moduleToggle('instagram',true)">ON</button><button class="btn danger" onclick="moduleToggle('instagram',false)">OFF / BLOCK</button></div></div>
-<div class="card channel"><div class="head"><span class="tag">CHANNEL</span><span id="websiteState" class="state">—</span></div><h3>🌐 Website</h3><p>Growth scan و پایش رشد وب‌سایت از API موجود.</p><div class="actions"><button class="btn" onclick="moduleToggle('website',true)">ON</button><button class="btn danger" onclick="moduleToggle('website',false)">OFF / BLOCK</button></div></div>
-<section class="card section">
+`,
+ masthead:`<header class="top">
+<div><div class="ey">HAMZEHI SOCIAL AI · OPERATION CENTER</div><div class="brand">AUTONOMOUS BUSINESS OS</div>
+<div class="sub">مرکز فرمان و نظارت؛ دستور می‌دهی، سیستم Plan می‌سازد، Task ایجاد می‌کند، اجرا را ثبت می‌کند و وضعیت هر بخش را نشان می‌دهد.</div></div>
+<div class="pill" id="masterState">CONNECTING…</div>
+</header>
+`,
+ money:`<section class="card section" id="siMoneySection">
+<div class="title"><div><h2>💰 REVENUE RECOVERY · MONEY AT STAKE</h2><div class="hint">فقط دفتر ثبت‌شده توسط مالک · payment_engine=false · بدون درگاه پرداخت. ارزها جمع یا تبدیل نمی‌شوند. پیش‌نویس‌ها فقط پس از تأیید مالک از Outreach Approval ارسال می‌شوند.</div></div><div class="tools"><button class="btn" onclick="runRevenueFollowupsUi()">PREPARE PAYMENT REQUEST DRAFTS</button><button class="btn" onclick="loadRevenueRecovery()">↻ REFRESH</button></div></div>
+<div id="siMoney" class="rows" style="margin-top:9px"></div>
+<div id="followupStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div><div id="followupResult" class="hint"></div><div id="followupItems" class="rows"></div>
+</section>
+`,
+ negotiation:`<section class="card section">
+<div class="title"><div><h2>💬 NEGOTIATION INBOX</h2><div class="hint">پاسخ‌های لینک‌شده، نیت محدود و پیش‌نویس قابل ویرایش. تأیید به‌تنهایی ارسال نمی‌کند.</div></div><button class="btn" onclick="loadNegotiationInbox()">↻ REFRESH</button></div>
+<div id="negotiationInboxStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="negotiationInboxItems" class="rows"></div>
+</section>
+`,
+ opportunities:`<section class="section">
+<div class="card">
+<div class="title">
+<div><h2>🎯 OPPORTUNITIES</h2><span class="tag">LEADS</span></div>
+<span class="tag">AD AUTOPILOT</span>
+</div>
+<div class="tools" style="margin-top:9px">
+<button class="btn" onclick="previewAdAutopilot()">🔎 PREVIEW</button>
+<button class="btn danger" onclick="deleteSelectedAdAutopilot()">🗑️ DELETE SELECTED</button>
+<button class="btn danger" onclick="deleteAllAdAutopilot()">🗑️ DELETE ALL</button>
+</div>
+<div id="adCleanupStatus" class="hint" style="margin-top:8px">برای بررسی رکوردهای Ads Autopilot روی PREVIEW بزن.</div>
+<div id="opportunities" class="rows">—</div>
+<div id="adAutopilotPreview" class="rows" style="margin-top:9px">—</div>
+</div>
+</section>
+`,
+ orders:`<section class="card section">
+<div class="title"><div><h2>📦 ORDERS</h2><div class="hint">پذیرش Quote فقط Order Candidate می‌سازد؛ ثبت سفارش قطعی نیازمند تأیید صریح مالک است و به معنی پرداخت نیست.</div></div><button class="btn" onclick="loadOrders()">↻ REFRESH</button></div>
+<div id="orderStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div><div id="orderItems" class="rows"></div>
+</section>
+`,
+ outreach:`<section class="card section">
+<div class="title"><div><h2>✉️ OUTREACH APPROVAL</h2><div class="hint">پیش‌نویس مشتری فقط برای بررسی است؛ تأیید در این مرحله هیچ پیامی ارسال نمی‌کند.</div></div><button class="btn" onclick="loadOutreachApprovals()">↻ REFRESH</button></div>
+<div id="outreachApprovalStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="outreachApprovalItems" class="rows"></div>
+</section>
+`,
+ photo:`<section class="card section">
   <div class="title">
     <div>
       <h2>📸 PHOTO AUTOPILOT</h2>
@@ -201,9 +269,57 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
     در انتظار وضعیت…
   </div>
 </section>
+`,
+ priceList:`<section class="card section">
+<div class="title"><div><h2>🏷️ ARAB FIXED PRICE LIST</h2><div class="hint">هر تغییر قیمت یک Version جدید می‌سازد؛ هیچ قیمت پیش‌فرضی وجود ندارد.</div></div><button class="btn" onclick="loadPriceItems()">↻ REFRESH</button></div>
+<div class="grid4" style="margin-top:10px"><input id="priceName" class="input" placeholder="Product name"><input id="priceKey" class="input" placeholder="Exact product key"><input id="priceSku" class="input" placeholder="SKU (optional)"><input id="priceCurrency" class="input" placeholder="Currency"><input id="priceUnit" class="input" inputmode="numeric" placeholder="Unit price minor units"><input id="priceMoq" class="input" inputmode="numeric" placeholder="MOQ (optional)"><input id="priceFrom" class="input" placeholder="Effective from ISO"><input id="priceUntil" class="input" placeholder="Effective until ISO"></div>
+<div class="tools" style="margin-top:8px"><button class="btn primary" onclick="createPriceVersion()">ADD OWNER-APPROVED ITEM</button></div><div id="priceStatus" class="hint"></div><div id="priceItems" class="rows"></div>
+</section>
+`,
+ quotes:`<section class="card section">
+<div class="title"><div><h2>🧾 QUOTE REQUESTS</h2><div class="hint">قیمت ایران فقط با تأیید مالک؛ قیمت عرب فقط از Price List فعال. NULL یعنی نامشخص و Quote ناقص قابل تأیید نیست.</div></div><button class="btn" onclick="loadQuotes()">↻ REFRESH</button></div>
+<div id="quoteStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div><div id="quoteItems" class="rows"></div>
+</section>
+`,
+ revenueCard:`<section class="section">
+<div class="card"><div class="title"><h2>💰 REVENUE</h2><span class="tag">REAL CRM</span></div><div id="revenue" class="rows">—</div></div>
+</section>
+`,
+ safety:`<section class="card section">
+<div class="title"><h2>🛡️ SAFETY GATE</h2><span class="tag ok">ACTIVE</span></div>
+<div class="hint" style="margin-top:8px">این پنل وضعیت و کنترل‌های واقعی V10 را نمایش می‌دهد. پرداخت، قرارداد، Secret، DNS، R2 و Deploy از این UI قابل دستکاری نیستند. عملیات بیرونی نیازمند مجوز باید همچنان Gate داشته باشند.</div>
+<div id="safety" class="row" style="margin-top:9px">در انتظار پاسخ Worker…</div>
+</section>
+`,
+ taskBrain:`<section class="grid2 section">
+<div class="card">
+<div class="title">
+<h2>📋 LIVE TASK MANAGER</h2>
+<span id="taskCount" class="tag">—</span>
+</div>
+<div id="tasks" class="rows">—</div>
+</div>
+
+<div class="card">
+<div class="title">
+<h2>🧠 BUSINESS BRAIN</h2>
+<button class="btn" onclick="loadBrain()">↻</button>
+</div>
+
+<div id="brain" class="row" style="margin-top:9px">
+در انتظار داده…
+</div>
+
+<div class="title" style="margin-top:14px">
+<h2>🕒 LIVE ACTIVITY</h2>
+<span class="tag">RECENT</span>
+</div>
+
+<div id="timeline" class="rows timeline">—</div>
 </div>
 </section>
-<section class="card section">
+`,
+ video:`<section class="card section">
   <div class="title">
     <div>
       <h2>🎬 VIDEO AUTOPILOT</h2>
@@ -257,102 +373,15 @@ return `<!doctype html><html lang="fa" dir="rtl"><head>
     </div>
   </div>
 </section>
-<section class="grid2 section">
-<div class="card">
-<div class="title">
-<h2>📋 LIVE TASK MANAGER</h2>
-<span id="taskCount" class="tag">—</span>
-</div>
-<div id="tasks" class="rows">—</div>
-</div>
-
-<div class="card">
-<div class="title">
-<h2>🧠 BUSINESS BRAIN</h2>
-<button class="btn" onclick="loadBrain()">↻</button>
-</div>
-
-<div id="brain" class="row" style="margin-top:9px">
-در انتظار داده…
-</div>
-
-<div class="title" style="margin-top:14px">
-<h2>🕒 LIVE ACTIVITY</h2>
-<span class="tag">RECENT</span>
-</div>
-
-<div id="timeline" class="rows timeline">—</div>
-</div>
-</section>
-<section class="card section">
-<div class="title">
-<div>
-<h2>🔎 AUTONOMY DIAGNOSTIC</h2>
-<div class="hint">خواندن مستقیم وضعیت واقعی Queue، Lock و Content Module از /api/autonomy/status</div>
-</div>
-<button class="btn" onclick="loadDiagnostic()">↻ CHECK</button>
-</div>
-
-<div class="grid3" style="margin-top:10px">
-<div class="row">
-<b>MASTER</b>
-<div id="diagMaster" class="muted">—</div>
-</div>
-
-<div class="row">
-<b>CONTENT MODULE</b>
-<div id="diagContent" class="muted">—</div>
-</div>
-
-<div class="row">
-<b>TASK COUNTS</b>
-<div id="diagTasks" class="muted">—</div>
-</div>
-</div>
-
-<div class="row" style="margin-top:9px">
-<b>ACTIVE LOCKS</b>
-<div id="diagLocks" class="muted" style="margin-top:6px">در انتظار بررسی…</div>
-</div>
-<div class="row" style="margin-top:9px">
-<b>🔍 LOCKED CONTENT TASK</b>
-<div id="diagLockedTask" class="muted" style="margin-top:6px">
-در انتظار بررسی…
-</div>
-</div>
-<div id="diagStatus" class="hint" style="margin-top:8px">
-هنوز بررسی نشده است.
-</div>
-</section>
-<section class="grid3 section">
-<div class="card"><div class="title"><h2>💰 REVENUE</h2><span class="tag">REAL CRM</span></div><div id="revenue" class="rows">—</div></div>
-<div class="card">
-<div class="title">
-<div><h2>🎯 OPPORTUNITIES</h2><span class="tag">LEADS</span></div>
-<span class="tag">AD AUTOPILOT</span>
-</div>
-<div class="tools" style="margin-top:9px">
-<button class="btn" onclick="previewAdAutopilot()">🔎 PREVIEW</button>
-<button class="btn danger" onclick="deleteSelectedAdAutopilot()">🗑️ DELETE SELECTED</button>
-<button class="btn danger" onclick="deleteAllAdAutopilot()">🗑️ DELETE ALL</button>
-</div>
-<div id="adCleanupStatus" class="hint" style="margin-top:8px">برای بررسی رکوردهای Ads Autopilot روی PREVIEW بزن.</div>
-<div id="opportunities" class="rows">—</div>
-<div id="adAutopilotPreview" class="rows" style="margin-top:9px">—</div>
-</div>
-<div class="card dangerbox"><div class="title"><h2>🚨 ERRORS & RECOVERY</h2><button class="btn" onclick="loadErrors()">↻</button></div><div id="errors" class="rows">—</div></div>
-</section>
-
-<section class="card section">
-<div class="title"><h2>🛡️ SAFETY GATE</h2><span class="tag ok">ACTIVE</span></div>
-<div class="hint" style="margin-top:8px">این پنل وضعیت و کنترل‌های واقعی V10 را نمایش می‌دهد. پرداخت، قرارداد، Secret، DNS، R2 و Deploy از این UI قابل دستکاری نیستند. عملیات بیرونی نیازمند مجوز باید همچنان Gate داشته باشند.</div>
-<div id="safety" class="row" style="margin-top:9px">در انتظار پاسخ Worker…</div>
-</section>
-
-<div class="footer">HAMZEHI SOCIAL AI · V10 Professional Operation Center · Real backend state · No fake metrics · No external libraries</div>
-
-<script>
-const A="/api/autonomy",KEY="hamzehi_admin_token",$=id=>document.getElementById(id);
+`,
+};
+const DASH_SCRIPT=`<script>
+// Routed pages render only some sections. A lookup of an element that is NOT on this page returns one inert, detached stand-in
+// (per id), so a shared action that also refreshes another page's list (e.g. resolving a decision reloads Outreach) never throws.
+const DASH_GHOSTS={},dashGhost=id=>DASH_GHOSTS[id]||(DASH_GHOSTS[id]=Object.assign(document.createElement("div"),{id}));
+const A="/api/autonomy",KEY="hamzehi_admin_token",$=id=>document.getElementById(id)||dashGhost(id);
+// has(): is this section on the current page? on(): run a loader only when its section is here (each page loads only its own data).
+const has=id=>!!document.getElementById(id),on=(id,fn)=>has(id)?fn():null;
 function esc(x){return String(x??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 function token(){return localStorage.getItem(KEY)||""}
 function hdr(){const t=token();return t?{"Authorization":"Bearer "+t}:{}}
@@ -534,7 +563,7 @@ function showTeachResult(d){
  if(d.status==="processing"){$("commandStatus").innerHTML="<span class='warn'>این دانش هنوز در حال پردازش است؛ چند ثانیه بعد دوباره امتحان کنید (دوباره پردازش نمی‌شود).</span>";return}
  const s=d.summary||{};
  const cols=(d.collections||[]).map(c=>"<div class='mini'>"+esc(c.entity_key)+" · <b>"+esc(c.concept)+"</b> · "+esc(c.market)+" → "+esc((c.values||[]).join("، "))+" ("+esc((c.values||[]).length)+")</div>").join("");
- $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ دانش ساختاربندی شد · Proposals: "+esc(s.proposals||0)+" · Pending review: "+esc(s.pending_review||0)+" · Needs correction: "+esc(s.conflict||0)+(d.redirected_to_price_list?" · "+esc(d.redirected_to_price_list)+" price item(s) belong to the price list import":"")+(d.idempotent?" · ارسال تکراری؛ دوباره پردازش نشد":"")+(d.retried?" · نتیجه قبلی ناموفق بود؛ دوباره پردازش شد":"")+"</span>"+cols+"<div class='mini'>هیچ موردی بدون تأیید مالک فعال نمی‌شود. <a href='#knowledgePanel'>OPEN KNOWLEDGE REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Teaching failed")+"</span>";
+ $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ دانش ساختاربندی شد · Proposals: "+esc(s.proposals||0)+" · Pending review: "+esc(s.pending_review||0)+" · Needs correction: "+esc(s.conflict||0)+(d.redirected_to_price_list?" · "+esc(d.redirected_to_price_list)+" price item(s) belong to the price list import":"")+(d.idempotent?" · ارسال تکراری؛ دوباره پردازش نشد":"")+(d.retried?" · نتیجه قبلی ناموفق بود؛ دوباره پردازش شد":"")+"</span>"+cols+"<div class='mini'>هیچ موردی بدون تأیید مالک فعال نمی‌شود. <a href='/dashboard/knowledge#knowledgePanel'>OPEN KNOWLEDGE REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Teaching failed")+"</span>";
  if(d.ok){commandRequestId=null;loadSalesKnowledge()}
 }
 async function loadKnowledgeHistory(delta=0){
@@ -725,10 +754,10 @@ async function loadStatus(){
  const d=await api(A+"/status");if(!d.ok){$("masterState").textContent="AUTH / API ERROR";$("masterState").className="pill bad";return}
  const c=d.controls||{},m=c.master||"—";$("masterState").textContent="MASTER: "+m.toUpperCase();$("masterState").className="pill "+(m==="on"?"ok":m==="paused"?"warn":"bad");$("masterValue").textContent=m.toUpperCase();
  $("opp").textContent=d.revenue?.opportunities??0;$("conv").textContent=d.revenue?.conversions??0;
- const mt=await api(A+"/metrics");if(mt.ok){$("autoRate").textContent=(mt.autonomous_rate??0)+"%";$("autoBar").style.width=Math.min(100,mt.autonomous_rate||0)+"%"}
+ const mt=has("autoRate")?await api(A+"/metrics"):{ok:false};if(mt.ok){$("autoRate").textContent=(mt.autonomous_rate??0)+"%";$("autoBar").style.width=Math.min(100,mt.autonomous_rate||0)+"%"}
  const mods=c.modules||{};for(const k of ["telegram","whatsapp","instagram","website"]){const e=$(k+"State"),on=mods[k]!==false;e.textContent=on?"ON":"OFF / BLOCK";e.className="state "+(on?"ok":"bad")}
-  await loadPhotoAutopilot();
-await loadVideoAutopilot();
+  if(has("photoAutoState"))await loadPhotoAutopilot();
+if(has("videoAutoState"))await loadVideoAutopilot();
 }
 async function loadPhotoAutopilot(){
   const d=await api("/api/photo-autopilot/status");
@@ -1062,7 +1091,7 @@ async function sendCommand(){
  const d=files.length?await submitOwnerKnowledge(raw):await api(A+"/command",{method:"POST",timeoutMs:60000,body:JSON.stringify({command:raw,command_id:commandRequestId,market:$("commandMarket").value})});
  if(d.knowledge_teach){showTeachResult(d);return}
  if(d.knowledge_import){
-  $("commandStatus").innerHTML=d.ok?ownerImportSummaryHtml(d)+"<div class='mini'><a href='#knowledgePanel'>OPEN KNOWLEDGE IMPORT REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Knowledge import failed")+"</span>";
+  $("commandStatus").innerHTML=d.ok?ownerImportSummaryHtml(d)+"<div class='mini'><a href='/dashboard/knowledge#knowledgePanel'>OPEN KNOWLEDGE IMPORT REVIEW</a></div>":"<span class='bad'>✕ "+esc(d.error||"Knowledge import failed")+"</span>";
   if(d.ok){commandRequestId=null;$("commandImages").value="";renderCommandImages();ownerImportData=d;renderOwnerImport(d)}
   return;
  }
@@ -1076,7 +1105,7 @@ async function sendCommand(){
  if(d.knowledge_router){
   const x=d.interpretation||{},request=d.request||{};
   const detail="Intent: "+esc(x.intent||"—")+" · "+esc(x.operation||"—")+" · "+esc(x.domain||"—")+" / "+esc(x.attribute||"—")+" · "+esc(x.market||"—");
-  const review=d.change_request_id?" <a href='#knowledgePanel'>OPEN KNOWLEDGE REVIEW</a>":"";
+  const review=d.change_request_id?" <a href='/dashboard/knowledge#knowledgePanel'>OPEN KNOWLEDGE REVIEW</a>":"";
   $("commandStatus").innerHTML=d.ok?"<span class='ok'>✓ "+esc(d.message||"Knowledge command handled")+"</span><div class='mini'>"+detail+" · Request: "+esc(d.change_request_id||"clarification")+review+"</div>":"<span class='bad'>✕ "+esc(d.error||"Knowledge command failed")+"</span>";
   commandRequestId=null;
   if(d.ok&&d.change_request_id)await loadSalesKnowledge();
@@ -1288,14 +1317,35 @@ async function loadOpp(){
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
 async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
 let refreshInProgress=false,dashTick=1;
+// Every loader of the original single page, each run only where its section is rendered. Money-at-stake also needs the open
+// escalation count (written by loadOwnerEscalations) wherever it is shown.
+function dashSectionLoads(){
+ return [on("tasks",loadTasks),on("brain",loadBrain),on("revenue",loadRevenue),on("opportunities",loadOpp),on("errors",loadErrors),on("safety",loadSafety),
+  on("approvalItems",loadApprovals),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox),on("quoteItems",loadQuotes),
+  on("orderItems",loadOrders),on("priceItems",loadPriceItems),on("knowledgeFacts",loadSalesKnowledge),(has("ownerEscalationsItems")||has("siMoney"))?loadOwnerEscalations():null,
+  on("hubDecisions",loadHubSummary)];
+}
+// Hub summary: counts from the same existing endpoints the section pages use (nothing estimated or invented).
+async function loadHubSummary(){
+ const [dec,escs,ord,err]=await Promise.all([api("/api/si/decisions?status=PENDING"),api("/api/owner-escalations"),api("/api/orders"),api(A+"/errors")]);
+ const decisions=dec.ok?(dec.items||[]):null;
+ $("hubDecisions").textContent=decisions?decisions.length:"—";
+ $("hubEscalations").textContent=escs.ok?(escs.items||[]).filter(x=>x.status==="open").length:"—";
+ const candidates=ord.ok?(ord.items||[]).filter(o=>o.status==="order_candidate").length:null,awaiting=decisions?decisions.filter(x=>x.decision_type==="ORDER_CANDIDATE_APPROVAL").length:null;
+ $("hubCandidates").textContent=candidates===null?"—":candidates;
+ $("hubCandidatesHint").textContent="در انتظار تأیید مالک"+(awaiting===null?"":" · "+awaiting+" accepted offer(s) awaiting approval");
+ const alerts=err.ok?[...(err.tasks||[]),...(err.retries||[])]:null;
+ $("hubHealth").textContent=alerts===null?"—":alerts.length?alerts.length+" ⚠":"OK";$("hubHealth").className="num "+(alerts===null?"":alerts.length?"warn":"ok");
+ $("hubAlerts").innerHTML=alerts===null?"—":rows(alerts.slice(0,5),x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>");
+}
 // Full refresh: page load, token save, manual REFRESH and control actions.
 async function refreshAll(){
  if(refreshInProgress)return;
  refreshInProgress=true;dashTick=1;
  try{
   await loadStatus();
-  const siLoads=siFullLoad?[siLoadAll()]:[siLoadDecisions(),siLoadMoney()];siFullLoad=false;
-  await Promise.all([loadTasks(),loadBrain(),loadRevenue(),loadOpp(),loadErrors(),loadSafety(),loadApprovals(),loadOutreachApprovals(),loadNegotiationInbox(),loadQuotes(),loadOrders(),loadPriceItems(),loadSalesKnowledge(),loadOwnerEscalations(),...siLoads]);
+  const siLoads=siFullLoad?[on("siDecisions",siLoadDecisions),on("siGaps",siLoadGaps),on("siMoney",siLoadMoney),on("siKnowledge",siLoadKnowledge)]:[on("siDecisions",siLoadDecisions),on("siMoney",siLoadMoney)];siFullLoad=false;
+  await Promise.all([...dashSectionLoads(),...siLoads]);
  }catch(e){
   $("masterState").textContent="DASHBOARD ERROR";
   $("masterState").className="pill bad";
@@ -1309,11 +1359,13 @@ async function refreshAll(){
 }
 // Background polling stays well under the Worker API limit (60 requests/min per IP): one group per 15s tick,
 // owner queues every 30s, every other panel every 60s, about 25 requests/min in total.
+// (Routed pages: the same groups, each loader only where its section is rendered — a page polls only its own data.)
+const dashEscalationLoad=()=>(has("ownerEscalationsItems")||has("siMoney"))?loadOwnerEscalations():null;
 const DASHBOARD_POLL_GROUPS=[
- ()=>[loadStatus(),loadBrain(),loadTasks(),loadErrors(),loadRevenue(),loadOpp()],
- ()=>[loadOwnerEscalations(),loadOutreachApprovals(),loadNegotiationInbox()],
- ()=>[loadApprovals(),loadQuotes(),loadOrders(),loadPriceItems(),loadSalesKnowledge(),loadSafety(),siLoadDecisions(),siLoadMoney()],
- ()=>[loadOwnerEscalations(),loadOutreachApprovals(),loadNegotiationInbox()]
+ ()=>[loadStatus(),on("brain",loadBrain),on("tasks",loadTasks),on("errors",loadErrors),on("revenue",loadRevenue),on("opportunities",loadOpp),on("hubDecisions",loadHubSummary)],
+ ()=>[dashEscalationLoad(),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox)],
+ ()=>[on("approvalItems",loadApprovals),on("quoteItems",loadQuotes),on("orderItems",loadOrders),on("priceItems",loadPriceItems),on("knowledgeFacts",loadSalesKnowledge),on("safety",loadSafety),on("siDecisions",siLoadDecisions),on("siMoney",siLoadMoney)],
+ ()=>[dashEscalationLoad(),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox)]
 ];
 async function refreshTick(){
  if(refreshInProgress)return;
@@ -1322,6 +1374,60 @@ async function refreshTick(){
  catch(e){$("masterState").textContent="DASHBOARD ERROR";$("masterState").className="pill bad"}
  finally{refreshInProgress=false}
 }
-updateTokenUI();refreshAll();loadDiagnostic();setInterval(refreshTick,15000);
+updateTokenUI();refreshAll();on("diagMaster",loadDiagnostic);setInterval(refreshTick,15000);
 </script></body></html>`;
+
+// ---- Hub-only additions (summary of existing data + navigation; no new metrics, no new API).
+DASH_SECTIONS.hubSummary=`<section class="grid4 section">
+<div class="card"><div class="k">SYSTEM HEALTH</div><div class="num" id="hubHealth">—</div><div class="hint" id="hubHealthHint">خطاهای ثبت‌شده Task / Retry</div></div>
+<div class="card"><div class="k">PENDING APPROVALS</div><div class="num" id="hubDecisions">—</div><div class="hint">تصمیم‌های مالک · PENDING</div></div>
+<div class="card"><div class="k">OPEN ESCALATIONS</div><div class="num" id="hubEscalations">—</div><div class="hint">موارد مسدودکننده مشتری</div></div>
+<div class="card"><div class="k">ORDER CANDIDATES</div><div class="num" id="hubCandidates">—</div><div class="hint" id="hubCandidatesHint">در انتظار تأیید مالک</div></div>
+</section>
+<section class="grid2 section">
+<div class="card"><div class="title"><h2>💰 REVENUE SUMMARY</h2><a class="btn" href="/dashboard/revenue">OPEN REVENUE</a></div><div id="revenue" class="rows">—</div></div>
+<div class="card dangerbox"><div class="title"><h2>🚨 RECENT ALERTS</h2><a class="btn" href="/dashboard/system">OPEN SYSTEM</a></div><div id="hubAlerts" class="rows">—</div></div>
+</section>
+`;
+DASH_SECTIONS.knowledgeApprovalsLink=`<section class="card section">
+<div class="title"><div><h2>📚 KNOWLEDGE APPROVALS</h2><div class="hint">بررسی پیشنهادهای دانش (Old → Proposed)، Knowledge Imports و APPROVE ALL / REJECT ALL در صفحه Knowledge انجام می‌شود.</div></div><a class="btn primary" href="/dashboard/knowledge#knowledgePanel">OPEN KNOWLEDGE REVIEW</a></div>
+</section>
+`;
+// Where every original section lives (a section may appear on more than one page; each page is its own document).
+export const DASHBOARD_PAGES={
+ hub:{path:"/dashboard",title:"DASHBOARD",icon:"🏠",desc:"",sections:["kpis","hubSummary","hubNav","auth"]},
+ sales:{path:"/dashboard/sales",title:"SALES",icon:"💬",desc:"Leads · Negotiation · Quotes · Orders · Follow-ups",sections:["opportunities","negotiation","outreach","quotes","orders"]},
+ knowledge:{path:"/dashboard/knowledge",title:"KNOWLEDGE",icon:"📚",desc:"Business knowledge · Imports · Price lists · Catalog",sections:["command","knowledge","priceList","catalog"]},
+ approvals:{path:"/dashboard/approvals",title:"APPROVALS",icon:"✅",desc:"Escalations · Decisions · Quotes · Outreach · Content",sections:["escalations","outreach","quotes","contentApproval","knowledgeApprovalsLink"]},
+ content:{path:"/dashboard/content",title:"CONTENT",icon:"📝",desc:"Content queue · Drafts · Channels",sections:["contentApproval","channels"]},
+ media:{path:"/dashboard/media",title:"MEDIA",icon:"📸",desc:"Photo autopilot · Video autopilot",sections:["photo","video"]},
+ revenue:{path:"/dashboard/revenue",title:"REVENUE",icon:"💰",desc:"Revenue · Money at stake · Orders & payments",sections:["revenueCard","money","orders"]},
+ system:{path:"/dashboard/system",title:"SYSTEM",icon:"🛠️",desc:"Master · Channels · Tasks · Diagnostics · Errors · Safety",sections:["auth","command","master","channels","taskBrain","diagnostic","errorsCard","safety"]},
+ // FULL VIEW: every section on one page in the original order (opt-in safety net; nothing from the old dashboard is out of reach).
+ all:{path:"/dashboard/all",title:"FULL VIEW",icon:"☰",desc:"Every section on one page (original layout)",sections:["kpis","command","knowledge","escalations","auth","contentApproval","outreach","negotiation","quotes","orders","money","priceList","catalog","master","channels","photo","video","taskBrain","diagnostic","revenueCard","opportunities","errorsCard","safety"]}
+};
+const DASH_ORDER=["sales","knowledge","approvals","content","media","revenue","system"];
+const dashEsc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
+DASH_SECTIONS.hubNav=`<section class="section"><div class="navcards">`+DASH_ORDER.map(k=>{const p=DASHBOARD_PAGES[k];return `<a class="navcard" href="${p.path}"><i>${p.icon}</i><b>${p.title}</b><span>${dashEsc(p.desc)}</span></a>`;}).join("")+`</div><div class="hint" style="margin-top:8px"><a href="/dashboard/all" style="color:#cfd8e6">☰ FULL VIEW</a> · every section on one page (original layout)</div></section>
+`;
+// Resolves /dashboard, /dashboard/<section> (optional trailing slash) to a page key; anything else → null.
+export function dashboardRoute(pathname){
+ const p=String(pathname||"").replace(/\/+$/,"")||"/";
+ if(p==="/dashboard")return "hub";
+ const m=p.match(/^\/dashboard\/([a-z]+)$/);
+ return m&&DASHBOARD_PAGES[m[1]]&&m[1]!=="hub"?m[1]:null;
+}
+function dashboardNav(page){
+ const cur=DASHBOARD_PAGES[page];
+ const links=DASH_ORDER.map(k=>`<a href="${DASHBOARD_PAGES[k].path}"${k===page?' class="cur" aria-current="page"':""}>${DASHBOARD_PAGES[k].icon} ${DASHBOARD_PAGES[k].title}</a>`).join("");
+ const full=`<a href="/dashboard/all"${page==="all"?' class="cur" aria-current="page"':""}>☰ FULL VIEW</a>`;
+ return `<nav class="dnav" aria-label="Dashboard sections">${page==="hub"?'<a href="/dashboard" class="cur" aria-current="page">🏠 DASHBOARD</a>':'<a href="/dashboard" class="back">← DASHBOARD</a>'}${links}${full}</nav>`
+  +(page==="hub"?"":`<div class="ptitle"><h1>${cur.icon} ${cur.title}</h1><span class="hint">${dashEsc(cur.desc)}</span></div>`);
+}
+export function liveDashboardHtml(route="hub"){
+ const page=DASHBOARD_PAGES[route]?route:"hub";
+ const body=DASHBOARD_PAGES[page].sections.map(k=>DASH_SECTIONS[k]).join("\n");
+ return DASH_HEAD.replace("<title>HAMZEHI SOCIAL AI · Command Center</title>",`<title>HAMZEHI SOCIAL AI · ${page==="hub"?"Command Center":DASHBOARD_PAGES[page].title}</title>`)
+  +"\n"+DASH_SECTIONS.masthead+dashboardNav(page)+"\n"+body+"\n"+DASH_SECTIONS.footer
+  +`\n<script>const DASH_PAGE=${JSON.stringify(page)};</script>`+DASH_SCRIPT;
 }

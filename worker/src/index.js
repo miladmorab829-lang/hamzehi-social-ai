@@ -1,4 +1,4 @@
-import { liveDashboardHtml } from "./live-dashboard-page.js";
+import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
@@ -10061,8 +10061,12 @@ await pollWeeklyVideoAutopilot(env);
   if (u.pathname.startsWith("/api/autonomy/")) return await handleAutonomy(env, req);
 
     try {
-      if (req.method === "GET" && u.pathname === "/dashboard") {
-        return new Response(repairMojibake(liveDashboardHtml()), {
+      // Dashboard hub + section pages (/dashboard, /dashboard/sales, …). Every page is the same static shell; data still comes only from
+      // the existing authenticated APIs. An unknown /dashboard/… path goes back to the hub.
+      if (req.method === "GET" && (u.pathname === "/dashboard" || u.pathname.startsWith("/dashboard/"))) {
+        const dashboardPage = dashboardRoute(u.pathname);
+        if (!dashboardPage) return Response.redirect(new URL("/dashboard", u).toString(), 302);
+        return new Response(repairMojibake(liveDashboardHtml(dashboardPage)), {
           status: 200,
           headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
         });
