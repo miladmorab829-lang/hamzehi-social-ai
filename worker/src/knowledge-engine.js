@@ -454,8 +454,8 @@ export function knowledgeCollections(proposals){
 // These members do not teach value recognition (no `multi`), so the context read for owner rules and relations stays as before.
 export const KNOWLEDGE_TYPED_CUSTOMER_FIELDS={
   "size.available_size":{concept:"available_sizes",labels:{fa:"سایزهای موجود",ar:"المقاسات المتوفرة",en:"Available sizes"},keywords:["سایز","سایزها","سایزهای","سایزهایی","اندازه","ابعاد","مقاس","مقاسات","المقاسات","قیاس","size","sizes"]},
-  "color.exterior":{concept:"exterior_colors",labels:{fa:"رنگ‌های بیرونی",ar:"الألوان الخارجية",en:"Exterior colors"},keywords:["رنگ","رنگها","رنگهای","بیرونی","بیرون","لون","اللون","الوان","ألوان","الألوان","خارجی","الخارجی","color","colors","colour","exterior"]},
-  "color.interior":{concept:"interior_colors",labels:{fa:"رنگ‌های داخلی",ar:"الألوان الداخلية",en:"Interior colors"},keywords:["رنگ","رنگها","رنگهای","داخلی","داخل","لون","اللون","الوان","ألوان","الألوان","الداخلی","color","colors","colour","interior"]},
+  "color.exterior":{concept:"exterior_colors",labels:{fa:"رنگ‌های بیرونی",ar:"الألوان الخارجية",en:"Exterior colors"},keywords:["رنگ","رنگها","رنگهای","بیرونی","بیرون","لون","اللون","الوان","ألوان","الألوان","الالوان","خارجی","الخارجی","خارجية","الخارجية","color","colors","colour","exterior"]},
+  "color.interior":{concept:"interior_colors",labels:{fa:"رنگ‌های داخلی",ar:"الألوان الداخلية",en:"Interior colors"},keywords:["رنگ","رنگها","رنگهای","داخلی","داخل","لون","اللون","الوان","ألوان","الألوان","الالوان","الداخلی","داخلية","الداخلية","color","colors","colour","interior"]},
   "color.combination":{concept:"color_combinations",labels:{fa:"ترکیب‌های رنگی",ar:"تركيبات الألوان",en:"Color combinations"},keywords:["ترکیب","ترکیبی","تركيب","تركيبة","combination","combo"]},
   "product.material":{concept:"standard_materials",labels:{fa:"جنس‌ها",ar:"الخامات",en:"Materials"},keywords:["جنس","جنسش","متریال","مواد","خامه","خامة","الخامة","مادة","material","materials"]},
   "product.category":{concept:"product_categories",labels:{fa:"دسته محصول",ar:"فئة المنتج",en:"Product category"},keywords:["دسته","دسته بندی","فئة","الفئة","category"]},
@@ -594,18 +594,17 @@ export function checkKnowledgeRelations(records,ctx,{entities=[],current=null}={
 }
 const QUESTION=/[?؟]|(?:^|\s)(?:چه|چی|چند|کدام|کدوم|آیا|هست|هستند|دارید|دارین|دارد|میشه|می شه|می شود|ممکنه|امکان|موجود|شنو|شنهو|اکو|هل|کم|ممکن|یوجد|متوفر|what|which|how|do you|can|is there|are there|available)(?:\s|$)/u;
 export function knowledgeLooksLikeQuestion(text){return QUESTION.test(knowledgeText(text));}
-// Which approved, NON-commercial fact groups does the customer's question touch? (owner keywords/labels/concept words)
-export function matchKnowledgeQuestion(message,records,{entities=[]}={}){
+// The approved, NON-commercial fact collections in scope, and the ones the customer's question touches (owner keywords/labels/concept words).
+const conceptWords=r=>[...r.envelope.keywords,...Object.values(r.envelope.labels),...r.concept.split("_").filter(w=>w.length>=3)];
+function questionGroups(message,records,entities){
   const text=knowledgeText(message);
-  if(!knowledgeLooksLikeQuestion(message))return [];
   const groups=new Map(),answerable=[];
   for(const r of records){
     const e=r.envelope;
     if(e.relation||e.conditions.length||e.effect||!["fact","capability","availability"].includes(e.kind)||ALIAS_CONCEPTS.has(r.concept))continue;
     if(knowledgeIsCommercial(r.concept,e)||!inScope(r,entities))continue;
     answerable.push(r);
-    const words=[...e.keywords,...Object.values(e.labels),...r.concept.split("_").filter(w=>w.length>=3)];
-    const hits=words.filter(w=>hasPhrase(text,w)).length;if(!hits)continue;
+    const hits=conceptWords(r).filter(w=>hasPhrase(text,w)).length;if(!hits)continue;
     const key=knowledgeText(r.entity_key)+"|"+r.concept,g=groups.get(key)||groups.set(key,{key,entity:r.entity_key,concept:r.concept,records:[],score:0}).get(key);
     g.records.push(r);g.score=Math.max(g.score,hits);
   }
@@ -613,17 +612,54 @@ export function matchKnowledgeQuestion(message,records,{entities=[]}={}){
   // keywords) still belongs to the same collection.
   for(const r of answerable){const g=groups.get(knowledgeText(r.entity_key)+"|"+r.concept);if(g&&!g.records.includes(r))g.records.push(r);}
   const specific=g=>Number(knowledgeText(g.entity)!=="global");
-  return [...groups.values()].sort((a,b)=>b.score-a.score||specific(b)-specific(a)).slice(0,2);
+  return {text,answerable,matched:[...groups.values()].sort((a,b)=>b.score-a.score||specific(b)-specific(a))};
+}
+// Which approved, NON-commercial fact groups does the customer's question touch? (the two best matches)
+export function matchKnowledgeQuestion(message,records,{entities=[]}={}){
+  if(!knowledgeLooksLikeQuestion(message))return [];
+  return questionGroups(message,records,entities).matched.slice(0,2);
+}
+// A COLOUR question is answered with every approved colour collection of the product — exterior, interior, combinations, ribbon …,
+// whatever the owner named them — not just the best-matching one; a role the customer names («بیرونی», «روبان», «الداخلية») narrows
+// it to that role. A collection is about colour when its concept or a label says so (data, not a list of roles). Words that only say
+// "colour" / "available" name no role:
+const COLOR_WORDS=new Set(["رنگ","رنگها","رنگهای","رنگهایی","رنگی","لون","اللون","الوان","ألوان","الألوان","الالوان","color","colors","colour","colours"].map(knowledgeText));
+const COLOR_FILLERS=new Set(["ها","های","هایی","ی","موجود","موجوده","الموجودة","الموجوده","متوفر","متوفرة","المتوفرة","available","the"].map(knowledgeText));
+const wordsOf=s=>knowledgeText(s).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+const colorCollection=g=>[g.concept,...g.records.flatMap(r=>Object.values(r.envelope.labels||{}))].some(name=>wordsOf(name).some(w=>COLOR_WORDS.has(w)));
+// The collections one customer question is answered with: the best match — or, for a colour question, all colour collections of the
+// product (+ business-wide), the product's own collection replacing a business-wide one of the same concept.
+export function knowledgeAnswerGroups(message,records,{entities=[]}={}){
+  if(!knowledgeLooksLikeQuestion(message))return [];
+  const {text,answerable,matched}=questionGroups(message,records,entities),top=matched[0];
+  if(top?!colorCollection(top):!wordsOf(message).some(w=>COLOR_WORDS.has(w)))return top?[top]:[];
+  const all=new Map();
+  for(const r of answerable){const key=knowledgeText(r.entity_key)+"|"+r.concept;(all.get(key)||all.set(key,{key,entity:r.entity_key,concept:r.concept,records:[],score:0}).get(key)).records.push(r);}
+  const specific=g=>knowledgeText(g.entity)!=="global",colors=[...all.values()].filter(colorCollection);
+  const scoped=colors.filter(g=>specific(g)||!colors.some(o=>specific(o)&&o.concept===g.concept));
+  const named=g=>g.records.flatMap(conceptWords).some(w=>hasPhrase(text,w)&&wordsOf(w).some(t=>!COLOR_WORDS.has(t)&&!COLOR_FILLERS.has(t)));
+  const chosen=scoped.some(named)?scoped.filter(named):scoped;
+  // The question's best match leads; the other collections follow in retrieval order, the product's own before business-wide ones.
+  const rank=g=>{const i=matched.findIndex(m=>m.key===g.key);return i<0?matched.length:i;};
+  return chosen.sort((a,b)=>rank(a)-rank(b)||Number(specific(b))-Number(specific(a)));
 }
 const langKey=language=>language==="Iraqi Arabic"?"ar":"fa";
+const answerLabel=(group,language)=>{const labels=group.records[0].envelope.labels||{};return labels[langKey(language)]||labels.fa||labels.ar||labels.en||group.concept.replace(/_/g," ");};
 export function composeKnowledgeAnswer(group,language){
-  const lang=langKey(language),labels=group.records[0].envelope.labels||{};
-  const label=labels[lang]||labels.fa||labels.ar||labels.en||group.concept.replace(/_/g," ");
+  const lang=langKey(language),label=answerLabel(group,language);
   // One value once, however often or in whichever form it was taught («5x5» by the router and «۵x۵» by the engine, or in two markets).
   const seen=new Set(),values=group.records.map(r=>r.envelope.value).filter(v=>{if(v===undefined||v===null)return false;const k=typeof v==="string"?knowledgeText(v):JSON.stringify(v);if(seen.has(k))return false;seen.add(k);return true;});
   if(!values.length)return null;
   if(values.every(v=>typeof v==="boolean")){const yes=values.every(Boolean);return lang==="ar"?`${label}: ${yes?"نعم":"لا"}.`:`${label}: ${yes?"بله":"خیر"}.`;}
   return `${label}: ${values.join("، ")}.`;
+}
+// Several collections → ONE reply, one «label: values.» per collection in the given order; collections shown under the same label are
+// one line, and a value appears once per line.
+export function composeKnowledgeAnswers(groups,language){
+  const lines=new Map();
+  for(const g of groups||[]){const key=knowledgeText(answerLabel(g,language)),line=lines.get(key);if(line)line.records.push(...g.records);else lines.set(key,{...g,records:[...g.records]});}
+  const parts=[...lines.values()].map(g=>composeKnowledgeAnswer(g,language)).filter(Boolean);
+  return parts.length?parts.join(" "):null;
 }
 export function composeRelationAnswer(match,language){
   const vals=Object.values(match.members).join(" + ");
