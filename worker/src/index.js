@@ -7537,9 +7537,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // The collections an answer is built from: the best match, or — for a colour question — every colour collection of the product.
   const kgAnswerGroups=kgIntentExcluded?[]:knowledgeAnswerGroups(row.message,kgScope,{entities:kgEntities.matched});
   let kgAnswer=null;
+  // A combination the customer names in THIS message that the owner never decided («سرمه‌ای با روبان طلایی؟») is never answered with a
+  // plain value list (that would read as "yes"); it goes to the owner (kgUnknownRelation below). Approved relations are answered first.
+  const kgUnknownNamedNow=kgRelations.unknown.some(u=>(u.fields||[]).length>0&&u.fields.every(f=>Object.hasOwn(kgCurrent,f)));
   if(!kgIntentExcluded&&!kgRelations.conflict&&kgRelations.matches.length&&Object.keys(kgCurrent).some(f=>Object.hasOwn(kgRelations.matches[0].members,f))){
     kgAnswer={kind:"relation",text:composeRelationAnswer(kgRelations.matches[0],language),ids:[kgRelations.matches[0].id]};
-  }else if(kgAnswerGroups.length){
+  }else if(kgAnswerGroups.length&&!kgUnknownNamedNow){
     const text=composeKnowledgeAnswers(kgAnswerGroups,language);
     if(text)kgAnswer={kind:"values",text,ids:kgAnswerGroups.flatMap(g=>g.records.map(r=>r.id))};
   }
