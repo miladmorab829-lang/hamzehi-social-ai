@@ -7529,7 +7529,7 @@ function salesAcceptPendingReply(language){return language==="Iraqi Arabic"?"ش�
 // offer reference in quote_id («chat-offer:<candidate>:<offer hash>»), so a redelivery or retry never adds a second row. The snapshot
 // is the owner-approved price behind the offer; nothing is confirmed, charged or shipped — the owner confirms it in ORDERS.
 const CHAT_OFFER_ACCEPTANCE_SOURCE="telegram_chat_offer";
-async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null}){
+async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null,customerName=null}){
   await ensureOrderStore(env);
   const offer=candidate.offer||{},price=candidate.price||{},ref=`chat-offer:${candidate.candidate_id}:${offer.offer_hash}`;
   if(!offer.offer_hash||!Number.isSafeInteger(offer.quantity)||offer.quantity<=0||!Number.isSafeInteger(price.unit_price_minor)||!Number.isSafeInteger(price.total_minor)||!price.currency||!["IRAN","ARAB"].includes(candidate.market))throw Error("Accepted offer snapshot is incomplete");
@@ -7540,14 +7540,42 @@ async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null
   const priceRef=price.price_version||price.price_item||null,discount=Number.isSafeInteger(price.discount?.amount_minor)?price.discount.amount_minor:0;
   const summary=`${product} × ${offer.quantity} · ${price.currency} ${price.unit_price_minor}/unit · total ${price.total_minor}${discount?` (discount ${discount})`:""} · customer accepted in chat`;
   await env.DB.prepare(`INSERT OR IGNORE INTO lead_orders(id,order_number,quote_id,lead_id,conversation_id,quote_outreach_id,acceptance_inbox_message_id,acceptance_provider_message_id,acceptance_source,customer_accepted_at,
-    market,pricing_mode,price_item_id,price_item_version,product,quantity,customization,destination,currency,unit_price_minor,subtotal_minor,discount_minor,shipping_minor,tax_minor,other_fees_minor,total_minor,moq,payment_terms,delivery_terms,approved_quote_text,status,created_at,updated_at)
-    VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,NULL,NULL,?,'order_candidate',?,?)`)
+    market,pricing_mode,price_item_id,price_item_version,product,quantity,customization,destination,currency,unit_price_minor,subtotal_minor,discount_minor,shipping_minor,tax_minor,other_fees_minor,total_minor,moq,payment_terms,delivery_terms,approved_quote_text,customer_name,status,created_at,updated_at)
+    VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,NULL,NULL,?,?,'order_candidate',?,?)`)
     .bind(id,orderNumber,ref,row.lead_id,row.conversation_id,row.id,row.external_id||null,CHAT_OFFER_ACCEPTANCE_SOURCE,acceptedAt,candidate.market,price.source==="si"?"si_price_version":"approved_price_list",priceRef?.id||null,priceRef?.version??null,
-      product,offer.quantity,req.configuration||null,destination||null,price.currency,price.unit_price_minor,price.subtotal_minor??price.unit_price_minor*offer.quantity,discount,price.total_minor,price.moq??null,summary,t,t).run();
+      product,offer.quantity,req.configuration||null,destination||null,price.currency,price.unit_price_minor,price.subtotal_minor??price.unit_price_minor*offer.quantity,discount,price.total_minor,price.moq??null,summary,customerName?String(customerName).slice(0,120):null,t,t).run();
   const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(ref).first();
   if(!order)throw Error("Order candidate could not be persisted");
   await auditOrderEventOnce(env,`candidate:${order.id}`,"lead_order_candidate_created","Customer accepted the approved chat offer: order candidate created",{order_id:order.id,order_number:order.order_number,offer_ref:ref,lead_id:order.lead_id,acceptance_inbox_message_id:order.acceptance_inbox_message_id,status:"order_candidate"});
   return {order,created:order.id===id};
+}
+// Repair for a deal that was ACCEPTED but has no order candidate (accepted before candidates were persisted, or a write failed):
+// the ONE order candidate is created from the exact accepted offer snapshot, with the original acceptance message, under the same
+// deterministic reference (an existing row is reused — never a duplicate); the pending owner approval is linked to it.
+async function salesBackfillAcceptedOrder(env,{leadId,conversationId,candidate,destination=null,customerName=null}){
+  const offer=candidate?.offer||{};if(!offer.accepted_in||!offer.offer_hash)return null;
+  const acceptance=await env.DB.prepare("SELECT id,external_id,created_at,lead_id,conversation_id FROM inbox_messages WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(offer.accepted_in,leadId,conversationId).first();
+  if(!acceptance)return null;
+  const {order}=await salesEnsureChatOrderCandidate(env,{row:acceptance,candidate,destination,customerName});
+  if(customerName&&!order.customer_name)await env.DB.prepare("UPDATE lead_orders SET customer_name=?,updated_at=? WHERE id=? AND status='order_candidate' AND customer_name IS NULL").bind(String(customerName).slice(0,120),now(),order.id).run();
+  await env.DB.prepare("UPDATE owner_decisions SET order_id=?,updated_at=? WHERE decision_type='ORDER_CANDIDATE_APPROVAL' AND conversation_id=? AND fingerprint=? AND (order_id IS NULL OR order_id='')").bind(order.id,now(),conversationId,`ORDER_CANDIDATE|${candidate.candidate_id}|${offer.offer_hash}`).run().catch(()=>null);
+  return order;
+}
+// Bounded consistency pass (cron, every 15 min; no message is ever sent): a PENDING order-candidate approval whose accepted offer has
+// no order candidate gets it, from the snapshot stored on that decision. Historical rows are only added to, never deleted or changed.
+async function reconcileAcceptedChatOffers(env,{limit=10}={}){
+  let pending=[];try{pending=((await env.DB.prepare("SELECT id,lead_id,conversation_id,known_json FROM owner_decisions WHERE decision_type='ORDER_CANDIDATE_APPROVAL' AND status='PENDING' AND (order_id IS NULL OR order_id='') ORDER BY created_at LIMIT ?").bind(limit).all()).results||[]);}catch{return {checked:0,created:0};}
+  let created=0;
+  for(const d of pending){
+    try{
+      let candidate=null;try{candidate=JSON.parse(d.known_json||"{}").order_candidate||null;}catch{}
+      if(!candidate?.offer?.accepted_in||!d.lead_id||!d.conversation_id)continue;
+      const facts=((await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND memory_key IN ('customer_name','destination')").bind(d.lead_id,d.conversation_id).all()).results||[]);
+      const fact=k=>{const f=facts.find(x=>x.memory_key===k);try{const v=f?JSON.parse(f.value_json):null;return typeof v==="string"&&v.trim()?v.trim():null}catch{return null}};
+      if(await salesBackfillAcceptedOrder(env,{leadId:d.lead_id,conversationId:d.conversation_id,candidate,destination:fact("destination"),customerName:fact("customer_name")}))created++;
+    }catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be reconciled as an order candidate",{decision_id:d.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+  }
+  return {checked:pending.length,created};
 }
 // A customer name given in answer to OUR name question («علی رضایی», «اسمم مریم هست», «فروشگاه نگین», «اسمي علي»). Questions,
 // greetings, thanks and long sentences are never taken as a name.
@@ -7577,7 +7605,7 @@ const salesOfferPrice=p=>p?{ref:p.price_version?.id||p.price_item?.id||null,unit
 // It carries the deal for the owner's existing quote approval; nothing is ordered, charged or sent here.
 async function salesOpenAcceptanceDecision(env,{row,candidate}){
   const fingerprint=`ORDER_CANDIDATE|${candidate.candidate_id}|${candidate.offer.offer_hash}`;
-  const result=await openDecision(env,{decision_type:"ORDER_CANDIDATE_APPROVAL",fingerprint,priority:15,lead_id:row.lead_id,conversation_id:row.conversation_id,market:candidate.market,product_key:candidate.product?.key||null,
+  const result=await openDecision(env,{decision_type:"ORDER_CANDIDATE_APPROVAL",fingerprint,priority:15,order_id:candidate.order_id||null,lead_id:row.lead_id,conversation_id:row.conversation_id,market:candidate.market,product_key:candidate.product?.key||null,
     question:"Customer accepted the approved offer: confirm this order candidate (approve the quote before anything is ordered or paid)",known:{order_candidate:candidate},missing:candidate.open_issues||[],
     recommendation:"Confirm through the existing quote approval (prepare, approve and send the quote). Nothing is ordered, charged or sent automatically.",
     risk:"Order candidate only: not an order and not a payment.",payload:{resolution:"order_candidate",candidate_id:candidate.candidate_id,offer_hash:candidate.offer.offer_hash}});
@@ -7830,18 +7858,21 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // naming another approved product (or an ambiguous one) in this message is a change too.
   const productNamedInMessage=["current_message","clarification"].includes(pricing?.resolution?.basis)&&(pricing.status==="product_ambiguous"||pricing.product?.key!==dealCandidate?.product?.key);
   const dealChanged=!!dealCandidate&&!!pricing&&(productNamedInMessage||newFacts.some(f=>["requested_quantity","product_interest","requested_size","exterior_color","interior_color","printing","branding"].includes(f)))&&!(dealCandidate.offer?.offer_hash&&currentOfferHash===dealCandidate.offer.offer_hash);
+  // «ثبت کنید» again on the SAME, unchanged accepted deal is already registered: it continues the order details (never re-quoted,
+  // never demoted to a new offer). A changed deal or a changed approved price is re-offered as before.
+  const acceptedAgain=intent==="accepted"&&!formalQuoteReply&&dealCandidate?.status==="accepted"&&!!dealCandidate.offer?.offer_hash&&!dealChanged&&(!currentOfferHash||currentOfferHash===dealCandidate.offer.offer_hash);
   const answeringPriceQuestion=["clarify_product","ask_attribute"].includes(lastAction)||(lastAction==="answer_price"&&newFacts.includes("requested_quantity"))||(lastAction==="ask_destination"&&!!conversationMarket);
   if(orderStatusAsked){action="order_status";}
   else if(intent==="rejected"){action="acknowledge_rejection";}
   else if(acceptance&&offerFresh){action="accept_offer";}
   // An acceptance without an open offer for exactly this deal first gets that offer (the customer confirms the exact approved price).
-  else if((acceptance||(intent==="accepted"&&!formalQuoteReply))&&pricedNow&&priceHandled()){}
+  else if(!acceptedAgain&&(acceptance||(intent==="accepted"&&!formalQuoteReply))&&pricedNow&&priceHandled()){}
   // The approved answer to an objection is given once; asked again (e.g. «more discount?»), anything beyond it is the owner's decision.
   else if(objectionKind&&pricedNow&&(negotiation=salesNegotiationReply(objectionKind,pricing,language))&&!recentReplies.some(r=>salesBrainClaimText(r)===salesBrainClaimText(negotiation.parts.join(" ")))){action=negotiation.action;}
   else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price")escalate("commercial_owner","commercial_owner_review_required");
   else if(intent==="asks_moq"){const moqFact=knowledge.filter(x=>x.domain==="quantity"&&x.attribute==="moq").sort((a,b)=>Number(b.market===conversationMarket)-Number(a.market===conversationMarket))[0];let moqValue=null;try{moqValue=JSON.parse(moqFact?.value_json||"null");}catch{}if(!(Number.isSafeInteger(moqValue)&&moqValue>0)&&pricedNow&&Number.isSafeInteger(pricing.moq))moqValue=pricing.moq;if(Number.isSafeInteger(moqValue)&&moqValue>0){action="answer_moq";answerNumbers.push(moqValue);}else escalate("moq_owner","approved_moq_missing");}
   else if(intent==="quote_requested"){action="quote";needsOwner=!known.product_or_model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
-  else if(intent==="accepted"){action="accepted";}
+  else if(intent==="accepted"&&!acceptedAgain){action="accepted";}
   else if(intent==="asks_price"&&priceHandled()){}
   // An open owner decision blocks only ITS issue. A bare follow-up about it ("any news?") waits on it; any other message — a safe
   // unrelated question, a new detail — is handled normally, and reaches the same escalation again only if it raises the same
@@ -7876,10 +7907,18 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     else if(dealCandidate?.status==="accepted"&&!dealChanged){
       // Only a plain reply to OUR name question is a name: not a message that states a deal detail, has digits or is a request.
       const nameAnswer=priorDecisions[0]?.asked==="customer_name"&&!statedDeal.length&&intent==="other"&&!/[0-9۰-۹٠-٩]/u.test(String(row.message||""))&&!SALES_NOT_A_NAME.test(salesNormal(row.message))?salesCustomerName(row.message):null;
-      if(nameAnswer){await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"customer_name",memory_key:"customer_name",value:nameAnswer}});memory.customer_name=nameAnswer;}
+      // A deal accepted before order candidates were persisted (or whose write failed silently) gets its ONE order candidate now,
+      // from the exact accepted offer (same deterministic reference → never a duplicate), and the owner decision is linked to it.
+      if(!dealCandidate.order_id&&dealCandidate.offer?.accepted_in){
+        try{const accepted=await salesBackfillAcceptedOrder(env,{leadId:row.lead_id,conversationId:row.conversation_id,candidate:dealCandidate,destination:memory.destination||null,customerName:memory.customer_name||null});if(accepted){dealCandidate.order_id=accepted.id;dealCandidate.order_number=accepted.order_number;}}
+        catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be backfilled as an order candidate",{lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+      }
+      if(nameAnswer){await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"customer_name",memory_key:"customer_name",value:nameAnswer}});memory.customer_name=nameAnswer;
+        // The SAME order candidate carries the name (never a second candidate).
+        if(dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET customer_name=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(nameAnswer.slice(0,120),now(),dealCandidate.order_id).run().catch(()=>null);}
       if(memory.destination&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET destination=?,updated_at=? WHERE id=? AND status='order_candidate' AND (destination IS NULL OR destination='')").bind(String(memory.destination).slice(0,120),now(),dealCandidate.order_id).run().catch(()=>null);
       const nextDetail=!memory.customer_name?"customer_name":!memory.destination?"destination":null,detailsAsked=SALES_DETAILS_PROMPT.test(salesNormal(row.message))||SALES_DETAILS_PROMPT.test(String(row.message||""));
-      if(!nextDetail&&!nameAnswer&&!detailsAsked){if(salesThanksOnly(row.message))action="thanks";else{action="wait_for_owner";waitingOn=null;}}
+      if(!nextDetail&&!nameAnswer&&!detailsAsked&&!acceptedAgain){if(salesThanksOnly(row.message))action="thanks";else{action="wait_for_owner";waitingOn=null;}}
       else{action="order_details";askedField=nextDetail;orderDetails={nameRecorded:!!nameAnswer,customerAsked:detailsAsked};}
     }
     // A plain greeting or thanks is answered as such — never with an old holding text.
@@ -7931,7 +7970,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(action==="accept_offer"){
       // The acceptance becomes a REAL order candidate first; only a successful write lets the reply say «ثبت شد».
       let chatOrder=null;
-      try{chatOrder=(await salesEnsureChatOrderCandidate(env,{row,candidate,destination:memory.destination||null})).order;candidate.order_id=chatOrder.id;candidate.order_number=chatOrder.order_number;}
+      try{chatOrder=(await salesEnsureChatOrderCandidate(env,{row,candidate,destination:memory.destination||null,customerName:memory.customer_name||null})).order;candidate.order_id=chatOrder.id;candidate.order_number=chatOrder.order_number;}
       catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be recorded as an order candidate",{lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
       if(chatOrder){
         try{await ensureSalesIntelligenceStore(env);acceptanceDecision=await salesOpenAcceptanceDecision(env,{row,candidate});candidate.decision_id=acceptanceDecision?.id||null;}
@@ -8219,7 +8258,8 @@ async function ensureOrderStore(env){
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_lead ON lead_orders(lead_id)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_conversation ON lead_orders(conversation_id)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_orders_status ON lead_orders(status)").run();
-  for(const column of ["unit_cost_minor INTEGER","shipping_cost_minor INTEGER","other_cost_minor INTEGER","carrier TEXT","tracking_reference TEXT","shipped_at TEXT","delivered_at TEXT"]){
+  // customer_name: the name the customer gave for a chat-accepted order candidate (additive, nullable).
+  for(const column of ["unit_cost_minor INTEGER","shipping_cost_minor INTEGER","other_cost_minor INTEGER","carrier TEXT","tracking_reference TEXT","shipped_at TEXT","delivered_at TEXT","customer_name TEXT"]){
     try{await env.DB.prepare(`ALTER TABLE lead_orders ADD COLUMN ${column}`).run();}
     catch(error){if(!/duplicate column|already exists/i.test(String(error?.message||error)))throw error;}
   }
@@ -10149,6 +10189,8 @@ export default {
     if (event?.cron === "*/15 * * * *") {
     // Bounded stale customer-image recovery (max 3 rows per tick, attempt-capped, fail-closed); never drafts or sends.
     ctx.waitUntil((async()=>{ try { await recoverStaleCustomerMedia(env,{limit:3}); } catch {} })());
+    // Bounded order-candidate consistency pass (accepted chat offers without an order candidate); never sends anything.
+    ctx.waitUntil((async()=>{ try { await reconcileAcceptedChatOffers(env,{limit:10}); } catch {} })());
     if (!(await autonomyMasterGate(env))) return;
     ctx.waitUntil((async()=>{
         await ensureWebsiteGrowthStore(env);
