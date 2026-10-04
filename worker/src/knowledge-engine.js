@@ -169,6 +169,33 @@ function collectionItems(text){
   const items=listItemsOf(m[2]);
   return items.length>=2&&items.length<=KNOWLEDGE_LIMITS.fanout&&items.every(x=>x.length<=60&&x.split(/\s+/).length<=4&&!/[!؟?]|\.(?:\s|$)/u.test(x))?items:null;
 }
+// Market scope inside extracted text counts ONLY as explicit market context — the same forms the command router uses: a trailing
+// «… برای عراق», «… for Iraq», «… (ایران)», «… (برای عراق)», «… بازار عراق», «… فقط عراق», «… مخصوص عراق», «… للعراق». A product or
+// value that merely contains or ends with a country word or an adjective («جعبه طرح ایران», «طرح عربی», «ارسال به عراق») is kept
+// whole, in its normal market.
+const MARKET_WORDS={"ایران":"IRAN","ايران":"IRAN","iran":"IRAN","لإيران":"IRAN","لايران":"IRAN","عراق":"ARAB","العراق":"ARAB","للعراق":"ARAB","iraq":"ARAB","عربی":"ARAB","عربي":"ARAB","عرب":"ARAB","arab":"ARAB"};
+const VALUE_MARKET_WORD="(?:ایران|ايران|عراق|العراق|iran|iraq|عربی|عربي|عرب|arab)";
+// Country names only after «فقط»: «کاتالوگ فقط عربی» is a language, not a market.
+const VALUE_MARKET_COUNTRY="(?:ایران|ايران|عراق|العراق|iran|iraq)";
+const VALUE_MARKET_PHRASE=new RegExp("(?:^|[\\s،,(])((?:(?:فقط|only|just)\\s+)?(?:برای|for(?:\\s+the)?|مخصوص|ویژه)\\s+(?:(?:بازار|market)\\s+)?"+VALUE_MARKET_WORD+"(?:\\s+market)?|(?:فقط|only)\\s+"+VALUE_MARKET_COUNTRY+"|(?:بازار|ل?سوق|market)\\s+"+VALUE_MARKET_WORD+"|(?:iran|iraq|arab)\\s+market|\\(\\s*"+VALUE_MARKET_WORD+"\\s*\\)|للعراق|لإيران|لايران)[\\s)]*$","iu");
+const marketOfPhrase=phrase=>MARKET_WORDS[(String(phrase||"").match(/لإيران|لايران|للعراق|العراق|ایران|ايران|عراق|عربی|عربي|عرب|iran|iraq|arab/iu)||[""])[0].toLowerCase()]||null;
+// A key that is ONLY a country name is market-wide knowledge (no product is called just «عراق»).
+const ENTITY_ONLY_COUNTRY=/^\s*(?:ایران|ايران|عراق|العراق|iran|iraq)\s*$/iu;
+function splitEntityMarket(key){
+  const text=String(key||"");
+  if(ENTITY_ONLY_COUNTRY.test(text))return {key:"",market:marketOfPhrase(text)};
+  const m=text.match(VALUE_MARKET_PHRASE);
+  if(!m)return null;
+  return {key:text.slice(0,m.index).replace(/[\s،,(:\-–—]+$/u,"").trim(),market:marketOfPhrase(m[1])};
+}
+function splitValueMarket(value){
+  if(typeof value!=="string")return null;
+  const m=value.match(VALUE_MARKET_PHRASE);
+  if(!m)return null;
+  const rest=value.slice(0,m.index).replace(/[\s،,(:\-–—]+$/u,"").trim();
+  if(!rest)return null;
+  return {value:rest,market:marketOfPhrase(m[1])};
+}
 function ambiguityText(a){
   const s=typeof a==="string"?a:a&&typeof a==="object"?String(a.note??a.reason??a.question??a.about??""):"";
   return cleanString(s,200);
@@ -188,13 +215,18 @@ function normalizeOne(source,defaultMarket,text=""){
   const doubts=(Array.isArray(raw.ambiguities)?raw.ambiguities:[]).slice(0,5).map(ambiguityText).filter(Boolean);
   const notes=[];
   const entityRaw=raw.entity&&typeof raw.entity==="object"?raw.entity:{};
-  let entityKey=cleanString(entityRaw.key??raw.entity_key??"",120)||"";const lowered=knowledgeText(entityKey);
+  let entityKey=cleanString(entityRaw.key??raw.entity_key??"",120)||"";
+  // A market phrase copied into the key («انگشتر کوچک برای عراق») is the record's market (applied below), never part of the product.
+  const keyMarket=splitEntityMarket(entityKey);if(keyMarket)entityKey=keyMarket.key;
+  const lowered=knowledgeText(entityKey);
   let entityType=["product","model","business"].includes(entityRaw.type)?entityRaw.type:null;
-  if(["global","all","business","همه","کل"].includes(lowered)||(!entityKey&&entityType==="business")){entityKey="global";entityType="business";}
+  if(["global","all","business","همه","کل"].includes(lowered)||(!entityKey&&(entityType==="business"||keyMarket))){entityKey="global";entityType="business";}
   else if(!entityKey)issues.push("entity_missing");
   else if(!entityType||entityType==="business")entityType="product";
   let market=null;
   if(raw.market!==null&&raw.market!==undefined&&raw.market!==""){market=String(raw.market).toUpperCase();if(!KNOWLEDGE_MARKETS.has(market)){issues.push("invalid_market");market=null;}}
+  // The owner's own market words decide the scope; a different explicit market is a conflict for the owner, never a silent pick.
+  if(keyMarket?.market){if(market&&market!==keyMarket.market)issues.push("market_conflict");else market=keyMarket.market;}
   let typed=raw.typed&&typeof raw.typed==="object"?{domain:knowledgeIdent(raw.typed.domain,40),attribute:knowledgeIdent(raw.typed.attribute,40)}:null;
   // ROLE SCOPING: a typed field that stands for a role (exterior / interior / …) is trusted only when the owner's own words name
   // that role. Otherwise the model guessed one: the statement stays a generic fact under the owner's own collection name — the
@@ -212,6 +244,19 @@ function normalizeOne(source,defaultMarket,text=""){
   if(!typed&&typeof raw.value==="string"&&text&&["fact","capability","availability"].includes(String(raw.kind||"").toLowerCase())){
     const owned=collectionItems(text),parts=listItemsOf(raw.value);
     if(owned&&parts.length>=2&&parts.length===owned.length&&parts.every(x=>owned.some(y=>knowledgeText(y)===knowledgeText(x))))raw={...raw,value:parts};
+  }
+  // A market phrase left inside the values (collection members, a single value, a typed value or a relation side) is stripped from
+  // them and becomes the record's market — the owner's own words, so the selected market never replaces it; two different markets,
+  // or one that contradicts an explicit market, is a conflict for the owner.
+  const valueMarkets=new Set(),cleanValue=v=>{const split=splitValueMarket(v);if(!split)return v;if(split.market)valueMarkets.add(split.market);return split.value;};
+  if(typeof raw.value==="string"||Array.isArray(raw.value))raw={...raw,value:Array.isArray(raw.value)?raw.value.map(cleanValue):cleanValue(raw.value)};
+  if(raw.relation&&typeof raw.relation==="object"&&raw.relation.members&&typeof raw.relation.members==="object"&&!Array.isArray(raw.relation.members))
+    raw={...raw,relation:{...raw.relation,members:Object.fromEntries(Object.entries(raw.relation.members).map(([field,v])=>[field,Array.isArray(v)?v.map(cleanValue):cleanValue(v)]))}};
+  if(valueMarkets.size>1)issues.push("market_conflict");
+  else if(valueMarkets.size===1){
+    const scoped=[...valueMarkets][0];
+    if(market&&market!==scoped)issues.push("market_conflict");
+    else{market=scoped;notes.push("market_scope: "+scoped+" taken from the owner's words in the value");}
   }
   const confidence=typeof raw.confidence==="number"&&raw.confidence>=0&&raw.confidence<=1?raw.confidence:null;
   const base={operation:operation||"ADD",entity_type:entityType||"business",entity_key:entityKey||"unresolved",market:market||defaultMarket,confidence,issues:[...issues],notes:[...notes]};
@@ -400,11 +445,39 @@ export function knowledgeCollections(proposals){
 }
 
 // ---- retrieval ----
+// Customer-facing TYPED fields — written by the owner command router, the owner form or a typed engine record — are read through the
+// SAME retrieval as engine records: each approved value becomes one member of the collection named here, so the Sales Brain resolves
+// the product, matches the question, words the answer and keeps the evidence exactly as for an engine-taught collection, whichever way
+// the fact was created. Data, not logic: another customer-facing typed field is one more entry. Absent on purpose (never a customer
+// answer): prices, MOQ, payment, shipping, discounts, production, sales/negotiation rules, free-text rule fields, and printing (the
+// router stores the owner's whole sentence there). product.name only names the product: an alias that resolves it, never an answer.
+// These members do not teach value recognition (no `multi`), so the context read for owner rules and relations stays as before.
+export const KNOWLEDGE_TYPED_CUSTOMER_FIELDS={
+  "size.available_size":{concept:"available_sizes",labels:{fa:"سایزهای موجود",ar:"المقاسات المتوفرة",en:"Available sizes"},keywords:["سایز","سایزها","سایزهای","سایزهایی","اندازه","ابعاد","مقاس","مقاسات","المقاسات","قیاس","size","sizes"]},
+  "color.exterior":{concept:"exterior_colors",labels:{fa:"رنگ‌های بیرونی",ar:"الألوان الخارجية",en:"Exterior colors"},keywords:["رنگ","رنگها","رنگهای","بیرونی","بیرون","لون","اللون","الوان","ألوان","الألوان","خارجی","الخارجی","color","colors","colour","exterior"]},
+  "color.interior":{concept:"interior_colors",labels:{fa:"رنگ‌های داخلی",ar:"الألوان الداخلية",en:"Interior colors"},keywords:["رنگ","رنگها","رنگهای","داخلی","داخل","لون","اللون","الوان","ألوان","الألوان","الداخلی","color","colors","colour","interior"]},
+  "color.combination":{concept:"color_combinations",labels:{fa:"ترکیب‌های رنگی",ar:"تركيبات الألوان",en:"Color combinations"},keywords:["ترکیب","ترکیبی","تركيب","تركيبة","combination","combo"]},
+  "product.material":{concept:"standard_materials",labels:{fa:"جنس‌ها",ar:"الخامات",en:"Materials"},keywords:["جنس","جنسش","متریال","مواد","خامه","خامة","الخامة","مادة","material","materials"]},
+  "product.category":{concept:"product_categories",labels:{fa:"دسته محصول",ar:"فئة المنتج",en:"Product category"},keywords:["دسته","دسته بندی","فئة","الفئة","category"]},
+  "product.use_case":{concept:"use_cases",labels:{fa:"کاربردها",ar:"الاستخدامات",en:"Use cases"},keywords:["کاربرد","کاربردها","کاربردش","استخدام","الاستخدام","usage"]},
+  "product.configuration":{concept:"configurations",labels:{fa:"پیکربندی‌ها",ar:"التكوينات",en:"Configurations"},keywords:["پیکربندی","چیدمان","تكوين","التكوين","configuration","layout"]},
+  "product.name":{concept:"name",labels:{},keywords:[]}
+};
+export const KNOWLEDGE_TYPED_CUSTOMER_DOMAINS=[...new Set(Object.keys(KNOWLEDGE_TYPED_CUSTOMER_FIELDS).map(k=>k.split(".")[0]))];
 export function hydrateKnowledgeRecords(rows){
   const out=[];
-  for(const r of rows||[]){let env=null;try{env=JSON.parse(r.value_json);}catch{continue;}
-    if(!env||env.schema!==KNOWLEDGE_SCHEMA)continue;
-    out.push({id:r.id,version:r.version,entity_key:r.entity_key,entity_type:r.entity_type,concept:r.attribute,market:r.market,member_key:r.member_key,envelope:env});}
+  for(const r of rows||[]){let value=null;try{value=JSON.parse(r.value_json);}catch{continue;}
+    if(r.domain!==undefined&&r.domain!==KNOWLEDGE_DOMAIN){
+      const spec=KNOWLEDGE_TYPED_CUSTOMER_FIELDS[r.domain+"."+r.attribute];
+      // One plain value per typed member; a structured member (an object) has no customer wording and is left out.
+      const v=spec?scalarOf(value):undefined;
+      if(v===undefined||v===null||v===""||typeof v==="boolean")continue;
+      out.push({id:r.id,version:r.version,entity_key:r.entity_key,entity_type:r.entity_type,concept:spec.concept,market:r.market,member_key:r.member_key,typed_field:r.domain+"."+r.attribute,
+        envelope:{schema:KNOWLEDGE_SCHEMA,kind:"fact",priority:50,conditions:[],keywords:[...spec.keywords],labels:{...spec.labels},value:v}});
+      continue;
+    }
+    if(!value||value.schema!==KNOWLEDGE_SCHEMA)continue;
+    out.push({id:r.id,version:r.version,entity_key:r.entity_key,entity_type:r.entity_type,concept:r.attribute,market:r.market,member_key:r.member_key,envelope:value});}
   return out;
 }
 export function knowledgeEntityForms(value){
@@ -546,7 +619,8 @@ const langKey=language=>language==="Iraqi Arabic"?"ar":"fa";
 export function composeKnowledgeAnswer(group,language){
   const lang=langKey(language),labels=group.records[0].envelope.labels||{};
   const label=labels[lang]||labels.fa||labels.ar||labels.en||group.concept.replace(/_/g," ");
-  const values=[...new Set(group.records.map(r=>r.envelope.value).filter(v=>v!==undefined&&v!==null))];
+  // One value once, however often or in whichever form it was taught («5x5» by the router and «۵x۵» by the engine, or in two markets).
+  const seen=new Set(),values=group.records.map(r=>r.envelope.value).filter(v=>{if(v===undefined||v===null)return false;const k=typeof v==="string"?knowledgeText(v):JSON.stringify(v);if(seen.has(k))return false;seen.add(k);return true;});
   if(!values.length)return null;
   if(values.every(v=>typeof v==="boolean")){const yes=values.every(Boolean);return lang==="ar"?`${label}: ${yes?"نعم":"لا"}.`:`${label}: ${yes?"بله":"خیر"}.`;}
   return `${label}: ${values.join("، ")}.`;

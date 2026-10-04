@@ -1,6 +1,6 @@
 import { liveDashboardHtml } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
-import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswer, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords } from "./knowledge-engine.js";
+import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswer, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -5851,12 +5851,13 @@ function isReadOnlyStatusCommand(raw){
   if(READ_ONLY_CONSTRAINTS.test(command))return true;
   return READ_ONLY_REPORT_TERMS.test(command)&&!OPERATIONAL_ACTION_TERMS.test(affirmative);
 }
-// The market the command itself names, or null. A command that names none keeps the market the owner selected (never a silent GLOBAL).
+// The market the command itself WRITES — explicit market context only (KNOWLEDGE_MARKET_EXPLICIT / a leading «عراق:» label) — or null.
+// A word that merely contains or is a country/adjective («طرح عربی», «ایران‌خودرو», «ارسال به عراق») writes no market. Two different
+// written markets are a conflict for the owner. A command that writes none keeps the market the owner selected.
 function knowledgeCommandMarket(raw){
-  const s=raw.toLowerCase();
-  if(/(?:ایران|\biran\b)/i.test(s))return "IRAN";
-  if(/(?:عراق|\biraq\b|عربی|عرب|\barab\b)/i.test(s))return "ARAB";
-  return null;
+  const found=new Set();
+  for(const m of String(raw||"").matchAll(KNOWLEDGE_MARKET_EVIDENCE))found.add(/ایران|ايران|لإيران|لايران|iran/i.test(m[1]||m[2]||"")?"IRAN":"ARAB");
+  return {market:found.size===1?[...found][0]:null,conflict:found.size>1};
 }
 // The words by which the fixed router recognises a field. ONE table serves three jobs — it picks the domain in parseSalesKnowledgeCommand,
 // it tells a model name from the field it was given with, and it rejects a name that still holds one — so the name capture can no longer
@@ -5883,8 +5884,28 @@ const KNOWLEDGE_FIELD_WORD_SCAN=KNOWLEDGE_FIELD_LIST.map(re=>new RegExp(re.sourc
 // reads plus from/to: the old English-only name pattern listed them but never ran (the Persian one also matches "model"), so
 // "for model X add size 5x5" captured "X add size 5x5".
 const KNOWLEDGE_NAME_STOPS=/(?:را|رو|هم|رنگ|color|لون|موک|moq|حداقل|از|به|اضافه|تغییر|اصلاح|جایگزین|حذف|غیرفعال|delete|replace|update|deactivate|(?:add|change|correct|remove|disable|expand|teach|also|too|from|to)\b)/i;
-// The text after «مدل» up to the first of them (matched from the start of a word, as before).
-const KNOWLEDGE_MODEL_NAME=new RegExp("(?:برای\\s*)?(?:مدل(?:\\s+(?:جعبه|box))?|model|موديل|الموديل)\\s+(.+?)(?=\\s+"+KNOWLEDGE_NAME_STOPS.source+"|$)","i");
+// ---- Market scope in owner commands: ONLY explicit market context counts ----
+// «برای عراق», «برای بازار ایران», «بازار عراق», «سوق العراق», «للعراق», «for Iraq», «Iraq market», «فقط عراق», «مخصوص عراق», any of
+// them in brackets («(عراق)», «(برای عراق)»), or a leading label «عراق:». A bare or embedded word — «طرح عربی», «ایران‌خودرو»,
+// «طرح ایران», «X عربستان», «ارسال به عراق» — is product/value text, never a market. Detection (knowledgeCommandMarket), the end of a
+// model name and the market phrase removed from values all use THIS one definition, so a word is always either content or scope:
+// never both, never lost.
+const KNOWLEDGE_MARKET_WORD="(?:ایران|ايران|عراق|العراق|iran|iraq|عربی|عربي|عرب|arab)";
+// Country names only: after «فقط» an adjective is usually a language («کاتالوگ فقط عربی»), not a market.
+const KNOWLEDGE_MARKET_COUNTRY="(?:ایران|ايران|عراق|العراق|iran|iraq)";
+const KNOWLEDGE_MARKET_CONTEXT="(?:(?:فقط|only|just)\\s+)?(?:برای|for(?:\\s+the)?|مخصوص|ویژه)\\s+(?:(?:بازار|market)\\s+)?"+KNOWLEDGE_MARKET_WORD+"(?:\\s+market)?|(?:فقط|only)\\s+"+KNOWLEDGE_MARKET_COUNTRY+"|(?:بازار|ل?سوق|market)\\s+"+KNOWLEDGE_MARKET_WORD+"|(?:iran|iraq|arab)\\s+market|للعراق|لإيران|لايران";
+const KNOWLEDGE_MARKET_EXPLICIT="(?:\\(\\s*(?:"+KNOWLEDGE_MARKET_CONTEXT+"|"+KNOWLEDGE_MARKET_WORD+")\\s*\\)|"+KNOWLEDGE_MARKET_CONTEXT+")(?![\\u0600-\\u06FF\\u200C\\u200DA-Za-z0-9])";
+const KNOWLEDGE_MARKET_LABEL="^\\s*"+KNOWLEDGE_MARKET_COUNTRY+"\\s*[:：]";
+// A market phrase ends a model name too: «برای مدل X برای عراق …» is model X in the ARAB market.
+const KNOWLEDGE_MARKET_PHRASE=KNOWLEDGE_MARKET_EXPLICIT;
+// …and is scope, never part of an attribute VALUE: «سایز 5x5 برای عراق» is the size «5x5» in the ARAB market (read from the full
+// command). A market name that IS content (a destination such as «ارسال به عراق») is no market phrase, so it stays in the value.
+const KNOWLEDGE_VALUE_MARKET_PHRASE=new RegExp("(^|\\s)"+KNOWLEDGE_MARKET_EXPLICIT+"|"+KNOWLEDGE_MARKET_LABEL,"gi");
+const KNOWLEDGE_MARKET_EVIDENCE=new RegExp("(?:^|\\s)("+KNOWLEDGE_MARKET_EXPLICIT+")|("+KNOWLEDGE_MARKET_LABEL+")","gi");
+// Only the removed phrase is touched: right before punctuation its leading space goes too («قانون فروش برای عراق:» → «قانون فروش:»).
+function knowledgeWithoutMarketPhrases(text){return String(text||"").replace(KNOWLEDGE_VALUE_MARKET_PHRASE,(match,lead="",offset,all)=>/^\s*[:،,.؛;!؟?]/.test(all.slice(offset+match.length))?"":lead).replace(/\s+/g," ").trim();}
+// The text after «مدل» up to the first of them or a market phrase (matched from the start of a word, as before).
+const KNOWLEDGE_MODEL_NAME=new RegExp("(?:برای\\s*)?(?:مدل(?:\\s+(?:جعبه|box))?|model|موديل|الموديل)\\s+(.+?)(?=\\s+(?:"+KNOWLEDGE_NAME_STOPS.source+"|"+KNOWLEDGE_MARKET_PHRASE+")|$)","i");
 // A capture that BEGINS with one of them as a whole word is no name at all («برای مدل also add …»).
 const KNOWLEDGE_NAME_IS_STOP=new RegExp("^"+KNOWLEDGE_NAME_STOPS.source+"$","i");
 function knowledgeCommandEntity(raw){
@@ -5931,7 +5952,7 @@ const LEGACY_LIST_VALUE=/[،,؛;]|(?:^|\s)(?:و|یا|and|or)(?:\s|$)/u;
 // A plain color value has no link, target or product word inside it ("مشکی", "navy", "مشکی-طلایی" — not "مشکی با روبان طلایی").
 const LEGACY_VALUE_STRUCTURE=/(?:^|\s)(?:با|فقط|روی|بدون|برای|به|از|مدل|جعبه|باکس|with|only|on|without|for|to|from|model|box)(?:\s|$)/u;
 // Every word a simple fixed color command may contain besides its role, value and «مدل X» target (normalized by knowledgeText).
-const LEGACY_COLOR_COMMAND_WORDS=new Set(["را","رو","هم","به","برای","لطفا","یک","اضافه","کن","کنید","بکن","شود","بشه","ثبت","داریم","رنگ","رنگها","ها","های","لون","الوان","ألوان","the","to","for","of","a","an","please","also","too","add","expand","أضف","اضف","color","colour","colors","colours","ایران","iran","عراق","iraq","العراق","عرب","عربی","arab","بازار","market"]);
+const LEGACY_COLOR_COMMAND_WORDS=new Set(["را","رو","هم","به","برای","لطفا","یک","اضافه","کن","کنید","بکن","شود","بشه","ثبت","داریم","رنگ","رنگها","ها","های","لون","الوان","ألوان","the","to","for","of","a","an","please","also","too","add","expand","أضف","اضف","color","colour","colors","colours"]);
 const LEGACY_MODEL_MARKERS=["مدل","model","مودیل","المودیل","للمودیل","للمودل","جعبه","box"];
 function legacyColorCommandUnderstood(command,parsed){
   const words=v=>knowledgeText(v).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
@@ -5945,7 +5966,8 @@ const GENERIC_COMMAND_REASONS={
   color_role_not_named:"No color role (exterior, interior or combination) was named, so this is generic business knowledge for the knowledge engine; it is never assumed to be exterior. Nothing was changed.",
   list_of_values:"Several values were given; a list is taught through the knowledge engine as one collection. Nothing was changed.",
   not_fully_understood:"This command says more than the fixed router understands (for example a product named without «مدل», a collection name or a linked value); it is taught through the knowledge engine. Nothing was changed.",
-  model_not_clear:"The model name could not be told apart from the field it was given with (no model was named, or a field word such as size, printing or shipping sits inside the name), so no product was guessed; it is taught through the knowledge engine. Nothing was changed."
+  model_not_clear:"The model name could not be told apart from the field it was given with (no model was named, or a field word such as size, printing or shipping sits inside the name), so no product was guessed; it is taught through the knowledge engine. Nothing was changed.",
+  market_not_clear:"The command writes more than one market; it is taught through the knowledge engine so each market stays separate. Nothing was changed."
 };
 // Generic business knowledge goes to the generic engine (AI extraction → validated proposals → owner review). Without that engine the
 // owner gets a clarification: the fixed router never guesses a role, a list or a target for it.
@@ -5966,9 +5988,10 @@ export function parseSalesKnowledgeCommand(raw,{market:selected}={}){
     return {recognized:true,confidence:0.3,error:"An explicit knowledge action is required (add, expand, update, replace, correct, deactivate, delete or teach); nothing was changed"};
   }
   const entity=knowledgeCommandEntity(command),s=command.toLowerCase();
-  // Market: the one the command names, else the one the owner selected for it, else GLOBAL (only when none was given at all).
-  const namedMarket=knowledgeCommandMarket(command),selectedMarket=["IRAN","ARAB","GLOBAL"].includes(String(selected||"").toUpperCase())?String(selected).toUpperCase():null;
-  const market=namedMarket||selectedMarket||"GLOBAL",marketSource=namedMarket?"command":selectedMarket?"selected":"default";
+  // Market: the one the command WRITES (explicit market context only), else the one the owner selected for it, else GLOBAL (only when
+  // none was given at all). Two different written markets are never resolved by guessing.
+  const written=knowledgeCommandMarket(command),selectedMarket=["IRAN","ARAB","GLOBAL"].includes(String(selected||"").toUpperCase())?String(selected).toUpperCase():null;
+  const market=written.conflict?"GLOBAL":written.market||selectedMarket||"GLOBAL",marketSource=written.conflict?"conflict":written.market?"command":selectedMarket?"selected":"default";
   if(KNOWLEDGE_FIELD_WORDS.negotiation.test(s))action.intent="CHANGE_NEGOTIATION_BEHAVIOR";
   if(KNOWLEDGE_FIELD_WORDS.sales.test(s))action.intent=["UPDATE","REPLACE"].includes(action.operation)?"CHANGE_SALES_RULE":"ADD_SALES_RULE";
   let domain=null,attribute=null;
@@ -5991,17 +6014,21 @@ export function parseSalesKnowledgeCommand(raw,{market:selected}={}){
   else if(/(?:مدل|جعبه|\bproduct\b|\bmodel\b)/i.test(s)){domain="product";attribute="name";}
   else return {recognized:true,confidence:0.4,error:"The knowledge domain or attribute is not allowlisted"};
   const parsed={recognized:true,intent:action.intent,operation:action.operation,domain,attribute,market,market_source:marketSource,...entity,confidence:0.96};
+  // Two written markets: knowledge goes to the engine (which keeps each market separate); pricing stays unrouted until one is chosen.
+  if(written.conflict&&domain!=="pricing")return genericKnowledgeCommand(parsed,"market_not_clear");
   // A model name that cannot be told apart from the field it was given with is never turned into a product (pricing never uses the entity:
   // it is redirected below before anything is created).
   if(entity.entity_rejected&&domain!=="pricing")return genericKnowledgeCommand(parsed,"model_not_clear");
   if(domain==="color"&&!attribute)return genericKnowledgeCommand(parsed,"color_role_not_named");
-  Object.assign(parsed,knowledgeCommandValue(command,domain,attribute,entity));
+  // The value is read from the command WITHOUT its market phrases (the product and the market above read the full command).
+  Object.assign(parsed,knowledgeCommandValue(knowledgeWithoutMarketPhrases(command),domain,attribute,entity));
   if(domain==="color"&&typeof parsed.value==="string")parsed.value=knowledgeWithoutRoleWords(parsed.value,"color."+attribute)||null;
   if(["DELETE","DEACTIVATE"].includes(parsed.operation))parsed.value=null;
   // A list for a multi-value field is a collection: the generic engine keeps every value (never one joined member). Separators are
   // read from the owner's original words too, because the affirmative filter above re-joins clauses split on commas with spaces.
   if(parsed.value!==null&&knowledgeFieldType(domain,attribute)==="member"&&[parsed.value,knowledgeCommandValue(original,domain,attribute,entity).value].some(v=>typeof v==="string"&&LEGACY_LIST_VALUE.test(knowledgeText(v))))return genericKnowledgeCommand(parsed,"list_of_values");
-  if(domain==="color"&&["ADD","EXPAND"].includes(parsed.operation)&&parsed.value&&!legacyColorCommandUnderstood(command,parsed))return genericKnowledgeCommand(parsed,"not_fully_understood");
+  // Written market phrases are scope (handled above), so they never count as words this router does not understand.
+  if(domain==="color"&&["ADD","EXPAND"].includes(parsed.operation)&&parsed.value&&!legacyColorCommandUnderstood(knowledgeWithoutMarketPhrases(command),parsed))return genericKnowledgeCommand(parsed,"not_fully_understood");
   if(domain==="pricing")parsed.pricing_redirect=true;
   if(!parsed.value&&!["DELETE","DEACTIVATE"].includes(parsed.operation))parsed.error="The proposed value is not clear enough for a review request";
   if(entity.entity_type==="business"&&domain==="product")parsed.error="The target model or product is required";
@@ -7047,11 +7074,14 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // GENERIC BUSINESS KNOWLEDGE (data-driven; no per-concept code): approved records of THIS market + GLOBAL → match the product by
   // exact name / owner-taught alias only → recognise values the owner taught in the customer's own words → evaluate approved
   // rules/relations generically. This returns KNOWLEDGE, never permission: commercial effects never reach a customer reply.
-  const wave2=Date.now(),kgNow=now();
+  // ONE customer-facing retrieval: approved engine records AND the customer-facing typed facts (size / color / product, whether the
+  // command router, the owner form or a typed engine record wrote them) are read by the same market-isolated, effective-dated query
+  // and become the same records (hydrateKnowledgeRecords), so the same knowledge gives the same customer answer however it was taught.
+  const wave2=Date.now(),kgNow=now(),kgDomains=[KNOWLEDGE_DOMAIN,...KNOWLEDGE_TYPED_CUSTOMER_DOMAINS];
   const [knowledge,requirementRules,kgRows,likelyVisualMatches]=await Promise.all([
     env.DB.prepare("SELECT id,version,domain,entity_key,attribute,market,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain<>'knowledge' AND (entity_key='global' OR (?<>'' AND entity_key=?))"+marketClause+" ORDER BY created_at DESC LIMIT 100").bind(model,model,...knowledgeMarkets).all().then(r=>r.results||[]),
     env.DB.prepare(`SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN ('pricing','product','configuration','size','strategy') AND (entity_key='global'${productKeys.length?` OR entity_key IN (${productKeys.map(()=>"?").join(",")})`:""})${marketClause} ORDER BY created_at DESC LIMIT 100`).bind(...productKeys,...knowledgeMarkets).all().then(r=>r.results||[]),
-    env.DB.prepare("SELECT id,version,domain,entity_type,entity_key,attribute,market,member_key,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain=?"+marketClause+" AND (effective_from IS NULL OR effective_from<=?) AND (effective_until IS NULL OR effective_until>?) ORDER BY created_at DESC LIMIT 600").bind(KNOWLEDGE_DOMAIN,...knowledgeMarkets,kgNow,kgNow).all().then(r=>r.results||[]),
+    env.DB.prepare(`SELECT id,version,domain,entity_type,entity_key,attribute,market,member_key,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN (${kgDomains.map(()=>"?").join(",")})`+marketClause+" AND (effective_from IS NULL OR effective_from<=?) AND (effective_until IS NULL OR effective_until>?) ORDER BY created_at DESC LIMIT 600").bind(...kgDomains,...knowledgeMarkets,kgNow,kgNow).all().then(r=>r.results||[]),
     (async()=>{if(!imageCategory||imageCategory==="unknown")return [];try{return ((await retrieveEligibleVisualProductMedia(env,[{type:"category",value:visualAttributeValue(imageCategory).normalized}],3)).items||[]).map(x=>({visual_media_id:x.id,match_type:"likely_visual_match",basis:"category",attributes:Object.fromEntries((x.attributes||[]).filter(a=>a.status==="active").map(a=>[a.attribute_type,a.normalized_value]))}));}catch{return [];}})()
   ]);
   timing.knowledge_ms=Date.now()-wave2;
