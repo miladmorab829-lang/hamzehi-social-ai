@@ -236,6 +236,13 @@ function gateConfirmationIssue(text,preferenceTerms){
   }
   return false;
 }
+// Does the reply say a COLOUR choice is finalised / registered / noted (a sentence with such a verb that names one of the colours)?
+// The brain allows that wording only when the colours were actually saved (questions only offer, they never claim).
+export function salesAiClaimsColoursRecorded(text,colours){
+  const names=(colours||[]).map(gateNorm).filter(c=>c.length>=2);
+  if(!names.length)return false;
+  return String(text||"").split(/(?<=[.!?؟\n؛;])/u).some(raw=>{const s=gateNorm(raw);return (GATE_CONFIRM.test(s)||/یادداشت\s*(?:شد|شده|کردم|کردیم)/u.test(s))&&!/[?؟]\s*$/u.test(raw.trim())&&names.some(c=>s.includes(c));});
+}
 const GATE_PRICE_WORDS=/(?<!\p{L})(?:قیمت\p{L}*|فی|هزینه\p{L}*|مبلغ\p{L}*|سعر\p{L}*|السعر|کلفه|الکلفه|بیش|price\p{L}*|cost\p{L}*|total)(?!\p{L})/u,GATE_MIN_WORDS=/(?<!\p{L})(?:حداقل|کمترین|دست کم|الحد الادنی|اقل|minimum|at least)(?!\p{L})/u;
 export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[]}={}){
   const text=String(prose||""),issues=[];

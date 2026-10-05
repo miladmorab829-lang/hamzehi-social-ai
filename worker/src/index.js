@@ -1,7 +1,7 @@
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
-import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
+import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -8121,7 +8121,10 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(text)kgAnswer={kind:"values",text,ids:kgAnswerGroups.flatMap(g=>g.records.map(r=>r.id))};
   }
   // Owner-defined hard stops (constraint/prohibition rules that apply now) and combinations the owner never decided go to the owner.
-  const kgHardStop=kgEval.applicable.find(x=>["constraint","prohibition"].includes(x.kind))||null;
+  // An UNCONDITIONAL owner colour policy («رنگ خارج از فهرست نیازمند تأیید مالک است», «رنگ هر بخش فقط از رنگ‌های تأییدشده») is a standing
+  // rule that approved options satisfy, not a stop for every turn: a non-standard colour is a special request and goes to the owner
+  // on its own path (colorPick.special below). Conditional rules and every other constraint/prohibition stop exactly as before.
+  const kgHardStop=kgEval.applicable.find(x=>["constraint","prohibition"].includes(x.kind)&&!(!(x.conditions||[]).length&&/color|colour|رنگ/iu.test(`${x.concept||""} ${typeof x.value==="string"?x.value:""}`)))||null;
   const kgUnknownRelation=!kgIntentExcluded&&!kgAnswer&&kgRelations.unknown.length>0;
   // The chosen standard colours are remembered (one or several; «… هم» adds to the earlier choice, otherwise a new choice replaces
   // it) unless an owner rule or an undecided combination stops them — then the owner decides and nothing is confirmed.
@@ -8411,6 +8414,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const DET_ONLY=["accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","ask_image_reference"];
     const SEGMENT=["answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner"];
     if(orderStatusAsked||DET_ONLY.includes(action))aiInfo.fallback="deterministic_action";
+    // Truthfulness: the AI may say the colours are finalised / registered / noted only when they ARE saved (this turn or before).
+    else if(!selectedColors.length&&salesAiClaimsColoursRecorded(ai.reply,colorOptions))aiInfo.fallback="colours_not_recorded";
     else{
       let segment=action==="advise_colors"?(priceReply?priceReply.parts.join(" "):null):SEGMENT.includes(action)||(action==="clarify_product"&&!!clarifyCandidates)?draft:null;
       // (the model's own prose already passed the fail-closed gate right after the call)
