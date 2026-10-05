@@ -1,0 +1,14 @@
+# TEMPORARY, ISOLATED smoke-test Worker for the REAL OpenAI Sales AI Gateway (worker/src/sales-ai-brain.js).
+# Deliberately has NO bindings at all: no D1, KV, R2, AI, queues, services, cron, Telegram token or production resource.
+# Secrets (set by the owner, never in this file): OPENAI_API_KEY, SMOKE_OWNER_TOKEN.
+# Delete after the test:  npx wrangler delete --config worker/smoke-sales-ai/wrangler.toml
+name = "hamzehi-sales-ai-smoke"
+main = "index.js"
+compatibility_date = "2026-09-11"
+compatibility_flags = ["global_fetch_strictly_public"]
+workers_dev = true
+
+[vars]
+# Same model-selection contract as production: SALES_AI_MODEL (optional) overrides OPENAI_MODEL.
+# Keep this identical to the production value in worker/wrangler.toml.
+OPENAI_MODEL = "gpt-5.6-luna"
