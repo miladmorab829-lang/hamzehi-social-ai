@@ -14,6 +14,9 @@ binding = "AI"
 
 [vars]
 OPENAI_MODEL = "gpt-5.6-luna"
+# Telegram Sales Brain: AI-first understanding/drafting through the Sales AI Gateway (worker/src/sales-ai-brain.js), grounded and
+# validated by the deterministic layer. "off" = the deterministic brain only. SALES_AI_MODEL (optional) overrides OPENAI_MODEL.
+SALES_AI_BRAIN = "off"
 RATE_LIMIT_PER_MINUTE = "60"
 TELEGRAM_VAULT_CHAT_ID = "@mhboxgroup"
 TELEGRAM_VIDEO_VAULT_CHAT_ID = "@mhboxgroup"
