@@ -1772,23 +1772,25 @@ const OWNER_CANONICAL_HEADER=[/^(?:نام\s*محصول|محصول|product(?:\s*n
 const OWNER_COLOR_MARKETS={...OWNER_CANONICAL_MARKETS,global:"GLOBAL","سراسری":"GLOBAL"};
 function ownerCanonicalColorLine(line){
   const raw=String(line||"").normalize("NFKC").trim();
-  if(!/^\|?\s*COLOR\s*(?:\||$)/iu.test(raw))return null;
+  // «PRINTING | <option> | <market>» is the same format for ONE standard printing type (printing.type), e.g. «PRINTING | طلاکوب | IRAN».
+  const head=raw.match(/^\|?\s*(COLOR|PRINTING)\s*(?:\||$)/iu);if(!head)return null;
+  const printing=head[1].toUpperCase()==="PRINTING",word=printing?"PRINTING":"COLOR";
   const bordered=/^\s*\|/u.test(raw)&&/\|\s*$/u.test(raw);
   const cols=(bordered?raw.replace(/^\s*\|/u,"").replace(/\|\s*$/u,""):raw).split("|").map(c=>c.replace(/[\s‏‎]+/gu," ").trim());
   const reject=(code,detail)=>({kind:"rejected",canonical_color:true,issues:[{code,detail}]});
-  if(cols.length!==3)return reject("canonical_color_column_count",`Expected 3 columns (COLOR | option | market), got ${cols.length}`);
+  if(cols.length!==3)return reject("canonical_color_column_count",`Expected 3 columns (${word} | option | market), got ${cols.length}`);
   const [,option,marketText]=cols;
-  if(!option||!/\p{L}/u.test(option)||option.length>60||/^COLOR$/iu.test(option)||Object.hasOwn(OWNER_COLOR_MARKETS,option.toLowerCase()))return reject("canonical_color_option_invalid","Column 2 must be ONE colour option name (letters, at most 60 characters)");
+  if(!option||!/\p{L}/u.test(option)||option.length>60||/^(?:COLOR|PRINTING)$/iu.test(option)||Object.hasOwn(OWNER_COLOR_MARKETS,option.toLowerCase()))return reject("canonical_color_option_invalid",`Column 2 must be ONE ${printing?"printing type":"colour option"} name (letters, at most 60 characters)`);
   if(/[،,؛;]|(?<![\p{L}])(?:و|and)(?![\p{L}])/iu.test(option))return reject("canonical_color_single_option","Column 2 must be ONE option, not a list or combination (one line per option)");
   const market=OWNER_COLOR_MARKETS[String(marketText||"").toLowerCase()];
   if(!market)return reject("canonical_color_market_unsupported",`Column 3 must be IRAN, ARAB or GLOBAL, got "${String(marketText||"").slice(0,30)}"`);
-  return {kind:"color",option,market};
+  return {kind:printing?"printing":"color",option,market};
 }
 const ownerHasCanonicalColorLines=text=>String(text||"").split(/\r?\n/).some(l=>!!ownerCanonicalColorLine(l));
 function ownerCanonicalPriceLine(raw){
   if(!raw.includes("|"))return null;
-  // A COLOR line is the canonical colour format (Teach Knowledge), never a price row.
-  if(/^\|?\s*COLOR\s*(?:\||$)/iu.test(raw))return null;
+  // A COLOR / PRINTING line is the canonical standard-option format (Teach Knowledge), never a price row.
+  if(/^\|?\s*(?:COLOR|PRINTING)\s*(?:\||$)/iu.test(raw))return null;
   // Outer border pipes («| a | b | … |») are dropped only when the line has BOTH; a single leading pipe is an empty first column.
   const bordered=/^\s*\|/u.test(raw)&&/\|\s*$/u.test(raw);
   const cols=(bordered?raw.replace(/^\s*\|/u,"").replace(/\|\s*$/u,""):raw).split("|").map(c=>c.replace(/\s+/g," ").trim());
@@ -5421,7 +5423,7 @@ const SALES_KNOWLEDGE_FIELDS = {
   size: {available_size:"member",custom_size_rule:"text"},
   quantity: {moq:"integer",quantity_rule:"text"},
   color: {exterior:"member",interior:"member",combination:"member",restriction:"text"},
-  printing: {method:"member",color:"member",limitation:"text"},
+  printing: {method:"member",color:"member",limitation:"text",type:"member"},
   production: {constraint:"text",timing_rule:"text"},
   shipping: {method:"member",destination:"member",terms:"text"},
   deposit: {rule:"text"},
@@ -5786,10 +5788,11 @@ async function teachCanonicalColors(env,text){
   for(let i=0;i<lines.length;i++){
     const c=ownerCanonicalColorLine(lines[i]),at={line:i+1,text:lines[i].slice(0,120)};
     if(!c){rejected.push({...at,code:"not_a_canonical_color_line",detail:"Only «COLOR | option | market» lines can be sent together; this line was not interpreted"});continue;}
-    if(c.kind!=="color"){rejected.push({...at,...c.issues[0]});continue;}
+    if(c.kind==="rejected"){rejected.push({...at,...c.issues[0]});continue;}
     parsed++;
-    const id="color-"+(await knowledgeHash(knowledgeCanonical(["color","exterior","global",c.market,knowledgeKeyPart(c.option)]))).slice(0,32);
-    try{const p=await proposeSalesKnowledge(env,{id,operation:"ADD",domain:"color",entity_type:"business",entity_key:"global",attribute:"exterior",market:c.market,value:c.option},{reusePending:true});if(!ids.includes(p.id))ids.push(p.id);}
+    const [domain,attribute]=c.kind==="printing"?["printing","type"]:["color","exterior"];
+    const id=domain+"-"+(await knowledgeHash(knowledgeCanonical([domain,attribute,"global",c.market,knowledgeKeyPart(c.option)]))).slice(0,32);
+    try{const p=await proposeSalesKnowledge(env,{id,operation:"ADD",domain,entity_type:"business",entity_key:"global",attribute,market:c.market,value:c.option},{reusePending:true});if(!ids.includes(p.id))ids.push(p.id);}
     catch(error){rejected.push({...at,code:"canonical_color_rejected",detail:sanitizeOperationalError(error?.message||error)});}
   }
   const view=await teachView(env,ids);
@@ -6328,9 +6331,9 @@ async function ensureLeadOutreachStoreNow(env){
 }
 
 // order_candidate: the ONE structured deal state of the conversation (written by the Sales Brain, versioned by supersession).
-const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference","order_candidate","customer_name","selected_colors","color_parts","conversation_summary"]);
+const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference","order_candidate","customer_name","selected_colors","color_parts","conversation_summary","printing_type"]);
 // Details that belong to ONE deal (a new deal never inherits them); the customer's name, city and market are durable.
-const SALES_DEAL_SCOPED_KEYS=["requested_quantity","requested_size","selected_colors","color_parts","exterior_color","interior_color","printing","branding"];
+const SALES_DEAL_SCOPED_KEYS=["requested_quantity","requested_size","selected_colors","color_parts","exterior_color","interior_color","printing","branding","printing_type"];
 const CONVERSATION_SALES_STAGES=new Set(["new_reply","interested","asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted","rejected","other"]);
 
 // Idempotent schema setup runs once per isolate per database (see onceEnsured); the body is unchanged.
@@ -7502,12 +7505,30 @@ function salesListPrice(p,market,quantity,{texts=[]}={}){
 // ---- Standard colour options come ONLY from approved Business Knowledge (typed color.exterior members or an engine-taught
 // exterior-colour collection) of this conversation's markets: the product's own approved colours when the owner set them for that
 // product (a product rule is never widened to every product), otherwise the business-wide (global) standard options. No list in code.
-function salesApprovedColorOptions(records,entities){
-  const colours=(records||[]).filter(r=>r.concept==="exterior_colors"&&!r.envelope?.relation&&!["rule","constraint","prohibition"].includes(r.envelope?.kind));
+function salesApprovedColorOptions(records,entities,concept="exterior_colors"){
+  const colours=(records||[]).filter(r=>r.concept===concept&&!r.envelope?.relation&&!["rule","constraint","prohibition"].includes(r.envelope?.kind));
   const own=colours.filter(r=>(entities||[]).includes(r.entity_key)),pick=own.length?own:colours.filter(r=>knowledgeText(r.entity_key)==="global");
   const values=[...pick].reverse().flatMap(r=>{const v=r.envelope?.value;return (Array.isArray(v)?v:[v]).filter(x=>typeof x==="string"&&x.trim()).map(x=>x.trim());});
   // records: the approved facts the options come from — the evidence a reply naming them is validated against.
   return {options:[...new Map(values.map(v=>[salesTokens(v).join(" "),v])).values()].filter(v=>salesTokens(v).length),records:pick};
+}
+// The printing TYPE a message names. Spacing variants are one type («طلاکوب» = «طلا کوب» = «طلا‌کوب»). Exactly one approved type named
+// is the choice; several at once are ambiguous (nothing chosen); a negated one («بدون چاپ», «طلاکوب نمیخوام») is not a choice. A
+// «…کوب» type or another printing method that is no approved option is an out-of-list request: the owner decides (never assumed
+// available, never saved as approved). Only once the market has an approved list: before that, nothing changes here.
+const SALES_PRINTING_COMPACT=v=>salesNormal(v).replace(/[\s‌‍]+/g,"");
+const SALES_PRINTING_WORDS=/(?:چاپ|کوب|فویل|طباعه|طباعة|print|foil|stamp)/iu;
+const SALES_PRINTING_METHODS=/(?:لیزر|برجسته|یووی|(?<![\p{L}])uv(?![\p{L}])|سیلک|دیجیتال|افست|هات\s*استمپ|امباس|emboss|laser|silk|digital|offset|hot\s*stamp|لیزر|بارز|نافر)/iu;
+const SALES_PRINTING_NEGATION=/(?:بدون|نمی\s*خوام|نمیخوام|نمی\s*خواهم|نخواستم|لازم\s*نیست|نه\s+چاپ|without|no\s+print|لا\s*اريد|بدون)/iu;
+function salesPrintingSelection(text,options){
+  const t=salesNormal(text),compact=SALES_PRINTING_COMPACT(text),known=new Set((options||[]).map(SALES_PRINTING_COMPACT));
+  const named=(options||[]).filter(o=>{const c=SALES_PRINTING_COMPACT(o);return c.length>=3&&compact.includes(c);});
+  const outOfList=[...t.matchAll(/(\p{L}+)\s?کوب/gu)].map(m=>SALES_PRINTING_COMPACT(m[0])).filter(w=>!known.has(w));
+  const unknown=outOfList.length>0||(SALES_PRINTING_WORDS.test(t)&&SALES_PRINTING_METHODS.test(t));
+  const negated=SALES_PRINTING_NEGATION.test(t);
+  // (Without any approved type in this market nothing is decided here: the owner has not defined the list yet — unchanged behaviour.)
+  if(!known.size)return {selected:null,ambiguous:[],unknown:false};
+  return {selected:!unknown&&!negated&&named.length===1?named[0]:null,ambiguous:!unknown&&!negated&&named.length>1?named:[],unknown:unknown&&!negated};
 }
 // «… هم» / «also» adds the named colours to the earlier choice; otherwise a new choice replaces it.
 const SALES_COLOR_ADD=/(?<![\p{L}])(?:هم|همچنین|اضافه|كمان|ويا\s*هذا|also|too)(?![\p{L}])/iu;
@@ -7735,7 +7756,7 @@ function salesOrderColorsJson(colors){
   if(Array.isArray(colors))return colors.length?JSON.stringify(colors):null;
   return colors&&typeof colors==="object"&&Array.isArray(colors.colors)&&colors.colors.length?JSON.stringify(colors):null;
 }
-async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null,customerName=null,colors=null}){
+async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null,customerName=null,colors=null,customization=null}){
   await ensureOrderStore(env);
   const offer=candidate.offer||{},price=candidate.price||{},ref=`chat-offer:${candidate.candidate_id}:${offer.offer_hash}`;
   if(!offer.offer_hash||!Number.isSafeInteger(offer.quantity)||offer.quantity<=0||!Number.isSafeInteger(price.unit_price_minor)||!Number.isSafeInteger(price.total_minor)||!price.currency||!["IRAN","ARAB"].includes(candidate.market))throw Error("Accepted offer snapshot is incomplete");
@@ -7749,7 +7770,7 @@ async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null
     market,pricing_mode,price_item_id,price_item_version,product,quantity,customization,destination,currency,unit_price_minor,subtotal_minor,discount_minor,shipping_minor,tax_minor,other_fees_minor,total_minor,moq,payment_terms,delivery_terms,approved_quote_text,customer_name,colors_json,status,created_at,updated_at)
     VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,NULL,NULL,?,?,?,'order_candidate',?,?)`)
     .bind(id,orderNumber,ref,row.lead_id,row.conversation_id,row.id,row.external_id||null,CHAT_OFFER_ACCEPTANCE_SOURCE,acceptedAt,candidate.market,price.source==="si"?"si_price_version":"approved_price_list",priceRef?.id||null,priceRef?.version??null,
-      product,offer.quantity,req.configuration||null,destination||null,price.currency,price.unit_price_minor,price.subtotal_minor??price.unit_price_minor*offer.quantity,discount,price.total_minor,price.moq??null,summary,customerName?String(customerName).slice(0,120):null,salesOrderColorsJson(colors),t,t).run();
+      product,offer.quantity,customization||req.configuration||null,destination||null,price.currency,price.unit_price_minor,price.subtotal_minor??price.unit_price_minor*offer.quantity,discount,price.total_minor,price.moq??null,summary,customerName?String(customerName).slice(0,120):null,salesOrderColorsJson(colors),t,t).run();
   const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(ref).first();
   if(!order)throw Error("Order candidate could not be persisted");
   await auditOrderEventOnce(env,`candidate:${order.id}`,"lead_order_candidate_created","Customer accepted the approved chat offer: order candidate created",{order_id:order.id,order_number:order.order_number,offer_ref:ref,lead_id:order.lead_id,acceptance_inbox_message_id:order.acceptance_inbox_message_id,status:"order_candidate"});
@@ -7988,6 +8009,10 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // product-specific colour / ribbon rules and relations apply to them exactly as to any other recognised value.
   const colorKnowledge=salesApprovedColorOptions(kgScope,kgEntities.matched),colorOptions=colorKnowledge.options;
   const colorEvidenceFacts=colorKnowledge.records.length?salesBrainAuthoritativeFacts({knowledge:colorKnowledge.records.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))}):[];
+  // Approved standard printing TYPES (Business Knowledge only, read exactly like the colours) and the type this message names.
+  const printingKnowledge=salesApprovedColorOptions(kgScope,kgEntities.matched,"printing_methods"),printingOptions=printingKnowledge.options;
+  const printingEvidenceFacts=printingKnowledge.records.length?salesBrainAuthoritativeFacts({knowledge:printingKnowledge.records.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))}):[];
+  const printingPick=salesPrintingSelection(row.message,printingOptions);
   // The model's parts (2-piece رویه/کف, 3-piece بالا/وسط/پایین, sliding بیرونی/داخل) and the colour chosen for each part.
   const colorStructure=colorOptions.length?salesColorStructure([row.message,pricing?.requirements?.configuration,dealCandidate?.requirements?.configuration,memory.product_interest,...earlierInbound]):null;
   const colorPartWords=SALES_COLOR_STRUCTURES.flatMap(s=>[...s.parts.fa,...s.parts.ar]).flatMap(p=>SALES_COLOR_PART_FORMS[p]||[p]);
@@ -8028,7 +8053,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       // that are not approved — or no reply at all — is discarded WHOLE: neither its facts nor its reading steer anything.
       const d=res.decision,digits=v=>[...String(v??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(m=>knowledgeCommandNumber(m[0])).filter(Number.isSafeInteger);
       aiAllowedNumbers=[...new Set([knownQuantity,dealCandidate?.quantity,...digits(row.message),...digits(memory.product_interest),...digits(memory.requested_size),...digits(JSON.stringify(pricing?.catalog_summary||[])),...digits(dealCandidate?.product?.name),...digits(JSON.stringify(dealCandidate?.requirements||{})),...salesAiGroundedNumbers(input)].filter(Number.isSafeInteger))];
-      const issues=salesAiProseIssues(d.reply,{allowedNumbers:aiAllowedNumbers,preferenceTerms:salesAiPreferenceTerms(input)});
+      const issues=salesAiProseIssues(d.reply,{allowedNumbers:aiAllowedNumbers,preferenceTerms:[...salesAiPreferenceTerms(input),...printingOptions]});
       issues.push(...salesAiColorIssues(d,{approved:colorOptions,norm:v=>salesTokens(v).join(" "),unsupported:colorPick.unsupported||[]}));
       aiInfo.called=true;
       if(issues.length)aiInfo.fallback="prose:"+issues[0];
@@ -8143,6 +8168,15 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     selectedColors=chosen;memory.selected_colors=chosen;colorsRecorded=true;
   }
   if(selectedColors.length)known.color=true;
+  // An approved printing type the customer names is remembered as exactly that option (own key «printing_type»; the raw «printing»
+  // phrase capture is unchanged) unless an owner rule stops it; an out-of-list type is never saved as approved (owner, below).
+  let printingRecorded=false,printingSpecial=false;
+  if(printingPick.selected&&!kgHardStop){
+    if(memory.printing_type!==printingPick.selected)await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"printing_type",memory_key:"printing_type",value:printingPick.selected}});
+    memory.printing_type=printingPick.selected;printingRecorded=true;known.customization=true;
+  }
+  const approvedPrinting=typeof memory.printing_type==="string"&&printingOptions.find(o=>SALES_PRINTING_COMPACT(o)===SALES_PRINTING_COMPACT(memory.printing_type))||null;
+  const orderCustomization=req=>[req?.configuration||null,approvedPrinting?`چاپ ${approvedPrinting}`:null].filter(Boolean).join(" · ")||null;
   // What the order candidate stores: the colours, and per part when the customer chose per part.
   const colorsForOrder=()=>Object.keys(colorParts).length?{parts:colorParts,colors:selectedColors}:selectedColors;
   const structureParts=colorStructure?colorStructure.parts[language==="Iraqi Arabic"?"ar":"fa"]:null;
@@ -8259,6 +8293,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(action==="wait_for_owner")action="knowledge_owner";
     if(colorsRecorded){orderDetails={colorsRecorded:selectedColors};if(dealCandidate?.status==="accepted"&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET colors_json=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(JSON.stringify(colorsForOrder()),now(),dealCandidate.order_id).run().catch(()=>null);}
   }
+  // A printing type that is no approved option: the owner decides (one owner question per issue; never confirmed, never saved).
+  else if(printingPick.unknown){escalate("knowledge_owner","approved_knowledge_missing");printingSpecial=true;}
   // «Which colours do you have / which combination do you suggest?» with approved colours → answered from that knowledge (parts of the
   // model, the colours, a suggestion the owner's rules allow), never a holding reply. Owner rules still apply to an actual CHOICE.
   else if(colorAsk){action="advise_colors";}
@@ -8305,11 +8341,13 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       if(memory.destination&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET destination=?,updated_at=? WHERE id=? AND status='order_candidate' AND (destination IS NULL OR destination='')").bind(String(memory.destination).slice(0,120),now(),dealCandidate.order_id).run().catch(()=>null);
       // The chosen colours are written on the SAME order candidate (never a second one).
       if(colorsRecorded&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET colors_json=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(JSON.stringify(colorsForOrder()),now(),dealCandidate.order_id).run().catch(()=>null);
+      // The approved printing type is written on the SAME order candidate's customization (never a second candidate).
+      if(printingRecorded&&dealCandidate.order_id)await env.DB.prepare("UPDATE lead_orders SET customization=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(orderCustomization(dealCandidate.requirements),now(),dealCandidate.order_id).run().catch(()=>null);
       // Colours come after the name and the city — only when the owner approved standard options (they are offered from knowledge),
       // never re-asked once chosen (a part still missing is asked for that part only), and asked at most twice.
       const colorAmbiguous=colorPick.ambiguous;
       const nextDetail=!memory.customer_name?"customer_name":!memory.destination?"destination":colorOptions.length&&(!selectedColors.length||colorAmbiguous.length||missingParts.length)&&timesAsked("colors")<2?"colors":null,detailsAsked=SALES_DETAILS_PROMPT.test(salesNormal(row.message))||SALES_DETAILS_PROMPT.test(String(row.message||""));
-      if(!nextDetail&&!nameAnswer&&!detailsAsked&&!acceptedAgain&&!colorsRecorded){if(salesThanksOnly(row.message))action="thanks";else{action="wait_for_owner";waitingOn=null;}}
+      if(!nextDetail&&!nameAnswer&&!detailsAsked&&!acceptedAgain&&!colorsRecorded&&!printingRecorded){if(salesThanksOnly(row.message))action="thanks";else{action="wait_for_owner";waitingOn=null;}}
       else{action="order_details";askedField=nextDetail;orderDetails={nameRecorded:!!nameAnswer,customerAsked:detailsAsked,colorsRecorded:colorsRecorded?selectedColors:null,colorPartsRecorded:colorsRecorded&&partsPick&&Object.keys(colorParts).length?colorParts:null,colorAmbiguous,colorOptions,structureParts,missingParts};}
     }
     // Standard colours chosen before the deal is accepted: remembered and confirmed (an option that fits several is asked back).
@@ -8382,7 +8420,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(action==="accept_offer"){
       // The acceptance becomes a REAL order candidate first; only a successful write lets the reply say «ثبت شد».
       let chatOrder=null;
-      try{chatOrder=(await salesEnsureChatOrderCandidate(env,{row,candidate,destination:memory.destination||null,customerName:memory.customer_name||null,colors:colorsForOrder()})).order;candidate.order_id=chatOrder.id;candidate.order_number=chatOrder.order_number;}
+      try{chatOrder=(await salesEnsureChatOrderCandidate(env,{row,candidate,destination:memory.destination||null,customerName:memory.customer_name||null,colors:colorsForOrder(),customization:orderCustomization(candidate.requirements)})).order;candidate.order_id=chatOrder.id;candidate.order_number=chatOrder.order_number;}
       catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be recorded as an order candidate",{lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
       if(chatOrder){
         try{await ensureSalesIntelligenceStore(env);acceptanceDecision=await salesOpenAcceptanceDecision(env,{row,candidate});candidate.decision_id=acceptanceDecision?.id||null;}
@@ -8416,6 +8454,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(orderStatusAsked||DET_ONLY.includes(action))aiInfo.fallback="deterministic_action";
     // Truthfulness: the AI may say the colours are finalised / registered / noted only when they ARE saved (this turn or before).
     else if(!selectedColors.length&&salesAiClaimsColoursRecorded(ai.reply,colorOptions))aiInfo.fallback="colours_not_recorded";
+    // …and the printing type only when an APPROVED type is saved (the same claim check, on the printing names).
+    else if(!approvedPrinting&&salesAiClaimsColoursRecorded(ai.reply,[...printingOptions,"چاپ","کوب"]))aiInfo.fallback="printing_not_recorded";
     else{
       let segment=action==="advise_colors"?(priceReply?priceReply.parts.join(" "):null):SEGMENT.includes(action)||(action==="clarify_product"&&!!clarifyCandidates)?draft:null;
       // (the model's own prose already passed the fail-closed gate right after the call)
@@ -8428,12 +8468,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         const useSegment=!!segment&&(commercialAsked||newOffer||(needsOwner&&SEGMENT.includes(action)));
         if(segment&&!useSegment){segment=null;if(SEGMENT.includes(action)||action==="advise_colors"){action="ai_answer";askedField=null;}}
         const composed=(segment?(prose.includes(SALES_AI_COMMERCIAL_SLOT)?prose.replace(SALES_AI_COMMERCIAL_SLOT,segment):prose+" "+segment):prose.split(SALES_AI_COMMERCIAL_SLOT).join("")).replace(/[ \t]{2,}/g," ").trim();
-        aiEvidenceFacts.push(...authorityFacts,...(salesEvidence?.facts||[]),...colorEvidenceFacts);
+        aiEvidenceFacts.push(...authorityFacts,...(salesEvidence?.facts||[]),...colorEvidenceFacts,...printingEvidenceFacts);
         const v=validateSalesBrainDraft(composed,{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:aiEvidenceFacts,markets:knowledgeMarkets});
         // Sanitised rejection detail (no draft or customer text): which claim category and which short normalised values failed.
         if(!v.valid){aiInfo.fallback="validator:"+v.reason;aiInfo.validator_rejection={reason:v.reason,claim_category:v.claim_category||null,unsupported_values:[...(v.unsupported_values||v.unsupported_numbers||[])].slice(0,8).map(x=>String(x).slice(0,40))};}
         else{
-          const hardOwner=needsOwner&&(SEGMENT.includes(action)||colorSpecial);
+          const hardOwner=needsOwner&&(SEGMENT.includes(action)||colorSpecial||printingSpecial);
           if(ai.owner_escalation_needed&&!needsOwner){needsOwner=true;needsOwnerReason=ai.escalation_reason==="unapproved_terms"?"commercial_owner_review_required":"approved_knowledge_missing";if(!SEGMENT.includes(action))action="knowledge_owner";}
           else if(!ai.owner_escalation_needed&&!hardOwner&&(needsOwner||["wait_for_owner","owner_followup","knowledge_owner"].includes(action))){needsOwner=false;needsOwnerReason=null;action="ai_answer";askedField=null;}
           draft=composed;validation=v;replySource=segment?"ai+commercial":"ai";

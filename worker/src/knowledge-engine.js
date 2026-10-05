@@ -461,7 +461,10 @@ export const KNOWLEDGE_TYPED_CUSTOMER_FIELDS={
   "product.category":{concept:"product_categories",labels:{fa:"دسته محصول",ar:"فئة المنتج",en:"Product category"},keywords:["دسته","دسته بندی","فئة","الفئة","category"]},
   "product.use_case":{concept:"use_cases",labels:{fa:"کاربردها",ar:"الاستخدامات",en:"Use cases"},keywords:["کاربرد","کاربردها","کاربردش","استخدام","الاستخدام","usage"]},
   "product.configuration":{concept:"configurations",labels:{fa:"پیکربندی‌ها",ar:"التكوينات",en:"Configurations"},keywords:["پیکربندی","چیدمان","تكوين","التكوين","configuration","layout"]},
-  "product.name":{concept:"name",labels:{},keywords:[]}
+  "product.name":{concept:"name",labels:{},keywords:[]},
+  // Standard printing TYPES, one owner-approved option per fact (taught ONLY as «PRINTING | option | market», like the colours). Its
+  // own attribute: the router's printing facts (printing.method / .limitation — the owner's whole sentence) stay out of customer answers.
+  "printing.type":{concept:"printing_methods",labels:{fa:"انواع چاپ",ar:"أنواع الطباعة",en:"Printing types"},keywords:["چاپ","چاپی","کوب","طلاکوب","نقره‌کوب","مشکی‌کوب","فویل","طباعة","الطباعة","printing","print","foil"]}
 };
 export const KNOWLEDGE_TYPED_CUSTOMER_DOMAINS=[...new Set(Object.keys(KNOWLEDGE_TYPED_CUSTOMER_FIELDS).map(k=>k.split(".")[0]))];
 export function hydrateKnowledgeRecords(rows){
