@@ -1,6 +1,6 @@
 // TEMPORARY, ISOLATED smoke test of the REAL OpenAI model through the committed Sales AI Gateway (../src/sales-ai-brain.js).
 //
-// HTTP POST /run (Authorization: Bearer <SMOKE_OWNER_TOKEN>) → fixed cases A–J → synthetic read-only context → the production
+// HTTP POST /run?case=<ID> (Authorization: Bearer <SMOKE_OWNER_TOKEN>) → ONE fixed case of A–J → synthetic read-only context → the production
 // gateway functions (policy, context builder, structured-output call, normalisation) → sanitised JSON report.
 //
 // SCOPE: this validates the REAL provider/model (compatibility, structured output, Persian / Iraqi-Arabic understanding,
@@ -106,9 +106,11 @@ function schemaCheck(raw){
 }
 const scriptOf=t=>/[پچژکگی]/u.test(t)?"Persian":/[؀-ۿ]/u.test(t)?"Arabic":/[a-z]/i.test(t)?"Latin":"none";
 
-// ---- one run of the fixed suite (sequential: one real call per case)
-async function runSuite(env){
-  const results=[],observed={};
+// ---- ONE fixed case = at most ONE real provider call (the suite is run case by case, so no request waits for all 14 calls).
+const SCOPE="This smoke test reuses the production salesAiProseIssues gate, but does not execute the complete production validateSalesBrainDraft / deterministic sales pipeline.";
+const CASE_IDS=CASES.map(c=>c.id);
+async function runCase(env,c){
+  const observed={};
   // Observe the gateway's own provider response (raw text + usage) without changing the request it makes; headers are never read.
   const realFetch=globalThis.fetch;
   // (Provider error bodies are reduced to their type/code only: OpenAI error messages can quote part of a key, so they are never kept.)
@@ -116,8 +118,6 @@ async function runSuite(env){
     if(!r.ok){observed.provider_error={type:typeof data?.error?.type==="string"?data.error.type.slice(0,60):null,code:typeof data?.error?.code==="string"?data.error.code.slice(0,60):null};}
     else{let text=typeof data?.output_text==="string"?data.output_text:"";if(!text)for(const item of data?.output||[])for(const part of item?.content||[])if(typeof part?.text==="string")text+=part.text;observed.raw=text;observed.model=typeof data?.model==="string"?data.model.slice(0,80):null;observed.usage=data?.usage?{input_tokens:data.usage.input_tokens??null,output_tokens:data.usage.output_tokens??null}:null;}}}catch{}return r;};
   try{
-    for(const c of CASES){
-      for(const k of Object.keys(observed))delete observed[k];
       const input=buildSalesAiInput({...c.ctx,message:c.message});
       const res=await callSalesAi(env,{instructions:salesAiPolicy(c.ctx.language),input});
       let raw=null;try{raw=JSON.parse(String(observed.raw||"").match(/\{[\s\S]*\}/)?.[0]||"null");}catch{}
@@ -131,7 +131,7 @@ async function runSuite(env){
       // which this Worker does NOT run — they are listed separately and never counted as covered by the prose gate.
       const gateMisses=discipline.filter(x=>!["capability_promise","availability_claim"].includes(x.split(":")[0]))
         .filter(()=>gate.length===0);
-      results.push({
+      return {
         case:c.id,label:c.label,model_requested:res.model,model_reported_by_provider:observed.model??null,
         provider_success:res.ok,provider_error:res.error||null,provider_error_detail:observed.provider_error||null,provider_status:observed.status??null,
         schema_valid:res.ok&&schemaErrors.length===0,schema_errors:schemaErrors,latency_ms:res.ms,
@@ -148,42 +148,48 @@ async function runSuite(env){
         prose_gate_blocks:gate,
         prose_gate_verdict:d?(gateMisses.length?"FAIL":"PASS"):"N/A (no decision; production would answer deterministically)",
         not_covered_by_prose_gate:discipline.filter(x=>["capability_promise","availability_claim"].includes(x.split(":")[0]))
-      });
-    }
+      };
   }finally{globalThis.fetch=realFetch;}
-  const lat=results.filter(r=>Number.isFinite(r.latency_ms)).map(r=>r.latency_ms).sort((a,b)=>a-b),pct=(n,of)=>of?Math.round(1000*n/of)/10:0;
-  const decided=results.filter(r=>r.provider_success);
-  const failed=results.filter(r=>!r.provider_success);
-  return {scope:"This smoke test reuses the production salesAiProseIssues gate, but does not execute the complete production validateSalesBrainDraft / deterministic sales pipeline.",
-    summary:{suite_status:failed.length?"PROVIDER_FAILURE — not a successful smoke test":"COMPLETED",
-    model_requested:salesAiModel(env),models_reported_by_provider:[...new Set(results.map(r=>r.model_reported_by_provider).filter(Boolean))],
-    timeout_ms_configured:Number(env.SALES_AI_TIMEOUT_MS)||8000,total_cases:results.length,total_real_openai_calls:results.length,retries:0,
-    provider_failures:failed.map(r=>({case:r.case,error:r.provider_error,status:r.provider_status,detail:r.provider_error_detail})),
-    provider_success_rate:pct(decided.length,results.length),schema_success_rate:pct(results.filter(r=>r.schema_valid).length,results.length),
-    understanding_pass_rate:pct(results.filter(r=>r.understanding_verdict==="PASS").length,results.length),
-    commercial_discipline_pass_rate:pct(decided.filter(r=>r.commercial_discipline_verdict==="PASS").length,decided.length),
-    prose_gate_pass_rate:pct(decided.filter(r=>r.prose_gate_verdict==="PASS").length,decided.length),
-    latency_min_ms:lat[0]??null,latency_median_ms:lat.length?lat[Math.floor((lat.length-1)/2)]:null,latency_max_ms:lat[lat.length-1]??null,
-    timeout_count:results.filter(r=>r.provider_error==="provider_timeout").length},results};
 }
 
-// ---- HTTP: one route, owner-only, fixed suite, one run at a time (per isolate) with a cooldown.
-let running=false,lastRun=0;
+// ---- HTTP
+//   GET  /manifest          public: the ordered fixed case ids + metadata (no secrets, no execution)
+//   POST /run?case=<ID>     owner-only: runs EXACTLY that one fixed case (≤ 1 real provider call), returns its sanitised result
+// The caller can only choose an id from the hard-coded allowlist; nothing else from the request is used. No /run-all on purpose:
+// it would recreate the long synchronous request. One case runs at a time per isolate (the observer above patches fetch for the
+// duration of a case); a repeat of the SAME case within 20 s in that isolate is refused (accidental double tap). Both guards are
+// per-isolate only — the owner token is the real protection.
+let busy=null;const lastRunOf=new Map();
 function sameSecret(a,b){a=String(a||"");b=String(b||"");if(!a||!b||a.length!==b.length)return false;let x=0;for(let i=0;i<a.length;i++)x|=a.charCodeAt(i)^b.charCodeAt(i);return x===0;}
 const json=(body,status=200)=>new Response(JSON.stringify(body,null,1),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"}});
 export default {
   async fetch(req,env){
     const url=new URL(req.url);
+    if(url.pathname==="/manifest"){
+      if(req.method!=="GET")return json({ok:false,error:"method_not_allowed"},405);
+      return json({ok:true,smoke:"sales-ai-real-openai",scope:SCOPE,cases:CASE_IDS,total_cases:CASE_IDS.length,labels:Object.fromEntries(CASES.map(c=>[c.id,c.label])),
+        run:"POST /run?case=<ID> with Authorization: Bearer <SMOKE_OWNER_TOKEN> — one fixed case per request",max_provider_calls_per_request:1,retries:0,
+        model_requested:salesAiModel(env),timeout_ms_configured:Number(env.SALES_AI_TIMEOUT_MS)||8000});
+    }
     if(url.pathname!=="/run")return json({ok:false,error:"not_found"},404);
     if(req.method!=="POST")return json({ok:false,error:"method_not_allowed"},405);
     if(!env.SMOKE_OWNER_TOKEN||!env.OPENAI_API_KEY)return json({ok:false,error:"not_configured"},503);
     const auth=req.headers.get("Authorization")||"";
     if(!sameSecret(auth.startsWith("Bearer ")?auth.slice(7):"",env.SMOKE_OWNER_TOKEN))return json({ok:false,error:"unauthorized"},401);
-    if(running)return json({ok:false,error:"already_running"},409);
-    if(Date.now()-lastRun<60000)return json({ok:false,error:"cooldown_60s"},429);
-    running=true;lastRun=Date.now();
-    try{return json({ok:true,smoke:"sales-ai-real-openai",note:"fixed cases only; no data written anywhere; no Telegram",...await runSuite(env)});}
-    catch{return json({ok:false,error:"suite_failed"},500);}
-    finally{running=false;}
+    const id=url.searchParams.get("case");
+    const c=CASES.find(x=>x.id===id);
+    if(!c)return json({ok:false,error:id?"unknown_case":"case_required",allowed_cases:CASE_IDS},400);
+    if(busy)return json({ok:false,error:"busy",running_case:busy},409);
+    const last=lastRunOf.get(c.id);
+    if(last&&Date.now()-last<20000)return json({ok:false,error:"same_case_cooldown_20s",case:c.id},429);
+    busy=c.id;lastRunOf.set(c.id,Date.now());
+    try{
+      const result=await runCase(env,c);
+      const index=CASE_IDS.indexOf(c.id);
+      return json({ok:true,smoke:"sales-ai-real-openai",scope:SCOPE,case_index:index+1,total_cases:CASE_IDS.length,next_case:CASE_IDS[index+1]||null,
+        provider_calls:1,retries:0,model_requested:salesAiModel(env),
+        case_status:result.provider_success?"COMPLETED":"PROVIDER_FAILURE — not a successful case",result});
+    }catch{return json({ok:false,error:"case_failed",case:c.id},500);}
+    finally{busy=null;}
   }
 };
