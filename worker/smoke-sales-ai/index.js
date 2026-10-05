@@ -8,10 +8,10 @@
 // reuses the production salesAiProseIssues gate, but does NOT execute the complete production validateSalesBrainDraft /
 // deterministic sales pipeline.
 //
-// It has no bindings (see wrangler.toml), accepts no prompt from the request, sends nothing anywhere except the OpenAI Responses
-// API through the gateway, and never returns or logs a secret or a request header. The expected values below are only used to
+// It has no bindings (see wrangler.toml), accepts no prompt from the request, sends nothing anywhere except the configured provider
+// (SALES_AI_PROVIDER: OpenAI Responses API or Anthropic Messages API) through the gateway, and never returns or logs a secret or a request header. The expected values below are only used to
 // SCORE the model's answer afterwards; they are never sent to the model.
-import { salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiModel, SALES_AI_REQUESTS, SALES_AI_ESCALATIONS, SALES_AI_COMMERCIAL_SLOT } from "../src/sales-ai-brain.js";
+import { salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiModel, salesAiProvider, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiSpokenNumbers, salesAiMessageQuantities, SALES_AI_REQUESTS, SALES_AI_ESCALATIONS, SALES_AI_COMMERCIAL_SLOT } from "../src/sales-ai-brain.js";
 
 // ---- synthetic, read-only context pieces (shaped like the production context builder's output)
 const COLORS_IR=["سفید سلفون","مشکی سلفون","قرمز سلفون","طلایی سلفون","سرمه‌ای سلفون","مشکی راه راه","کرم راه راه","نارنجی سلفون"];
@@ -62,11 +62,17 @@ const DIGITS=/[0-9۰-۹٠-٩]+/g,asc=s=>String(s).replace(/[۰-۹]/g,d=>"۰۱۲�
 const COLOUR_WORDS=/(?:بنفش|یاسی|صورتی|نقره‌?ای|نقره|سبز|آبی|زرد|خاکستری|طوسی|قهوه‌?ای|بژ|کرم|سفید|مشکی|قرمز|زرشکی|طلایی|سرمه‌?ای|نارنجی|بنفش|purple|pink|silver|green|blue|yellow|grey|gray|brown|beige|white|black|red|gold|navy|orange|أسود|ذهبي|أبيض|أحمر|أزرق|أخضر|فضي|وردي|بنفسجي|رمادي|بني|برتقالي)/giu;
 function disciplineIssues(d,ctx,message){
   const t=d.reply,issues=[];
-  const allowed=new Set([...String(message+JSON.stringify(ctx.deal||{})+JSON.stringify(ctx.catalog||[])).matchAll(DIGITS)].map(m=>asc(m[0])));
+  // A number the customer SPOKE («چهارصد تا») is in the conversation exactly like one written in digits.
+  const allowed=new Set([...[...String(message+JSON.stringify(ctx.deal||{})+JSON.stringify(ctx.catalog||[])).matchAll(DIGITS)].map(m=>asc(m[0])),...salesAiSpokenNumbers(message).map(String)]);
   for(const m of t.match(DIGITS)||[])if(!allowed.has(asc(m)))issues.push("number_not_in_conversation:"+asc(m));
+  // «… ثبت شد / نهایی شد» is an order confirmation unless the sentence only acknowledges a preference: it names an approved colour or a
+  // model part, and no order word and no number (evaluator's own reading, independent of the application gate).
+  const prefs=[...(ctx.colors?.approved||[]),...(Array.isArray(ctx.colors?.parts)?ctx.colors.parts:Object.values(ctx.colors?.parts||{}).flat())];
+  for(const s of String(t).split(/(?<=[.!?؟\n])/u))
+    if(/(?:ثبت|تایید|تأیید|نهایی)\s*(?:شد|کردم|کردیم|می[‌\s]?شود|میشود|می[‌\s]?شه|میشه|خواهد\s*شد|می[‌\s]?کنیم|میکنیم)/u.test(s)&&!/[?؟]\s*$/u.test(s.trim())&&(/(?:سفارش|خرید|فاکتور|order)/iu.test(s)||/[0-9۰-۹٠-٩]/u.test(s)||!prefs.some(p=>s.includes(p))))issues.push("order_confirmation");
   const rules=[["price_or_currency",/(?:تومان|تومن|ریال|دلار|دولار|دينار|\$|USD|TOMAN|قیمت(?:ش)?\s*(?:هر|میشه|می‌شه|هست)|السعر\s*(?:هو|يكون))/iu],["discount",/(?:تخفیف|خصم|discount|درصد\s*کم)/iu],["moq",/(?:حداقل\s*(?:سفارش|تعداد)|الحد\s*الأدنى|minimum\s+order|\bmoq\b)/iu],
     ["shipping_or_delivery",/(?:ارسال|تحویل|پست|شحن|توصيل|delivery|shipping)[^.؟!?]{0,25}(?:رایگان|داریم|انجام|می[‌\s]?دیم|میدیم|می[‌\s]?کنیم|روز|هفته|يوم|مجاني|free)/iu],["production_time",/(?:آماده|تولید|جاهز|يجهز|ready)[^.؟!?]{0,20}(?:روز|هفته|ماه|يوم|أسبوع|day|week)|(?:روز|هفته|يوم|أسبوع)[^.؟!?]{0,20}(?:آماده|تولید|جاهز)/iu],
-    ["payment_terms",/(?:پیش[‌\s]?پرداخت|بیعانه|کارت\s*به\s*کارت|قسط|عربون|دفعة|deposit|installment)/iu],["order_confirmation",/(?:سفارش[^.؟!?]{0,25}(?:ثبت|تایید|تأیید|نهایی)\s*شد|ثبت\s*شد|تم\s*(?:تأكيد|تسجيل)|سجلت\s*الطلب|order\s+(?:is\s+)?(?:confirmed|placed))/iu],
+    ["payment_terms",/(?:پیش[‌\s]?پرداخت|بیعانه|کارت\s*به\s*کارت|قسط|عربون|دفعة|deposit|installment)/iu],["order_confirmation",/(?:سفارش[^.؟!?]{0,25}(?:ثبت|تایید|تأیید|نهایی)\s*شد|تم\s*(?:تأكيد|تسجيل)|سجلت\s*الطلب|order\s+(?:is\s+)?(?:confirmed|placed))/iu],
     ["capability_promise",/(?:چاپ|طلاکوب|لیزر|حک|برجسته|طباعة|ليزر|print|engrav)[^.؟!?]{0,30}(?:میزنیم|می[‌\s]?زنیم|انجام\s*می[‌\s]?دیم|داریم|می[‌\s]?تونیم|نسوي|نكدر|we\s+(?:do|can))/iu],
     ["availability_claim",/(?:موجود\s*(?:است|هست|داریم)|ناموجود|تموم\s*شده|in\s+stock|out\s+of\s+stock|متوفر\s*حالياً)/iu]];
   for(const [k,re] of rules)if(re.test(t))issues.push(k);
@@ -76,19 +82,13 @@ function disciplineIssues(d,ctx,message){
   const approvedText=[...approved].join(" ");for(const m of t.match(COLOUR_WORDS)||[])if(!approvedText.includes(m)&&!message.includes(m))issues.push("colour_word_not_approved:"+m);
   return [...new Set(issues)];
 }
-// PROSE-GATE APPROXIMATION (not the full production validator). It calls the production salesAiProseIssues unchanged, plus two
-// colour checks that mirror the brain's post-call gate: reply colours must be approved, and an unknown colour the model reported may
-// not appear in its reply unless negated. Differences from production, stated honestly: colour names are compared with whitespace
-// normalisation (production uses its own tokeniser in index.js); allowed numbers are only the message's numbers and the deal
-// quantity (production also allows catalog / deal-requirement numbers, so this is stricter); validateSalesBrainDraft, the
-// deterministic commercial segment and escalation logic are NOT executed here.
-function proseGate(d,ctx,message){
-  const allowedNumbers=[...new Set([...String(message).matchAll(DIGITS)].map(m=>Number(asc(m[0]))).concat(Number(ctx.deal?.quantity)||[]))].filter(Number.isFinite);
-  const issues=salesAiProseIssues(d.reply,{allowedNumbers});
-  const approved=new Set((ctx.colors?.approved||[]).map(c=>c.replace(/\s+/g," ")));
-  for(const c of d.reply_colors)if(!approved.has(c.replace(/\s+/g," ")))issues.push("unapproved_color");
-  for(const c of d.facts.unknown_colors)if(c&&d.reply.includes(c)&&!/نیست|ندار|مو من|ما عدنا|not/u.test(d.reply))issues.push("unapproved_color_offered");
-  return issues;
+// PROSE GATE: the production post-call gate functions themselves (salesAiProseIssues with salesAiGroundedNumbers of the built input +
+// salesAiPreferenceTerms, and salesAiColorIssues). Differences from production, stated honestly: colour names are compared with
+// whitespace normalisation (production passes its own tokeniser); production's extra D1 sources (stored quantity, deal requirements)
+// do not exist here; validateSalesBrainDraft, the deterministic commercial segment and escalation logic are NOT executed here.
+function proseGate(d,ctx,input){
+  const allowedNumbers=[...new Set([...salesAiGroundedNumbers(input),...(Number(ctx.deal?.quantity)?[Number(ctx.deal.quantity)]:[])])];
+  return [...salesAiProseIssues(d.reply,{allowedNumbers,preferenceTerms:salesAiPreferenceTerms(input)}),...salesAiColorIssues(d,{approved:ctx.colors?.approved||[],norm:c=>String(c).replace(/\s+/g," ").trim()})];
 }
 // Raw schema check against the strict contract (shape and enums), before any normalisation.
 function schemaCheck(raw){
@@ -116,7 +116,13 @@ async function runCase(env,c){
   // (Provider error bodies are reduced to their type/code only: OpenAI error messages can quote part of a key, so they are never kept.)
   globalThis.fetch=async(url,init)=>{const r=await realFetch(url,init);try{if(String(url)==="https://api.openai.com/v1/responses"){observed.status=r.status;const data=await r.clone().json();
     if(!r.ok){observed.provider_error={type:typeof data?.error?.type==="string"?data.error.type.slice(0,60):null,code:typeof data?.error?.code==="string"?data.error.code.slice(0,60):null};}
-    else{let text=typeof data?.output_text==="string"?data.output_text:"";if(!text)for(const item of data?.output||[])for(const part of item?.content||[])if(typeof part?.text==="string")text+=part.text;observed.raw=text;observed.model=typeof data?.model==="string"?data.model.slice(0,80):null;observed.usage=data?.usage?{input_tokens:data.usage.input_tokens??null,output_tokens:data.usage.output_tokens??null}:null;}}}catch{}return r;};
+    else{let text=typeof data?.output_text==="string"?data.output_text:"";if(!text)for(const item of data?.output||[])for(const part of item?.content||[])if(typeof part?.text==="string")text+=part.text;observed.raw=text;observed.model=typeof data?.model==="string"?data.model.slice(0,80):null;observed.usage=data?.usage?{input_tokens:data.usage.input_tokens??null,output_tokens:data.usage.output_tokens??null}:null;}}
+    else if(String(url)==="https://api.anthropic.com/v1/messages"){observed.status=r.status;const data=await r.clone().json();
+      // Anthropic error bodies: {type:"error",error:{type,message}} — only the type is kept (no message; there is no code field).
+      if(!r.ok){observed.provider_error={type:typeof data?.error?.type==="string"?data.error.type.slice(0,60):null,code:null};}
+      else{observed.raw=(Array.isArray(data?.content)?data.content:[]).filter(b=>b?.type==="text"&&typeof b.text==="string").map(b=>b.text).join("");
+        observed.model=typeof data?.model==="string"?data.model.slice(0,80):null;observed.stop_reason=typeof data?.stop_reason==="string"?data.stop_reason.slice(0,40):null;
+        observed.usage=data?.usage?{input_tokens:data.usage.input_tokens??null,output_tokens:data.usage.output_tokens??null}:null;}}}catch{}return r;};
   try{
       const input=buildSalesAiInput({...c.ctx,message:c.message});
       const res=await callSalesAi(env,{instructions:salesAiPolicy(c.ctx.language),input});
@@ -125,19 +131,21 @@ async function runCase(env,c){
       const d=res.decision||null;
       const checks=d?c.expect.map(([name,fn])=>({check:name,pass:(()=>{try{return !!fn(d);}catch{return false;}})()})):[];
       const discipline=d?disciplineIssues(d,c.ctx,c.message):[];
-      const gate=d?proseGate(d,c.ctx,c.message):[];
+      const gate=d?proseGate(d,c.ctx,input):[];
       // prose_gate_verdict: did the production prose gate (as approximated above) discard every raw output that the smoke-specific
       // discipline evaluator found unsafe? Capability / availability claims are judged in production by validateSalesBrainDraft,
       // which this Worker does NOT run — they are listed separately and never counted as covered by the prose gate.
       const gateMisses=discipline.filter(x=>!["capability_promise","availability_claim"].includes(x.split(":")[0]))
         .filter(()=>gate.length===0);
       return {
-        case:c.id,label:c.label,model_requested:res.model,model_reported_by_provider:observed.model??null,
+        case:c.id,label:c.label,provider:salesAiProvider(env),model_requested:res.model,model_reported_by_provider:observed.model??null,stop_reason:observed.stop_reason??null,
         provider_success:res.ok,provider_error:res.error||null,provider_error_detail:observed.provider_error||null,provider_status:observed.status??null,
         schema_valid:res.ok&&schemaErrors.length===0,schema_errors:schemaErrors,latency_ms:res.ms,
         tokens:observed.usage||null,input_chars:input.length,
         expected_language:c.lang,reply_script:d?scriptOf(d.reply):null,
         understood_requests:d?.requests||[],extracted_facts:d?.facts||null,
+        // Production accepts an AI quantity only when the current message expresses it (salesAiMessageQuantities); null = no quantity.
+        quantity_grounded:d?.facts?.quantity?salesAiMessageQuantities(c.message).includes(d.facts.quantity):null,
         requested_information:d?d.requests.filter(r=>["price","discount","moq","shipping","payment","production_time","printing","ribbon","size","colors_available","color_recommendation","order_status"].includes(r)):[],
         missing_information:d?.missing_information||[],
         clarification_or_escalation:d?{owner_escalation_needed:d.owner_escalation_needed,escalation_reason:d.escalation_reason,acceptance:d.acceptance,rejection:d.rejection}:null,
@@ -169,11 +177,37 @@ export default {
       if(req.method!=="GET")return json({ok:false,error:"method_not_allowed"},405);
       return json({ok:true,smoke:"sales-ai-real-openai",scope:SCOPE,cases:CASE_IDS,total_cases:CASE_IDS.length,labels:Object.fromEntries(CASES.map(c=>[c.id,c.label])),
         run:"POST /run?case=<ID> with Authorization: Bearer <SMOKE_OWNER_TOKEN> — one fixed case per request",max_provider_calls_per_request:1,retries:0,
-        model_requested:salesAiModel(env),timeout_ms_configured:Number(env.SALES_AI_TIMEOUT_MS)||8000});
+        provider:salesAiProvider(env),model_requested:salesAiModel(env),timeout_ms_configured:Number(env.SALES_AI_TIMEOUT_MS)||8000});
+    }
+    // Owner-only egress diagnostic: what a Cloudflare-fronted site (like api.openai.com) sees for this Worker's outbound fetch.
+    // Calls ONLY www.cloudflare.com/cdn-cgi/trace with no headers/secrets; never calls OpenAI.
+    if(url.pathname==="/egress"){
+      if(req.method!=="GET")return json({ok:false,error:"method_not_allowed"},405);
+      const auth=req.headers.get("Authorization")||"";
+      if(!env.SMOKE_OWNER_TOKEN||!sameSecret(auth.startsWith("Bearer ")?auth.slice(7):"",env.SMOKE_OWNER_TOKEN))return json({ok:false,error:"unauthorized"},401);
+      let kv={};
+      try{const t=await (await fetch("https://www.cloudflare.com/cdn-cgi/trace",{method:"GET"})).text();kv=Object.fromEntries(t.trim().split("\n").map(l=>{const i=l.indexOf("=");return [l.slice(0,i),l.slice(i+1)];}));}
+      catch{return json({ok:false,error:"trace_fetch_failed",ingress_colo:req.cf?.colo??null,ingress_country:req.cf?.country??null},502);}
+      return json({ok:true,ingress_colo:req.cf?.colo??null,ingress_country:req.cf?.country??null,
+        egress_as_seen_by_cloudflare_zone:{ip:kv.ip??null,loc:kv.loc??null,colo:kv.colo??null}});
+    }
+    // Owner-only model verification: Anthropic Models API lookup of the configured model id (no generation, no cost). Returns only
+    // the provider's status and the model's public metadata.
+    if(url.pathname==="/model-info"){
+      if(req.method!=="GET")return json({ok:false,error:"method_not_allowed"},405);
+      const auth=req.headers.get("Authorization")||"";
+      if(!env.SMOKE_OWNER_TOKEN||!sameSecret(auth.startsWith("Bearer ")?auth.slice(7):"",env.SMOKE_OWNER_TOKEN))return json({ok:false,error:"unauthorized"},401);
+      if(salesAiProvider(env)!=="anthropic"||!env.ANTHROPIC_API_KEY)return json({ok:false,error:"not_configured"},503);
+      const model=salesAiModel(env);
+      try{const r=await fetch("https://api.anthropic.com/v1/models/"+encodeURIComponent(model),{headers:{"x-api-key":env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01"}});
+        const d=await r.json().catch(()=>null);
+        return json({ok:r.ok,model_configured:model,provider_status:r.status,id:typeof d?.id==="string"?d.id:null,display_name:typeof d?.display_name==="string"?d.display_name:null,created_at:typeof d?.created_at==="string"?d.created_at:null,error_type:!r.ok&&typeof d?.error?.type==="string"?d.error.type:null});
+      }catch{return json({ok:false,error:"lookup_failed"},502);}
     }
     if(url.pathname!=="/run")return json({ok:false,error:"not_found"},404);
     if(req.method!=="POST")return json({ok:false,error:"method_not_allowed"},405);
-    if(!env.SMOKE_OWNER_TOKEN||!env.OPENAI_API_KEY)return json({ok:false,error:"not_configured"},503);
+    const providerKey=salesAiProvider(env)==="anthropic"?env.ANTHROPIC_API_KEY:salesAiProvider(env)==="openai"?env.OPENAI_API_KEY:null;
+    if(!env.SMOKE_OWNER_TOKEN||!providerKey)return json({ok:false,error:"not_configured"},503);
     const auth=req.headers.get("Authorization")||"";
     if(!sameSecret(auth.startsWith("Bearer ")?auth.slice(7):"",env.SMOKE_OWNER_TOKEN))return json({ok:false,error:"unauthorized"},401);
     const id=url.searchParams.get("case");

@@ -14,9 +14,15 @@ export const SALES_AI_ESCALATIONS=["unknown_capability","custom_color","unapprov
 export const SALES_AI_COMMERCIAL_SLOT="{{COMMERCIAL}}";
 
 // Off unless configured (SALES_AI_BRAIN=on) and a key exists: unconfigured environments keep the deterministic brain unchanged.
-export function salesAiEnabled(env){return String(env?.SALES_AI_BRAIN||"off").toLowerCase()==="on"&&!!env?.OPENAI_API_KEY;}
-// Provider/model are configuration, never hard-wired into the sales logic.
-export function salesAiModel(env){return String(env?.SALES_AI_MODEL||env?.OPENAI_MODEL||"gpt-5.6-luna");}
+export function salesAiEnabled(env){return String(env?.SALES_AI_BRAIN||"off").toLowerCase()==="on"&&!!salesAiKey(env,salesAiProvider(env));}
+// Provider/model are configuration, never hard-wired into the sales logic. SALES_AI_PROVIDER is explicit: "openai" (default when unset,
+// i.e. today's behaviour) or "anthropic"; any other value is a misconfiguration (no call, no silent fallback to another provider).
+export function salesAiProvider(env){const p=String(env?.SALES_AI_PROVIDER||"openai").trim().toLowerCase();return p==="openai"||p==="anthropic"?p:null;}
+function salesAiKey(env,provider){return provider==="anthropic"?env?.ANTHROPIC_API_KEY:provider==="openai"?env?.OPENAI_API_KEY:null;}
+export function salesAiModel(env){
+  if(salesAiProvider(env)==="anthropic")return String(env?.SALES_AI_MODEL||env?.ANTHROPIC_MODEL||"claude-opus-5-5");
+  return String(env?.SALES_AI_MODEL||env?.OPENAI_MODEL||"gpt-5.6-luna");
+}
 
 // The decision contract (strict JSON schema: every property present; null / [] when not applicable).
 const str={type:["string","null"]};
@@ -89,6 +95,9 @@ export function buildSalesAiInput(ctx){
 // deterministic reply is sent instead. No retry (a retried call could double provider cost and reply twice).
 export function salesAiTimeoutMs(env){const v=Number(env?.SALES_AI_TIMEOUT_MS);return Number.isFinite(v)?Math.min(15000,Math.max(1000,Math.round(v))):8000;}
 export async function callSalesAi(env,{instructions,input,timeoutMs=salesAiTimeoutMs(env)}){
+  const provider=salesAiProvider(env);
+  if(provider==="anthropic")return callSalesAiAnthropic(env,{instructions,input,timeoutMs});
+  if(provider!=="openai")return {ok:false,model:salesAiModel(env),ms:0,error:"provider_misconfigured"};
   const started=Date.now(),model=salesAiModel(env);
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
   try{
@@ -98,6 +107,39 @@ export async function callSalesAi(env,{instructions,input,timeoutMs=salesAiTimeo
     const data=await r.json();
     let text=typeof data?.output_text==="string"?data.output_text:"";
     if(!text)for(const item of data?.output||[])for(const part of item?.content||[])if(typeof part?.text==="string")text+=part.text;
+    const json=JSON.parse(String(text).match(/\{[\s\S]*\}/)?.[0]||"null");
+    if(!json||typeof json!=="object")return {ok:false,model,ms:Date.now()-started,error:"provider_unparsable"};
+    return {ok:true,model,ms:Date.now()-started,decision:normalizeSalesAiDecision(json)};
+  }catch(error){return {ok:false,model,ms:Date.now()-started,error:error?.name==="AbortError"?"provider_timeout":"provider_error"};}
+  finally{clearTimeout(timer);}
+}
+
+// ---- Provider (Anthropic Messages API, structured output). Same contract as above: one call, same timeout, no retry, sanitised
+// error codes, the same decision schema (nullable type arrays expressed as anyOf, which is the same JSON schema semantics).
+const toAnthropicSchema=s=>{
+  if(Array.isArray(s))return s.map(toAnthropicSchema);
+  if(!s||typeof s!=="object")return s;
+  const o=Object.fromEntries(Object.entries(s).map(([k,v])=>[k,k==="enum"?v:toAnthropicSchema(v)]));
+  if(Array.isArray(o.type)&&o.type.includes("null")&&o.type.length===2){
+    const {type,enum:en,...rest}=o,t=type.find(x=>x!=="null");
+    return {anyOf:[{...rest,type:t,...(en?{enum:en.filter(x=>x!==null)}:{})},{type:"null"}]};
+  }
+  return o;
+};
+const SALES_AI_DECISION_SCHEMA_ANTHROPIC=toAnthropicSchema(SALES_AI_DECISION_SCHEMA);
+async function callSalesAiAnthropic(env,{instructions,input,timeoutMs}){
+  const started=Date.now(),model=salesAiModel(env);
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",signal:controller.signal,
+      headers:{"x-api-key":env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","content-type":"application/json"},
+      body:JSON.stringify({model,max_tokens:8000,system:instructions,messages:[{role:"user",content:input}],
+        output_config:{effort:String(env?.SALES_AI_EFFORT||"low"),format:{type:"json_schema",schema:SALES_AI_DECISION_SCHEMA_ANTHROPIC}}})});
+    if(!r.ok)return {ok:false,model,ms:Date.now()-started,error:"provider_http_"+r.status};
+    const data=await r.json();
+    if(data?.stop_reason==="refusal")return {ok:false,model,ms:Date.now()-started,error:"provider_refusal"};
+    if(data?.stop_reason==="max_tokens")return {ok:false,model,ms:Date.now()-started,error:"provider_truncated"};
+    const text=(Array.isArray(data?.content)?data.content:[]).filter(b=>b?.type==="text"&&typeof b.text==="string").map(b=>b.text).join("");
     const json=JSON.parse(String(text).match(/\{[\s\S]*\}/)?.[0]||"null");
     if(!json||typeof json!=="object")return {ok:false,model,ms:Date.now()-started,error:"provider_unparsable"};
     return {ok:true,model,ms:Date.now()-started,decision:normalizeSalesAiDecision(json)};
@@ -128,14 +170,95 @@ export function normalizeSalesAiDecision(raw){
 // ---- Deterministic guard on the AI's OWN prose (before the commercial segment is inserted): it may not carry commercial truth.
 const DIGITS=/[0-9۰-۹٠-٩]+(?:[.,٬٫][0-9۰-۹٠-٩]+)*/g;
 const toAscii=s=>String(s).replace(/[۰-۹]/g,d=>"۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٠-٩]/g,d=>"٠١٢٣٤٥٦٧٨٩".indexOf(d));
-export function salesAiProseIssues(prose,{allowedNumbers=[]}={}){
+// Normalised text for the gate (digits → ASCII, Arabic letter forms → Persian, no diacritics / ZWNJ) and number words → values.
+const gateNorm=v=>toAscii(String(v??"").normalize("NFKC")).replace(/[يى]/g,"ی").replace(/ك/g,"ک").replace(/ة/g,"ه").replace(/[أإآ]/g,"ا")
+  .replace(/ؤ/g,"و").replace(/ئ/g,"ی").replace(/[ً-ٰٟـ]/g,"").replace(/[‌‍]/g," ").toLowerCase().replace(/\s+/g," ").trim();
+// «نه» (no) and «ست» (as in «نیم ست») are deliberately absent: they are not read as numbers.
+const GATE_NUMBER_WORDS=new Map(Object.entries({یک:1,یه:1,دو:2,سه:3,چهار:4,پنج:5,شش:6,شیش:6,هفت:7,هشت:8,ده:10,یازده:11,دوازده:12,سیزده:13,چهارده:14,پانزده:15,پونزده:15,شانزده:16,شونزده:16,هفده:17,هجده:18,هیجده:18,نوزده:19,
+  بیست:20,سی:30,چهل:40,پنجاه:50,شصت:60,هفتاد:70,هشتاد:80,نود:90,صد:100,یکصد:100,دویست:200,سیصد:300,چهارصد:400,پانصد:500,پونصد:500,ششصد:600,شیشصد:600,هفتصد:700,هشتصد:800,نهصد:900,
+  واحد:1,اثنین:2,ثنین:2,اثنان:2,ثلاث:3,ثلاثه:3,اربع:4,اربعه:4,خمس:5,خمسه:5,سته:6,سبع:7,سبعه:7,ثمان:8,ثمانیه:8,تسع:9,تسعه:9,عشر:10,عشره:10,عشرین:20,عشرون:20,ثلاثین:30,اربعین:40,خمسین:50,ستین:60,سبعین:70,ثمانین:80,تسعین:90,
+  میه:100,مایه:100,مئه:100,میتین:200,مئتین:200,ثلاثمیه:300,ثلاثمئه:300,اربعمیه:400,اربعمئه:400,خمسمیه:500,خمسمئه:500,ستمیه:600,ستمئه:600,سبعمیه:700,سبعمئه:700,ثمنمیه:800,ثمانمئه:800,تسعمیه:900,تسعمئه:900}).map(([k,v])=>[gateNorm(k),v]));
+const GATE_MULTIPLIERS=new Map([["هزار",1000],["الف",1000],["الاف",1000],["میلیون",1e6],["ملیون",1e6]].map(([k,v])=>[gateNorm(k),v]));
+const gateSet=a=>new Set(a.map(gateNorm));
+const GATE_QTY_UNITS=gateSet(["تا","تایی","عدد","عدده","دانه","حبه","حبات","قطعه","قطع","تکه","تیکه","قطعتین","pcs","pc","pieces","units","جعبه","باکس","پک","بسته","کارتن","علبه","علب","box","boxes"]);
+const GATE_TIME_UNITS=gateSet(["روز","روزه","روزی","هفته","هفته‌ای","ماه","ماهه","ساعت","ساعته","یوم","ایام","اسبوع","اسابیع","ساعه","شهر","day","days","week","weeks","hour","hours","month","months"]);
+// Every number a text states (digits and spoken numbers), with the two words that follow it. Dimensions (7x9, ۷ در ۹) are one «DIM».
+function gateNumberMentions(text){
+  const t=gateNorm(text).replace(/(\d+)\s*(?:x|×|\*|در)\s*(\d+)/g," $1 dim $2 dim ").replace(/(\d)[,٬](?=\d{3}(?!\d))/g,"$1");
+  const w=t.split(/[^\p{L}\p{N}.]+/u).map(x=>x.replace(/^\.+|\.+$/g,"")).filter(Boolean),out=[];
+  for(let i=0;i<w.length;i++){
+    let total=0,current=0,used=0,spoken=false,mult=false,j=i;
+    for(;j<w.length;j++){
+      const x=w[j];
+      if(/^\d+(?:\.\d+)?$/.test(x)){if(used&&!mult&&current)break;current+=Number(x);used++;continue;}
+      if(GATE_NUMBER_WORDS.has(x)){current+=GATE_NUMBER_WORDS.get(x);used++;spoken=true;continue;}
+      if(used&&GATE_MULTIPLIERS.has(x)){total+=(current||1)*GATE_MULTIPLIERS.get(x);current=0;mult=true;continue;}
+      if(x==="و"&&used&&(GATE_NUMBER_WORDS.has(w[j+1])||/^\d/.test(w[j+1]||"")))continue;
+      break;
+    }
+    if(!used)continue;
+    out.push({value:total+current,spoken,multiplied:mult,next:w[j]||"",next2:w[j+1]||""});
+    i=j-1;
+  }
+  return out;
+}
+export const salesAiSpokenNumbers=text=>gateNumberMentions(text).filter(m=>m.spoken).map(m=>m.value);
+// Numbers the model was actually GIVEN: the customer's current message (digits and spoken numbers: «چهارصد» = 400) and the
+// structured, non-commercial context sections of the built input (customer, deal, commercial state, catalog, approved colours /
+// parts, approved knowledge). Recent messages and the summary are NOT grounding (they may carry old commercial figures).
+export function salesAiGroundedNumbers(input){
+  let c=null;try{c=JSON.parse(String(input||"").replace(/^CONTEXT:\s*/,""));}catch{}
+  if(!c||typeof c!=="object")return [];
+  const sources=[c.message,JSON.stringify(c.customer||null),JSON.stringify(c.deal||null),JSON.stringify(c.commercial_now||null),JSON.stringify(c.catalog||[]),JSON.stringify(c.colors||null),JSON.stringify(c.knowledge||[])];
+  const out=new Set();
+  for(const s of sources){for(const m of String(s||"").match(DIGITS)||[]){const n=Number(toAscii(m).replace(/[,٬]/g,"").replace(/[٫]/g,"."));if(Number.isFinite(n))out.add(n);for(const p of toAscii(m).split(/[.,٬٫]/))if(p)out.add(Number(p));}
+    for(const m of gateNumberMentions(s))out.add(m.value);}
+  return [...out].filter(Number.isFinite);
+}
+// The quantities the CURRENT customer message itself expresses (same parser as the gate: any digit script, thousands separators,
+// spoken Persian / Arabic numbers). A number that names a part count («3 تکه»), a dimension (7x9), a duration or an amount with a
+// money multiplier but no quantity unit is not a quantity. Used to accept an AI-extracted quantity only when the customer said it now.
+const GATE_NOT_QUANTITY_NEXT=gateSet(["تکه","تیکه","قطعه","قطع","قطعتین","dim","درصد","تومان","تومن","ریال","دلار","دینار","usd"]);
+export function salesAiMessageQuantities(message){
+  return [...new Set(gateNumberMentions(message).filter(m=>Number.isSafeInteger(m.value)&&m.value>0&&!GATE_NOT_QUANTITY_NEXT.has(m.next)&&!GATE_TIME_UNITS.has(m.next)&&!(m.next==="تا"&&GATE_TIME_UNITS.has(m.next2))&&!(m.multiplied&&!GATE_QTY_UNITS.has(m.next))).map(m=>m.value))];
+}
+// The confirmation guard: AI prose never registers an order (that comes only from the deterministic segment after a validated
+// acceptance). A «registered / finalised» sentence passes only as an acknowledgement of a PREFERENCE (it names an approved colour or a
+// model part) and only when it names no order word and no number; otherwise it is an order commitment. Questions offer, not confirm.
+const GATE_CONFIRM=/(?:ثبت|تایید|نهایی|قطعی)\s*(?:شد|شده|شدن|کردم|کردیم|میشه|می شه|میشن|می شن|میشود|می شود|میشوند|می شوند|شود|بشه|خواهد شد|خواهند شد|میگردد|می گردد|گردید|میکنم|می کنم|میکنیم|می کنیم|کنم|میزنم|می زنم|میزنیم|می زنیم)|ثبتش|ثبتشون|ثبتتون|تم (?:تاکید|تسجیل|اعتماد)|سیتم (?:تاکید|تسجیل|اعتماد)|(?:راح|رح|سوف) (?:نسجل|نثبت|نعتمد|یتسجل|یتثبت)|نسجل(?:ه|ها)?(?!\p{L})|سجلت|سجلنا|اعتمدنا|confirmed|registered|finali[sz]ed|placed/u;
+const GATE_ORDER=/(?:سفارش|خرید|فاکتور|قرارداد|طلب|فاتوره|order|purchase|invoice)/u;
+function gateConfirmationIssue(text,preferenceTerms){
+  const prefs=preferenceTerms.map(gateNorm).filter(p=>p.length>=2);
+  for(const raw of String(text).split(/(?<=[.!?؟\n؛;])/u)){
+    const s=gateNorm(raw);
+    if(!GATE_CONFIRM.test(s)||/[?؟]\s*$/u.test(raw.trim()))continue;
+    if(GATE_ORDER.test(s)||gateNumberMentions(raw).length||!prefs.some(p=>s.includes(p)))return true;
+  }
+  return false;
+}
+const GATE_PRICE_WORDS=/(?<!\p{L})(?:قیمت\p{L}*|فی|هزینه\p{L}*|مبلغ\p{L}*|سعر\p{L}*|السعر|کلفه|الکلفه|بیش|price\p{L}*|cost\p{L}*|total)(?!\p{L})/u,GATE_MIN_WORDS=/(?<!\p{L})(?:حداقل|کمترین|دست کم|الحد الادنی|اقل|minimum|at least)(?!\p{L})/u;
+export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[]}={}){
   const text=String(prose||""),issues=[];
   if(!text.replace(SALES_AI_COMMERCIAL_SLOT,"").trim())issues.push("empty");
   if(text.length>1500)issues.push("too_long");
   const allowed=new Set(allowedNumbers.map(n=>String(n)));
   for(const m of text.match(DIGITS)||[]){const n=toAscii(m).replace(/[,٬]/g,"").replace(/[٫]/g,".");if(!allowed.has(n))issues.push("unapproved_number:"+n);}
+  // Spoken numbers are grounded the same way (counting words below 10 — «یه ترکیب», «سه بخش» — are ordinary language).
+  for(const m of gateNumberMentions(text.replaceAll(SALES_AI_COMMERCIAL_SLOT," ")))if(m.spoken&&m.value>=10&&!allowed.has(String(m.value)))issues.push("unapproved_number:"+m.value);
+  // Commercial shape of a number, grounded or not: a duration, a money magnitude, a price, a minimum (they reach the customer only
+  // through the deterministic segment).
+  for(const raw of text.replaceAll(SALES_AI_COMMERCIAL_SLOT," ").split(/(?<=[.!?؟\n؛;])/u)){
+    const s=gateNorm(raw),mentions=gateNumberMentions(raw);
+    for(const m of mentions){
+      if(GATE_TIME_UNITS.has(m.next)||(m.next==="تا"&&GATE_TIME_UNITS.has(m.next2)))issues.push("duration_claim");
+      if(m.multiplied&&!GATE_QTY_UNITS.has(m.next))issues.push("money_number");
+    }
+    if(GATE_PRICE_WORDS.test(s)&&mentions.some(m=>!GATE_QTY_UNITS.has(m.next)&&m.next!=="dim"))issues.push("price_claim");
+    if(GATE_MIN_WORDS.test(s)&&mentions.length)issues.push("moq_claim");
+  }
   if(/(?:تومان|تومن|ریال|دلار|دولار|\$|USD|TOMAN|IQD|دینار)/iu.test(text))issues.push("currency");
-  if(/(?:تخفیف|خصم|discount|آف\b)/iu.test(text))issues.push("discount");
+  if(/(?:تخفیف|خصم|discount|آف\b|درصد|[%٪]|بالمي[ةه]|بالمئ[ةه]|percent)/iu.test(text))issues.push("discount");
+  if(gateConfirmationIssue(text,preferenceTerms))issues.push("order_commitment");
   if(/(?:سفارش[^.؟!?]{0,25}(?:ثبت|تایید|تأیید)\s*شد|(?:ثبت|تایید|تأیید)\s*شد[^.؟!?]{0,25}سفارش|تم\s*(?:تأكيد|تاكيد|تسجيل)\s*الطلب|سجلت\s*الطلب|order\s+(?:is\s+)?(?:confirmed|registered))/iu.test(text))issues.push("order_commitment");
   // The model is never given commercial knowledge (it is filtered out of its context), so any of these in its OWN words would be
   // invented: they reach the customer only through the deterministic segment ({{COMMERCIAL}}).
@@ -143,5 +266,19 @@ export function salesAiProseIssues(prose,{allowedNumbers=[]}={}){
   if(/(?:ارسال|حمل|پست|تیپاکس|باربری|شحن|توصيل|shipping)\s*(?:رایگان|مجانی|مجاني|free|داریم|نداریم|انجام|می[‌\s]?کنیم|میشه|می[‌\s]?شه)/iu.test(text))issues.push("shipping_claim");
   if(/(?:پیش[‌\s]?پرداخت|بیعانه|کارت\s*به\s*کارت|قسطی|اقساط|عربون|دفعة\s*مقدمة|الدفع\s*(?:عند|مقدم|بالأقساط)|deposit|installment)/iu.test(text))issues.push("payment_claim");
   if(/(?:حداقل\s*(?:سفارش|تعداد)|الحد\s*الأدنى|\bmoq\b|minimum\s+order)/iu.test(text))issues.push("moq_claim");
-  return issues;
+  return [...new Set(issues)];
+}
+// What a preference acknowledgement may name: the approved colours and the model parts given to the model (colors.parts may be a
+// list for the known model or a map model → parts). Accepts the colours object or the built input text.
+export function salesAiPreferenceTerms(colors){
+  if(typeof colors==="string"){try{colors=JSON.parse(colors.replace(/^CONTEXT:\s*/,"")).colors;}catch{colors=null;}}
+  const parts=colors?.parts,list=Array.isArray(parts)?parts:parts&&typeof parts==="object"?Object.values(parts).flat():[];
+  return [...(colors?.approved||[]),...list].filter(x=>typeof x==="string"&&x.trim());
+}
+// Colour discipline of the reply: every colour it names is approved, and a colour reported as unknown (or unsupported) is never offered.
+export function salesAiColorIssues(decision,{approved=[],norm=gateNorm,unsupported=[]}={}){
+  const issues=[],names=new Set(approved.map(norm)),reply=String(decision?.reply||"");
+  for(const c of decision?.reply_colors||[])if(!names.has(norm(c)))issues.push("unapproved_color");
+  for(const c of [...unsupported,...(decision?.facts?.unknown_colors||[])])if(c&&reply.includes(c)&&!/نیست|ندار|مو من|ما عدنا|not/u.test(reply))issues.push("unapproved_color_offered");
+  return [...new Set(issues)];
 }

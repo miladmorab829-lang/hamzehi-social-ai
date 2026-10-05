@@ -1,7 +1,7 @@
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
-import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
+import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -8025,11 +8025,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       // discount, MOQ, shipping, payment, delivery/status, order confirmation), numbers the conversation never contained, colours
       // that are not approved — or no reply at all — is discarded WHOLE: neither its facts nor its reading steer anything.
       const d=res.decision,digits=v=>[...String(v??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(m=>knowledgeCommandNumber(m[0])).filter(Number.isSafeInteger);
-      aiAllowedNumbers=[...new Set([knownQuantity,dealCandidate?.quantity,...digits(row.message),...digits(memory.product_interest),...digits(memory.requested_size),...digits(JSON.stringify(pricing?.catalog_summary||[])),...digits(dealCandidate?.product?.name),...digits(JSON.stringify(dealCandidate?.requirements||{}))].filter(Number.isSafeInteger))];
-      const issues=salesAiProseIssues(d.reply,{allowedNumbers:aiAllowedNumbers});
-      const approvedNames=new Set(colorOptions.map(o=>salesTokens(o).join(" ")));
-      for(const c of d.reply_colors)if(!approvedNames.has(salesTokens(c).join(" ")))issues.push("unapproved_color");
-      for(const c of [...(colorPick.unsupported||[]),...d.facts.unknown_colors])if(c&&d.reply.includes(c)&&!/نیست|ندار|مو من|ما عدنا|not/u.test(d.reply))issues.push("unapproved_color_offered");
+      aiAllowedNumbers=[...new Set([knownQuantity,dealCandidate?.quantity,...digits(row.message),...digits(memory.product_interest),...digits(memory.requested_size),...digits(JSON.stringify(pricing?.catalog_summary||[])),...digits(dealCandidate?.product?.name),...digits(JSON.stringify(dealCandidate?.requirements||{})),...salesAiGroundedNumbers(input)].filter(Number.isSafeInteger))];
+      const issues=salesAiProseIssues(d.reply,{allowedNumbers:aiAllowedNumbers,preferenceTerms:salesAiPreferenceTerms(input)});
+      issues.push(...salesAiColorIssues(d,{approved:colorOptions,norm:v=>salesTokens(v).join(" "),unsupported:colorPick.unsupported||[]}));
       aiInfo.called=true;
       if(issues.length)aiInfo.fallback="prose:"+issues[0];
       else{ai=d;aiInfo.used=true;aiInfo.requests=ai.requests;}
@@ -8055,7 +8053,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       if(chosen.length)applied.push("colors");
     }
     const cleanText=v=>typeof v==="string"&&/\p{L}/u.test(v)&&!/[0-9۰-۹٠-٩@#]/u.test(v)&&v.length<=40?v.trim():null;
-    if(f.quantity&&f.quantity!==knownQuantity){
+    // A NEW quantity from the AI is used only when the customer's CURRENT message expresses it (digits in any script or spoken);
+    // history, the summary, the offer or the catalog never prove a new quantity. Otherwise the trusted quantity stays and nothing reprices.
+    const quantityGrounded=!!f.quantity&&salesAiMessageQuantities(row.message).includes(f.quantity);
+    if(f.quantity&&f.quantity!==knownQuantity&&!quantityGrounded)aiInfo.quantity_rejected="not_in_current_message";
+    if(f.quantity&&f.quantity!==knownQuantity&&quantityGrounded){
       await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"requested_quantity",memory_key:"requested_quantity",value:f.quantity}});
       knownQuantity=f.quantity;quantityValid=true;known.quantity=true;memory.requested_quantity=f.quantity;aiChanged.quantity=true;applied.push("quantity");
     }

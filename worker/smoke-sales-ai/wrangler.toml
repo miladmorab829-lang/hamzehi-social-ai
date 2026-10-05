@@ -12,3 +12,8 @@ workers_dev = true
 # Same model-selection contract as production: SALES_AI_MODEL (optional) overrides OPENAI_MODEL.
 # Keep this identical to the production value in worker/wrangler.toml.
 OPENAI_MODEL = "gpt-5.6-luna"
+# Explicit provider selection (no automatic fallback): "anthropic" uses ANTHROPIC_API_KEY + ANTHROPIC_MODEL; "openai" uses the above.
+SALES_AI_PROVIDER = "anthropic"
+ANTHROPIC_MODEL = "claude-opus-5-5"
+# Smoke-only: the gateway's maximum allowed provider timeout (production default stays 8 s).
+SALES_AI_TIMEOUT_MS = "15000"
