@@ -506,7 +506,7 @@ async function afterDepositTermsDecision(env,decision,act){
     :(termsLine?(ar?`تمت موافقة المدير على طلبكم بخصوص شروط الدفع لهذا الطلب: ${termsLine}.`:`درخواستتون درباره شرایط پرداخت این سفارش تأیید شد: ${termsLine}.`):(ar?"تمت موافقة المدير على طلبكم بخصوص شروط الدفع لهذا الطلب.":"درخواستتون درباره شرایط پرداخت این سفارش تأیید شد."))
     :(termsLine?(ar?`للأسف لم تتم الموافقة على طلب تغيير شروط الدفع؛ تبقى الشروط المعتادة: ${termsLine}.`:`متأسفانه امکان تغییر شرایط پرداخت تأیید نشد و شرایط معمول برقراره: ${termsLine}.`):(ar?"للأسف لم تتم الموافقة على طلب تغيير شروط الدفع.":"متأسفانه امکان تغییر شرایط پرداخت تأیید نشد."));
   if(decision.lead_id&&decision.conversation_id&&D.createApprovalGatedDraft)await D.createApprovalGatedDraft(env,{key:`payment-terms:decision-draft:${decision.id}`,skipKey:`payment-terms:decision-draft-skipped:${decision.id}`,leadId:decision.lead_id,conversationId:decision.conversation_id,language,message,
-    eventType:"payment_terms_decision_draft_created",eventMessage:"Payment-terms decision draft created for owner approval",details:{decision_id:decision.id,order_id:order?.id||null,outcome:approved?"approved":"rejected",deposit_percent:pct??null}});
+    eventType:"payment_terms_decision_draft_created",eventMessage:"Payment-terms decision draft created for owner approval",details:{decision_id:decision.id,order_id:order?.id||null,outcome:approved?"approved":"rejected",deposit_percent:pct??null,...(order?{snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}:{})}});
   if(order)await preparePaymentRequest(env,order);
 }
 export async function listDecisions(env,{status="PENDING",type=null,limit=100}={}){
@@ -784,18 +784,39 @@ export async function orderDepositTerms(env,order){
   }
   return {percent:def,source:"default",decision_id:null,kind:"default"};
 }
+// ---- The CUSTOMER-FACING payment configuration of one order, as the database says it is right now: which instructions apply
+// (this order's approved CASE_ONLY answer, else the market setting — by id + version), the deposit setting (id + version + value)
+// and the order's effective deposit terms (default, or the owner-approved override decision). A payment-request draft is built on
+// exactly one configuration; its fingerprint is a hash of ids / versions / amounts only (no card, IBAN or phone).
+export async function paymentRequestConfig(env,order){
+  await ensureSalesIntelligenceStore(env);
+  const terms=await orderDepositTerms(env,order);
+  const caseRow=await first(env,"SELECT id,owner_answer_json FROM owner_decisions WHERE order_id=? AND decision_type='PAYMENT_TERMS' AND status='RESOLVED' AND owner_decision IN ('APPROVE','ANSWER') AND json_valid(scope_json) AND json_extract(scope_json,'$.scope')='CASE_ONLY' AND NOT (json_valid(payload_json) AND COALESCE(json_extract(payload_json,'$.kind'),'')='deposit_terms') ORDER BY resolved_at DESC LIMIT 1",order.id);
+  const caseText=String(parseJson(caseRow?.owner_answer_json,{})?.value??"").trim()||null;
+  const ctx={market:order.market,product_key:null};
+  const setting=caseText?null:await getSetting(env,"payment_instructions",ctx);
+  const depositSetting=await getSetting(env,"deposit_percent",ctx);
+  const instructions=paymentDestinationOnly(caseText||setting?.value);
+  const parts={v:1,order:order.id,status:order.status,total:order.total_minor,currency:order.currency,
+    instructions:caseText?`case:${caseRow.id}`:setting?`setting:${setting.id}:v${setting.version}`:"none",
+    deposit_setting:depositSetting?`${depositSetting.id}:v${depositSetting.version}:${depositSetting.value}`:"none",
+    terms:terms.pending?`pending:${terms.decision_id}`:`${terms.source}:${terms.kind||"-"}:${terms.percent??"-"}:${terms.decision_id||"-"}`};
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(parts)));
+  const fingerprint=Array.from(new Uint8Array(digest).slice(0,12),b=>b.toString(16).padStart(2,"0")).join("");
+  return {terms,instructions,parts,fingerprint};
+}
 export async function preparePaymentRequest(env,order,{caseInstructions=null}={}){
   await ensureSalesIntelligenceStore(env);
   if(order.status!=="confirmed")return {created:false,reason:"order_not_awaiting_payment"};
-  // The owner's already-approved CASE_ONLY instructions for THIS order are reused (never asked again, no second PAYMENT_TERMS decision).
-  const approvedCase=caseInstructions?null:await first(env,"SELECT owner_answer_json FROM owner_decisions WHERE order_id=? AND decision_type='PAYMENT_TERMS' AND status='RESOLVED' AND owner_decision='APPROVE' AND json_valid(scope_json) AND json_extract(scope_json,'$.scope')='CASE_ONLY' AND NOT (json_valid(payload_json) AND COALESCE(json_extract(payload_json,'$.kind'),'')='deposit_terms') ORDER BY resolved_at DESC LIMIT 1",order.id);
-  const approvedCaseText=String(parseJson(approvedCase?.owner_answer_json,{})?.value??"").trim()||null;
-  const ctx={market:order.market,product_key:null},instructions=paymentDestinationOnly(caseInstructions||approvedCaseText||(await getSetting(env,"payment_instructions",ctx))?.value);
+  // The owner's already-approved CASE_ONLY instructions for THIS order are reused (never asked again, no second PAYMENT_TERMS decision);
+  // which instructions / terms apply is read back from the database (paymentRequestConfig), so the draft and its send-time check agree.
+  const config=await paymentRequestConfig(env,order);
+  const instructions=config.instructions;
   const amount=D.customerPaymentAmountText?.({currency:order.currency,amount_minor:order.total_minor});
   const base={lead_id:order.lead_id,conversation_id:order.conversation_id,market:order.market,order_id:order.id};
   if(!instructions)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,question:`Payment instructions for ${order.market} are not defined (order ${order.order_number})`,known:{order_number:order.order_number,total_minor:order.total_minor,currency:order.currency},recommendation:"Enter payment instructions for this order, or save them for the market.",risk:"No bank/payment details are invented.",payload:{resolution:"setting",setting_key:"payment_instructions",scope:{market:order.market}}})).decision};
   if(!amount)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,fingerprint:`PAYMENT_AMOUNT|${order.id}`,question:`Order ${order.order_number} amount cannot be safely formatted (currency ${order.currency}); legacy currency is not converted`,known:{currency:order.currency,total_minor:order.total_minor},payload:{resolution:"record"}})).decision};
-  const terms=await orderDepositTerms(env,order);
+  const terms=config.terms;
   // A customer's request for other payment terms is still with the owner: no payment request until it is decided.
   if(terms.pending)return {created:false,reason:"payment_terms_pending",decision_id:terms.decision_id};
   const deposit=terms.percent;
@@ -806,10 +827,12 @@ export async function preparePaymentRequest(env,order,{caseInstructions=null}={}
   const remainingText=depositText&&Number(order.total_minor)-depositMinor>0&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:Number(order.total_minor)-depositMinor});
   const message=(ar?[`تم تأكيد طلبكم ${order.order_number}: ${order.product} × ${order.quantity}`,`المبلغ المطلوب: ${amount}`,depositText?`العربون المطلوب (${deposit}%): ${depositText}`:null,remainingText?`المبلغ المتبقي: ${remainingText}`:null,`طريقة الدفع: ${instructions}`]
     :[`سفارش ${order.order_number} تأیید شد: ${order.product} × ${order.quantity}`,`مبلغ قابل پرداخت: ${amount}`,depositText?`پیش‌پرداخت (${deposit}%): ${depositText}`:null,remainingText?`باقی‌مانده: ${remainingText}`:null,`روش پرداخت: ${instructions}`]).filter(Boolean).join("\n");
-  // An owner-approved per-order override gets its own draft key, so a draft built on the default terms is never reused for it.
-  const termsKey=terms.source==="owner_override"?`:terms-${terms.decision_id}`:"";
+  // ONE draft per payment configuration: the key carries the configuration fingerprint, so an unchanged retrigger returns the same
+  // draft and any change (instructions version, deposit setting, per-order terms) creates exactly one replacement. Older drafts of
+  // the order become stale at send time (salesOutreachStillCurrent recomputes the fingerprint).
+  const termsKey=`:cfg-${config.fingerprint}`;
   return await D.createApprovalGatedDraft(env,{key:`lead-order:update-draft:${order.id}:payment_request${termsKey}`,skipKey:`lead-order:update-draft-skipped:${order.id}:payment_request${termsKey}`,leadId:order.lead_id,conversationId:order.conversation_id,language,message,
-    eventType:"lead_order_update_draft_created",eventMessage:"Payment request draft created for owner approval",details:{order_id:order.id,order_number:order.order_number,event:"payment_request",payment_instructions:instructions,payment_terms:{deposit_percent:deposit??null,source:terms.source,decision_id:terms.decision_id||null},snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency,deposit_percent:deposit??null}}});
+    eventType:"lead_order_update_draft_created",eventMessage:"Payment request draft created for owner approval",details:{order_id:order.id,order_number:order.order_number,event:"payment_request",payment_instructions:instructions,payment_fingerprint:config.fingerprint,payment_config:config.parts,payment_terms:{deposit_percent:deposit??null,source:terms.source,decision_id:terms.decision_id||null},snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency,deposit_percent:deposit??null}}});
 }
 
 /* -------------------------------------------------- controlled learning */

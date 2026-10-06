@@ -2,7 +2,7 @@ import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
-import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
+import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -9336,6 +9336,9 @@ async function sendApprovedTelegramOutreach(env,outreachId){
     WHERE o.id=? LIMIT 1`).bind(outreachId).first();
   if(!outreach) return {ok:false,statusCode:404,error:'Outreach not found'};
   if(outreach.status!=='approved')return {ok:false,statusCode:409,error:'Outreach is not approved for sending',status:outreach.status};
+  // (server-side, for every caller: a stale order draft — e.g. a payment request on superseded terms — is never sent)
+  const freshness=await salesOutreachStillCurrent(env,outreach.id);
+  if(!freshness.current)return {ok:false,statusCode:409,error:'Outreach draft is stale and must be reviewed again',reason:freshness.reason,status:outreach.status};
   if(outreach.channel!=='telegram')return {ok:false,statusCode:400,error:'Outreach channel is not Telegram'};
   if(!outreach.canonical_lead_id)return {ok:false,statusCode:409,error:'Canonical lead not found'};
   if(!outreach.selected_contact_id||outreach.contact_lead_id!==outreach.lead_id)return {ok:false,statusCode:409,error:'Telegram contact does not belong to this lead'};
@@ -9475,7 +9478,9 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
   if(details.order_id){
     await ensureOrderStore(env);const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();
     if(!order)return {created:false,reason:"order_missing",sending_enabled:false};
-    const blocked=async(reason,extra={})=>{await audit(env,"sales_draft_blocked","Approval-gated draft blocked by fail-closed validation",{order_id:order.id,event:details.event||null,reason,...extra});return {created:false,reason:`sales_draft_${reason}`,...extra,sending_enabled:false};};
+    // (a blocked draft is logged without identifier-length numbers: an altered card / IBAN / phone never reaches the audit log)
+    const redactIds=v=>JSON.parse(JSON.stringify(v??{},(k,x)=>(typeof x==="number"&&Math.abs(x)>=1e10)||(typeof x==="string"&&/^[+]?[0-9]{11,}$/.test(x))?`<redacted ${String(x).replace(/[^0-9]/g,"").length}-digit identifier>`:x));
+    const blocked=async(reason,extra={})=>{const safe=redactIds(extra);await audit(env,"sales_draft_blocked","Approval-gated draft blocked by fail-closed validation",{order_id:order.id,event:details.event||null,reason,...safe});return {created:false,reason:`sales_draft_${reason}`,...safe,sending_enabled:false};};
     // Order facts validate a draft only inside that order's own customer conversation.
     if(order.lead_id!==leadId||order.conversation_id!==conversationId)return await blocked("order_context_mismatch");
     const instructions=await authoritativePaymentInstructions(env,order,claimedInstructions);
@@ -9544,12 +9549,15 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
 async function salesOutreachStillCurrent(env,outreachId){
   const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE id LIKE 'sales-draft:%' AND json_valid(details_json) AND json_extract(details_json,'$.outreach_id')=? LIMIT 1").bind(outreachId).first();
   if(!event)return {current:true};let details={};try{details=JSON.parse(event.details_json||"{}")}catch{return {current:false,reason:"invalid_sales_draft_snapshot"};}
-  if(!details.order_id)return {current:true};const order=await env.DB.prepare("SELECT status,total_minor,currency FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();if(!order)return {current:false,reason:"order_missing"};
+  if(!details.order_id)return {current:true};const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();if(!order)return {current:false,reason:"order_missing"};
   const snapshot=details.snapshot||{};if(!(snapshot.status===order.status&&snapshot.total_minor===order.total_minor&&snapshot.currency===order.currency))return {current:false,reason:"order_snapshot_stale"};
-  // A payment request built on other payment terms than the order's current ones (a newer owner override, or one still pending) is stale.
-  if(details.event==="payment_request"&&Object.prototype.hasOwnProperty.call(snapshot,"deposit_percent")){
-    const terms=await orderDepositTerms(env,{id:details.order_id,market:details.market||(await env.DB.prepare("SELECT market FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first())?.market}).catch(()=>null);
-    if(!terms||terms.pending||(terms.percent??null)!==snapshot.deposit_percent)return {current:false,reason:"payment_terms_changed"};
+  // A payment request is current only while the order's payment configuration (instructions version, deposit setting, per-order
+  // terms) still has the fingerprint the draft was built on. A draft without one predates this check and is never sendable.
+  if(details.event==="payment_request"){
+    if(!details.payment_fingerprint)return {current:false,reason:"payment_fingerprint_missing"};
+    const config=await paymentRequestConfig(env,order).catch(()=>null);
+    if(!config||config.terms.pending)return {current:false,reason:"payment_terms_pending"};
+    if(config.fingerprint!==details.payment_fingerprint)return {current:false,reason:"payment_configuration_changed"};
   }
   return {current:true};
 }
@@ -12277,6 +12285,7 @@ Context: ${context}`;
         if(quoteLinked)return json({ok:false,error:"Quote-linked outreach must use the quote approval controls"},409);
         if(!LEAD_OUTREACH_STATUSES.has(current.status))return json({ok:false,error:"Unknown outreach status"},409);
         if((action==="approve"&&current.status==="approved")||(action==="reject"&&current.status==="rejected")||(action==="submit"&&current.status==="pending_approval"))return json({ok:true,id,status:current.status,idempotent:true,sending_enabled:false});
+        if(action==="approve"){const freshness=await salesOutreachStillCurrent(env,id);if(!freshness.current)return json({ok:false,error:"Outreach draft is stale and cannot be approved; reject it",reason:freshness.reason},409);}
         const from=action==="submit"?"draft":"pending_approval",to=action==="submit"?"pending_approval":action==="approve"?"approved":"rejected",t=now();
         const result=action==="approve"
           ?await env.DB.prepare("UPDATE lead_outreach SET status=?,approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status=?").bind(to,t,String(b.approved_by||"admin"),t,id,from).run()
