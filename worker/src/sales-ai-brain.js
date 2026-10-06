@@ -254,7 +254,9 @@ const SALES_AI_PAY_LATER=/(?:(?:پرداخت|تسویه|پول)[^.؟!?\n]{0,25}(
 const SALES_AI_CHEQUE=/(?<![\p{L}\p{M}])(?:(?:چکی|با\s*چک)(?![\p{L}\p{M}])|چک\s*(?:هم\s|صیادی|مدت[‌\s]?دار|قبول|می[‌\s]?گیر|میگیر|بد|مید|بپرداز|پرداخت))|(?<![\p{L}\p{M}])(?:صك|صک|بصك|بصک|بالصك|بالصک|بالشيك|بالشیک)(?![\p{L}\p{M}])/u;
 const SALES_AI_INSTALMENT=/(?<![\p{L}\p{M}])(?:قسطی|اقساطی|اقساط|قسط(?:ی|ها|بندی)?|تقسيط|بالتقسيط|تقسیط|بالتقسیط|بالأقساط|بالاقساط|أقساط)(?![\p{L}\p{M}])|installments?/iu;
 export function salesAiWithoutTermsRelays(text){
-  return String(text||"").split(/(?<=[.!?؟\n؛;])/u).filter(raw=>!(SALES_AI_PAY_WORDS.test(raw)&&SALES_AI_RELAY.test(raw)&&!SALES_AI_AGREE.test(raw))).join(" ");
+  // (a sentence ends at punctuation followed by space / end — never inside an amount such as «2.50» or «1,250.00»; kept text is
+  // re-joined exactly as written)
+  return String(text||"").split(/(?<=[.!?؟\n؛;])(?=\s|$)/u).filter(raw=>!(SALES_AI_PAY_WORDS.test(raw)&&SALES_AI_RELAY.test(raw)&&!SALES_AI_AGREE.test(raw))).join("");
 }
 // The payment terms a CUSTOMER asks for: {kind:"deposit",percent} (the advance % nearest a payment word), {kind:"full",percent:100}
 // or {kind:"after_delivery",percent:0}; null when the message asks for none.

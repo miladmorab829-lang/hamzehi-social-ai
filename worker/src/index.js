@@ -6802,7 +6802,7 @@ function salesBareQuantity(text){
 }
 // Intent cues on the normalized text (they complete the original patterns; context, not words alone, decides vague replies).
 const SALES_INTENT_CUES={
-  accepted:/(?:^|\s)(?:ثبتش کن|ثبت کن|ثبتش کنید|ثبت کنید|نهاییش کن|ثبتها|سجلها|سجل الطلب|سجلوها|سجلوه|اعتمدها|اعتمده|اکدها|اکده|سووها|سویها|توکلنا|خل نمشی|بزن بریم|انجامش بدید|انجام بدید|انجام بدین|go ahead)(?=\s|$|[،,.!؟?])/u,
+  accepted:/(?:^|\s)(?:ثبتش کن|ثبت کن|ثبتش کنید|ثبت کنید|نهاییش کن|ثبتها|سجلها|سجل الطلب|سجلوها|سجلوه|سجله|سجلی|سجلنا|ثبتلی|ثبتلنا|ثبته|ثبتوه|ثبتولی|اکدلی|اکد الطلب|اعتمدها|اعتمده|اکدها|اکده|سووها|سویها|توکلنا|خل نمشی|بزن بریم|انجامش بدید|انجام بدید|انجام بدین|go ahead)(?=\s|$|[،,.!؟?])/u,
   objection_price:/(?:^|\s)(?:غالیه|غالی|ارخص|ارزونتر|ارزون تر|cheaper)(?=\s|$|[،,.!؟?])/u,
   asks_moq:/(?:^|\s)(?:موک|اقل کمیه|اقل عدد|الحد الادنی)(?=\s|$|[،,.!؟?])/u,
   asks_price:/(?:^|\s)(?:قیمش|قیمشو|قیمتو|چند میشه|چند می شه|چند درمیاد|چند در میاد|چقدر میشه|چقد میشه|بکم|بیشها|بیش الواحد|بیش الحبه|بیش القطعه)(?=\s|$|[،,.!؟?])/u,
@@ -7896,11 +7896,12 @@ async function fetchCustomerReceiptImage(env,media){
 }
 const PAYMENT_MINOR_EXPONENT={USD:2};
 function paymentClaimMinor(amount,currency,orderCurrency){
-  if(!Number.isSafeInteger(amount))return null;
+  if(!Number.isFinite(amount)||amount<=0)return null;
   const cur=currency||orderCurrency;
-  if(cur==="RIAL"&&orderCurrency==="TOMAN")return amount%10===0?amount/10:null;
+  if(cur==="RIAL"&&orderCurrency==="TOMAN")return Number.isSafeInteger(amount)&&amount%10===0?amount/10:null;
   if(cur!==orderCurrency)return null;
-  return amount*10**(PAYMENT_MINOR_EXPONENT[orderCurrency]||0);
+  const minor=Math.round(Number(amount)*10**(PAYMENT_MINOR_EXPONENT[orderCurrency]||0));
+  return Number.isSafeInteger(minor)&&minor>0?minor:null;
 }
 async function salesPaymentClaimTurn(env,{row,order,language}){
   const text=String(row.message||"");

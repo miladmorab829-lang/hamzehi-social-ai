@@ -19,12 +19,12 @@ const RECEIPT=/(?:رسید|فیش|اسکرین|عکس\s*(?:فیش|رسید|وا�
 const DONE_FA=/(?:^|\s)(?:کردم|کردیم|کرده\s*ام|کردن|کردند|کرد|شد|شده|شدش|شدن|زدم|زدیم|زده\s*ام|دادم|دادیم|ریختم|ریختیم|ریخته\s*ام|فرستادم|فرستادیم|ارسال\s*(?:شد|کردم|کردیم)|انجام\s*(?:شد|دادم|دادیم)|تقدیم\s*(?:شد|کردم|شما|حضورتون)|خدمت\s*(?:شما|تون)|خدمتتون|نشست|رفت)(?=\s|$|[.!؟?،,])/u;
 const DONE_FA_ATTACHED=/(?:واریز|پرداخت|تسویه|حواله|انتقال|کارت\s*به\s*کارت)\s*(?:کردم|کردیم|شد|شده|زدم|دادم)/u;
 const DONE_AR=/(?:^|\s)(?:دفعت|دفعنا|دفعته|دفعتلک|تم\s*(?:ال)?دفع|حولت|حولنا|حولتلک|حولته|تم\s*(?:ال)?تحویل|سددت|سددنا|تم\s*(?:ال)?تسدید|دزیت|دزینا|دزیتلک|ارسلت|ارسلنا|بعثت|بعثنا|تم\s*الارسال)(?=\s|$|[.!؟?،,])/u;
-const RECEIPT_OFFER=/(?:(?:^|\s)عکس\s*(?:فیش|رسید|واریزی)(?=\s|$)|(?:^|\s)(?:اینم|این\s*هم|این|اینو|اینا)\s*(?:هم\s*)?(?:رسید|فیش|عکس\s*فیش|عکس\s*رسید|اسکرین)|(?:رسید|فیش)(?:\s*(?:واریزی|واریز|پرداخت|کارت\s*به\s*کارت|انتقال))?\s*(?:خدمت\s*شما|خدمتتون|تقدیم|ارسال\s*شد|فرستادم|رو\s*فرستادم|رو\s*ارسال\s*کردم|براتون\s*فرستادم)|فیش\s*واریزی|رسید\s*(?:پرداخت|واریز)|(?:هذا|هذه|هذی|هاذا|هاي|های)\s*(?:هو\s*)?(?:الوصل|وصل|الایصال|ایصال|الحواله|صوره\s*الحواله)|(?:وصل|ایصال)\s*(?:ال)?دفع|ارسلت\s*(?:لک\s*)?(?:الوصل|الایصال))/u;
+const RECEIPT_OFFER=/(?:(?:^|\s)عکس\s*(?:فیش|رسید|واریزی)(?=\s|$)|(?:^|\s)(?:اینم|این\s*هم|این|اینو|اینا)\s*(?:هم\s*)?(?:رسید|فیش|عکس\s*فیش|عکس\s*رسید|اسکرین)|(?:رسید|فیش)(?:\s*(?:واریزی|واریز|پرداخت|کارت\s*به\s*کارت|انتقال))?\s*(?:خدمت\s*شما|خدمتتون|تقدیم|ارسال\s*شد|فرستادم|رو\s*فرستادم|رو\s*ارسال\s*کردم|براتون\s*فرستادم)|فیش\s*واریزی|رسید\s*(?:پرداخت|واریز)|(?:هذا|هذه|هذی|هاذا|هاي|های)\s*(?:هو\s*)?(?:الوصل|وصل|الایصال|ایصال|الحواله|صوره\s*الحواله)|(?:وصل|ایصال)\s*(?:ال)?(?:دفع|تحویل|حواله)|(?:^|\s)تفضل(?:وا|ی)?\s*(?:ال)?(?:وصل|ایصال)|ارسلت\s*(?:لک\s*)?(?:الوصل|الایصال))/u;
 // A short reply that, RIGHT AFTER a payment request, means "done / here you go".
 const SHORT_CONTEXT=/^(?:انجام\s*شد|انجام\s*دادم|زدم|ریختم|فرستادم|واریز\s*شد|تقدیم(?:\s*(?:شما|شد|حضورتون|حضور\s*شما))?|خدمت\s*شما|خدمتتون|بفرمایید|بفرما|تموم\s*شد|حله|اوکی\s*شد|ok\s*done|done|paid|sent|تم|خلص|خلصت|صار|تفضل|تفضلوا|تفضلی|دزیت|حولت|دفعت|هذا|هاي)$/u;
 // Not a completed payment: negated, failed / cancelled, future / intent / conditional, or a question / request for details.
 const NEGATED=/(?:(?:^|\s)ن(?:کردم|کردیم|کرده\s*ام|کرده|کردن|زدم|زدیم|دادم|دادیم|ریختم|ریختیم|فرستادم|فرستادیم|شده|شد|تونستم|میشه|می\s*شه)(?=\s|$|[.!؟?،,])|(?:^|\s)هنوز(?=\s|$)|(?:^|\s)(?:ما|لم|لا|مو|ماکو)\s*(?:دفعت|ادفع|حولت|احول|سددت|اسدد|دزیت|ادز|ارسلت|بعثت|وصل)(?=\s|$)|(?:^|\s)(?:لسه|لسا|بعد\s*ما)(?=\s|$)|not\s+(?:yet|paid|sent)|haven'?t)/u;
-const FAILED=/(?:ناموفق|نا\s*موفق|خطا|ارور|برگشت\s*(?:خورد|خورده|زد)?|کنسل|لغو|انجام\s*نشد|نرفت|نشست\s*نکرد|failed|declined|cancel+ed|error|فشل|ما\s*صار|ما\s*تم|رجع|تعذر|انلغی|الغی|الغاء)/u;
+const FAILED=/(?:ناموفق|نا\s*موفق|خطا|ارور|برگشت\s*(?:خورد|خورده|زد)?|کنسل|لغو|انجام\s*نشد|نرفت|نشست\s*نکرد|failed|declined|cancel+ed|error|فشل|ما\s*صار|ما\s*تم|رجع|تعذر|انلغی|الغی|الغاء|لغیت|لغیته|الغیت|الغیته|ملغی)/u;
 const FUTURE=/(?:(?:^|\s)(?:می\s*)?(?:کنم|کنیم|زنم|زنیم|ریزم|ریزیم|فرستم|فرستیم|بدم|بدیم|بزنم|بریزم|بکنم|بفرستم|بپردازم)(?=\s|$|[.!؟?،,])|(?:^|\s)(?:میکنم|میکنیم|میزنم|میزنیم|میریزم|میریزیم|میفرستم|میدم|میدیم|میپردازم)(?=\s|$|[.!؟?،,])|بعدا|بعد\s*ا|فردا|پس\s*فردا|هفته\s*(?:بعد|دیگه)|(?:می\s*)?خوام|میخوام|میخواهم|خواهم|قراره|باید|منتظر|اگه|اگر|(?:^|\s)(?:راح|رح|سوف|حـ)\s*(?:ادفع|احول|اسدد|ادز|ارسل)|باچر|باجر|بکره|بکرا|غدا|ارید\s*ادفع|اریدادفع|ابی\s*ادفع|اکدر\s*ادفع|will\s+(?:pay|send|transfer)|tomorrow|later)/u;
 const QUESTION=/(?:[?؟]\s*$|(?:^|\s)(?:چطور|چطوری|چگونه|چقدر|چند|کجا|کدوم|چه\s*جوری|چجوری|شماره\s*(?:کارت|حساب|شبا)|شبا\s*(?:رو\s*)?(?:بدید|بفرستید)|بدید|بدین|بفرستید|بفرمایید\s*شماره|شلون|اشلون|کیف|شکد|وین|رقم\s*(?:ال)?(?:کارت|حساب|ایبان))(?=\s|$|[.!؟?،,]))/u;
 
@@ -32,14 +32,17 @@ const QUESTION=/(?:[?؟]\s*$|(?:^|\s)(?:چطور|چطوری|چگونه|چقدر|
 export function paymentClaimAmount(text){
   const t=paymentClaimNorm(text).replace(/(\d)[,٬.](?=\d{3}(?!\d))/g,"$1");
   const found=[];
-  const re=/(\d+(?:\/\d+)?)\s*(میلیون|ملیون|میلیارد|هزار|تومن|تومان|ریال|م\b|k\b|الف|ملیون|مليون|دینار|دولار|\$|usd|iqd|irr|irt)?(?:\s*و\s*(\d+)\s*(هزار|الف))?/giu;
+  // (decimals and «$625» / «625$» / «625 دولار» are amounts too; a small number counts only right next to a currency marker,
+  // so a quantity such as «500 قطعة» is never read as money)
+  const re=/(\$\s*)?(\d+(?:[./]\d{1,2})?)\s*(میلیون|ملیون|میلیارد|هزار|تومن|تومان|ریال|م\b|k\b|الف|مليون|دینار|دولار|\$|usd|iqd|irr|irt)?(?:\s*و\s*(\d+)\s*(هزار|الف))?/giu;
   for(const m of t.matchAll(re)){
-    let v=Number(String(m[1]).replace("/","."));if(!Number.isFinite(v))continue;
-    const unit=(m[2]||"").toLowerCase();
+    let v=Number(String(m[2]).replace("/","."));if(!Number.isFinite(v))continue;
+    const unit=(m[3]||"").toLowerCase();
     if(/^(?:میلیون|ملیون|مليون|م)$/.test(unit))v*=1e6;else if(unit==="میلیارد")v*=1e9;else if(/^(?:هزار|k|الف)$/.test(unit))v*=1e3;
-    if(m[3])v+=Number(m[3])*1e3;
-    v=Math.round(v);
-    if(v>=1000)found.push({value:v,at:m.index});
+    if(m[4])v+=Number(m[4])*1e3;
+    v=Math.round(v*100)/100;
+    const currencyMarked=!!m[1]||/^(?:تومن|تومان|ریال|دینار|دولار|\$|usd|iqd|irr|irt|الف)$/.test(unit);
+    if(v>=1000||(currencyMarked&&v>0))found.push({value:v,at:m.index});
   }
   if(!found.length)return null;
   const best=found.sort((a,b)=>b.value-a.value)[0];
@@ -104,7 +107,7 @@ function sanitizeEvidence(raw){
   const n=Number(raw?.amount);
   return {claim_type:["completed","intent","question","negated","failed","unrelated"].includes(raw?.claim_type)?raw.claim_type:"unrelated",
     is_receipt_image:typeof raw?.is_receipt_image==="boolean"?raw.is_receipt_image:null,image_readable:typeof raw?.image_readable==="boolean"?raw.image_readable:null,
-    amount:Number.isFinite(n)&&n>0&&n<1e13?Math.round(n):null,currency:["TOMAN","RIAL","IQD","USD"].includes(raw?.currency)?raw.currency:null,
+    amount:Number.isFinite(n)&&n>0&&n<1e13?Math.round(n*100)/100:null,currency:["TOMAN","RIAL","IQD","USD"].includes(raw?.currency)?raw.currency:null,
     transaction_reference:s(raw?.transaction_reference,60),transaction_datetime:s(raw?.transaction_datetime,40),source_bank:s(raw?.source_bank,60),destination_bank:s(raw?.destination_bank,60),
     destination_card:s(raw?.destination_card,40),destination_iban:s(raw?.destination_iban,40),payer_name:s(raw?.payer_name,60),payee_name:s(raw?.payee_name,60),
     payment_method:["card_to_card","bank_transfer","cash","exchange_hawala","other"].includes(raw?.payment_method)?raw.payment_method:null,
