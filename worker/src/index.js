@@ -1,8 +1,8 @@
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
-import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
-import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
+import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
+import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -7773,6 +7773,8 @@ async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null
       product,offer.quantity,customization||req.configuration||null,destination||null,price.currency,price.unit_price_minor,price.subtotal_minor??price.unit_price_minor*offer.quantity,discount,price.total_minor,price.moq??null,summary,customerName?String(customerName).slice(0,120):null,salesOrderColorsJson(colors),t,t).run();
   const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(ref).first();
   if(!order)throw Error("Order candidate could not be persisted");
+  // The customer's payment-terms request made during this deal (before the order existed) now belongs to this order only.
+  await env.DB.prepare("UPDATE owner_decisions SET order_id=?,updated_at=? WHERE decision_type='PAYMENT_TERMS' AND conversation_id=? AND (order_id IS NULL OR order_id='') AND json_valid(payload_json) AND json_extract(payload_json,'$.kind')='deposit_terms' AND json_extract(payload_json,'$.candidate_id')=?").bind(order.id,now(),row.conversation_id,candidate.candidate_id).run().catch(()=>null);
   await auditOrderEventOnce(env,`candidate:${order.id}`,"lead_order_candidate_created","Customer accepted the approved chat offer: order candidate created",{order_id:order.id,order_number:order.order_number,offer_ref:ref,lead_id:order.lead_id,acceptance_inbox_message_id:order.acceptance_inbox_message_id,status:"order_candidate"});
   return {order,created:order.id===id};
 }
@@ -8447,7 +8449,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // Acceptance, order status and quotes stay fully deterministic. Escalations the deterministic layer requires (no approved price,
   // an owner rule, discount/terms, a non-standard colour) are kept; a soft holding or a stale wait is replaced only when the AI
   // answered from approved knowledge. Anything that fails validation → the deterministic reply (and why is recorded).
-  let replySource="legacy";const aiEvidenceFacts=[];
+  let replySource="legacy";const aiEvidenceFacts=[],needsOwnerPreAi=needsOwner;
   if(ai&&ai.reply){
     const DET_ONLY=["accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","ask_image_reference"];
     const SEGMENT=["answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner"];
@@ -8488,6 +8490,52 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     needsOwner=true;needsOwnerReason=ai.escalation_reason==="unapproved_terms"?"commercial_owner_review_required":"approved_knowledge_missing";
     // (a deterministic reply that carries authoritative commercial information is kept; the escalation is added to it)
     if(replySource==="legacy"&&!["answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner","advise_colors","order_details"].includes(action)){action="knowledge_owner";askedField=null;draft=salesBrainNaturalDraft("knowledge_owner",language,{avoid:recentReplies});validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});aiInfo.escalation_only=true;}
+  }
+  // ---- Payment-terms negotiation. The market's deposit (e.g. IRAN 50% advance / 50% before shipping) is the DEFAULT, not a wall: a
+  // customer asking for other terms (another advance %, paying in full, paying after delivery) gets a natural reply and the request
+  // goes to the owner as ONE PAYMENT_TERMS decision for this deal/order. Nothing is agreed here; an approved override applies to
+  // that one order only and never changes the persistent default.
+  // (after the order is placed, a terms request on the not-yet-paid order is handled the same way instead of as a status question)
+  const termsPostSale=orderStatusAsked&&!!postSaleOrder&&["order_candidate","confirmed"].includes(postSaleOrder.status)&&!ORDER_STATUS_QUESTION.test(String(row.message||""));
+  const termsMarket=conversationMarket||(termsPostSale?postSaleOrder.market:null);
+  const termsAsk=termsMarket&&(!orderStatusAsked||termsPostSale)?salesPaymentTermsRequest(row.message):null;
+  if(termsAsk){
+    try{
+      const termsOrderId=(termsPostSale?postSaleOrder.id:null)||candidate?.order_id||dealCandidate?.order_id||null;
+      const termsOrder=termsOrderId?await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(termsOrderId).first():null;
+      const defaultPct=(await getSetting(env,"deposit_percent",{market:termsMarket}).catch(()=>null))?.value??null;
+      const effective=termsOrder?await orderDepositTerms(env,termsOrder):{percent:defaultPct};
+      const methodAsk=DEPOSIT_TERMS_METHOD_KINDS.has(termsAsk.kind);
+      const alreadyAgreed=!effective.pending&&(methodAsk?effective.source==="owner_override"&&effective.kind===termsAsk.kind&&(termsAsk.percent===null||effective.percent===termsAsk.percent):effective.percent===termsAsk.percent);
+      if(!alreadyAgreed){
+        await ensureSalesIntelligenceStore(env);
+        const opened=await openDecision(env,{decision_type:"PAYMENT_TERMS",priority:20,fingerprint:`PAYMENT_DEPOSIT|${row.conversation_id}|${termsOrderId||candidate?.candidate_id||"-"}|${termsAsk.kind}|${termsAsk.percent??"-"}`,
+          lead_id:row.lead_id,conversation_id:row.conversation_id,market:termsMarket,order_id:termsOrderId,
+          question:`Customer asks for other payment terms${termsOrder?` on order ${termsOrder.order_number}`:""}: ${termsAsk.kind==="after_delivery"?"pay after delivery (no advance)":termsAsk.kind==="full"?"pay 100% in advance":termsAsk.kind==="installments"?`pay in instalments${termsAsk.percent!==null?` (${termsAsk.percent}% advance)`:""}`:termsAsk.kind==="cheque"?`pay by cheque${termsAsk.percent!==null?` (${termsAsk.percent}% advance)`:""}`:`${termsAsk.percent}% advance / ${100-termsAsk.percent}% remaining`} (default: ${defaultPct??"not set"}% advance)`,
+          known:{requested:termsAsk,default_deposit_percent:defaultPct,order_number:termsOrder?.order_number||null,product:candidate?.product?.name||null,quantity:candidate?.quantity??null},
+          recommendation:methodAsk?"Approve for this order only (optionally answer with the advance %; the default advance applies otherwise), or reject (the default terms then apply). The schedule / cheque details are arranged by the owner.":"Approve for this order only, answer with another advance %, or reject (the default terms then apply).",risk:"Applies to this one order only; the market default is not changed. Nothing was promised to the customer.",
+          payload:{resolution:"record",kind:"deposit_terms",requested_kind:termsAsk.kind,requested_percent:termsAsk.percent,candidate_id:candidate?.candidate_id||null,source_message_id:row.id}});
+        aiInfo.payment_terms={requested:termsAsk,decision_id:opened.decision?.id||null,order_id:termsOrderId};
+        // The AI's own unapproved_terms escalation for this same request is not raised twice.
+        if(needsOwner&&!needsOwnerPreAi&&ai?.escalation_reason==="unapproved_terms"){needsOwner=false;needsOwnerReason=null;}
+        const ar=language==="Iraqi Arabic",hold=ar?"طلبكم بخصوص شروط الدفع أرسلناه للمدير للموافقة، ونبلغكم بالنتيجة.":"درخواستتون درباره شرایط پرداخت رو برای تأیید مدیر فرستادم و نتیجه رو خبرتون می‌دم.";
+        if(termsPostSale){draft=hold;action="payment_terms_owner";askedField=null;replySource="legacy";validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});}
+        else if(!needsOwnerPreAi&&!["order_status","acknowledge_rejection","quote"].includes(action)){
+          const keepDet=["accept_offer","accepted"].includes(action);
+          if(keepDet)draft=`${draft} ${hold}`;
+          else{
+            // The AI's own words are kept WITHOUT its relay sentences (the request itself is told by the fixed, number-free holding line);
+            // a reply rejected by the validator only for relaying the customer's figure is reconsidered the same way.
+            const aiText=replySource!=="legacy"&&validation.valid?draft:ai?.reply&&String(aiInfo.fallback||"").startsWith("validator:")?String(ai.reply).split(SALES_AI_COMMERCIAL_SLOT).join(""):null;
+            const rest=aiText?salesAiWithoutTermsRelays(aiText).replace(/[ \t]{2,}/g," ").trim():"";
+            draft=rest?`${rest} ${hold}`:hold;replySource=rest?"ai+payment_terms":"legacy";
+            action="payment_terms_owner";askedField=null;
+          }
+          validation=validateSalesBrainDraft(draft,{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:aiEvidenceFacts.length?aiEvidenceFacts:authorityFacts,markets:knowledgeMarkets});
+          if(!validation.valid&&!keepDet){draft=hold;replySource="legacy";validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});}
+        }
+      }
+    }catch(error){aiInfo.payment_terms={error:sanitizeOperationalError(error?.message||error)};needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
   }
   aiInfo.reply_source=replySource;
   timing.validator_ms=Date.now()-validatorStarted;
@@ -8585,7 +8633,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // escalation stays open and the actual commercial answer still requires the owner.
 // The sales agent's answers (answer_price, negotiate, handle_objection, accept_offer, clarify_product, ask_attribute) are composed
 // ONLY from one owner-approved price record of the conversation's market and are re-validated below against exactly that evidence.
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.
@@ -9414,9 +9462,10 @@ function telegramLeadContactChatId(contact) {
 async function authoritativePaymentInstructions(env,order,claimed){
   const text=String(claimed??"").trim();if(!text)return null;
   await ensureSalesIntelligenceStore(env);
-  if(String((await getSetting(env,"payment_instructions",{market:order.market}))?.value??"").trim()===text)return text;
+  const same=stored=>{const v=String(stored??"").trim();return !!v&&(v===text||paymentDestinationOnly(v)===text);};
+  if(same((await getSetting(env,"payment_instructions",{market:order.market}))?.value))return text;
   const rows=(await env.DB.prepare("SELECT owner_answer_json,scope_json FROM owner_decisions WHERE order_id=? AND decision_type='PAYMENT_TERMS' AND status='RESOLVED'").bind(order.id).all()).results||[];
-  for(const row of rows){let answer={},scope={};try{answer=JSON.parse(row.owner_answer_json||"{}");scope=JSON.parse(row.scope_json||"{}");}catch{continue;}if(scope.scope==="CASE_ONLY"&&String(answer?.value??"").trim()===text)return text;}
+  for(const row of rows){let answer={},scope={};try{answer=JSON.parse(row.owner_answer_json||"{}");scope=JSON.parse(row.scope_json||"{}");}catch{continue;}if(scope.scope==="CASE_ONLY"&&same(answer?.value))return text;}
   return null;
 }
 async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,message,eventType,eventMessage,details={}}){
@@ -9435,18 +9484,49 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
     const amountText=customerPaymentAmountText({currency:order.currency,amount_minor:order.total_minor});
     const unitText=Number.isSafeInteger(order.unit_price_minor)?customerPaymentAmountText({currency:order.currency,amount_minor:order.unit_price_minor}):null;
     // A deposit is grounded ONLY as the market's owner-set deposit_percent applied to THIS order's total (and the remaining balance).
-    const depositPct=(await getSetting(env,"deposit_percent",{market:order.market}).catch(()=>null))?.value;
+    const depositTerms=await orderDepositTerms(env,order).catch(()=>null),depositPct=depositTerms&&!depositTerms.pending?depositTerms.percent:null;
     const depositMinor=Number.isSafeInteger(depositPct)&&depositPct>0&&depositPct<=100&&Number.isSafeInteger(order.total_minor)?Math.ceil(order.total_minor*depositPct/100):null;
-    const depositValues=depositMinor===null?[]:[depositPct,depositMinor,order.total_minor-depositMinor,customerPaymentAmountText({currency:order.currency,amount_minor:depositMinor}),customerPaymentAmountText({currency:order.currency,amount_minor:order.total_minor-depositMinor})];
+    const depositValues=depositMinor===null?[]:[depositPct,100-depositPct,depositMinor,order.total_minor-depositMinor,customerPaymentAmountText({currency:order.currency,amount_minor:depositMinor}),customerPaymentAmountText({currency:order.currency,amount_minor:order.total_minor-depositMinor})];
     // Money is compared as WHOLE amounts: thousands separators are joined first («18,900,000» = 18900000), so an altered amount can
     // never pass group by group (18 / 000 / 000).
     const wholeAmounts=s=>String(s??"").replace(/([0-9۰-۹٠-٩])[,٬](?=[0-9۰-۹٠-٩]{3}(?![0-9۰-۹٠-٩]))/g,"$1");
     const allowedNumbers=[order.order_number,order.total_minor,amountText,order.quantity,order.unit_price_minor,unitText,order.product,order.customization,...depositValues,instructions].map(wholeAmounts).flatMap(value=>[...String(value??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger);
-    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||""),amountText,instructions].filter(Boolean)}].map(f=>({...f,values:(f.values||[]).map(wholeAmounts)}));
+    const methodWords=depositTerms?.source==="owner_override"?{installments:["پرداخت اقساطی","اقساطی","اقساط","قسطی","الدفع بالأقساط","بالأقساط"],cheque:["پرداخت با چک","با چک","چک","الدفع بالصك","بالصك"]}[depositTerms.kind]||[]:[];
+    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||""),amountText,instructions,...methodWords].filter(Boolean)}].map(f=>({...f,values:(f.values||[]).map(wholeAmounts)}));
     // The owner-approved payment instructions are authoritative as an EXACT text: card, IBAN, account and phone identifiers are
     // identifiers, not numbers (too long for a numeric check). Only their verbatim occurrence (never inside a longer digit run) is set
     // aside; every other digit of the draft is validated as before, and an altered identifier no longer matches → it fails closed.
     const exact=instructions?new RegExp(`(?<![0-9۰-۹٠-٩])${instructions.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}(?![0-9۰-۹٠-٩])`,"gu"):null;
+    // ---- Commercial numbers are grounded in their OWN source only. Identifiers (the approved instructions with card / IBAN / phone,
+    // the order number, product / option names, carrier / tracking refs) are set aside as EXACT text and their digits never
+    // authorise an amount: «0» inside an order number does not make «remaining: 0» true.
+    const esc=v=>v.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),digitRun="[0-9۰-۹٠-٩]";
+    let masked=String(message);
+    for(const id of [instructions,order.order_number,order.product,order.customization,order.carrier,order.tracking_reference].map(v=>String(v??"").trim()).filter(Boolean).sort((a,b)=>b.length-a.length)){
+      // (a name that is only digits, e.g. product «3», is an identifier only in its own position: «3 × 700»)
+      masked=masked.replace(new RegExp(`(?<!${digitRun})${esc(id)}${/\p{L}/u.test(id)?`(?!${digitRun})`:`(?=\\s*×)`}`,"gu")," ");
+    }
+    masked=wholeAmounts(masked);
+    const remainingMinor=depositMinor===null?null:order.total_minor-depositMinor;
+    const depositText=depositMinor===null?null:customerPaymentAmountText({currency:order.currency,amount_minor:depositMinor});
+    const remainingText=remainingMinor>0?customerPaymentAmountText({currency:order.currency,amount_minor:remainingMinor}):null;
+    const commercial=new Set([order.total_minor,amountText,order.quantity,order.unit_price_minor,unitText,...(depositMinor===null?[]:[depositPct,depositMinor,depositText]),...(remainingMinor>0?[100-depositPct,remainingMinor,remainingText]:[])]
+      .map(wholeAmounts).flatMap(value=>[...String(value??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger));
+    const strayNumbers=[...new Set([...masked.matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0])).filter(n=>n===null||!commercial.has(n)))];
+    if(strayNumbers.length)return await blocked("unsupported_numeric_claim",{validation:{valid:false,reason:"unsupported_numeric_claim",unsupported_numbers:strayNumbers}});
+    // Labelled amounts must be the exact value of THEIR label: total, advance (% and amount), remaining (% and amount).
+    const amountKey=v=>String(v??"").replace(/[۰-۹]/g,d=>"۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٠-٩]/g,d=>"٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/[,٬]/g,"").replace(/[.]+$/,"");
+    const firstAmount=v=>{const m=String(v??"").match(/[0-9۰-۹٠-٩][0-9۰-۹٠-٩.,٬]*/u);return m?amountKey(m[0]):null;};
+    const NUM="[0-9۰-۹٠-٩][0-9۰-۹٠-٩.,٬]*";
+    const labels=[["total",/مبلغ\s*قابل\s*پرداخت|المبلغ\s*المطلوب/u],["deposit",/پیش[‌\s]?پرداخت|بیعانه|العربون(?:\s*المطلوب)?/u],["remaining",/باقی[‌\s]?مانده|المبلغ\s*المتبقي|والباقي|الباقي/u]];
+    const expected={total:{amount:firstAmount(amountText),pct:null},deposit:{amount:firstAmount(depositText),pct:depositMinor===null?null:depositPct},remaining:{amount:firstAmount(remainingText),pct:remainingMinor>0?100-depositPct:null}};
+    const termMismatch=[];
+    for(const [name,label] of labels)for(const m of masked.matchAll(new RegExp(`(?:${label.source})\\s*(?:\\(\\s*(${NUM})\\s*[%٪]\\s*\\))?\\s*:?\\s*(?:(${NUM})\\s*([%٪])?)?`,"gu"))){
+      const want=expected[name];
+      if(m[1]!==undefined&&amountKey(m[1])!==String(want.pct))termMismatch.push(`${name}_percent`);
+      if(m[2]!==undefined){const got=amountKey(m[2]);if(m[3]?got!==String(want.pct):got!==want.amount)termMismatch.push(m[3]?`${name}_percent`:`${name}_amount`);}
+    }
+    if(termMismatch.length)return await blocked("payment_terms_mismatch",{validation:{valid:false,reason:"payment_terms_mismatch",mismatched:[...new Set(termMismatch)]}});
     const validation=validateSalesBrainDraft(wholeAmounts(exact?String(message).replace(exact," "):message),{allowedNumbers,authoritativeFacts:facts});
     if(!validation.valid)return await blocked(validation.reason,{validation});
   }
@@ -9465,7 +9545,13 @@ async function salesOutreachStillCurrent(env,outreachId){
   const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE id LIKE 'sales-draft:%' AND json_valid(details_json) AND json_extract(details_json,'$.outreach_id')=? LIMIT 1").bind(outreachId).first();
   if(!event)return {current:true};let details={};try{details=JSON.parse(event.details_json||"{}")}catch{return {current:false,reason:"invalid_sales_draft_snapshot"};}
   if(!details.order_id)return {current:true};const order=await env.DB.prepare("SELECT status,total_minor,currency FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();if(!order)return {current:false,reason:"order_missing"};
-  const snapshot=details.snapshot||{};return snapshot.status===order.status&&snapshot.total_minor===order.total_minor&&snapshot.currency===order.currency?{current:true}:{current:false,reason:"order_snapshot_stale"};
+  const snapshot=details.snapshot||{};if(!(snapshot.status===order.status&&snapshot.total_minor===order.total_minor&&snapshot.currency===order.currency))return {current:false,reason:"order_snapshot_stale"};
+  // A payment request built on other payment terms than the order's current ones (a newer owner override, or one still pending) is stale.
+  if(details.event==="payment_request"&&Object.prototype.hasOwnProperty.call(snapshot,"deposit_percent")){
+    const terms=await orderDepositTerms(env,{id:details.order_id,market:details.market||(await env.DB.prepare("SELECT market FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first())?.market}).catch(()=>null);
+    if(!terms||terms.pending||(terms.percent??null)!==snapshot.deposit_percent)return {current:false,reason:"payment_terms_changed"};
+  }
+  return {current:true};
 }
 
 function normalizeLeadEmail(value) {

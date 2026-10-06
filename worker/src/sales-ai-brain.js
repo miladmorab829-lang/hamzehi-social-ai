@@ -244,6 +244,35 @@ export function salesAiClaimsColoursRecorded(text,colours){
   return String(text||"").split(/(?<=[.!?؟\n؛;])/u).some(raw=>{const s=gateNorm(raw);return (GATE_CONFIRM.test(s)||/یادداشت\s*(?:شد|شده|کردم|کردیم)/u.test(s))&&!/[?؟]\s*$/u.test(raw.trim())&&names.some(c=>s.includes(c));});
 }
 const GATE_PRICE_WORDS=/(?<!\p{L})(?:قیمت\p{L}*|فی|هزینه\p{L}*|مبلغ\p{L}*|سعر\p{L}*|السعر|کلفه|الکلفه|بیش|price\p{L}*|cost\p{L}*|total)(?!\p{L})/u,GATE_MIN_WORDS=/(?<!\p{L})(?:حداقل|کمترین|دست کم|الحد الادنی|اقل|minimum|at least)(?!\p{L})/u;
+// ---- Payment-terms negotiation. A customer may ask for other terms (another advance %, full payment, paying after delivery); the
+// request is relayed to the owner, never accepted or invented by the AI.
+const SALES_AI_PAY_WORDS=/(?:بیعانه|پیش[‌\s]?پرداخت|پیش[‌\s]?قسط|علی[‌\s]?الحساب|عربون|العربون|دفعه\s*مقدمه|دفعة\s*مقدمة|مقدم|deposit|advance|upfront|پرداخت|تسویه|الدفع|payment|pay)/iu;
+const SALES_AI_RELAY=/(?:هماهنگ|بررسی|استعلام|تأیید\s*مدیر|تایید\s*مدیر|با\s*مدیر|از\s*مدیر|مدیر\s*فروش|برای\s*تأیید|برای\s*تایید|نتیجه\s*رو|خبرتون|اطلاع\s*می|confirm\s+with|check\s+with|owner|أتأكد|أراجع|نراجع|المدير|للموافقة)/iu;
+const SALES_AI_AGREE=/(?:قبول|موافق|مشکلی\s*نیست|اشکالی\s*نداره|حله|اوکیه|پذیرفت|تأیید\s*شد|تایید\s*شد|ثبت\s*شد|می[‌\s]?تونید|میتونید|مانعی\s*نداره|approved|accepted|agreed|you\s+can|مقبول|ماشي|يصير|تگدر|تقدر)/iu;
+const SALES_AI_PAY_LATER=/(?:(?:پرداخت|تسویه|پول)[^.؟!?\n]{0,25}(?:بعد|پس)\s*(?:از\s*)?(?:تحویل|دریافت|ارسال|رسیدن)|(?:بعد|پس)\s*(?:از\s*)?(?:تحویل|دریافت)[^.؟!?\n]{0,25}(?:پرداخت|تسویه)|نسیه|اعتباری|(?:ماهانه|ماهیانه|هفتگی)\s*(?:پرداخت|تسویه)|cash\s+on\s+delivery|pay\s+later|after\s+delivery|عند\s*الاستلام|بعد\s*الاستلام|آجل|بالآجل|بالتقسيط|بالأقساط|installments?|cheques?)/iu;
+// Cheque wording is matched as whole words only («کوچکی» / «چک کردم» are not cheques).
+const SALES_AI_CHEQUE=/(?<![\p{L}\p{M}])(?:(?:چکی|با\s*چک)(?![\p{L}\p{M}])|چک\s*(?:هم\s|صیادی|مدت[‌\s]?دار|قبول|می[‌\s]?گیر|میگیر|بد|مید|بپرداز|پرداخت))|(?<![\p{L}\p{M}])(?:صك|صک|بصك|بصک|بالصك|بالصک|بالشيك|بالشیک)(?![\p{L}\p{M}])/u;
+const SALES_AI_INSTALMENT=/(?<![\p{L}\p{M}])(?:قسطی|اقساطی|اقساط|قسط(?:ی|ها|بندی)?|تقسيط|بالتقسيط|تقسیط|بالتقسیط|بالأقساط|بالاقساط|أقساط)(?![\p{L}\p{M}])|installments?/iu;
+export function salesAiWithoutTermsRelays(text){
+  return String(text||"").split(/(?<=[.!?؟\n؛;])/u).filter(raw=>!(SALES_AI_PAY_WORDS.test(raw)&&SALES_AI_RELAY.test(raw)&&!SALES_AI_AGREE.test(raw))).join(" ");
+}
+// The payment terms a CUSTOMER asks for: {kind:"deposit",percent} (the advance % nearest a payment word), {kind:"full",percent:100}
+// or {kind:"after_delivery",percent:0}; null when the message asks for none.
+export function salesPaymentTermsRequest(message){
+  const t=gateNorm(String(message||""));
+  if(/(?:(?:پرداخت|تسویه|پول)[^.؟!?]{0,25}(?:بعد|پس)\s*(?:از\s*)?(?:تحویل|دریافت|رسیدن)|(?:بعد|پس)\s*(?:از\s*)?(?:تحویل|دریافت)[^.؟!?]{0,25}(?:پرداخت|تسویه|بدم|میدم|بپردازم)|نسیه|cash\s+on\s+delivery|pay\s+(?:on|after)\s+delivery|عند\s*الاستلام|بعد\s*الاستلام)/iu.test(t))return {kind:"after_delivery",percent:0};
+  if(/(?:(?:کل|تمام|همه)\s*(?:مبلغ|پول|هزینه)?[^.؟!?]{0,15}(?:اول|اولش|پیشاپیش|نقد|یکجا|یک\s*جا|کامل)|(?:پرداخت|تسویه)\s*(?:کامل|یکجا|یک\s*جا|نقدی)|صد\s*درصد|pay\s+in\s+full|full\s+payment|الدفع\s*كامل|كامل\s*المبلغ)/iu.test(t))return {kind:"full",percent:100};
+  const W=/(?:بیعانه|پیش\s*پرداخت|پیش\s*قسط|علی\s*الحساب|عربون|العربون|دفعه\s*مقدمه|مقدم|deposit|advance|upfront)/giu;
+  const words=[...t.matchAll(W)].map(m=>m.index);
+  const pcts=[...t.matchAll(/([0-9]{1,3})\s*(?:درصد|٪|%|بالمیه|بالمئه|percent)/giu)].map(m=>({value:Number(m[1]),at:m.index})).filter(x=>x.value<=100);
+  // Paying in instalments / by cheque is a payment-terms request too (with the advance % the customer named, if any).
+  const advance=pcts.length&&words.length?pcts.map(p=>({...p,d:Math.min(...words.map(w=>Math.abs(w-p.at)))})).sort((a,b)=>a.d-b.d)[0].value:null;
+  if(SALES_AI_INSTALMENT.test(t.replace(/پیش\s*قسط/gu," ")))return {kind:"installments",percent:advance};
+  if(SALES_AI_CHEQUE.test(t)||/(?<![\p{L}\p{M}])چک(?![\p{L}\p{M}])[^.؟!?]{0,20}(?:قبول|میگیر|می\s*گیر|بدم|میدم|بپرداز|پرداخت)/u.test(t)||/\bcheques?\b/iu.test(t))return {kind:"cheque",percent:advance};
+  if(!pcts.length||!words.length)return null;
+  const best=pcts.map(p=>({...p,d:Math.min(...words.map(w=>Math.abs(w-p.at)))})).sort((a,b)=>a.d-b.d)[0];
+  return {kind:best.value===100?"full":best.value===0?"after_delivery":"deposit",percent:best.value};
+}
 export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[]}={}){
   const text=String(prose||""),issues=[];
   if(!text.replace(SALES_AI_COMMERCIAL_SLOT,"").trim())issues.push("empty");
@@ -264,14 +293,19 @@ export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[]}=
     if(GATE_MIN_WORDS.test(s)&&mentions.length)issues.push("moq_claim");
   }
   if(/(?:تومان|تومن|ریال|دلار|دولار|\$|USD|TOMAN|IQD|دینار)/iu.test(text))issues.push("currency");
-  if(/(?:تخفیف|خصم|discount|آف\b|درصد|[%٪]|بالمي[ةه]|بالمئ[ةه]|percent)/iu.test(text))issues.push("discount");
+  // A sentence that only RELAYS the customer's payment-terms request to the owner («۳۰ درصد بیعانه رو با مدیر هماهنگ می‌کنم») is not a
+  // commercial claim: it is left out of the discount / payment checks (its numbers are still grounded). Agreeing or stating terms is not.
+  const termsText=salesAiWithoutTermsRelays(text);
+  if(/(?:تخفیف|خصم|discount|آف\b|درصد|[%٪]|بالمي[ةه]|بالمئ[ةه]|percent)/iu.test(termsText))issues.push("discount");
   if(gateConfirmationIssue(text,preferenceTerms))issues.push("order_commitment");
   if(/(?:سفارش[^.؟!?]{0,25}(?:ثبت|تایید|تأیید)\s*شد|(?:ثبت|تایید|تأیید)\s*شد[^.؟!?]{0,25}سفارش|تم\s*(?:تأكيد|تاكيد|تسجيل)\s*الطلب|سجلت\s*الطلب|order\s+(?:is\s+)?(?:confirmed|registered))/iu.test(text))issues.push("order_commitment");
   // The model is never given commercial knowledge (it is filtered out of its context), so any of these in its OWN words would be
   // invented: they reach the customer only through the deterministic segment ({{COMMERCIAL}}).
   if(/(?:ارسال|تحویل|آماده|تولید|توصيل|يوصل|الشحن|التسليم|يجهز|جاهز|delivery|ship|ready)[^.؟!?]{0,20}(?<![\p{L}])(?:روز|ساعت|هفته|ماه|يوم|أيام|أسبوع|ساعة|شهر|day|week|hour|month)(?:ه|ی|ها|s)?(?![\p{L}])|(?<![\p{L}])(?:روز|ساعت|هفته|ماه|يوم|أيام|أسبوع|ساعة|شهر|day|week|hour|month)(?:ه|ی|ها|s)?(?![\p{L}])[^.؟!?]{0,20}(?:ارسال|تحویل|آماده|تولید|توصيل|يوصل|الشحن|التسليم|يجهز|جاهز|delivery|ship|ready)|(?:در\s*حال\s*تولید|تولید\s*شد|ارسال\s*شد|تحویل\s*شد|پرداخت\s*شد|قيد\s*الإنتاج|تم\s*الشحن|تم\s*التسليم|تم\s*الدفع|shipped|delivered|in\s+production)/iu.test(text))issues.push("delivery_or_status_claim");
   if(/(?:ارسال|حمل|پست|تیپاکس|باربری|شحن|توصيل|shipping)\s*(?:رایگان|مجانی|مجاني|free|داریم|نداریم|انجام|می[‌\s]?کنیم|میشه|می[‌\s]?شه)/iu.test(text))issues.push("shipping_claim");
-  if(/(?:پیش[‌\s]?پرداخت|بیعانه|کارت\s*به\s*کارت|قسطی|اقساط|عربون|دفعة\s*مقدمة|الدفع\s*(?:عند|مقدم|بالأقساط)|deposit|installment)/iu.test(text))issues.push("payment_claim");
+  if(/(?:پیش[‌\s]?پرداخت|بیعانه|کارت\s*به\s*کارت|قسطی|اقساط|عربون|دفعة\s*مقدمة|الدفع\s*(?:عند|مقدم|بالأقساط)|deposit|installment)/iu.test(termsText))issues.push("payment_claim");
+  // Credit / pay-after-delivery / a payment schedule in the AI's own words is an unapproved payment term (relays excepted).
+  if(SALES_AI_PAY_LATER.test(termsText)||SALES_AI_CHEQUE.test(termsText)||SALES_AI_INSTALMENT.test(termsText))issues.push("payment_claim");
   if(/(?:حداقل\s*(?:سفارش|تعداد)|الحد\s*الأدنى|\bmoq\b|minimum\s+order)/iu.test(text))issues.push("moq_claim");
   return [...new Set(issues)];
 }

@@ -113,7 +113,8 @@ const SETTING_SPECS={
   quote_fees_mode:v=>{const x=String(v||"").toLowerCase();if(!["none","owner_quoted"].includes(x))throw Error("quote_fees_mode must be none or owner_quoted");return x;},
   quote_payment_terms:v=>{const x=String(v||"").trim().slice(0,1000);if(!x)throw Error("quote_payment_terms text is required");return x;},
   quote_delivery_terms:v=>{const x=String(v||"").trim().slice(0,1000);if(!x)throw Error("quote_delivery_terms text is required");return x;},
-  payment_instructions:v=>{const x=String(v||"").trim().slice(0,2000);if(!x)throw Error("payment_instructions text is required");return x;},
+  payment_instructions:v=>{const x=String(v||"").trim().slice(0,2000);if(!x)throw Error("payment_instructions text is required");
+    if(PAYMENT_TERMS_MARKERS.test(x))throw Error("payment_instructions must contain only bank / card / IBAN / account holder / contact details; payment terms (advance %, remaining, schedule) come from deposit_percent or an owner-approved per-order PAYMENT_TERMS decision");return x;},
   deposit_percent:v=>{const n=safeInt(v,{min:0,name:"deposit_percent"});if(n>100)throw Error("deposit_percent must be 0..100");return n;},
   discount_rule:v=>{const o=typeof v==="object"&&v?v:parseJson(v,{});if(!["percent_bp","amount_minor"].includes(o.type))throw Error("discount_rule.type must be percent_bp or amount_minor");return {type:o.type,value:safeInt(o.value,{min:0,name:"discount_rule.value"}),min_quantity:safeInt(o.min_quantity,{min:1,nullable:true,name:"discount_rule.min_quantity"})};},
   color_compatibility_policy:v=>{const x=String(v||"").toLowerCase();if(!["explicit_only","standard_values_allowed"].includes(x))throw Error("color_compatibility_policy must be explicit_only or standard_values_allowed");return x;},
@@ -135,6 +136,15 @@ export function settingScopeKey(scope={}){
 function scopeCandidates({market,product_key,config_key}={}){
   const c=[];const p=product_key?`product:${product_key}`:null,cf=config_key?`config:${config_key}`:null,m=market?`market:${market}`:null;
   if(m&&p&&cf)c.push(`${m}|${p}|${cf}`);if(p&&cf)c.push(`${p}|${cf}`);if(m&&p)c.push(`${m}|${p}`);if(p)c.push(p);if(m)c.push(m);c.push("global");return c;
+}
+// Payment TERMS (advance %, remaining, when / how the balance is paid) never live inside the payment instructions: the instructions
+// are the payment DESTINATION only (bank, card, IBAN, holder, contact). Terms come from deposit_percent or a per-order override.
+export const PAYMENT_TERMS_MARKERS=/[%٪]|درصد|پیش[‌\s]?پرداخت|پیش[‌\s]?قسط|بیعانه|علی[‌\s]?الحساب|باقی[‌\s]?مانده|مانده[‌\s]?حساب|تسویه|(?:قبل|بعد|پس)\s*از\s*(?:ارسال|تحویل|دریافت)|اقساط|قسطی|نسیه|عربون|العربون|دفعة\s*مقدمة|مقدماً|المتبقي|الباقي|بالمي[ةه]|بالمئ[ةه]|deposit|advance|remaining|balance\s+due|percent|installment/iu;
+// Legacy text that mixes terms into the instructions: only the sentences without any terms marker are kept (null when nothing
+// remains, so the owner is asked again instead of sending terms that contradict the order's own).
+export function paymentDestinationOnly(text){
+  const kept=String(text??"").split(/(?<=[.!؟?\n؛;])/u).filter(part=>part.trim()&&!PAYMENT_TERMS_MARKERS.test(part)).join("").trim();
+  return kept||null;
 }
 export async function getSetting(env,key,ctx={}){
   const cands=scopeCandidates(ctx);
@@ -477,7 +487,27 @@ export async function resolveDecision(env,{id,action,scope="CASE_ONLY",answer={}
   if(decision.order_id&&parseJson(decision.payload_json,{}).setting_key==="payment_instructions"&&act!=="REJECT"){
     const order=await first(env,"SELECT * FROM lead_orders WHERE id=?",decision.order_id);if(order)await preparePaymentRequest(env,order,{caseInstructions:sc==="CASE_ONLY"?String(answer.value||""):null});
   }
+  if(parseJson(decision.payload_json,{})?.kind==="deposit_terms")try{await afterDepositTermsDecision(env,resolved,act);}catch(e){await auditSafe(env,"deposit_terms_followup_failed","Payment-terms decision follow-up failed",{decision_id:id,error:String(e?.message||e)});}
   return {decision:resolved,effect};
+}
+// The owner's answer to a customer's payment-terms request is told to the customer through the normal approval-gated draft
+// (Draft -> SUBMIT -> APPROVE -> SEND); a confirmed order's payment request is then (re)built on the final terms.
+async function afterDepositTermsDecision(env,decision,act){
+  const order=decision.order_id?await first(env,"SELECT * FROM lead_orders WHERE id=?",decision.order_id):null;
+  const market=order?.market||decision.market||"IRAN",language=D.outreachLanguage({country:market==="IRAN"?"iran":"iraq"}),ar=language==="Iraqi Arabic";
+  const kind=parseJson(decision.payload_json,{})?.requested_kind||"deposit",method=DEPOSIT_TERMS_METHOD_KINDS.has(kind);
+  const defPct=(await getSetting(env,"deposit_percent",{market,product_key:null}))?.value;
+  const approvedPct=act!=="REJECT"?decisionDepositPercent(decision):null,approved=act!=="REJECT"&&(approvedPct!==null||method);
+  const pct=approved&&approvedPct!==null?approvedPct:defPct;
+  const methodText=kind==="installments"?(ar?"الدفع بالأقساط":"پرداخت اقساطی"):kind==="cheque"?(ar?"الدفع بالصك":"پرداخت با چک"):null;
+  const termsLine=pct===null||pct===undefined?null:pct>=100?(ar?"الدفع كامل مقدماً":"پرداخت کامل پیش از ارسال"):pct===0?(ar?"بدون عربون":"بدون پیش‌پرداخت"):(ar?`العربون ${pct}% والباقي ${100-pct}%`:`پیش‌پرداخت ${pct}٪ و باقی‌مانده ${100-pct}٪`);
+  const message=approved
+    ?method?(ar?`تمت موافقة المدير على ${methodText} لهذا الطلب${termsLine?`، مع ${termsLine}`:""}.`:`درخواستتون برای ${methodText} این سفارش تأیید شد${termsLine?`؛ ${termsLine}`:""}.`)
+    :(termsLine?(ar?`تمت موافقة المدير على طلبكم بخصوص شروط الدفع لهذا الطلب: ${termsLine}.`:`درخواستتون درباره شرایط پرداخت این سفارش تأیید شد: ${termsLine}.`):(ar?"تمت موافقة المدير على طلبكم بخصوص شروط الدفع لهذا الطلب.":"درخواستتون درباره شرایط پرداخت این سفارش تأیید شد."))
+    :(termsLine?(ar?`للأسف لم تتم الموافقة على طلب تغيير شروط الدفع؛ تبقى الشروط المعتادة: ${termsLine}.`:`متأسفانه امکان تغییر شرایط پرداخت تأیید نشد و شرایط معمول برقراره: ${termsLine}.`):(ar?"للأسف لم تتم الموافقة على طلب تغيير شروط الدفع.":"متأسفانه امکان تغییر شرایط پرداخت تأیید نشد."));
+  if(decision.lead_id&&decision.conversation_id&&D.createApprovalGatedDraft)await D.createApprovalGatedDraft(env,{key:`payment-terms:decision-draft:${decision.id}`,skipKey:`payment-terms:decision-draft-skipped:${decision.id}`,leadId:decision.lead_id,conversationId:decision.conversation_id,language,message,
+    eventType:"payment_terms_decision_draft_created",eventMessage:"Payment-terms decision draft created for owner approval",details:{decision_id:decision.id,order_id:order?.id||null,outcome:approved?"approved":"rejected",deposit_percent:pct??null}});
+  if(order)await preparePaymentRequest(env,order);
 }
 export async function listDecisions(env,{status="PENDING",type=null,limit=100}={}){
   await ensureSalesIntelligenceStore(env);
@@ -730,27 +760,56 @@ export async function marginGuard(env,quote,overrides={}){
 
 /* ------------------------------------------------------- payment request */
 // Approval-gated payment request after owner confirmation; never invents instructions, amounts, deposit or deadline.
+// The deposit terms that apply to ONE order: the owner's approved override for this order (a customer's negotiated request), else the
+// market's persistent default. The override never touches the persistent setting. A request still awaiting the owner => pending.
+const DEPOSIT_TERMS_SQL="decision_type='PAYMENT_TERMS' AND json_valid(payload_json) AND json_extract(payload_json,'$.kind')='deposit_terms'";
+// The advance % an owner approved on a deposit-terms decision: the owner's own answer value (a counter-offer), else the requested %.
+function decisionDepositPercent(decision){
+  const ans=parseJson(decision.owner_answer_json,{})||{},pl=parseJson(decision.payload_json,{})||{};
+  const raw=ans.value!==undefined&&ans.value!==null&&String(ans.value).trim()!==""?ans.value:pl.requested_percent;
+  const pct=Number(digitsLatin(String(raw??"")).replace(/[%٪\s]/g,""));
+  return String(raw??"").trim()!==""&&Number.isInteger(pct)&&pct>=0&&pct<=100?pct:null;
+}
+// Requests about HOW the balance is paid (instalments, cheque); an approval of one keeps the default advance unless the owner gives a %.
+export const DEPOSIT_TERMS_METHOD_KINDS=new Set(["installments","cheque"]);
+export async function orderDepositTerms(env,order){
+  await ensureSalesIntelligenceStore(env);
+  const pending=await first(env,`SELECT id FROM owner_decisions WHERE order_id=? AND status='PENDING' AND ${DEPOSIT_TERMS_SQL} ORDER BY created_at DESC LIMIT 1`,order.id);
+  if(pending)return {pending:true,decision_id:pending.id};
+  const approved=await first(env,`SELECT id,payload_json,owner_answer_json FROM owner_decisions WHERE order_id=? AND status='RESOLVED' AND owner_decision IN ('APPROVE','ANSWER') AND ${DEPOSIT_TERMS_SQL} ORDER BY resolved_at DESC LIMIT 1`,order.id);
+  const def=(await getSetting(env,"deposit_percent",{market:order.market,product_key:null}))?.value??null;
+  if(approved){
+    const pct=decisionDepositPercent(approved),kind=parseJson(approved.payload_json,{})?.requested_kind||"deposit";
+    if(pct!==null||DEPOSIT_TERMS_METHOD_KINDS.has(kind))return {percent:pct??def,source:"owner_override",decision_id:approved.id,kind};
+  }
+  return {percent:def,source:"default",decision_id:null,kind:"default"};
+}
 export async function preparePaymentRequest(env,order,{caseInstructions=null}={}){
   await ensureSalesIntelligenceStore(env);
   if(order.status!=="confirmed")return {created:false,reason:"order_not_awaiting_payment"};
   // The owner's already-approved CASE_ONLY instructions for THIS order are reused (never asked again, no second PAYMENT_TERMS decision).
-  const approvedCase=caseInstructions?null:await first(env,"SELECT owner_answer_json FROM owner_decisions WHERE order_id=? AND decision_type='PAYMENT_TERMS' AND status='RESOLVED' AND owner_decision='APPROVE' AND json_valid(scope_json) AND json_extract(scope_json,'$.scope')='CASE_ONLY' ORDER BY resolved_at DESC LIMIT 1",order.id);
+  const approvedCase=caseInstructions?null:await first(env,"SELECT owner_answer_json FROM owner_decisions WHERE order_id=? AND decision_type='PAYMENT_TERMS' AND status='RESOLVED' AND owner_decision='APPROVE' AND json_valid(scope_json) AND json_extract(scope_json,'$.scope')='CASE_ONLY' AND NOT (json_valid(payload_json) AND COALESCE(json_extract(payload_json,'$.kind'),'')='deposit_terms') ORDER BY resolved_at DESC LIMIT 1",order.id);
   const approvedCaseText=String(parseJson(approvedCase?.owner_answer_json,{})?.value??"").trim()||null;
-  const ctx={market:order.market,product_key:null},instructions=caseInstructions||approvedCaseText||(await getSetting(env,"payment_instructions",ctx))?.value;
+  const ctx={market:order.market,product_key:null},instructions=paymentDestinationOnly(caseInstructions||approvedCaseText||(await getSetting(env,"payment_instructions",ctx))?.value);
   const amount=D.customerPaymentAmountText?.({currency:order.currency,amount_minor:order.total_minor});
   const base={lead_id:order.lead_id,conversation_id:order.conversation_id,market:order.market,order_id:order.id};
   if(!instructions)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,question:`Payment instructions for ${order.market} are not defined (order ${order.order_number})`,known:{order_number:order.order_number,total_minor:order.total_minor,currency:order.currency},recommendation:"Enter payment instructions for this order, or save them for the market.",risk:"No bank/payment details are invented.",payload:{resolution:"setting",setting_key:"payment_instructions",scope:{market:order.market}}})).decision};
   if(!amount)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,fingerprint:`PAYMENT_AMOUNT|${order.id}`,question:`Order ${order.order_number} amount cannot be safely formatted (currency ${order.currency}); legacy currency is not converted`,known:{currency:order.currency,total_minor:order.total_minor},payload:{resolution:"record"}})).decision};
-  const deposit=(await getSetting(env,"deposit_percent",ctx))?.value;
+  const terms=await orderDepositTerms(env,order);
+  // A customer's request for other payment terms is still with the owner: no payment request until it is decided.
+  if(terms.pending)return {created:false,reason:"payment_terms_pending",decision_id:terms.decision_id};
+  const deposit=terms.percent;
   const language=D.outreachLanguage({country:order.market==="IRAN"?"iran":"iraq"}),ar=language==="Iraqi Arabic";
-  const depositMinor=deposit!==undefined&&deposit!==null?Math.ceil(Number(order.total_minor)*deposit/100):null;
+  const depositMinor=deposit!==undefined&&deposit!==null&&deposit>0?Math.ceil(Number(order.total_minor)*deposit/100):null;
   const depositText=depositMinor!==null&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:depositMinor});
   // The remaining balance is the system's own calculation (total − deposit); WHEN it is due stays in the owner's instructions.
-  const remainingText=depositText&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:Number(order.total_minor)-depositMinor});
+  const remainingText=depositText&&Number(order.total_minor)-depositMinor>0&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:Number(order.total_minor)-depositMinor});
   const message=(ar?[`تم تأكيد طلبكم ${order.order_number}: ${order.product} × ${order.quantity}`,`المبلغ المطلوب: ${amount}`,depositText?`العربون المطلوب (${deposit}%): ${depositText}`:null,remainingText?`المبلغ المتبقي: ${remainingText}`:null,`طريقة الدفع: ${instructions}`]
     :[`سفارش ${order.order_number} تأیید شد: ${order.product} × ${order.quantity}`,`مبلغ قابل پرداخت: ${amount}`,depositText?`پیش‌پرداخت (${deposit}%): ${depositText}`:null,remainingText?`باقی‌مانده: ${remainingText}`:null,`روش پرداخت: ${instructions}`]).filter(Boolean).join("\n");
-  return await D.createApprovalGatedDraft(env,{key:`lead-order:update-draft:${order.id}:payment_request`,skipKey:`lead-order:update-draft-skipped:${order.id}:payment_request`,leadId:order.lead_id,conversationId:order.conversation_id,language,message,
-    eventType:"lead_order_update_draft_created",eventMessage:"Payment request draft created for owner approval",details:{order_id:order.id,order_number:order.order_number,event:"payment_request",payment_instructions:instructions,snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}});
+  // An owner-approved per-order override gets its own draft key, so a draft built on the default terms is never reused for it.
+  const termsKey=terms.source==="owner_override"?`:terms-${terms.decision_id}`:"";
+  return await D.createApprovalGatedDraft(env,{key:`lead-order:update-draft:${order.id}:payment_request${termsKey}`,skipKey:`lead-order:update-draft-skipped:${order.id}:payment_request${termsKey}`,leadId:order.lead_id,conversationId:order.conversation_id,language,message,
+    eventType:"lead_order_update_draft_created",eventMessage:"Payment request draft created for owner approval",details:{order_id:order.id,order_number:order.order_number,event:"payment_request",payment_instructions:instructions,payment_terms:{deposit_percent:deposit??null,source:terms.source,decision_id:terms.decision_id||null},snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency,deposit_percent:deposit??null}}});
 }
 
 /* -------------------------------------------------- controlled learning */
