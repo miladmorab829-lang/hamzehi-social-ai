@@ -7909,7 +7909,11 @@ async function salesPaymentClaimTurn(env,{row,order,language}){
   const seen=await env.DB.prepare("SELECT * FROM owner_decisions WHERE decision_type='PAYMENT_VERIFICATION' AND order_id=? AND instr(payload_json,?)>0 LIMIT 1").bind(order.id,`"${row.id}"`).first();
   const media=await env.DB.prepare("SELECT * FROM conversation_customer_media WHERE inbox_message_id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(row.id,row.lead_id,row.conversation_id).first().catch(()=>null);
   const ar=language==="Iraqi Arabic";
-  const reply=media?(ar?"وصل الإيصال، راح نتأكد من الحوالة ونبلغك.":"رسید دریافت شد؛ واریز رو بررسی می‌کنم و خبرتون می‌دم."):(ar?"وصلت رسالتك، راح نتأكد من الحوالة ونبلغك.":"پیامتون دریافت شد؛ واریز رو بررسی می‌کنم و خبرتون می‌دم.");
+  // An order that already has a recorded payment: the customer is told this NEW transfer is being checked (never "received").
+  const anotherPayment=!!(await env.DB.prepare("SELECT id FROM lead_order_payments WHERE order_id=? LIMIT 1").bind(order.id).first());
+  const reply=anotherPayment
+    ?(media?(ar?"وصل إيصال الحوالة الجديدة، راح نتأكد منها ونبلغك.":"رسید واریز جدیدتون دریافت شد؛ بررسی می‌کنم و خبرتون می‌دم."):(ar?"وصلت رسالة الحوالة الجديدة، راح نتأكد منها ونبلغك.":"پیام واریز جدیدتون دریافت شد؛ بررسی می‌کنم و خبرتون می‌دم."))
+    :media?(ar?"وصل الإيصال، راح نتأكد من الحوالة ونبلغك.":"رسید دریافت شد؛ واریز رو بررسی می‌کنم و خبرتون می‌دم."):(ar?"وصلت رسالتك، راح نتأكد من الحوالة ونبلغك.":"پیامتون دریافت شد؛ واریز رو بررسی می‌کنم و خبرتون می‌دم.");
   if(seen)return {decision:seen,reply,duplicate:true};
   const requested=await env.DB.prepare("SELECT id FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status='sent' AND (instr(message,'مبلغ قابل پرداخت')>0 OR instr(message,'المبلغ المطلوب')>0) LIMIT 1").bind(row.lead_id,row.conversation_id).first();
   const signal=paymentClaimSignal(text,{awaitingPayment:true,paymentRequested:!!requested});
@@ -8777,7 +8781,10 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
     inboundAutomatedReplyCounts(env,row)
   ]);
   const key=salesBrainClaimText(outreach.message),inboundKey=salesBrainClaimText(row.message);
-  if(recent.slice(0,3).some(x=>salesBrainClaimText(x.message)===key))return "repetitive_reply";
+  // A NEW payment claim (its own inbound message opened or joined a payment verification) is a new financial event: its neutral
+  // acknowledgement is sent even when the wording matches an earlier one. A replayed claim (duplicate) gets no exemption.
+  const newPaymentEvent=brain.next_sales_action==="payment_claim_owner"&&!!brain.ai_brain?.payment_claim?.decision_id&&brain.ai_brain.payment_claim.duplicate===false;
+  if(!newPaymentEvent&&recent.slice(0,3).some(x=>salesBrainClaimText(x.message)===key))return "repetitive_reply";
   // Bot self-loop guard: an inbound that merely echoes one of our own recent replies is never answered automatically.
   if(inboundKey&&recent.some(x=>salesBrainClaimText(x.message)===inboundKey))return "echo_of_outbound";
   if(counts.hour>=INBOUND_AUTO_REPLY_HOURLY_LIMIT||counts.burst>=INBOUND_AUTO_REPLY_BURST_LIMIT)return "auto_send_rate_limited";
