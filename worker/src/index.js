@@ -7934,7 +7934,9 @@ async function salesPaymentClaimTurn(env,{row,order,language}){
   const terms=await orderDepositTerms(env,order).catch(()=>null),pct=terms&&!terms.pending?terms.percent:null;
   const expected=paid===0&&Number.isInteger(pct)&&pct>0&&pct<100?Math.ceil(total*pct/100):outstanding;
   const claimed=signal.amount?paymentClaimMinor(signal.amount.amount,signal.amount.currency,order.currency):null;
-  const receipt=ev?.amount?paymentClaimMinor(ev.amount,ev.currency,order.currency):null;
+  // A receipt amount exists only when there IS a receipt image and its analysis read an amount (never the text's own amount).
+  const hasReceiptImage=!!media&&!!image&&ev?.is_receipt_image!==false;
+  const receipt=hasReceiptImage&&ev?.amount?paymentClaimMinor(ev.amount,ev.currency,order.currency):null;
   const fits=v=>v===null?null:(v===expected||v===outstanding);
   const present=[claimed,receipt].filter(v=>v!==null);
   const mismatch=present.some(v=>!fits(v))||(claimed!==null&&receipt!==null&&claimed!==receipt);
@@ -7949,18 +7951,18 @@ async function salesPaymentClaimTurn(env,{row,order,language}){
     ai:ai?{ok:!!ai.ok,claim_type:aiSays,confidence:ev?.confidence||null,error:ai.ok?null:ai.error}:{ok:false,error:"evidence_ai_not_configured"}};
   const known={order_number:order.order_number,customer:order.customer_name||null,expected_minor:expected,outstanding_minor:outstanding,currency:order.currency,deposit_percent:pct,
     claimed_minor:claimed,receipt_minor:receipt,claim_amount_match:fits(claimed),receipt_amount_match:fits(receipt),mismatch,method,transaction_reference:ev?.transaction_reference||null,
-    destination_match:destination.status,receipt_status:imageStatus,media_id:media?.id||null,confidence:ev?.confidence||(signal.claim?"text_rule":"low")};
-  const question=`Verify customer payment · order ${order.order_number} · expected ${money(expected)} · customer claimed ${money(claimed)} · receipt detected ${money(receipt)} · mismatch ${mismatch?"YES":"NO"} · method ${method||"—"} · ref ${known.transaction_reference||"—"} · destination ${destination.status}${media?` · receipt ${imageStatus}`:""}`;
+    destination_match:destination.status,receipt_status:media?imageStatus:null,media_id:media?.id||null,confidence:ev?.confidence||(signal.claim?"text_rule":"low")};
+  const question=`Verify customer payment · order ${order.order_number} · expected ${money(expected)} · customer claimed ${money(claimed)} · receipt detected ${media?money(receipt):"no receipt image"} · mismatch ${mismatch?"YES":"NO"} · method ${method||"—"} · ref ${known.transaction_reference||"—"} · destination ${destination.status}${media?` · receipt ${imageStatus}`:""}`;
   // A receipt sent shortly after the text claim (or vice versa) joins the SAME pending verification of this order.
   const recent=await env.DB.prepare("SELECT * FROM owner_decisions WHERE decision_type='PAYMENT_VERIFICATION' AND order_id=? AND status='PENDING' AND created_at>? ORDER BY created_at DESC LIMIT 1").bind(order.id,new Date(Date.now()-2*3600000).toISOString()).first();
   if(recent){
     const prev=JSON.parse(recent.payload_json||"{}"),pk=JSON.parse(recent.known_json||"{}");
-    const merged={...pk,...Object.fromEntries(Object.entries(known).filter(([,v])=>v!==null&&v!==undefined)),claimed_minor:known.claimed_minor??pk.claimed_minor??null,receipt_minor:known.receipt_minor??pk.receipt_minor??null};
+    const merged={...pk,...Object.fromEntries(Object.entries(known).filter(([k,v])=>v!==null&&v!==undefined&&!(k==="destination_match"&&v==="not_visible"))),claimed_minor:known.claimed_minor??pk.claimed_minor??null,receipt_minor:known.receipt_minor??pk.receipt_minor??null};
     const all=[merged.claimed_minor,merged.receipt_minor].filter(v=>v!==null&&v!==undefined);
     merged.mismatch=all.some(v=>!(v===expected||v===outstanding))||(all.length===2&&all[0]!==all[1]);
     merged.claim_amount_match=merged.claimed_minor===null||merged.claimed_minor===undefined?null:fits(merged.claimed_minor);merged.receipt_amount_match=merged.receipt_minor===null||merged.receipt_minor===undefined?null:fits(merged.receipt_minor);
     const payload={...prev,evidence:[...(prev.evidence||[]),evidence],suggested_amount_minor:all.length&&!merged.mismatch?all[0]:null,method:method||prev.method||null,transaction_reference:merged.transaction_reference||null,destination_match:merged.destination_match};
-    const q=`Verify customer payment · order ${order.order_number} · expected ${money(expected)} · customer claimed ${money(merged.claimed_minor??null)} · receipt detected ${money(merged.receipt_minor??null)} · mismatch ${merged.mismatch?"YES":"NO"} · method ${payload.method||"—"} · ref ${merged.transaction_reference||"—"} · destination ${merged.destination_match}`;
+    const q=`Verify customer payment · order ${order.order_number} · expected ${money(expected)} · customer claimed ${money(merged.claimed_minor??null)} · receipt detected ${merged.media_id?money(merged.receipt_minor??null):"no receipt image"} · mismatch ${merged.mismatch?"YES":"NO"} · method ${payload.method||"—"} · ref ${merged.transaction_reference||"—"} · destination ${merged.destination_match}`;
     const risk=`Customer claim + receipt are unverified evidence.${merged.mismatch?" AMOUNT MISMATCH.":""}${merged.destination_match==="mismatch"?" DESTINATION DOES NOT MATCH THE APPROVED ACCOUNT.":""}`;
     const conflicting=merged.mismatch?[{expected_minor:expected,claimed_minor:merged.claimed_minor??null,receipt_minor:merged.receipt_minor??null}]:[];
     await env.DB.prepare("UPDATE owner_decisions SET question=?,known_json=?,payload_json=?,risk=?,conflicting_json=?,updated_at=? WHERE id=? AND status='PENDING'").bind(q.slice(0,1000),JSON.stringify(merged),JSON.stringify(payload),risk,JSON.stringify(conflicting),now(),recent.id).run();

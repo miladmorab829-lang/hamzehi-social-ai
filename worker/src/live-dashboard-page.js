@@ -687,7 +687,7 @@ function siPayBlock(x){const k=x.known||{},bad=v=>"<b class='bad'>"+esc(v)+"</b>
  return "<div class='row' style='margin:6px 0'><b>💳 PAYMENT VERIFICATION · "+esc(k.order_number||"")+" · "+esc(k.customer||"")+"</b>"+
   line("Expected payment",esc(siPayMoney(k,k.expected_minor))+" (outstanding "+esc(siPayMoney(k,k.outstanding_minor))+(k.deposit_percent!==null&&k.deposit_percent!==undefined?" · deposit "+esc(k.deposit_percent)+"%":"")+")")+
   line("Customer claimed",esc(siPayMoney(k,k.claimed_minor))+(k.claim_amount_match===false?" "+bad("≠ expected"):""))+
-  line("Receipt detected",esc(siPayMoney(k,k.receipt_minor))+(k.receipt_amount_match===false?" "+bad("≠ expected"):"")+" · receipt "+esc(k.receipt_status||"—"))+
+  line("Receipt detected",k.media_id?esc(siPayMoney(k,k.receipt_minor))+(k.receipt_amount_match===false?" "+bad("≠ expected"):"")+" · receipt "+esc(k.receipt_status||"—"):"No receipt image")+
   line("Mismatch",k.mismatch?bad("YES — enter the verified amount"):"NO")+
   line("Method / reference",esc(k.method||"—")+" / "+esc(k.transaction_reference||"—"))+
   line("Destination",k.destination_match==="mismatch"?bad("DOES NOT MATCH the approved account"):esc(k.destination_match||"—"))+
