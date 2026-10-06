@@ -733,7 +733,10 @@ export async function marginGuard(env,quote,overrides={}){
 export async function preparePaymentRequest(env,order,{caseInstructions=null}={}){
   await ensureSalesIntelligenceStore(env);
   if(order.status!=="confirmed")return {created:false,reason:"order_not_awaiting_payment"};
-  const ctx={market:order.market,product_key:null},instructions=caseInstructions||(await getSetting(env,"payment_instructions",ctx))?.value;
+  // The owner's already-approved CASE_ONLY instructions for THIS order are reused (never asked again, no second PAYMENT_TERMS decision).
+  const approvedCase=caseInstructions?null:await first(env,"SELECT owner_answer_json FROM owner_decisions WHERE order_id=? AND decision_type='PAYMENT_TERMS' AND status='RESOLVED' AND owner_decision='APPROVE' AND json_valid(scope_json) AND json_extract(scope_json,'$.scope')='CASE_ONLY' ORDER BY resolved_at DESC LIMIT 1",order.id);
+  const approvedCaseText=String(parseJson(approvedCase?.owner_answer_json,{})?.value??"").trim()||null;
+  const ctx={market:order.market,product_key:null},instructions=caseInstructions||approvedCaseText||(await getSetting(env,"payment_instructions",ctx))?.value;
   const amount=D.customerPaymentAmountText?.({currency:order.currency,amount_minor:order.total_minor});
   const base={lead_id:order.lead_id,conversation_id:order.conversation_id,market:order.market,order_id:order.id};
   if(!instructions)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,question:`Payment instructions for ${order.market} are not defined (order ${order.order_number})`,known:{order_number:order.order_number,total_minor:order.total_minor,currency:order.currency},recommendation:"Enter payment instructions for this order, or save them for the market.",risk:"No bank/payment details are invented.",payload:{resolution:"setting",setting_key:"payment_instructions",scope:{market:order.market}}})).decision};
