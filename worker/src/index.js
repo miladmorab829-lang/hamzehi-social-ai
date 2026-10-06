@@ -9434,13 +9434,20 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
     // Numbers may come only from this same order: number, total, formatted total, quantity, and owner-recorded instructions.
     const amountText=customerPaymentAmountText({currency:order.currency,amount_minor:order.total_minor});
     const unitText=Number.isSafeInteger(order.unit_price_minor)?customerPaymentAmountText({currency:order.currency,amount_minor:order.unit_price_minor}):null;
-    const allowedNumbers=[order.order_number,order.total_minor,amountText,order.quantity,order.unit_price_minor,unitText,order.product,order.customization,instructions].flatMap(value=>[...String(value??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger);
-    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||""),amountText,instructions].filter(Boolean)}];
+    // A deposit is grounded ONLY as the market's owner-set deposit_percent applied to THIS order's total (and the remaining balance).
+    const depositPct=(await getSetting(env,"deposit_percent",{market:order.market}).catch(()=>null))?.value;
+    const depositMinor=Number.isSafeInteger(depositPct)&&depositPct>0&&depositPct<=100&&Number.isSafeInteger(order.total_minor)?Math.ceil(order.total_minor*depositPct/100):null;
+    const depositValues=depositMinor===null?[]:[depositPct,depositMinor,order.total_minor-depositMinor,customerPaymentAmountText({currency:order.currency,amount_minor:depositMinor}),customerPaymentAmountText({currency:order.currency,amount_minor:order.total_minor-depositMinor})];
+    // Money is compared as WHOLE amounts: thousands separators are joined first («18,900,000» = 18900000), so an altered amount can
+    // never pass group by group (18 / 000 / 000).
+    const wholeAmounts=s=>String(s??"").replace(/([0-9۰-۹٠-٩])[,٬](?=[0-9۰-۹٠-٩]{3}(?![0-9۰-۹٠-٩]))/g,"$1");
+    const allowedNumbers=[order.order_number,order.total_minor,amountText,order.quantity,order.unit_price_minor,unitText,order.product,order.customization,...depositValues,instructions].map(wholeAmounts).flatMap(value=>[...String(value??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger);
+    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||""),amountText,instructions].filter(Boolean)}].map(f=>({...f,values:(f.values||[]).map(wholeAmounts)}));
     // The owner-approved payment instructions are authoritative as an EXACT text: card, IBAN, account and phone identifiers are
     // identifiers, not numbers (too long for a numeric check). Only their verbatim occurrence (never inside a longer digit run) is set
     // aside; every other digit of the draft is validated as before, and an altered identifier no longer matches → it fails closed.
     const exact=instructions?new RegExp(`(?<![0-9۰-۹٠-٩])${instructions.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}(?![0-9۰-۹٠-٩])`,"gu"):null;
-    const validation=validateSalesBrainDraft(exact?String(message).replace(exact," "):message,{allowedNumbers,authoritativeFacts:facts});
+    const validation=validateSalesBrainDraft(wholeAmounts(exact?String(message).replace(exact," "):message),{allowedNumbers,authoritativeFacts:facts});
     if(!validation.valid)return await blocked(validation.reason,{validation});
   }
   const eventId=`sales-draft:${key}`,prior=await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind(eventId).first();

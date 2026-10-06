@@ -743,9 +743,12 @@ export async function preparePaymentRequest(env,order,{caseInstructions=null}={}
   if(!amount)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,fingerprint:`PAYMENT_AMOUNT|${order.id}`,question:`Order ${order.order_number} amount cannot be safely formatted (currency ${order.currency}); legacy currency is not converted`,known:{currency:order.currency,total_minor:order.total_minor},payload:{resolution:"record"}})).decision};
   const deposit=(await getSetting(env,"deposit_percent",ctx))?.value;
   const language=D.outreachLanguage({country:order.market==="IRAN"?"iran":"iraq"}),ar=language==="Iraqi Arabic";
-  const depositText=deposit!==undefined&&deposit!==null&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:Math.ceil(Number(order.total_minor)*deposit/100)});
-  const message=(ar?[`تم تأكيد طلبكم ${order.order_number}: ${order.product} × ${order.quantity}`,`المبلغ المطلوب: ${amount}`,depositText?`العربون المطلوب (${deposit}%): ${depositText}`:null,`طريقة الدفع: ${instructions}`]
-    :[`سفارش ${order.order_number} تأیید شد: ${order.product} × ${order.quantity}`,`مبلغ قابل پرداخت: ${amount}`,depositText?`پیش‌پرداخت (${deposit}%): ${depositText}`:null,`روش پرداخت: ${instructions}`]).filter(Boolean).join("\n");
+  const depositMinor=deposit!==undefined&&deposit!==null?Math.ceil(Number(order.total_minor)*deposit/100):null;
+  const depositText=depositMinor!==null&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:depositMinor});
+  // The remaining balance is the system's own calculation (total − deposit); WHEN it is due stays in the owner's instructions.
+  const remainingText=depositText&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:Number(order.total_minor)-depositMinor});
+  const message=(ar?[`تم تأكيد طلبكم ${order.order_number}: ${order.product} × ${order.quantity}`,`المبلغ المطلوب: ${amount}`,depositText?`العربون المطلوب (${deposit}%): ${depositText}`:null,remainingText?`المبلغ المتبقي: ${remainingText}`:null,`طريقة الدفع: ${instructions}`]
+    :[`سفارش ${order.order_number} تأیید شد: ${order.product} × ${order.quantity}`,`مبلغ قابل پرداخت: ${amount}`,depositText?`پیش‌پرداخت (${deposit}%): ${depositText}`:null,remainingText?`باقی‌مانده: ${remainingText}`:null,`روش پرداخت: ${instructions}`]).filter(Boolean).join("\n");
   return await D.createApprovalGatedDraft(env,{key:`lead-order:update-draft:${order.id}:payment_request`,skipKey:`lead-order:update-draft-skipped:${order.id}:payment_request`,leadId:order.lead_id,conversationId:order.conversation_id,language,message,
     eventType:"lead_order_update_draft_created",eventMessage:"Payment request draft created for owner approval",details:{order_id:order.id,order_number:order.order_number,event:"payment_request",payment_instructions:instructions,snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}});
 }
