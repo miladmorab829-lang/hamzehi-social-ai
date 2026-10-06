@@ -116,7 +116,7 @@ export async function callSalesAi(env,{instructions,input,timeoutMs=salesAiTimeo
 
 // ---- Provider (Anthropic Messages API, structured output). Same contract as above: one call, same timeout, no retry, sanitised
 // error codes, the same decision schema (nullable type arrays expressed as anyOf, which is the same JSON schema semantics).
-const toAnthropicSchema=s=>{
+export const toAnthropicSchema=s=>{
   if(Array.isArray(s))return s.map(toAnthropicSchema);
   if(!s||typeof s!=="object")return s;
   const o=Object.fromEntries(Object.entries(s).map(([k,v])=>[k,k==="enum"?v:toAnthropicSchema(v)]));
@@ -306,6 +306,8 @@ export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[]}=
   if(/(?:پیش[‌\s]?پرداخت|بیعانه|کارت\s*به\s*کارت|قسطی|اقساط|عربون|دفعة\s*مقدمة|الدفع\s*(?:عند|مقدم|بالأقساط)|deposit|installment)/iu.test(termsText))issues.push("payment_claim");
   // Credit / pay-after-delivery / a payment schedule in the AI's own words is an unapproved payment term (relays excepted).
   if(SALES_AI_PAY_LATER.test(termsText)||SALES_AI_CHEQUE.test(termsText)||SALES_AI_INSTALMENT.test(termsText))issues.push("payment_claim");
+  // Only an owner-recorded payment may be called received / confirmed — never the AI's words.
+  if(/(?:(?:پرداخت|واریز|وجه|مبلغ|پول|بیعانه|پیش[‌\s]?پرداخت)[^.؟!?\n]{0,25}(?:تأیید|تایید|دریافت|ثبت|وصول|رسید)\s*(?:شد|شده|گردید|کردیم|کردم)|payment\s+(?:is\s+|was\s+|has\s+been\s+)?(?:confirmed|received)|(?:تم|تمت)\s*(?:استلام|تأكيد|تاكيد)\s*(?:ال)?(?:دفع|دفعه|دفعة|مبلغ|حواله|حوالة|تحويل)|وصلت?\s*(?:ال)?(?:فلوس|حواله|حوالة|دفعه|دفعة))/iu.test(text))issues.push("payment_claim");
   if(/(?:حداقل\s*(?:سفارش|تعداد)|الحد\s*الأدنى|\bmoq\b|minimum\s+order)/iu.test(text))issues.push("moq_claim");
   return [...new Set(issues)];
 }

@@ -376,7 +376,7 @@ export async function openDecision(env,d){
 }
 async function recordKnowledgeGap(env,d,decisionId){
   // A customer's acceptance waiting for owner approval is an approval step, not missing knowledge.
-  if(d.payload?.resolution==="learning"||d.payload?.resolution==="order_candidate")return;
+  if(d.payload?.resolution==="learning"||d.payload?.resolution==="order_candidate"||d.payload?.resolution==="payment_verification")return;
   const fp=gapFingerprint(d),t=now(),gap=await first(env,"SELECT * FROM knowledge_gaps WHERE fingerprint=?",fp);
   if(!gap){await env.DB.prepare(`INSERT OR IGNORE INTO knowledge_gaps(fingerprint,decision_type,product_key,attribute_key,value_text,occurrences,lead_ids_json,examples_json,first_seen,last_seen,status,updated_at)
     VALUES(?,?,?,?,?,1,?,?,?,?,'open',?)`).bind(fp,d.decision_type,d.product_key||null,normKey(d.payload?.attribute)||null,normText(d.payload?.value)||null,JSON.stringify(d.lead_id?[d.lead_id]:[]),JSON.stringify([decisionId]),t,t,t).run();}
@@ -464,6 +464,24 @@ async function applyResolution(env,decision,{action,scope,answer,actor}){
     if(request)await addCaseOverride(env,request.id,o=>{o.discount={discount_minor:amount,reason:String(answer.reason||"owner exceptional discount").slice(0,300),decision_id:decision.id};});
     if(save&&answer.rule){const saved=await saveKnowledgeVersion(env,"setting",{setting_key:"discount_rule",scope:answer.scope||{market:decision.market,product_key:decision.product_key},value:answer.rule},saveOpts);return {...result,resulting_ref:`setting:${saved.row.id}`};}
     return {...result,knowledge_action:"CASE_ONLY"};
+  }
+  // ---- Customer payment claim / receipt. APPROVE (or ANSWER with corrections) means the OWNER has independently verified that the
+  // money arrived: only then is ONE real payment recorded, through the existing order-payment rules (balance, currency, kind,
+  // idempotent reference). REJECT was handled above: no payment, the decision stays in history.
+  if(kind==="payment_verification"){
+    const order=await first(env,"SELECT * FROM lead_orders WHERE id=?",decision.order_id||payload.order_id);
+    if(!order)throw Error("Order not found for this payment verification");
+    const already=await first(env,"SELECT id FROM lead_order_payments WHERE order_id=? AND instr(COALESCE(notes,''),?)>0 LIMIT 1",order.id,`decision ${decision.id}`);
+    if(already)return {...result,knowledge_action:"PAYMENT_RECORDED",resulting_ref:`payment:${already.id}`};
+    const given=answer.amount_minor??(/^[0-9۰-۹٠-٩,٬\s]+$/u.test(String(answer.value??""))&&String(answer.value).trim()?answer.value:undefined);
+    const amount=given!==undefined&&given!==null&&String(given).trim()!==""?safeInt(given,{min:1,name:"amount_minor"}):payload.suggested_amount_minor;
+    if(!Number.isSafeInteger(amount)||amount<=0)throw Error("Enter the verified amount (amount_minor): the claimed / receipt amounts are missing or do not match the expected payment");
+    const method=String(answer.method||payload.method||"bank_transfer");
+    const paidBefore=Number(await D.orderPaidMinor(env,order.id))||0,outstanding=Number(order.total_minor)-paidBefore;
+    const paymentKind=String(answer.payment_kind||(amount===outstanding?"full":paidBefore===0?"deposit":"partial"));
+    const reference=String(answer.reference||payload.transaction_reference||`payment-verification:${decision.id}`).trim().slice(0,200);
+    const recorded=await D.recordOrderPayment(env,{order_id:order.id,payment_kind:paymentKind,method,amount_minor:amount,currency:order.currency,reference,received_at:answer.received_at||null,notes:`Owner-verified customer payment claim (decision ${decision.id})`},actor);
+    return {...result,knowledge_action:"PAYMENT_RECORDED",resulting_ref:`payment:${recorded.payment?.id||""}`};
   }
   return {...result,knowledge_action:save?"RECORDED":"CASE_ONLY"};
 }

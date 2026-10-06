@@ -2,6 +2,7 @@ import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
+import { paymentClaimSignal, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -7877,6 +7878,103 @@ function salesSelfCheck(draft,{action,ownerPending}){
 
 // preloaded (optional, same turn only): row (with the classified category), context and imageReference already loaded by
 // processNegotiationInbound, and a timing object that receives per-stage milliseconds. Without it every input is loaded here.
+// ---- Customer payment claim / receipt → ONE owner verification decision. Recognition is evidence, never proof: nothing here
+// records money, changes the order or the lead. The customer gets a neutral "checking" reply; only the owner's APPROVE (after
+// seeing the money) records a payment (resolveDecision → recordOrderPayment).
+async function fetchCustomerReceiptImage(env,media){
+  if(!media?.file_id||!env.TELEGRAM_BOT_TOKEN)return null;
+  if(media.mime_type&&!/^image\/(?:jpeg|png|webp)$/i.test(media.mime_type))return null;
+  const fileRes=await customerMediaFetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(media.file_id)}`,{},5000);
+  const file=await fileRes.json().catch(()=>null),filePath=String(file?.result?.file_path||"");
+  if(!fileRes.ok||!file?.ok||!/^[A-Za-z0-9_\-/.]{1,200}$/.test(filePath)||filePath.includes(".."))return null;
+  const download=await customerMediaFetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`,{},8000);
+  if(!download.ok)return null;
+  const bytes=await readBoundedBytes(download,CUSTOMER_IMAGE_MAX_BYTES);if(!bytes)return null;
+  const kind=customerImageKind(bytes);if(!kind)return null;
+  let binary="";for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+  return {mime:kind,base64:btoa(binary),bytes};
+}
+const PAYMENT_MINOR_EXPONENT={USD:2};
+function paymentClaimMinor(amount,currency,orderCurrency){
+  if(!Number.isSafeInteger(amount))return null;
+  const cur=currency||orderCurrency;
+  if(cur==="RIAL"&&orderCurrency==="TOMAN")return amount%10===0?amount/10:null;
+  if(cur!==orderCurrency)return null;
+  return amount*10**(PAYMENT_MINOR_EXPONENT[orderCurrency]||0);
+}
+async function salesPaymentClaimTurn(env,{row,order,language}){
+  const text=String(row.message||"");
+  await ensureSalesIntelligenceStore(env);
+  // A replayed / redelivered message never creates a second decision.
+  const seen=await env.DB.prepare("SELECT * FROM owner_decisions WHERE decision_type='PAYMENT_VERIFICATION' AND order_id=? AND instr(payload_json,?)>0 LIMIT 1").bind(order.id,`"${row.id}"`).first();
+  const media=await env.DB.prepare("SELECT * FROM conversation_customer_media WHERE inbox_message_id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(row.id,row.lead_id,row.conversation_id).first().catch(()=>null);
+  const ar=language==="Iraqi Arabic";
+  const reply=media?(ar?"وصل الإيصال، راح نتأكد من الحوالة ونبلغك.":"رسید دریافت شد؛ واریز رو بررسی می‌کنم و خبرتون می‌دم."):(ar?"وصلت رسالتك، راح نتأكد من الحوالة ونبلغك.":"پیامتون دریافت شد؛ واریز رو بررسی می‌کنم و خبرتون می‌دم.");
+  if(seen)return {decision:seen,reply,duplicate:true};
+  const requested=await env.DB.prepare("SELECT id FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status='sent' AND (instr(message,'مبلغ قابل پرداخت')>0 OR instr(message,'المبلغ المطلوب')>0) LIMIT 1").bind(row.lead_id,row.conversation_id).first();
+  const signal=paymentClaimSignal(text,{awaitingPayment:true,paymentRequested:!!requested});
+  // Negated / future / question / failed payment talk is never a completed-payment claim (with or without an image).
+  if(["negated","future","question","failed"].includes(signal.state))return null;
+  const maybe=signal.claim||!!media&&!!requested||["payment_mention","receipt_offer","contextual","completed"].includes(signal.state);
+  if(!maybe)return null;
+  // Semantic confirmation + receipt reading (one bounded AI call); failure never blocks the owner check.
+  let image=null,ai=null,imageStatus=media?"not_analyzed":"no_image";
+  if(media){try{image=await fetchCustomerReceiptImage(env,media);imageStatus=image?"fetched":"unavailable";}catch{imageStatus="unavailable";}}
+  if(paymentEvidenceAiAvailable(env)){
+    ai=await analyzePaymentEvidence(env,{text,image:image?{mime:image.mime,base64:image.base64}:null,context:`Order ${order.order_number}; the seller asked the customer to pay. Currency of the order: ${order.currency}.`}).catch(()=>({ok:false,error:"evidence_error"}));
+    if(image)imageStatus=ai?.ok?(ai.evidence.image_readable===false?"unreadable":"analyzed"):"analysis_failed";
+  }else if(image)imageStatus="analysis_unavailable";
+  const ev=ai?.ok?ai.evidence:null;
+  const aiSays=ev?ev.claim_type:null;
+  if(!signal.claim&&ev&&["intent","question","negated","failed"].includes(aiSays))return null;
+  const isClaim=signal.claim||aiSays==="completed"||(!!media&&!!requested&&(!ev||ev.is_receipt_image!==false))||(!!media&&ev?.is_receipt_image===true&&(aiSays==="completed"||signal.state==="receipt_offer"));
+  if(!isClaim)return null;
+  // ---- Cross-check: expected next payment vs what the customer said vs what the receipt shows.
+  const paid=Number(await orderPaidMinor(env,order.id))||0,total=Number(order.total_minor),outstanding=total-paid;
+  const terms=await orderDepositTerms(env,order).catch(()=>null),pct=terms&&!terms.pending?terms.percent:null;
+  const expected=paid===0&&Number.isInteger(pct)&&pct>0&&pct<100?Math.ceil(total*pct/100):outstanding;
+  const claimed=signal.amount?paymentClaimMinor(signal.amount.amount,signal.amount.currency,order.currency):null;
+  const receipt=ev?.amount?paymentClaimMinor(ev.amount,ev.currency,order.currency):null;
+  const fits=v=>v===null?null:(v===expected||v===outstanding);
+  const present=[claimed,receipt].filter(v=>v!==null);
+  const mismatch=present.some(v=>!fits(v))||(claimed!==null&&receipt!==null&&claimed!==receipt);
+  const suggested=present.length&&!mismatch?present[0]:null;
+  const config=await paymentRequestConfig(env,order).catch(()=>null);
+  const destination=ev?paymentDestinationCheck(ev,config?.instructions||""):{status:"not_visible",destination_card_masked:null,destination_iban_masked:null};
+  const method=ev?.payment_method||(/کارت\s*به\s*کارت/u.test(text)?"card_to_card":/حواله|حوالة/u.test(text)?"exchange_hawala":null);
+  const money=v=>v===null?"—":customerPaymentAmountText({currency:order.currency,amount_minor:v})||String(v);
+  const evidence={inbox_message_id:row.id,provider_message_id:row.external_id||null,media_id:media?.id||null,received_at:row.created_at||now(),
+    text_claim:{state:signal.state,cues:signal.cues,amount_minor:claimed,raw_amount:signal.amount||null,excerpt:text.replace(/(?:IR)?[0-9۰-۹٠-٩][0-9۰-۹٠-٩\s-]{9,}/giu,x=>maskIdentifier(x)||"•").slice(0,200)},
+    receipt:media?{status:imageStatus,amount_minor:receipt,raw_amount:ev?.amount??null,raw_currency:ev?.currency??null,is_receipt_image:ev?.is_receipt_image??null,transaction_reference:ev?.transaction_reference||null,transaction_datetime:ev?.transaction_datetime||null,source_bank:ev?.source_bank||null,destination_bank:ev?.destination_bank||null,destination_card_masked:destination.destination_card_masked,destination_iban_masked:destination.destination_iban_masked,payer_name:ev?.payer_name||null,payee_name:ev?.payee_name||null}:null,
+    ai:ai?{ok:!!ai.ok,claim_type:aiSays,confidence:ev?.confidence||null,error:ai.ok?null:ai.error}:{ok:false,error:"evidence_ai_not_configured"}};
+  const known={order_number:order.order_number,customer:order.customer_name||null,expected_minor:expected,outstanding_minor:outstanding,currency:order.currency,deposit_percent:pct,
+    claimed_minor:claimed,receipt_minor:receipt,claim_amount_match:fits(claimed),receipt_amount_match:fits(receipt),mismatch,method,transaction_reference:ev?.transaction_reference||null,
+    destination_match:destination.status,receipt_status:imageStatus,media_id:media?.id||null,confidence:ev?.confidence||(signal.claim?"text_rule":"low")};
+  const question=`Verify customer payment · order ${order.order_number} · expected ${money(expected)} · customer claimed ${money(claimed)} · receipt detected ${money(receipt)} · mismatch ${mismatch?"YES":"NO"} · method ${method||"—"} · ref ${known.transaction_reference||"—"} · destination ${destination.status}${media?` · receipt ${imageStatus}`:""}`;
+  // A receipt sent shortly after the text claim (or vice versa) joins the SAME pending verification of this order.
+  const recent=await env.DB.prepare("SELECT * FROM owner_decisions WHERE decision_type='PAYMENT_VERIFICATION' AND order_id=? AND status='PENDING' AND created_at>? ORDER BY created_at DESC LIMIT 1").bind(order.id,new Date(Date.now()-2*3600000).toISOString()).first();
+  if(recent){
+    const prev=JSON.parse(recent.payload_json||"{}"),pk=JSON.parse(recent.known_json||"{}");
+    const merged={...pk,...Object.fromEntries(Object.entries(known).filter(([,v])=>v!==null&&v!==undefined)),claimed_minor:known.claimed_minor??pk.claimed_minor??null,receipt_minor:known.receipt_minor??pk.receipt_minor??null};
+    const all=[merged.claimed_minor,merged.receipt_minor].filter(v=>v!==null&&v!==undefined);
+    merged.mismatch=all.some(v=>!(v===expected||v===outstanding))||(all.length===2&&all[0]!==all[1]);
+    merged.claim_amount_match=merged.claimed_minor===null||merged.claimed_minor===undefined?null:fits(merged.claimed_minor);merged.receipt_amount_match=merged.receipt_minor===null||merged.receipt_minor===undefined?null:fits(merged.receipt_minor);
+    const payload={...prev,evidence:[...(prev.evidence||[]),evidence],suggested_amount_minor:all.length&&!merged.mismatch?all[0]:null,method:method||prev.method||null,transaction_reference:merged.transaction_reference||null,destination_match:merged.destination_match};
+    const q=`Verify customer payment · order ${order.order_number} · expected ${money(expected)} · customer claimed ${money(merged.claimed_minor??null)} · receipt detected ${money(merged.receipt_minor??null)} · mismatch ${merged.mismatch?"YES":"NO"} · method ${payload.method||"—"} · ref ${merged.transaction_reference||"—"} · destination ${merged.destination_match}`;
+    const risk=`Customer claim + receipt are unverified evidence.${merged.mismatch?" AMOUNT MISMATCH.":""}${merged.destination_match==="mismatch"?" DESTINATION DOES NOT MATCH THE APPROVED ACCOUNT.":""}`;
+    const conflicting=merged.mismatch?[{expected_minor:expected,claimed_minor:merged.claimed_minor??null,receipt_minor:merged.receipt_minor??null}]:[];
+    await env.DB.prepare("UPDATE owner_decisions SET question=?,known_json=?,payload_json=?,risk=?,conflicting_json=?,updated_at=? WHERE id=? AND status='PENDING'").bind(q.slice(0,1000),JSON.stringify(merged),JSON.stringify(payload),risk,JSON.stringify(conflicting),now(),recent.id).run();
+    await audit(env,"payment_claim_evidence_added","Customer payment evidence added to the pending owner verification",{decision_id:recent.id,order_id:order.id,inbox_message_id:row.id,media_id:media?.id||null,receipt_status:imageStatus,mismatch:merged.mismatch,destination_match:merged.destination_match});
+    return {decision:{...recent,question:q},reply,merged:true};
+  }
+  const opened=await openDecision(env,{decision_type:"PAYMENT_VERIFICATION",priority:5,fingerprint:`PAYMENT_EVIDENCE|${order.id}|${row.id}`,lead_id:row.lead_id,conversation_id:row.conversation_id,market:order.market,order_id:order.id,
+    question,known,missing:[...(suggested===null?["verified amount (amount_minor)"]:[]),...(known.transaction_reference?[]:["bank reference (optional)"])],conflicting:mismatch?[{expected_minor:expected,claimed_minor:claimed,receipt_minor:receipt}]:[],
+    recommendation:"APPROVE only after you see the money in the account (correct amount_minor / method / reference in the answer if needed); REJECT if it did not arrive.",
+    risk:`Customer claim + receipt are unverified evidence.${mismatch?" AMOUNT MISMATCH.":""}${destination.status==="mismatch"?" DESTINATION DOES NOT MATCH THE APPROVED ACCOUNT.":""}`,
+    payload:{resolution:"payment_verification",order_id:order.id,order_number:order.order_number,lead_id:row.lead_id,conversation_id:row.conversation_id,currency:order.currency,expected_minor:expected,outstanding_minor:outstanding,suggested_amount_minor:suggested,method,transaction_reference:ev?.transaction_reference||null,destination_match:destination.status,evidence:[evidence]}});
+  await audit(env,"payment_claim_detected","Customer payment claim recorded for owner verification (no payment recorded)",{decision_id:opened.decision?.id||null,order_id:order.id,inbox_message_id:row.id,media_id:media?.id||null,state:signal.state,receipt_status:imageStatus,mismatch,destination_match:destination.status,ai:ai?(ai.ok?"ok":ai.error):"not_configured"});
+  return {decision:opened.decision,reply,created:opened.created};
+}
 async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const timing=preloaded.timing||{},started=Date.now();
   // Stage timer for queries that run concurrently: each stage records its own duration (stages overlap within one wave).
@@ -8496,9 +8594,17 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // goes to the owner as ONE PAYMENT_TERMS decision for this deal/order. Nothing is agreed here; an approved override applies to
   // that one order only and never changes the persistent default.
   // (after the order is placed, a terms request on the not-yet-paid order is handled the same way instead of as a status question)
-  const termsPostSale=orderStatusAsked&&!!postSaleOrder&&["order_candidate","confirmed"].includes(postSaleOrder.status)&&!ORDER_STATUS_QUESTION.test(String(row.message||""));
+  // A customer saying (or showing) that a payment was made goes to ONE owner verification; the reply stays neutral.
+  let paymentClaim=null;
+  if(postSaleOrder&&["confirmed","partially_paid"].includes(postSaleOrder.status))try{paymentClaim=await salesPaymentClaimTurn(env,{row,order:postSaleOrder,language});}catch(error){aiInfo.payment_claim={error:sanitizeOperationalError(error?.message||error)};}
+  if(paymentClaim){
+    draft=paymentClaim.reply;action="payment_claim_owner";askedField=null;replySource="legacy";needsOwner=false;needsOwnerReason=null;
+    validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
+    aiInfo.payment_claim={decision_id:paymentClaim.decision?.id||null,duplicate:!!paymentClaim.duplicate,merged:!!paymentClaim.merged};
+  }
+  const termsPostSale=!paymentClaim&&orderStatusAsked&&!!postSaleOrder&&["order_candidate","confirmed"].includes(postSaleOrder.status)&&!ORDER_STATUS_QUESTION.test(String(row.message||""));
   const termsMarket=conversationMarket||(termsPostSale?postSaleOrder.market:null);
-  const termsAsk=termsMarket&&(!orderStatusAsked||termsPostSale)?salesPaymentTermsRequest(row.message):null;
+  const termsAsk=!paymentClaim&&termsMarket&&(!orderStatusAsked||termsPostSale)?salesPaymentTermsRequest(row.message):null;
   if(termsAsk){
     try{
       const termsOrderId=(termsPostSale?postSaleOrder.id:null)||candidate?.order_id||dealCandidate?.order_id||null;
@@ -8633,7 +8739,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // escalation stays open and the actual commercial answer still requires the owner.
 // The sales agent's answers (answer_price, negotiate, handle_objection, accept_offer, clarify_product, ask_attribute) are composed
 // ONLY from one owner-approved price record of the conversation's market and are re-validated below against exactly that evidence.
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.
@@ -8962,12 +9068,16 @@ async function recordOrderPayment(env,body,actor="authenticated_owner"){
   const id=uid(),t=now();
   const results=await env.DB.batch([
     env.DB.prepare("INSERT INTO lead_order_payments(id,order_id,lead_id,payment_kind,amount_minor,currency,method,reference,reference_key,received_at,notes,recorded_by,recorded_at) SELECT ?,id,lead_id,?,?,?,?,?,?,?,?,?,? FROM lead_orders WHERE id=? AND status IN ('confirmed','partially_paid')").bind(id,kind,amount,order.currency,method,reference,referenceKey,body.received_at?ownerRecordedDate(body.received_at,"received_at"):null,String(body.notes||"").trim().slice(0,500)||null,String(actor||"authenticated_owner").slice(0,120),t,orderId),
-    env.DB.prepare("UPDATE lead_orders SET status=CASE WHEN (SELECT COALESCE(SUM(amount_minor),0) FROM lead_order_payments WHERE order_id=?)>=total_minor THEN 'paid' ELSE 'partially_paid' END,updated_at=? WHERE id=? AND status IN ('confirmed','partially_paid') AND EXISTS(SELECT 1 FROM lead_order_payments WHERE id=?)").bind(orderId,t,orderId,id)
+    env.DB.prepare("UPDATE lead_orders SET status=CASE WHEN (SELECT COALESCE(SUM(amount_minor),0) FROM lead_order_payments WHERE order_id=?)>=total_minor THEN 'paid' ELSE 'partially_paid' END,updated_at=? WHERE id=? AND status IN ('confirmed','partially_paid') AND EXISTS(SELECT 1 FROM lead_order_payments WHERE id=?)").bind(orderId,t,orderId,id),
+    // The FIRST real (owner-recorded) payment makes the lead a customer — exactly once, and only together with that payment row.
+    env.DB.prepare("UPDATE leads SET stage='customer',updated_at=? WHERE id=? AND stage NOT IN ('customer','converted') AND EXISTS(SELECT 1 FROM lead_order_payments WHERE id=?)").bind(t,order.lead_id,id)
   ]);
   if(!results?.[0]?.meta?.changes)throw Error("Payment recording conflict; reload the order");
   const payment=await env.DB.prepare("SELECT * FROM lead_order_payments WHERE id=?").bind(id).first(),updated=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(orderId).first();
   await auditOrderEventOnce(env,`payment:${id}`,"lead_order_payment_recorded","Owner recorded payment; no gateway was invoked",{order_id:orderId,payment_id:id,amount_minor:amount,currency,method,recorded_by:String(actor||"authenticated_owner")});
-  return {recorded:true,payment,order:updated,payment_engine:false};
+  const converted=!!results?.[2]?.meta?.changes;
+  if(converted)await auditOrderEventOnce(env,`customer:${order.lead_id}`,"lead_converted_to_customer","First owner-recorded payment: lead became a customer",{lead_id:order.lead_id,order_id:orderId,payment_id:id});
+  return {recorded:true,payment,order:updated,payment_engine:false,lead_converted:converted};
 }
 async function reverseOrderPayment(env,body,actor="authenticated_owner"){
   await ensureOrderStore(env);const paymentId=String(body.payment_id||"").trim(),reason=String(body.reason||"").trim().slice(0,500);if(!paymentId||!reason)throw Error("payment_id and reversal reason are required");
@@ -10790,7 +10900,7 @@ function dashboardHtml() {
 configureSalesIntelligence({
   audit,json,auth,sanitizeOperationalError,ensureOrderStore,ensureLeadOutreachStore,
   calculateQuoteValues,quoteReadiness,outreachLanguage,createApprovalGatedDraft:approvalGatedSalesDraft,
-  customerPaymentAmountText,orderPaidMinor,resolveLinkedOwnerDecision
+  customerPaymentAmountText,orderPaidMinor,resolveLinkedOwnerDecision,recordOrderPayment
 });
 
 export default {
@@ -12293,6 +12403,19 @@ Context: ${context}`;
         if(!result.meta?.changes)return json({ok:false,error:`Invalid outreach transition from ${current.status}`},409);
         await audit(env,"lead_outreach_status_changed","Lead outreach review status changed",{outreach_id:id,lead_id:current.lead_id,from,to});
         return json({ok:true,id,status:to,idempotent:false,sending_enabled:false});
+      }
+
+      // Owner-only: the customer's receipt image of a payment verification (fetched from Telegram on demand, never stored or cached).
+      if (u.pathname === "/api/si/payment-evidence/receipt" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const decision=await env.DB.prepare("SELECT payload_json FROM owner_decisions WHERE id=? AND decision_type='PAYMENT_VERIFICATION' LIMIT 1").bind(String(u.searchParams.get("decision")||"")).first();
+        let ids=[];try{ids=(JSON.parse(decision?.payload_json||"{}").evidence||[]).map(e=>e.media_id).filter(Boolean);}catch{}
+        const mediaId=u.searchParams.get("media")||ids[ids.length-1];
+        if(!decision||!ids.includes(mediaId))return json({ok:false,error:"Receipt not found"},404);
+        const media=await env.DB.prepare("SELECT * FROM conversation_customer_media WHERE id=? LIMIT 1").bind(mediaId).first();
+        const image=media?await fetchCustomerReceiptImage(env,media).catch(()=>null):null;
+        if(!image)return json({ok:false,error:"Receipt image unavailable"},502);
+        return new Response(image.bytes,{headers:{"Content-Type":image.mime,"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
       }
 
       if (u.pathname === "/api/leads/outreach/send-telegram" && req.method === "POST") {
