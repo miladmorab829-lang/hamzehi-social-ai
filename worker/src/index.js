@@ -9036,6 +9036,8 @@ async function transitionLeadOrder(env,id,action,actor="admin",reason=null,detai
     }
     const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(id).first();
     await auditOrderEventOnce(env,`shipped:${id}`,"lead_order_shipped","Owner recorded order shipment",{order_id:id,order_number:order.order_number,carrier:order.carrier,tracking_reference:order.tracking_reference,shipped_at:order.shipped_at});
+    // The customer is told only through an approval-gated draft (owner SUBMIT → APPROVE → SEND); nothing is sent here.
+    try{await prepareShipmentNotice(env,order);}catch(error){await audit(env,"shipment_notice_prepare_failed","Shipment notification draft could not be prepared",{order_id:id,error:sanitizeOperationalError(error?.message||error)});}
     return order;
   }
   if(action==="fulfill"){
@@ -9052,6 +9054,21 @@ async function transitionLeadOrder(env,id,action,actor="admin",reason=null,detai
   throw Error("Invalid order action");
 }
 
+// ---- Shipment notification: ONE draft per recorded shipment (carrier, tracking, shipment date), only those recorded facts —
+// no ETA, no delivery date, no promise. A retried SHIP returns the same draft; changed shipment data makes the old one stale.
+async function shipmentFingerprint(order){
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify({v:1,order:order.id,carrier:order.carrier||null,tracking:order.tracking_reference||null,shipped_at:order.shipped_at||null})));
+  return Array.from(new Uint8Array(digest).slice(0,12),b=>b.toString(16).padStart(2,"0")).join("");
+}
+async function prepareShipmentNotice(env,order){
+  if(order.status!=="shipped"||!order.carrier||!order.tracking_reference)return {created:false,reason:"order_not_shipped"};
+  const language=outreachLanguage({country:order.market==="IRAN"?"iran":"iraq"}),ar=language==="Iraqi Arabic",fp=await shipmentFingerprint(order);
+  const message=ar?[`تم شحن طلبكم ${order.order_number}.`,`شركة الشحن: ${order.carrier}`,`رقم التتبع: ${order.tracking_reference}`].join("\n")
+    :[`سفارش ${order.order_number} ارسال شد.`,`روش/شرکت ارسال: ${order.carrier}`,`کد رهگیری: ${order.tracking_reference}`].join("\n");
+  return await approvalGatedSalesDraft(env,{key:`lead-order:update-draft:${order.id}:shipment_notice:cfg-${fp}`,leadId:order.lead_id,conversationId:order.conversation_id,language,message,
+    eventType:"shipment_notification_draft_created",eventMessage:"Shipment notification draft created for owner approval",
+    details:{order_id:order.id,order_number:order.order_number,event:"shipment_notice",shipment_fingerprint:fp,snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}});
+}
 function ownerRecordedDate(value,name){const d=new Date(String(value||"").trim());if(Number.isNaN(d.getTime()))throw Error(`${name} must be a valid owner-recorded date`);return d.toISOString();}
 
 function orderPaymentReferenceKey(value){return String(value||"").normalize("NFKC").replace(/\s+/g,"").toLowerCase().slice(0,200);}
@@ -9669,7 +9686,14 @@ async function salesOutreachStillCurrent(env,outreachId){
   const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE id LIKE 'sales-draft:%' AND json_valid(details_json) AND json_extract(details_json,'$.outreach_id')=? LIMIT 1").bind(outreachId).first();
   if(!event)return {current:true};let details={};try{details=JSON.parse(event.details_json||"{}")}catch{return {current:false,reason:"invalid_sales_draft_snapshot"};}
   if(!details.order_id)return {current:true};const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();if(!order)return {current:false,reason:"order_missing"};
-  const snapshot=details.snapshot||{};if(!(snapshot.status===order.status&&snapshot.total_minor===order.total_minor&&snapshot.currency===order.currency))return {current:false,reason:"order_snapshot_stale"};
+  const snapshot=details.snapshot||{};
+  // (a shipment notice stays sendable after delivery is recorded; any other order draft needs the exact status it was built on)
+  const statusOk=details.event==="shipment_notice"?["shipped","fulfilled"].includes(order.status):snapshot.status===order.status;
+  if(!(statusOk&&snapshot.total_minor===order.total_minor&&snapshot.currency===order.currency))return {current:false,reason:"order_snapshot_stale"};
+  if(details.event==="shipment_notice"){
+    if(!details.shipment_fingerprint)return {current:false,reason:"shipment_fingerprint_missing"};
+    if(await shipmentFingerprint(order)!==details.shipment_fingerprint)return {current:false,reason:"shipment_changed"};
+  }
   // A payment request is current only while the order's payment configuration (instructions version, deposit setting, per-order
   // terms) still has the fingerprint the draft was built on. A draft without one predates this check and is never sendable.
   if(details.event==="payment_request"){

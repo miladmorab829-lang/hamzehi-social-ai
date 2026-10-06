@@ -901,7 +901,8 @@ export async function rebuildRevenueAttribution(env){
   for(const o of rows){
     const req=o.request_id?await first(env,"SELECT request_class,product_key FROM sales_requests WHERE id=?",o.request_id):null,meta=parseJson(o.lead_notes,{});
     const costsKnown=o.unit_cost_minor!==null&&o.unit_cost_minor!==undefined&&o.shipping_cost_minor!==null&&o.shipping_cost_minor!==undefined&&o.other_cost_minor!==null&&o.other_cost_minor!==undefined;
-    const profit=costsKnown&&["paid","shipped","fulfilled"].includes(o.status)?Number(o.total_minor)-Number(o.tax_minor||0)-(o.unit_cost_minor*o.quantity+o.shipping_cost_minor+o.other_cost_minor):null;
+    // Profit = owner-recorded paid revenue − tax − recorded costs; only for fully paid orders with ALL costs recorded (never estimated).
+    const profit=costsKnown&&["paid","shipped","fulfilled"].includes(o.status)?Number(o.paid||0)-Number(o.tax_minor||0)-(o.unit_cost_minor*o.quantity+o.shipping_cost_minor+o.other_cost_minor):null;
     await env.DB.prepare(`INSERT OR REPLACE INTO revenue_attribution(order_id,lead_id,market,currency,lead_source,request_class,product_key,config_key,quantity,quote_id,price_version_id,pricing_mode,discount_minor,total_minor,paid_minor,profit_minor,order_status,repeat_index,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(o.id,o.lead_id,o.market,canonicalCurrency(o.currency),String(meta.source||meta.lead_source||meta.discovery_source||meta.platform||"unknown").slice(0,80),
       req?.request_class||"legacy",req?.product_key||normKey(o.product),o.quote_config||null,o.quantity,o.quote_id,o.price_version_id||null,o.pricing_mode,o.quote_discount??o.discount_minor??0,o.total_minor,Number(o.paid||0),profit,o.status,Number(o.prior_orders||0),o.created_at,t).run();n++;
@@ -995,7 +996,7 @@ export async function handleSalesIntelligence(req,env,u){
       if(!r.meta?.changes)return json({ok:false,error:"Sales request not found"},404);await auditSafe(env,"sales_request_reset","Owner reset a sales request for a new purchase",{request_id:p[1],actor});return json({ok:true,reset:true});}
     if(p[0]==="requests"&&p[1]&&p[2]==="process"&&req.method==="POST")return json({ok:true,...await processSalesRequest(env,p[1],{actor})});
     if(p[0]==="money-at-stake")return json({ok:true,...await moneyAtStake(env)});
-    if(p[0]==="intelligence"&&req.method==="POST")return json({ok:true,...await rebuildRevenueAttribution(env)});
+    if(p[0]==="intelligence"&&req.method==="POST"){const r=await rebuildRevenueAttribution(env);await auditSafe(env,"revenue_attribution_rebuilt","Owner rebuilt the revenue snapshot from recorded orders and payments",{rebuilt:r.rebuilt});return json({ok:true,...r});}
     if(p[0]==="intelligence")return json({ok:true,dimension:u.searchParams.get("dimension")||"market",items:await revenueBreakdown(env,u.searchParams.get("dimension")||"market")});
     if(p[0]==="corrections")return json({ok:true,items:await all(env,`SELECT c.change_kind,c.market,c.request_class,c.product_key,COUNT(*) AS n,SUM(CASE WHEN EXISTS(SELECT 1 FROM revenue_attribution a WHERE a.lead_id=c.lead_id AND a.order_status IN ('paid','shipped','fulfilled')) THEN 1 ELSE 0 END) AS led_to_paid
         FROM draft_corrections c GROUP BY c.change_kind,c.market,c.request_class,c.product_key ORDER BY n DESC LIMIT 100`)});
