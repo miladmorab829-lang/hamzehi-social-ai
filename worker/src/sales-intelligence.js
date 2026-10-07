@@ -494,6 +494,16 @@ export async function resolveDecision(env,{id,action,scope="CASE_ONLY",answer={}
   // Runtime-blocking escalations are resolved only through the injected unified CAS path.
   if(decision.owner_escalation_id&&D.resolveLinkedOwnerDecision)return await D.resolveLinkedOwnerDecision(env,{id,action:act,scope:sc,answer:answer||{},note,actor});
   if(decision.status!=="PENDING"){if(decision.owner_decision===act)return {idempotent:true,decision};throw Error(`Decision is already ${decision.status}`);}
+  // ONE owner approval for an accepted offer: APPROVE (or ANSWER) confirms exactly the linked order through the canonical order
+  // transition, which also closes this decision; REJECT only records the rejection (the order stays a candidate).
+  if(decision.decision_type==="ORDER_CANDIDATE_APPROVAL"&&act!=="REJECT"){
+    if(!decision.order_id)throw Error("This accepted offer has no order candidate yet; nothing was confirmed");
+    if(!D.confirmLeadOrder)throw Error("Order confirmation is unavailable; nothing was confirmed");
+    await D.confirmLeadOrder(env,decision.order_id,String(actor||"owner"));
+    const closed=await first(env,"SELECT * FROM owner_decisions WHERE id=?",id);
+    if(closed?.status!=="RESOLVED")throw Error("The order was confirmed but its approval could not be closed; refresh and retry");
+    return {decision:closed,effect:{knowledge_action:"CASE_ONLY",resulting_ref:closed.resulting_ref}};
+  }
   const effect=await applyResolution(env,decision,{action:act,scope:sc,answer:answer||{},actor});
   const status=act==="REJECT"?"REJECTED":"RESOLVED",t=now();
   const changed=await env.DB.prepare(`UPDATE owner_decisions SET status=?,owner_decision=?,owner_answer_json=?,owner_note=?,scope_json=?,knowledge_action=?,resulting_ref=?,resolved_by=?,resolved_at=?,updated_at=? WHERE id=? AND status='PENDING'`)

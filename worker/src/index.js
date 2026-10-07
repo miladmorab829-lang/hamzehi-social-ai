@@ -6634,6 +6634,30 @@ const CUSTOMER_DESTINATION_CITY=/(?<![\p{L}])(تهران|مشهد|اصفهان|�
 // exact city names, as whole words; the stored destination is the city's own form.
 const CUSTOMER_IRAQI_CITY_TO=/(?<![\p{L}])(?:ل(بغداد|أربيل|اربيل|كربلاء|كربلا|كركوك|دهوك)|لل(بصرة|بصره|نجف|موصل|سليمانية|حلة|ناصرية|عمارة|ديوانية|كوت))(?![\p{L}])/u;
 function customerIraqiCityTo(text){const m=String(text||"").match(CUSTOMER_IRAQI_CITY_TO);return m?(m[1]||"ال"+m[2]):null;}
+// A city inside a business / person name («متجر بغداد للذهب», «محلات البصرة», «شرکت تهران») is part of the name, not where the order goes.
+const CUSTOMER_BUSINESS_NOUN=/^(?:متجر|المتجر|محل|المحل|محلات|شركة|شركه|الشركة|معرض|مؤسسة|مؤسسه|مكتب|مصنع|معمل|صاغة|مجوهرات|فروشگاه|مغازه|شرکت|گالری|طلافروشی|جواهری|store|shop|company|gallery)$/iu;
+// The words that state WHERE the order goes («التوصيل للبصرة», «غير العنوان», «ارسال به تهران», «بغداد» alone as the answer).
+const CUSTOMER_DESTINATION_CUE=/(?<![\p{L}])(?:توصيل|التوصيل|يوصل|توصل|توصله|توصلها|الشحن|شحن|ارسال|إرسال|ارسله|ارسلها|العنوان|عنوان|المدينة|مدينة|مقصد|آدرس|ادرس|بفرستید|بفرستین|بفرست|deliver|delivery|ship|address)(?![\p{L}])/iu;
+const CUSTOMER_DESTINATION_CITY_ALL=new RegExp(CUSTOMER_DESTINATION_CITY.source,"giu");
+// Where the order goes, from ONE message: {value, explicit}. explicit = a labelled destination, «لبغداد», a destination word, a
+// correction, or a reply that is only the city; a bare city elsewhere in a sentence is a weak mention. A city inside a name never counts.
+// A correction («مو بغداد، البصرة») takes the LAST city named.
+function customerDestination(message){
+  const text=String(message||"").normalize("NFKC");
+  const labelled=text.match(/(?:destination|ship(?:ping)?\s+to|مقصد|ارسال\s+به|الوجهة|شحن\s+(?:الى|إلى))\s*[:：=-]?\s*([^\n،,؛;؟?]{2,180})/iu)?.[1];
+  if(labelled)return {value:labelled,explicit:true};
+  const correction=SALES_CORRECTION_MARK.test(salesNormal(text)),cue=CUSTOMER_DESTINATION_CUE.test(text);
+  const cities=[...text.matchAll(CUSTOMER_DESTINATION_CITY_ALL)].filter(m=>{
+    const before=text.slice(0,m.index).split(/[\n،,؛;.!؟?]/u).pop().split(/\s+/u).filter(Boolean).slice(-2);
+    return !before.some(w=>CUSTOMER_BUSINESS_NOUN.test(w));
+  });
+  const to=customerIraqiCityTo(text);
+  if(to)return {value:to,explicit:true};
+  if(!cities.length)return null;
+  const m=correction?cities[cities.length-1]:cities[0];
+  const onlyCity=salesTokens(text.replace(m[0]," ")).filter(w=>!/^(?:ال)?(?:مدینه|شهر|in|to)$/u.test(w)).length===0;
+  return {value:m[1],explicit:correction||cue||onlyCity};
+}
 // lastAction (optional): the Sales Brain's previous action in this conversation; a bare number answering a size question is not a quantity.
 function extractConversationMemoryFacts(message,intent,inboxId,{lastAction=null}={}){
   const text=String(message||"").normalize("NFKC").trim().slice(0,2000),facts=[];
@@ -6654,8 +6678,9 @@ function extractConversationMemoryFacts(message,intent,inboxId,{lastAction=null}
   const product=customerImageOrdinal(text)!==null||CUSTOMER_IMAGE_MODEL_REFERENCE.test(customerImageText(text))?null:text.match(/(?:product|model|محصول|مدل|منتج|موديل)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(product)add("product_interest",product);
   else{const productType=text.match(CUSTOMER_PRODUCT_TYPE)?.[0];if(productType)add("product_interest",productType.replace(/\s+/g," ").trim());}
-  const destination=text.match(/(?:destination|ship(?:ping)?\s+to|مقصد|ارسال\s+به|الوجهة|شحن\s+(?:الى|إلى))\s*[:：=-]?\s*([^\n،,؛;؟?]{2,180})/iu)?.[1]||text.match(CUSTOMER_DESTINATION_CITY)?.[1]||customerIraqiCityTo(text);
-  if(destination)add("destination",destination);
+  // (a weak, bare city mention is marked: it fills an unknown destination but never replaces a known one — see the capture below)
+  const destination=customerDestination(text);
+  if(destination){const n=facts.length;add("destination",destination.value);if(facts.length>n&&!destination.explicit)facts[n].weak=true;}
   // Dimensions are recognised in natural form ("۵ در ۵", "5x5", "20×30×10 سانت") as well as after a size keyword.
   const dims=text.match(CUSTOMER_DIMENSIONS),size=dims?[dims[1],dims[2],dims[3]].filter(Boolean).map(x=>x.replace(/[۰-۹]/g,d=>String(PERSIAN_DIGITS.indexOf(d))).replace(/[٠-٩]/g,d=>String(ARABIC_DIGITS.indexOf(d))).replace("٫",".")).join("x")+(dims[4]?" "+dims[4]:""):[text.match(/(?:size|dimensions?|سایز|اندازه|قياس)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1]].find(v=>v&&/[0-9۰-۹٠-٩]|کوچک|متوسط|بزرگ|استاندارد|small|medium|large|standard|صغير|كبير/iu.test(v));
   if(size)add("requested_size",size);
@@ -6679,6 +6704,8 @@ async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMes
     env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND memory_key=? AND status='active' LIMIT 1").bind(conversationId,fact.memory_key).first()
   ]);
   if(same)return {fact:same,idempotent:true};
+  // A weak mention (a city named in passing, not stated as the destination) fills an unknown value but never replaces a known one.
+  if(fact.weak&&current)return {fact:current,idempotent:true,kept_existing:true};
   const t=now(),id="conversation-memory-"+uid(),version=(current?.version||0)+1;
   try{
     const statements=[];
@@ -6911,7 +6938,9 @@ function extractQuoteRequestDetails(value) {
 
 async function getNegotiationConversationContext(env,leadId,conversationId) {
   const inbound=await env.DB.prepare("SELECT id,message,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
-  const outbound=await env.DB.prepare("SELECT id,message,created_at,status FROM lead_outreach WHERE lead_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
+  // Only what the customer actually received is "what we said": an unsent, rejected or failed draft (an old test reply, a payment
+  // request still waiting for the owner) is never conversation context, never a repeat to avoid and never current deal state.
+  const outbound=await env.DB.prepare("SELECT id,message,created_at,status FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status IN ('sent','sending','send_ambiguous') ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
   return [
     ...(inbound.results||[]).map(x=>({id:x.id,direction:"inbound",message:String(x.message||"").slice(0,1200),created_at:x.created_at})),
     ...(outbound.results||[]).map(x=>({id:x.id,direction:"outbound",message:String(x.message||"").slice(0,1200),created_at:x.created_at,status:x.status}))
@@ -7784,8 +7813,8 @@ function salesNegotiationReply(kind,r,language){
 // detail is asked right away (one question).
 function salesAcceptReply(candidate,language,{askName=false}={}){
   const ar=language==="Iraqi Arabic",qty=salesDigits(candidate.offer.quantity,language),name=candidate.product?.name||"";
-  if(askName)return ar?`تمام! سجلت طلب ${qty} قطعة من ${name}. شنو اسمك أو اسم المحل حتى أكمل الطلب؟`:`عالیه! درخواست ${qty} عدد ${name} ثبت شد. برای تکمیلش اسم یا نام مجموعه‌تون رو بفرمایید.`;
-  return ar?`تمام! سجلت طلب ${qty} قطعة من ${name}، وراح أبلغك بالتأكيد النهائي قريباً.`:`عالیه! درخواست ${qty} عدد ${name} ثبت شد؛ تأیید نهایی رو به‌زودی خبرتون می‌دم.`;
+  if(askName)return ar?`تمام! سجلت تفاصيل طلبك: ${qty} قطعة من ${name}، وراح أبلغك بالتأكيد النهائي بعد المراجعة. شنو اسمك أو اسم المحل حتى أكمل التفاصيل؟`:`عالیه! درخواست ${qty} عدد ${name} ثبت شد. برای تکمیلش اسم یا نام مجموعه‌تون رو بفرمایید.`;
+  return ar?`تمام! سجلت تفاصيل طلبك: ${qty} قطعة من ${name}، وراح أبلغك بالتأكيد النهائي بعد المراجعة.`:`عالیه! درخواست ${qty} عدد ${name} ثبت شد؛ تأیید نهایی رو به‌زودی خبرتون می‌دم.`;
 }
 // The acceptance could NOT be recorded: never claims «ثبت شد»; the owner sees it (needs_owner) and the offer stays open.
 function salesAcceptPendingReply(language){return language==="Iraqi Arabic"?"شكراً على التأكيد، راح أراجع الطلب وأرجعلك بالتأكيد.":"ممنون از تأییدتون؛ درخواست رو برای تأیید نهایی بررسی می‌کنم و خبرتون می‌دم.";}
@@ -8056,7 +8085,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // Facts this turn STATED, each flagged whether it CHANGED (a restated identical value is not new information).
     env.DB.prepare("SELECT f.fact_type,CASE WHEN p.id IS NULL OR p.value_hash<>f.value_hash THEN 1 ELSE 0 END AS changed FROM conversation_memory_facts f LEFT JOIN conversation_memory_facts p ON p.id=f.supersedes_fact_id WHERE f.lead_id=? AND f.conversation_id=? AND f.source_message_id=?").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
     // One durable owner escalation per open QUESTION (reason): a repeat waits for it; a different owner-only question gets its own.
-    env.DB.prepare("SELECT id,reason_code,source_message_id FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) ORDER BY created_at DESC LIMIT 20").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
+    env.DB.prepare("SELECT id,reason_code,source_message_id,created_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) ORDER BY created_at DESC LIMIT 20").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
     // The conversation's ACTIVE reply language (language policy) — one keyed read.
     env.DB.prepare("SELECT language FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null),
     // A Telegram reply to a SENT FORMAL QUOTE belongs to the formal-quote path (recordQuoteDecisionFromInbound) — never to a chat offer.
@@ -8114,6 +8143,20 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const salesPriceIntent=["asks_price","objection_price","negotiating","accepted"].includes(intent)||salesWeakAcceptance(row.message);
   const pricingWanted=!orderStatusAsked&&intent!=="rejected"&&(salesPriceIntent||!!storedCandidate||known.product_or_model||!!conversationMarket);
   const dealCandidate=storedCandidate&&storedCandidate.market===conversationMarket?storedCandidate:null;
+  // DEAL-SCOPED owner questions: an escalation raised BEFORE the active deal's current approved offer was made belongs to an earlier
+  // phase of the conversation (the customer then got — and may have accepted — an approved offer without it). It stays open for the
+  // owner (audit, dashboard) but is not pending for this deal: it never sets this deal's waiting state, the AI's pending questions or
+  // the owner-pending self-check. (A repeat of the same question still waits for it — see escalate.)
+  let dealEscalations=openEscalations;
+  const dealOfferedIn=dealCandidate?.offer?.offered_in||null;
+  if(dealOfferedIn&&openEscalations.length){
+    // Compared on the CUSTOMER messages' own times (the message that raised each question vs. the message the offer answered).
+    const ids=[...new Set([dealOfferedIn,...openEscalations.map(e=>e.source_message_id).filter(Boolean)])],at=new Map(context.filter(x=>x.direction==="inbound"&&ids.includes(x.id)).map(x=>[x.id,x.created_at]));
+    const missing=ids.filter(id=>!at.has(id));
+    if(missing.length)for(const r of ((await env.DB.prepare(`SELECT id,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id IN (${missing.map(()=>"?").join(",")})`).bind(row.lead_id,row.conversation_id,...missing).all().catch(()=>null))?.results||[]))at.set(r.id,r.created_at);
+    const offeredAt=at.get(dealOfferedIn);
+    if(offeredAt)dealEscalations=openEscalations.filter(e=>{const s=at.get(e.source_message_id);return !s||String(s)>=String(offeredAt);});
+  }
   // The deal's own chosen size / configuration is its oldest context: the conversation window keeps only the last messages, so a
   // long conversation (name, city, colours, …) never forgets which variant was offered; anything the customer says later overrides it.
   const dealVariant=Object.values(dealCandidate?.requirements||{}).filter(v=>typeof v==="string"&&v.trim());
@@ -8196,7 +8239,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       commercial:pricing?{status:pricing.status,product:pricing.product_name||pricing.product?.name||null,quantity:Number.isSafeInteger(pricing.quantity)?pricing.quantity:null,needs:pricing.status==="missing_attribute"?{choice:pricing.attribute?.key||null,options:pricing.attribute?.values||[]}:null}:null,
       catalog:pricing?.catalog_summary||[],
       colors:colorOptions.length?{approved:colorOptions,parts:colorStructure?colorStructure.parts[lang]:Object.fromEntries(SALES_COLOR_STRUCTURES.map(s=>[s.key,s.parts[lang]])),suggestion:colorStructure?.key==="three_piece"?"often top and bottom the same colour, middle different (only a suggestion)":null,chosen:Array.isArray(memory.selected_colors)?memory.selected_colors:[],chosen_parts:memory.color_parts||null}:null,
-      knowledge:knowledgeCtx,pending:openEscalations.map(e=>e.reason_code),stillNeeded,
+      knowledge:knowledgeCtx,pending:dealEscalations.map(e=>e.reason_code),stillNeeded,
       summary:conversationSummary?.text||null,summaryRequested:context.length>=12,
       recent:context.filter(x=>x.id!==row.id).map(x=>({from:x.direction==="inbound"?"customer":"assistant",text:x.message})),
       message:row.message});
@@ -8244,7 +8287,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"requested_quantity",memory_key:"requested_quantity",value:f.quantity}});
       knownQuantity=f.quantity;quantityValid=true;known.quantity=true;memory.requested_quantity=f.quantity;aiChanged.quantity=true;applied.push("quantity");
     }
-    const dest=cleanText(f.destination);
+    // The AI's destination replaces a known one only when THIS message states it explicitly (a destination word, a correction, a
+    // labelled destination or the city alone); a city inside a shop / person name never moves the delivery.
+    const destNow=customerDestination(row.message),destInName=!!f.destination&&!destNow&&CUSTOMER_DESTINATION_CITY.test(String(row.message||""));
+    let dest=cleanText(f.destination);
+    if(dest&&dest!==memory.destination&&(destInName||(memory.destination&&!(destNow?.explicit&&salesNormal(destNow.value)===salesNormal(dest))&&!(CUSTOMER_DESTINATION_CUE.test(String(row.message||""))&&salesNormal(row.message).includes(salesNormal(dest)))))){aiInfo.destination_rejected=destInName?"city_in_name":"not_stated_explicitly";dest=null;}
     if(dest&&dest!==memory.destination){await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"destination",memory_key:"destination",value:dest}});memory.destination=dest;known.destination=true;applied.push("destination");}
     const name=cleanText(f.customer_name);
     if(name&&name!==memory.customer_name&&name!==dest){await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"customer_name",memory_key:"customer_name",value:name}});memory.customer_name=name;applied.push("customer_name");}
@@ -8373,7 +8420,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const colorAsk=colorOptions.length>0&&kgAnswerExteriorOnly&&!priceAsked&&!colorPick.selected.length&&!colorPick.ambiguous.length&&!colorPick.special&&(colorPending||SALES_COLOR_QUESTION.test(String(row.message||""))&&(knowledgeLooksLikeQuestion(row.message)||SALES_COLOR_RECOMMEND.test(String(row.message||""))));
   // The next useful question of a natural reply: the first optional detail not known yet and never asked in this conversation.
   const nextOptionalField=()=>["color","size","customization","destination"].find(f=>!known[f]&&timesAsked(f)<1)||null;
-  const openEscalation=openEscalations[0]||null;
+  const openEscalation=dealEscalations[0]||null;
   // Our last replies in this conversation: a "still checking" acknowledgement never repeats one of them word for word.
   const recentReplies=context.filter(x=>x.direction==="outbound").slice(-3).map(x=>x.message);
   const decisionStarted=Date.now();
@@ -8733,7 +8780,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   result.ai_brain=aiInfo;
   if(replySource!=="legacy"){result.knowledge_answer_facts=aiEvidenceFacts;result.answer_numbers=[...new Set([...answerNumbers,...aiAllowedNumbers])];}
   // Bounded self-check of the reply (recorded with the decision; it never adds content).
-  result.self_check=salesSelfCheck(draft,{action,ownerPending:needsOwner||openEscalations.length>0||action==="accept_offer"||action==="wait_for_owner"});
+  result.self_check=salesSelfCheck(draft,{action,ownerPending:needsOwner||dealEscalations.length>0||action==="accept_offer"||action==="wait_for_owner"});
   if(candidateWrite){const s=Date.now();await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"order_candidate",memory_key:"order_candidate",value:candidateWrite}});timing.order_candidate_ms=Date.now()-s;}
   // The reply language becomes the conversation's ACTIVE language (language policy); the market is kept once established.
   const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,language=?,market=COALESCE(?,market),version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,language,conversationMarket,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
@@ -9080,11 +9127,20 @@ async function transitionLeadOrder(env,id,action,actor="admin",reason=null,detai
   if(action==="confirm"){
     if(current.status==="cancelled")throw Error("Cancelled order cannot be reopened");
     if(current.status==="order_candidate"){
+      // ONE owner decision per accepted offer: when the owner REJECTED this order's acceptance (its latest live approval decision),
+      // CONFIRM ORDER refuses — before any change or side effect. Reviving a rejected order is not a hidden path of confirm.
+      const approval=await env.DB.prepare("SELECT id,status FROM owner_decisions WHERE decision_type='ORDER_CANDIDATE_APPROVAL' AND order_id=? AND status<>'SUPERSEDED' ORDER BY created_at DESC LIMIT 1").bind(id).first().catch(()=>null);
+      if(approval?.status==="REJECTED")throw Error("The owner rejected this order's acceptance; it cannot be confirmed");
       const changed=await env.DB.prepare("UPDATE lead_orders SET status='confirmed',confirmed_by=?,confirmed_at=?,updated_at=? WHERE id=? AND status='order_candidate'").bind(owner,t,t,id).run();
       if(!changed.meta?.changes){const latest=await env.DB.prepare("SELECT status FROM lead_orders WHERE id=?").bind(id).first();if(latest?.status!=="confirmed")throw Error("Order confirmation conflict");}
     }
     const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(id).first();
     await auditOrderEventOnce(env,`confirmed:${id}`,"lead_order_confirmed","Owner confirmed order candidate",{order_id:id,order_number:order.order_number,quote_id:order.quote_id,from:"order_candidate",to:"confirmed",confirmed_by:order.confirmed_by,confirmed_at:order.confirmed_at});
+    // ONE owner approval: whichever control the owner used (CONFIRM ORDER, or APPROVE on the accepted-offer decision, which calls
+    // this same transition), the order's pending accepted-offer approval is closed here — at most once (only PENDING rows change).
+    const closed=await env.DB.prepare("UPDATE owner_decisions SET status='RESOLVED',owner_decision='APPROVE',owner_answer_json='{}',scope_json=?,knowledge_action='CASE_ONLY',resulting_ref=?,resolved_by=?,resolved_at=?,updated_at=? WHERE decision_type='ORDER_CANDIDATE_APPROVAL' AND order_id=? AND status='PENDING'")
+      .bind(JSON.stringify({scope:"CASE_ONLY"}),`lead_orders:${id}:confirmed`,owner,t,t,id).run().catch(()=>null);
+    if(closed?.meta?.changes)await audit(env,"owner_decision_resolved","Order confirmation resolved its accepted-offer approval",{order_id:id,order_number:order.order_number,decision_type:"ORDER_CANDIDATE_APPROVAL",via:details?.via||"order_confirm",closed:closed.meta.changes,actor:owner});
     // This only creates an approval-gated draft or an owner decision. It never sends or charges.
     try{await preparePaymentRequest(env,order);}catch(error){await audit(env,"payment_request_prepare_failed","Payment request draft could not be prepared",{order_id:id,error:sanitizeOperationalError(error?.message||error)});}
     return order;
@@ -11006,7 +11062,9 @@ function dashboardHtml() {
 configureSalesIntelligence({
   audit,json,auth,sanitizeOperationalError,ensureOrderStore,ensureLeadOutreachStore,
   calculateQuoteValues,quoteReadiness,outreachLanguage,createApprovalGatedDraft:approvalGatedSalesDraft,
-  customerPaymentAmountText,orderPaidMinor,resolveLinkedOwnerDecision,recordOrderPayment
+  customerPaymentAmountText,orderPaidMinor,resolveLinkedOwnerDecision,recordOrderPayment,
+  // The canonical order confirmation (owner gate): APPROVE on an accepted-offer decision confirms through exactly this path.
+  confirmLeadOrder:(env,orderId,actor)=>transitionLeadOrder(env,orderId,"confirm",actor,null,{via:"decision_approve"})
 });
 
 export default {
