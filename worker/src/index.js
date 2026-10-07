@@ -6749,7 +6749,8 @@ const SALES_THOUSAND=new Set(["هزار","الف","الاف","الفین"].map(s
 const SALES_COUNTABLE_NOUNS=new Set(["جعبه","باکس","پک","بسته","کارتن","علبه","علب","box","boxes"].map(salesNormal));
 const SALES_ATTRIBUTE_NOUNS=new Set(["رنگ","رنگی","لون","الوان","سایز","مدل","مودیل","طرح","مقاس","قیاس","نوع","جور","کد","color","colors","colour","colours","size","sizes","model","models"].map(salesNormal));
 const SALES_CURRENCY_WORDS=new Set(["تومان","تومن","ریال","دلار","دولار","دینار","usd","toman","dollar","dollars"].map(salesNormal));
-const SALES_QUANTITY_VERBS=new Set(["اخذ","ناخذ","اخذت","اخذنا","اطلب","نطلب","ارید","نرید","ابی","ابغی","اشتری","نشتری","میخوام","میخوایم","بگیرم","بگیریم","بخرم","بخریم"].map(salesNormal));
+// (Iraqi «خليها 1000» / «خله 1000» = «make it 1000»: a new quantity for the same deal.)
+const SALES_QUANTITY_VERBS=new Set(["اخذ","ناخذ","اخذت","اخذنا","اطلب","نطلب","ارید","نرید","ابی","ابغی","اشتری","نشتری","میخوام","میخوایم","بگیرم","بگیریم","بخرم","بخریم","خلیها","خلیه","خلها","خله","خلوها","سویها","سوها"].map(salesNormal));
 const SALES_QUANTITY_ASK_AFTER=new Set(["شکد","شگد","بیش","بکم","کم","قدیش","شلون","یصیر","تصیر","یطلع","چند","چقدر","چقد","میشه","چی","how","what"].map(salesNormal));
 // «اذا اخذ 1001 شكد يصير؟», «ارید 500»: a bare number right after a buying verb, followed by nothing or a question word, is the quantity.
 function salesVerbQuantity(text){
@@ -7464,15 +7465,35 @@ function salesMentionedEntities(records,texts){
 }
 // Which product this turn is about: the product named NOW, the answer to our clarification, the deal's product, or one named earlier.
 // A product the customer names now that is not in the approved catalog is never replaced by an older one.
-function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,history,productNamedNow}){
+// memorySource: the customer message that stated memoryProduct. The stored product is often only its generic part («علبة خاتم» of
+// «… علبة خاتم صغيرة …»), so when it fits several products, a reply that only adds another detail (a city, a name) keeps the product
+// that message named whole; a message naming one of those products now («لا، الكبيرة») still replaces it.
+function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memorySource=null,history,productNamedNow}){
   const all=[...catalog.siProducts,...catalog.listProducts];
   const find=(text,restrict=null)=>{const si=salesProductMatch(catalog.siProducts,text,{restrict});return si.status!=="none"?si:salesProductMatch(catalog.listProducts,text,{restrict});};
   if(candidate?.clarify?.length){const r=find(message,candidate.clarify);if(r.status==="matched")return {...r,basis:"clarification"};}
   const current=find(message);if(current.status!=="none")return {...current,basis:"current_message"};
   if(productNamedNow){const named=find(memoryProduct||"");return named.status!=="none"?{...named,basis:"current_message"}:{status:"none",basis:"unpriced_product_named"};}
+  // A correction may name only the word that tells two products apart («لا، الكبيرة»): it counts when the message is a correction
+  // (or that short answer), never as a word inside another sentence («اريد كمية كبيرة»).
+  const correctionLike=SALES_CORRECTION_MARK.test(salesNormal(message))||salesTokens(message).length<=2;
   const kept=candidate?.product?.key?all.find(p=>p.key===candidate.product.key&&p.source===candidate.product.source):null;
+  if(kept&&correctionLike){
+    // Its siblings: products whose name differs from it in exactly one word («علبة خاتم كبيرة» for «علبة خاتم صغيرة»).
+    const t=salesTokens(kept.name),siblings=all.filter(o=>{if(o===kept||o.source!==kept.source)return false;const u=salesTokens(o.name);return u.length===t.length&&u.filter((w,i)=>w!==t[i]).length===1;});
+    if(siblings.length){const r=find(message,[kept,...siblings].map(p=>p.key));if(r.status==="matched"&&r.product!==kept)return {...r,basis:"current_message"};}
+  }
   if(kept)return {status:"matched",confidence:candidate.product.confidence||"HIGH",product:kept,basis:"order_candidate",term:candidate.product.name};
-  for(const text of [memoryProduct,...history]){if(!text)continue;const r=find(text);if(r.status!=="none")return {...r,basis:"conversation"};}
+  for(const text of [memoryProduct,...history]){
+    if(!text)continue;const r=find(text);
+    if(r.status==="ambiguous"&&text===memoryProduct){
+      const keys=r.candidates.map(p=>p.key),named=correctionLike?find(message,keys):null;
+      if(named?.status==="matched")return {...named,basis:"current_message"};
+      const whole=memorySource?find(memorySource,keys):null;
+      if(whole?.status==="matched")return {...whole,basis:"conversation"};
+    }
+    if(r.status!=="none")return {...r,basis:"conversation"};
+  }
   return {status:"none"};
 }
 // The variant of a grouped list product the customer means: the size (when the product has several) and the configuration, read from
@@ -7672,13 +7693,13 @@ const SALES_NOT_COLOUR_DETAIL=/(?:[0-9۰-۹٠-٩]|چاپ|طلاکوب|فویل|�
 // quantity (SI first; a product SI knows but has not priced may still be priced by the ARAB list under the same name).
 // The product is named to the customer in the reply language: an approved alias the customer used in that language replaces an
 // approved name written in the other one (owner data only — nothing is translated or invented).
-async function salesPricing(env,{market,message,history,chronological,memoryProduct,candidate,quantity,productNamedNow,language=null}){
+async function salesPricing(env,{market,message,history,chronological,memoryProduct,memorySource=null,candidate,quantity,productNamedNow,language=null}){
   if(!["IRAN","ARAB"].includes(market))return {status:"market_unknown"};
   const catalog=await salesPriceCatalog(env,market);
   if(!catalog.siProducts.length&&!catalog.listProducts.length)return {status:"no_catalog"};
   // What this market sells (names, models, sizes — never prices): the Sales AI's catalog context, from the same single read.
   const catalog_summary=[...catalog.listProducts.map(p=>({product:p.name,models:p.variants?[...new Set(p.variants.map(v=>v.configuration))]:[],sizes:p.variants?[...new Set(p.variants.map(v=>v.size).filter(Boolean))]:[]})),...catalog.siProducts.map(p=>({product:p.name,models:[],sizes:[]}))].slice(0,30);
-  const resolution=salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,history,productNamedNow});
+  const resolution=salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memorySource,history,productNamedNow});
   if(resolution.status==="none")return {status:"product_unknown",resolution,catalog_summary};
   if(resolution.status==="ambiguous")return {status:"product_ambiguous",resolution,candidates:resolution.candidates,catalog_summary};
   const p=resolution.product,listDiscountRule=await salesListDiscountRule(env,market);
@@ -8069,6 +8090,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const orderStatusAsked=!!postSaleOrder&&(ORDER_STATUS_QUESTION.test(String(row.message||""))||(postSaleOrder.status!=="fulfilled"&&(intent==="asks_shipping"||intent==="other")));let stage=orderStatusAsked?`order_${postSaleOrder.status}`:salesBrainStage(intent,memory);
   const marketClause=` AND market IN (${knowledgeMarkets.map(()=>"?").join(",")})`;
   const model=String(memory.product_interest||"").trim();
+  // The message that stated this deal's product (a superseded or pre-deal statement is not in memory and is never read here).
+  const modelSourceId=model?memories.find(f=>f.memory_key==="product_interest")?.source_message_id:null;
+  const modelSource=modelSourceId&&modelSourceId!==row.id?context.find(x=>x.id===modelSourceId&&x.direction==="inbound")?.message||null:null;
   // Customer images of THIS lead+conversation only. A resolved image satisfies "which product/model" as a reference; its
   // observation is advisory visual context and never an authoritative fact for the validator.
   const imageReference=preloaded.imageReference||loadedImageReference||{status:"none",images:[],image_count:0};
@@ -8095,7 +8119,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const dealVariant=Object.values(dealCandidate?.requirements||{}).filter(v=>typeof v==="string"&&v.trim());
   const pricingStarted=Date.now();
   const pricingWork=!pricingWanted?null:(conversationMarket
-    ?salesPricing(env,{market:conversationMarket,message:row.message,history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...dealVariant,...[...earlierInbound].reverse(),row.message],memoryProduct:model,candidate:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:newFactRows.some(f=>f.fact_type==="product_interest"),language})
+    ?salesPricing(env,{market:conversationMarket,message:row.message,history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...dealVariant,...[...earlierInbound].reverse(),row.message],memoryProduct:model,memorySource:modelSource,candidate:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:newFactRows.some(f=>f.fact_type==="product_interest"),language})
     :salesPriceIntent?salesPriceCatalog(env,"ARAB").then(c=>({status:"market_unknown",catalog:c.siProducts.length+c.listProducts.length>0})):Promise.resolve(null)
   ).catch(()=>({status:"pricing_error"})).then(r=>{timing.pricing_ms=Date.now()-pricingStarted;return r;});
   // ---- Wave 2: approved knowledge of THIS market (+ GLOBAL) and the customer-photo category match, loaded concurrently.
@@ -8229,7 +8253,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const described=[f.product,f.model,f.size].filter(Boolean).join(" ");
     if(conversationMarket&&(aiChanged.quantity||described||(ai.requests.includes("price")&&!pricing))){
       const s=Date.now();
-      const repriced=await salesPricing(env,{market:conversationMarket,message:[row.message,described].filter(Boolean).join(" "),history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...dealVariant,...[...earlierInbound].reverse(),row.message,...(described?[described]:[])],memoryProduct:f.product||model,candidate:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:!!f.product,language}).catch(()=>null);
+      const repriced=await salesPricing(env,{market:conversationMarket,message:[row.message,described].filter(Boolean).join(" "),history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...dealVariant,...[...earlierInbound].reverse(),row.message,...(described?[described]:[])],memoryProduct:f.product||model,memorySource:f.product?null:modelSource,candidate:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:!!f.product,language}).catch(()=>null);
       timing.ai_repricing_ms=Date.now()-s;
       if(repriced&&repriced.product){pricing=repriced;known.product_or_model=true;
         if(f.product&&repriced.resolution?.basis==="current_message"&&repriced.product.name&&repriced.product.name!==memory.product_interest){await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"product_interest",memory_key:"product_interest",value:repriced.product.name}});aiChanged.product=true;applied.push("product");}}
