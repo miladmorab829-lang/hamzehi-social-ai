@@ -6645,7 +6645,7 @@ function extractConversationMemoryFacts(message,intent,inboxId,{lastAction=null}
   const quantity=text.match(/(?:quantity|qty|تعداد|كمية)\s*[:：=-]?\s*([0-9۰-۹٠-٩]+)/iu)?.[1];
   const corrected=quantity===undefined?salesQuantityCorrection(text):null;
   const unitQuantity=quantity===undefined&&corrected===null?extractUnitQuantity(text):null;
-  const spokenQuantity=quantity===undefined&&corrected===null&&unitQuantity===null?(salesWordQuantity(text)??(lastAction==="ask_size"||lastAction==="ask_attribute"?null:salesBareQuantity(text))):null;
+  const spokenQuantity=quantity===undefined&&corrected===null&&unitQuantity===null?(salesWordQuantity(text)??salesVerbQuantity(text)??(lastAction==="ask_size"||lastAction==="ask_attribute"?null:salesBareQuantity(text))):null;
   if(quantity!==undefined){const n=knowledgeCommandNumber(quantity);if(n!==null)add("requested_quantity",n);}
   else if(corrected!==null)add("requested_quantity",corrected);
   else if(unitQuantity!==null)add("requested_quantity",unitQuantity);
@@ -6749,6 +6749,18 @@ const SALES_THOUSAND=new Set(["هزار","الف","الاف","الفین"].map(s
 const SALES_COUNTABLE_NOUNS=new Set(["جعبه","باکس","پک","بسته","کارتن","علبه","علب","box","boxes"].map(salesNormal));
 const SALES_ATTRIBUTE_NOUNS=new Set(["رنگ","رنگی","لون","الوان","سایز","مدل","مودیل","طرح","مقاس","قیاس","نوع","جور","کد","color","colors","colour","colours","size","sizes","model","models"].map(salesNormal));
 const SALES_CURRENCY_WORDS=new Set(["تومان","تومن","ریال","دلار","دولار","دینار","usd","toman","dollar","dollars"].map(salesNormal));
+const SALES_QUANTITY_VERBS=new Set(["اخذ","ناخذ","اخذت","اخذنا","اطلب","نطلب","ارید","نرید","ابی","ابغی","اشتری","نشتری","میخوام","میخوایم","بگیرم","بگیریم","بخرم","بخریم"].map(salesNormal));
+const SALES_QUANTITY_ASK_AFTER=new Set(["شکد","شگد","بیش","بکم","کم","قدیش","شلون","یصیر","تصیر","یطلع","چند","چقدر","چقد","میشه","چی","how","what"].map(salesNormal));
+// «اذا اخذ 1001 شكد يصير؟», «ارید 500»: a bare number right after a buying verb, followed by nothing or a question word, is the quantity.
+function salesVerbQuantity(text){
+  const words=salesNormal(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  for(let i=1;i<words.length;i++){
+    if(!/^\d{1,7}$/.test(words[i])||!SALES_QUANTITY_VERBS.has(words[i-1]))continue;
+    const next=words[i+1],n=Number(words[i]);
+    if((!next||SALES_QUANTITY_ASK_AFTER.has(next))&&Number.isSafeInteger(n)&&n>1)return n;
+  }
+  return null;
+}
 const SALES_NOT_QUANTITY_BEFORE=new Set(["مدل","مودیل","model","کد","code","رنگ","لون","سایز","size","قیاس","مقاس","شماره","رقم","طرح","سانت","cm","mm","قیمت","سعر","price"].map(salesNormal));
 // Every spoken quantity of a message, in order (a correction takes the last one, a plain message the first one).
 function salesWordQuantities(text){
@@ -7485,7 +7497,13 @@ function salesPickVariant(p,texts){
   const configs=[...new Set(pool.map(v=>v.configuration))];
   return {missing:{key:"configuration",label:"مدل",question_fa:"کدوم مدل رو می‌خواید؟ ("+configs.join("، ")+")",question_ar:"أي موديل تريد؟ ("+configs.join("، ")+")",values:configs}};
 }
-function salesListPrice(p,market,quantity,{texts=[]}={}){
+// The market's owner-approved discount rule (business setting discount_rule, e.g. ARAB: 10% from 1001 pieces). Only that market's rule.
+async function salesListDiscountRule(env,market){
+  const s=await getSetting(env,"discount_rule",{market}).catch(()=>null),v=s?.value;
+  if(!v||!["percent_bp","amount_minor"].includes(v.type)||!(Number(v.value)>0)||(s.scope_key&&s.scope_key!==`market:${market}`))return null;
+  return {type:v.type,value:Number(v.value),min_quantity:v.min_quantity??null,id:s.id,version:s.version};
+}
+function salesListPrice(p,market,quantity,{texts=[],discountRule=null}={}){
   const base={product_key:p.key,product_name:p.name,market,currency:MARKET_CURRENCY[market],source:"list",requirements:{}};
   let item=null,name=p.name,requirements={};
   if(p.variants){
@@ -7498,10 +7516,12 @@ function salesListPrice(p,market,quantity,{texts=[]}={}){
   const priced={...base,product_name:name,requirements};
   if(canonicalCurrency(item.currency)!==MARKET_CURRENCY[market])return {...priced,status:"currency_conflict"};
   if(!Number.isSafeInteger(unit)||unit<=0)return {...priced,status:"no_price"};
-  const q=Number.isSafeInteger(quantity)&&quantity>0?quantity:null,shared={...priced,moq,policy:null,tiers:[{min:moq||1,max:null,unit_price_minor:unit}],discount_rule:null,price_item:{id:item.id,version:Number(item.version)}};
+  const q=Number.isSafeInteger(quantity)&&quantity>0?quantity:null,shared={...priced,moq,policy:null,tiers:[{min:moq||1,max:null,unit_price_minor:unit}],discount_rule:discountRule,price_item:{id:item.id,version:Number(item.version)}};
   if(q!==null&&moq&&q<moq)return {...shared,status:"under_moq",quantity:q,unit_at_moq:unit};
   const subtotal=q===null?null:unit*q;if(subtotal!==null&&!Number.isSafeInteger(subtotal))return {...shared,status:"overflow",quantity:q};
-  return {...shared,status:"priced",quantity:q,unit_price_minor:unit,subtotal_minor:subtotal,discount:null,total_minor:subtotal};
+  const r=discountRule;let discount=null;
+  if(subtotal!==null&&r&&r.value>0&&(!r.min_quantity||q>=r.min_quantity)){const amount=r.type==="percent_bp"?Math.floor(subtotal*r.value/10000):r.value;discount={type:r.type,value:r.value,amount_minor:Math.min(amount,subtotal),rule_id:r.id,rule_version:r.version};}
+  return {...shared,status:"priced",quantity:q,unit_price_minor:unit,subtotal_minor:subtotal,discount,total_minor:subtotal===null?null:subtotal-(discount?.amount_minor||0)};
 }
 // ---- Standard colour options come ONLY from approved Business Knowledge (typed color.exterior members or an engine-taught
 // exterior-colour collection) of this conversation's markets: the product's own approved colours when the owner set them for that
@@ -7661,10 +7681,10 @@ async function salesPricing(env,{market,message,history,chronological,memoryProd
   const resolution=salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,history,productNamedNow});
   if(resolution.status==="none")return {status:"product_unknown",resolution,catalog_summary};
   if(resolution.status==="ambiguous")return {status:"product_ambiguous",resolution,candidates:resolution.candidates,catalog_summary};
-  const p=resolution.product;
-  let result=p.source==="si"?{...await siApprovedPrice(env,{market,productKey:p.key,texts:chronological,quantity}).catch(()=>({status:"no_price"})),source:"si"}:salesListPrice(p,market,quantity,{texts:chronological});
+  const p=resolution.product,listDiscountRule=await salesListDiscountRule(env,market);
+  let result=p.source==="si"?{...await siApprovedPrice(env,{market,productKey:p.key,texts:chronological,quantity}).catch(()=>({status:"no_price"})),source:"si"}:salesListPrice(p,market,quantity,{texts:chronological,discountRule:listDiscountRule});
   // A product SI knows but has not priced may be priced by the same-named approved list of THIS market (IRAN or ARAB; never another).
-  if(p.source==="si"&&["no_price","configuration_not_priced"].includes(result.status)){const twin=catalog.listProducts.find(l=>salesNormal(l.name)===salesNormal(p.name));if(twin)result=salesListPrice(twin,market,quantity,{texts:chronological});}
+  if(p.source==="si"&&["no_price","configuration_not_priced"].includes(result.status)){const twin=catalog.listProducts.find(l=>salesNormal(l.name)===salesNormal(p.name));if(twin)result=salesListPrice(twin,market,quantity,{texts:chronological,discountRule:listDiscountRule});}
   const named=result.product_name||p.name,term=resolution.term,inLanguage=t=>!!language&&salesBrainScriptLanguage(t)===language;
   const display=!language||inLanguage(named)?named:term&&inLanguage(term)?term:p.terms.find(inLanguage)||named;
   if(display!==result.product_name)result={...result,product_name:display};
@@ -7882,6 +7902,8 @@ function salesSelfCheck(draft,{action,ownerPending}){
 // records money, changes the order or the lead. The customer gets a neutral "checking" reply; only the owner's APPROVE (after
 // seeing the money) records a payment (resolveDecision → recordOrderPayment).
 // «شلون ادفع؟», «وين احول؟», «اريد معلومات الصراف», «وين الصراف؟», «اريد ادفع العربون» (normalised text)
+// «شكد العربون؟», «العربون شكد؟», «بيش العربون؟»
+const SALES_DEPOSIT_ASK_AR=/(?:(?:شکد|شگد|بیش|بکم|کم|قدیش)\s*(?:ال)?عربون|(?:ال)?عربون\s*(?:شکد|شگد|بیش|بکم|کم))/u;
 const SALES_PAYMENT_HOWTO_AR=/(?:(?:شلون|اشلون|کیف|وین|منین|شنو)\s*(?:ا|ن)?(?:دفع|حول|الدفع|التحویل|الحواله|الصراف|المکتب)|(?:معلومات|تفاصیل|رقم|عنوان)\s*(?:ال)?(?:صراف|الصراف|الصرافه|الحواله|التحویل|الدفع|الحساب)|(?:^|\s)وین\s*(?:ال)?صراف|ارید\s*(?:ا|ن)?(?:دفع|حول)(?:\s*(?:ال)?(?:عربون|مبلغ|فلوس))?\s*[؟?]?$)/u;
 async function fetchCustomerReceiptImage(env,media){
   if(!media?.file_id||!env.TELEGRAM_BOT_TOKEN)return null;
@@ -8234,7 +8256,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // The product already resolved for this turn is kept; only its approved price is re-read without the previous deal's quantity
     // (and without the previous deal's variant).
     const p=pricing.product,texts=[...[...earlierInbound].reverse(),row.message];
-    const fresh=await (p.source==="si"?siApprovedPrice(env,{market:conversationMarket,productKey:p.key,texts,quantity:quantityValid?knownQuantity:null}).then(r=>({...r,source:"si"})):Promise.resolve(salesListPrice(p,conversationMarket,quantityValid?knownQuantity:null,{texts}))).catch(()=>null);
+    const fresh=await (p.source==="si"?siApprovedPrice(env,{market:conversationMarket,productKey:p.key,texts,quantity:quantityValid?knownQuantity:null}).then(r=>({...r,source:"si"})):salesListDiscountRule(env,conversationMarket).then(rule=>salesListPrice(p,conversationMarket,quantityValid?knownQuantity:null,{texts,discountRule:rule}))).catch(()=>null);
     if(fresh)pricing={...fresh,product_name:pricing.product_name||fresh.product_name,resolution:pricing.resolution,product:p,catalog_summary:pricing.catalog_summary};
   }
   const contextColors=colorPick.selected.length?colorPick.selected:Array.isArray(memory.selected_colors)?memory.selected_colors:[];
@@ -8657,15 +8679,24 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   }
   // ---- Iraqi «شلون ادفع؟ / وين احول؟ / اريد معلومات الصراف»: the transfer details exist only in the owner-approved payment request
   // (for Iraq usually this order's own exchange / hawala instructions). Nothing is invented; no internal wording reaches the customer.
-  if(!paymentClaim&&!termsAsk&&language==="Iraqi Arabic"&&SALES_PAYMENT_HOWTO_AR.test(paymentClaimNorm(row.message))){
+  const howtoText=paymentClaimNorm(row.message),depositAsk=SALES_DEPOSIT_ASK_AR.test(howtoText);
+  if(!paymentClaim&&!termsAsk&&language==="Iraqi Arabic"&&(depositAsk||SALES_PAYMENT_HOWTO_AR.test(howtoText))){
     const payOrder=postSaleOrder&&["confirmed","partially_paid"].includes(postSaleOrder.status)?postSaleOrder:null;
-    const sentRequest=payOrder?await env.DB.prepare("SELECT id FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status='sent' AND instr(message,'المبلغ المطلوب')>0 LIMIT 1").bind(row.lead_id,row.conversation_id).first().catch(()=>null):null;
-    draft=sentRequest?"تفاصيل التحويل موجودة بالرسالة اللي دزيناها إلك؛ إذا تحتاج أي توضيح تفضل."
-      :payOrder?"تفاصيل التحويل راح نجهزها ونرسلها إلك قريباً."
-      :"بعد ما نثبت الطلب نرسلك تفاصيل التحويل.";
+    const coordinate=payOrder?"تفاصيل التحويل عن طريق الصراف راح يبلغك بيها المسؤول مباشرة.":"بعد ما نثبت الطلب، المسؤول يبلغك مباشرة بتفاصيل التحويل عن طريق الصراف.";
+    draft=coordinate;let numbers=[];
+    // «شكد العربون؟» on a placed order: the advance and the balance from this order's approved terms (system-calculated)
+    if(depositAsk&&payOrder){
+      const terms=await orderDepositTerms(env,payOrder).catch(()=>null),pct=terms&&!terms.pending?terms.percent:null;
+      if(Number.isInteger(pct)&&pct>0&&pct<100){
+        const dep=Math.ceil(Number(payOrder.total_minor)*pct/100),depText=customerPaymentAmountText({currency:payOrder.currency,amount_minor:dep}),remText=customerPaymentAmountText({currency:payOrder.currency,amount_minor:Number(payOrder.total_minor)-dep});
+        if(depText&&remText){draft=`العربون ${pct}% يعني ${depText}، والباقي ${remText}. ${coordinate}`;numbers=[pct,...[depText,remText].flatMap(t=>[...t.replace(/,/g,"").matchAll(/[0-9]+/g)].map(m=>Number(m[0])))];}
+      }
+    }
     action="payment_info";askedField=null;replySource="legacy";needsOwner=false;needsOwnerReason=null;
-    validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
-    aiInfo.payment_info={order_id:payOrder?.id||null,request_sent:!!sentRequest};
+    validation=validateSalesBrainDraft(draft,{allowedNumbers:numbers,authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
+    if(!validation.valid&&numbers.length){draft=coordinate;numbers=[];validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});}
+    for(const n of numbers)if(!answerNumbers.includes(n))answerNumbers.push(n);
+    aiInfo.payment_info={order_id:payOrder?.id||null,deposit_answer:numbers.length>0};
   }
   aiInfo.reply_source=replySource;
   timing.validator_ms=Date.now()-validatorStarted;

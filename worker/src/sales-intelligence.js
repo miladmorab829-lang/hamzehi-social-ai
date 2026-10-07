@@ -812,18 +812,20 @@ export async function paymentRequestConfig(env,order){
   await ensureSalesIntelligenceStore(env);
   const terms=await orderDepositTerms(env,order);
   const caseRow=await first(env,"SELECT id,owner_answer_json FROM owner_decisions WHERE order_id=? AND decision_type='PAYMENT_TERMS' AND status='RESOLVED' AND owner_decision IN ('APPROVE','ANSWER') AND json_valid(scope_json) AND json_extract(scope_json,'$.scope')='CASE_ONLY' AND NOT (json_valid(payload_json) AND COALESCE(json_extract(payload_json,'$.kind'),'')='deposit_terms') ORDER BY resolved_at DESC LIMIT 1",order.id);
-  const caseText=String(parseJson(caseRow?.owner_answer_json,{})?.value??"").trim()||null;
+  // ARAB (Iraq): the owner personally gives the exchange / hawala details to the customer — the bot never sends any destination.
+  const ownerCoordinated=order.market==="ARAB";
+  const caseText=ownerCoordinated?null:String(parseJson(caseRow?.owner_answer_json,{})?.value??"").trim()||null;
   const ctx={market:order.market,product_key:null};
-  const setting=caseText?null:await getSetting(env,"payment_instructions",ctx);
+  const setting=caseText||ownerCoordinated?null:await getSetting(env,"payment_instructions",ctx);
   const depositSetting=await getSetting(env,"deposit_percent",ctx);
   const instructions=paymentDestinationOnly(caseText||setting?.value);
   const parts={v:1,order:order.id,status:order.status,total:order.total_minor,currency:order.currency,
-    instructions:caseText?`case:${caseRow.id}`:setting?`setting:${setting.id}:v${setting.version}`:"none",
+    instructions:ownerCoordinated?"owner_coordinated":caseText?`case:${caseRow.id}`:setting?`setting:${setting.id}:v${setting.version}`:"none",
     deposit_setting:depositSetting?`${depositSetting.id}:v${depositSetting.version}:${depositSetting.value}`:"none",
     terms:terms.pending?`pending:${terms.decision_id}`:`${terms.source}:${terms.kind||"-"}:${terms.percent??"-"}:${terms.decision_id||"-"}`};
   const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(parts)));
   const fingerprint=Array.from(new Uint8Array(digest).slice(0,12),b=>b.toString(16).padStart(2,"0")).join("");
-  return {terms,instructions,parts,fingerprint};
+  return {terms,instructions,parts,fingerprint,ownerCoordinated};
 }
 export async function preparePaymentRequest(env,order,{caseInstructions=null}={}){
   await ensureSalesIntelligenceStore(env);
@@ -834,7 +836,7 @@ export async function preparePaymentRequest(env,order,{caseInstructions=null}={}
   const instructions=config.instructions;
   const amount=D.customerPaymentAmountText?.({currency:order.currency,amount_minor:order.total_minor});
   const base={lead_id:order.lead_id,conversation_id:order.conversation_id,market:order.market,order_id:order.id};
-  if(!instructions)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,question:order.market==="ARAB"?`Payment instructions for ARAB are not defined (order ${order.order_number}): enter the exchange / hawala transfer details for THIS order`:`Payment instructions for ${order.market} are not defined (order ${order.order_number})`,known:{order_number:order.order_number,total_minor:order.total_minor,currency:order.currency},recommendation:"Enter payment instructions for this order, or save them for the market.",risk:"No bank/payment details are invented.",payload:{resolution:"setting",setting_key:"payment_instructions",scope:{market:order.market}}})).decision};
+  if(!instructions&&!config.ownerCoordinated)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,question:order.market==="ARAB"?`Payment instructions for ARAB are not defined (order ${order.order_number}): enter the exchange / hawala transfer details for THIS order`:`Payment instructions for ${order.market} are not defined (order ${order.order_number})`,known:{order_number:order.order_number,total_minor:order.total_minor,currency:order.currency},recommendation:"Enter payment instructions for this order, or save them for the market.",risk:"No bank/payment details are invented.",payload:{resolution:"setting",setting_key:"payment_instructions",scope:{market:order.market}}})).decision};
   if(!amount)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,fingerprint:`PAYMENT_AMOUNT|${order.id}`,question:`Order ${order.order_number} amount cannot be safely formatted (currency ${order.currency}); legacy currency is not converted`,known:{currency:order.currency,total_minor:order.total_minor},payload:{resolution:"record"}})).decision};
   const terms=config.terms;
   // A customer's request for other payment terms is still with the owner: no payment request until it is decided.
@@ -850,7 +852,7 @@ export async function preparePaymentRequest(env,order,{caseInstructions=null}={}
   const depositText=depositMinor!==null&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:depositMinor});
   // The remaining balance is the system's own calculation (total − deposit); WHEN it is due stays in the owner's instructions.
   const remainingText=depositText&&Number(order.total_minor)-depositMinor>0&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:Number(order.total_minor)-depositMinor});
-  const message=(ar?[`تم تأكيد طلبكم ${order.order_number}: ${order.product} × ${order.quantity}`,`المبلغ المطلوب: ${amount}`,depositText?`العربون المطلوب (${deposit}%): ${depositText}`:null,remainingText?`المبلغ المتبقي: ${remainingText}`:null,`طريقة الدفع: ${instructions}`]
+  const message=(ar?[`تم تأكيد طلبكم ${order.order_number}: ${order.product} × ${order.quantity}`,`المبلغ المطلوب: ${amount}`,depositText?`العربون المطلوب (${deposit}%): ${depositText}`:null,remainingText?`المبلغ المتبقي: ${remainingText}`:null,config.ownerCoordinated?"تفاصيل التحويل عن طريق الصراف راح يبلغك بيها المسؤول مباشرة.":`طريقة الدفع: ${instructions}`]
     :[`سفارش ${order.order_number} تأیید شد: ${order.product} × ${order.quantity}`,`مبلغ قابل پرداخت: ${amount}`,depositText?`پیش‌پرداخت (${deposit}%): ${depositText}`:null,remainingText?`باقی‌مانده: ${remainingText}`:null,`روش پرداخت: ${instructions}`]).filter(Boolean).join("\n");
   // ONE draft per payment configuration: the key carries the configuration fingerprint, so an unchanged retrigger returns the same
   // draft and any change (instructions version, deposit setting, per-order terms) creates exactly one replacement. Older drafts of
