@@ -681,11 +681,11 @@ async function payLoad(){const line=$("payLine");if(!line)return;const m=$("payM
  const pick=k=>(d.items||[]).find(x=>x.setting_key===k&&x.scope_key==="market:"+m),val=r=>{try{return JSON.parse(r.value_json)}catch(e){return ""}};const i=pick("payment_instructions"),dp=pick("deposit_percent");
  $("payInstr").value=i?String(val(i)):"";$("payDeposit").value=dp?String(val(dp)):"";line.textContent=m+" · "+(i?"payment_instructions v"+i.version:"payment_instructions: not set")+" · "+(dp?"deposit_percent v"+dp.version+" = "+val(dp)+"%":"deposit_percent: not set")}
 async function paySave(){const m=$("payMarket").value,text=$("payInstr").value.trim(),dep=$("payDeposit").value.trim(),line=$("payLine");
- if(!text){line.innerHTML="<span class='bad'>✕ payment_instructions is required</span>";return}
+ if(!text&&dep===""){line.innerHTML="<span class='bad'>✕ Enter payment instructions and/or a deposit percent</span>";return}
  if(dep!==""&&!(Number.isInteger(Number(dep))&&Number(dep)>=0&&Number(dep)<=100&&String(Number(dep))===dep)){line.innerHTML="<span class='bad'>✕ deposit_percent must be a whole number 0–100</span>";return}
  if(!confirm("Save payment settings for "+m+"? Customers will see this text exactly. No message is sent."))return;
  const save=(key,value)=>api("/api/si/knowledge/setting",{method:"POST",body:JSON.stringify({input:{setting_key:key,scope:{market:m},value}})});
- const r1=await save("payment_instructions",text);if(!r1.ok){line.innerHTML="<span class='bad'>✕ "+esc(r1.error)+"</span>";return}
+ const r1=text?await save("payment_instructions",text):{ok:true};if(!r1.ok){line.innerHTML="<span class='bad'>✕ "+esc(r1.error)+"</span>";return}
  const r2=dep!==""?await save("deposit_percent",Number(dep)):{ok:true};if(!r2.ok){line.innerHTML="<span class='bad'>✕ "+esc(r2.error)+"</span>";return}
  await payLoad();line.innerHTML="<span class='ok'>✓ saved</span> · "+esc(line.textContent)}
 async function siLoadDecisions(){const st=$("siDecisionFilter")?.value||"PENDING",box=$("siDecisions");if(!box)return;const d=await api("/api/si/decisions?status="+encodeURIComponent(st));if(!d.ok){$("siDecisionLine").innerHTML="<span class='bad'>✕ "+esc(d.error)+"</span>";box.innerHTML="";return}

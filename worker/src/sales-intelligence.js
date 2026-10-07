@@ -476,7 +476,7 @@ async function applyResolution(env,decision,{action,scope,answer,actor}){
     const given=answer.amount_minor??(/^[0-9۰-۹٠-٩,٬\s]+$/u.test(String(answer.value??""))&&String(answer.value).trim()?answer.value:undefined);
     const amount=given!==undefined&&given!==null&&String(given).trim()!==""?safeInt(given,{min:1,name:"amount_minor"}):payload.suggested_amount_minor;
     if(!Number.isSafeInteger(amount)||amount<=0)throw Error("Enter the verified amount (amount_minor): the claimed / receipt amounts are missing or do not match the expected payment");
-    const method=String(answer.method||payload.method||"bank_transfer");
+    const method=String(answer.method||payload.method||(order.market==="ARAB"?"exchange_hawala":"bank_transfer"));
     const paidBefore=Number(await D.orderPaidMinor(env,order.id))||0,outstanding=Number(order.total_minor)-paidBefore;
     const paymentKind=String(answer.payment_kind||(amount===outstanding?"full":paidBefore===0?"deposit":"partial"));
     const reference=String(answer.reference||payload.transaction_reference||`payment-verification:${decision.id}`).trim().slice(0,200);
@@ -512,6 +512,8 @@ export async function resolveDecision(env,{id,action,scope="CASE_ONLY",answer={}
 // (Draft -> SUBMIT -> APPROVE -> SEND); a confirmed order's payment request is then (re)built on the final terms.
 async function afterDepositTermsDecision(env,decision,act){
   const order=decision.order_id?await first(env,"SELECT * FROM lead_orders WHERE id=?",decision.order_id):null;
+  // (the owner filling in missing default terms is not a customer request: no customer notice, just the payment request)
+  if(parseJson(decision.payload_json,{})?.reason==="default_missing"){if(order&&act!=="REJECT")await preparePaymentRequest(env,order);return;}
   const market=order?.market||decision.market||"IRAN",language=D.outreachLanguage({country:market==="IRAN"?"iran":"iraq"}),ar=language==="Iraqi Arabic";
   const kind=parseJson(decision.payload_json,{})?.requested_kind||"deposit",method=DEPOSIT_TERMS_METHOD_KINDS.has(kind);
   const defPct=(await getSetting(env,"deposit_percent",{market,product_key:null}))?.value;
@@ -832,12 +834,17 @@ export async function preparePaymentRequest(env,order,{caseInstructions=null}={}
   const instructions=config.instructions;
   const amount=D.customerPaymentAmountText?.({currency:order.currency,amount_minor:order.total_minor});
   const base={lead_id:order.lead_id,conversation_id:order.conversation_id,market:order.market,order_id:order.id};
-  if(!instructions)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,question:`Payment instructions for ${order.market} are not defined (order ${order.order_number})`,known:{order_number:order.order_number,total_minor:order.total_minor,currency:order.currency},recommendation:"Enter payment instructions for this order, or save them for the market.",risk:"No bank/payment details are invented.",payload:{resolution:"setting",setting_key:"payment_instructions",scope:{market:order.market}}})).decision};
+  if(!instructions)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,question:order.market==="ARAB"?`Payment instructions for ARAB are not defined (order ${order.order_number}): enter the exchange / hawala transfer details for THIS order`:`Payment instructions for ${order.market} are not defined (order ${order.order_number})`,known:{order_number:order.order_number,total_minor:order.total_minor,currency:order.currency},recommendation:"Enter payment instructions for this order, or save them for the market.",risk:"No bank/payment details are invented.",payload:{resolution:"setting",setting_key:"payment_instructions",scope:{market:order.market}}})).decision};
   if(!amount)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,fingerprint:`PAYMENT_AMOUNT|${order.id}`,question:`Order ${order.order_number} amount cannot be safely formatted (currency ${order.currency}); legacy currency is not converted`,known:{currency:order.currency,total_minor:order.total_minor},payload:{resolution:"record"}})).decision};
   const terms=config.terms;
   // A customer's request for other payment terms is still with the owner: no payment request until it is decided.
   if(terms.pending)return {created:false,reason:"payment_terms_pending",decision_id:terms.decision_id};
   const deposit=terms.percent;
+  // No deposit terms at all (no market default, no approved override): never fall back to asking for the full total.
+  if(deposit===null||deposit===undefined)return {created:false,decision:(await openDecision(env,{...base,decision_type:"PAYMENT_TERMS",priority:15,fingerprint:`PAYMENT_DEPOSIT_DEFAULT|${order.id}`,
+    question:`Deposit terms for ${order.market} are not set (order ${order.order_number}): enter the advance % for this order (answer value), or save deposit_percent for the market`,
+    known:{order_number:order.order_number,total_minor:order.total_minor,currency:order.currency},recommendation:"Answer with the advance % for THIS order (e.g. 50), or set the market default in PAYMENT SETTINGS and re-confirm.",risk:"No payment request is created until deposit terms exist.",
+    payload:{resolution:"record",kind:"deposit_terms",requested_kind:"deposit",requested_percent:null,reason:"default_missing"}})).decision};
   const language=D.outreachLanguage({country:order.market==="IRAN"?"iran":"iraq"}),ar=language==="Iraqi Arabic";
   const depositMinor=deposit!==undefined&&deposit!==null&&deposit>0?Math.ceil(Number(order.total_minor)*deposit/100):null;
   const depositText=depositMinor!==null&&D.customerPaymentAmountText?.({currency:order.currency,amount_minor:depositMinor});

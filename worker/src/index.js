@@ -2,7 +2,7 @@ import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
-import { paymentClaimSignal, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, maskIdentifier } from "./payment-evidence.js";
+import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -7881,6 +7881,8 @@ function salesSelfCheck(draft,{action,ownerPending}){
 // ---- Customer payment claim / receipt → ONE owner verification decision. Recognition is evidence, never proof: nothing here
 // records money, changes the order or the lead. The customer gets a neutral "checking" reply; only the owner's APPROVE (after
 // seeing the money) records a payment (resolveDecision → recordOrderPayment).
+// «شلون ادفع؟», «وين احول؟», «اريد معلومات الصراف», «وين الصراف؟», «اريد ادفع العربون» (normalised text)
+const SALES_PAYMENT_HOWTO_AR=/(?:(?:شلون|اشلون|کیف|وین|منین|شنو)\s*(?:ا|ن)?(?:دفع|حول|الدفع|التحویل|الحواله|الصراف|المکتب)|(?:معلومات|تفاصیل|رقم|عنوان)\s*(?:ال)?(?:صراف|الصراف|الصرافه|الحواله|التحویل|الدفع|الحساب)|(?:^|\s)وین\s*(?:ال)?صراف|ارید\s*(?:ا|ن)?(?:دفع|حول)(?:\s*(?:ال)?(?:عربون|مبلغ|فلوس))?\s*[؟?]?$)/u;
 async function fetchCustomerReceiptImage(env,media){
   if(!media?.file_id||!env.TELEGRAM_BOT_TOKEN)return null;
   if(media.mime_type&&!/^image\/(?:jpeg|png|webp)$/i.test(media.mime_type))return null;
@@ -7948,11 +7950,12 @@ async function salesPaymentClaimTurn(env,{row,order,language}){
   const suggested=present.length&&!mismatch?present[0]:null;
   const config=await paymentRequestConfig(env,order).catch(()=>null);
   const destination=ev?paymentDestinationCheck(ev,config?.instructions||""):{status:"not_visible",destination_card_masked:null,destination_iban_masked:null};
-  const method=ev?.payment_method||(/کارت\s*به\s*کارت/u.test(text)?"card_to_card":/حواله|حوالة/u.test(text)?"exchange_hawala":null);
+  // (by context only: an exchange office → exchange_hawala, an explicit bank transfer → bank_transfer; a generic «حوالة» stays unknown)
+  const method=detectPaymentMethod(text,ev);
   const money=v=>v===null?"—":customerPaymentAmountText({currency:order.currency,amount_minor:v})||String(v);
   const evidence={inbox_message_id:row.id,provider_message_id:row.external_id||null,media_id:media?.id||null,received_at:row.created_at||now(),
     text_claim:{state:signal.state,cues:signal.cues,amount_minor:claimed,raw_amount:signal.amount||null,excerpt:text.replace(/(?:IR)?[0-9۰-۹٠-٩][0-9۰-۹٠-٩\s-]{9,}/giu,x=>maskIdentifier(x)||"•").slice(0,200)},
-    receipt:media?{status:imageStatus,amount_minor:receipt,raw_amount:ev?.amount??null,raw_currency:ev?.currency??null,is_receipt_image:ev?.is_receipt_image??null,transaction_reference:ev?.transaction_reference||null,transaction_datetime:ev?.transaction_datetime||null,source_bank:ev?.source_bank||null,destination_bank:ev?.destination_bank||null,destination_card_masked:destination.destination_card_masked,destination_iban_masked:destination.destination_iban_masked,payer_name:ev?.payer_name||null,payee_name:ev?.payee_name||null}:null,
+    receipt:media?{status:imageStatus,amount_minor:receipt,raw_amount:ev?.amount??null,raw_currency:ev?.currency??null,is_receipt_image:ev?.is_receipt_image??null,transaction_reference:ev?.transaction_reference||null,transaction_datetime:ev?.transaction_datetime||null,source_bank:ev?.source_bank||null,destination_bank:ev?.destination_bank||null,destination_card_masked:destination.destination_card_masked,destination_iban_masked:destination.destination_iban_masked,destination_account_masked:destination.destination_account_masked||null,destination_wallet_masked:destination.destination_wallet_masked||null,destination_phone_masked:destination.destination_phone_masked||null,payer_name:ev?.payer_name||null,payee_name:ev?.payee_name||null}:null,
     ai:ai?{ok:!!ai.ok,claim_type:aiSays,confidence:ev?.confidence||null,error:ai.ok?null:ai.error}:{ok:false,error:"evidence_ai_not_configured"}};
   const known={order_number:order.order_number,customer:order.customer_name||null,expected_minor:expected,outstanding_minor:outstanding,currency:order.currency,deposit_percent:pct,
     claimed_minor:claimed,receipt_minor:receipt,claim_amount_match:fits(claimed),receipt_amount_match:fits(receipt),mismatch,method,transaction_reference:ev?.transaction_reference||null,
@@ -8611,7 +8614,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   }
   const termsPostSale=!paymentClaim&&orderStatusAsked&&!!postSaleOrder&&["order_candidate","confirmed"].includes(postSaleOrder.status)&&!ORDER_STATUS_QUESTION.test(String(row.message||""));
   const termsMarket=conversationMarket||(termsPostSale?postSaleOrder.market:null);
-  const termsAsk=!paymentClaim&&termsMarket&&(!orderStatusAsked||termsPostSale)?salesPaymentTermsRequest(row.message):null;
+  // (an accepted deal or a placed order is a payment context: a bare «ممكن 30%؟» there asks about the advance)
+  const termsPaymentContext=!!postSaleOrder||dealCandidate?.status==="accepted"||candidate?.status==="accepted";
+  const termsAsk=!paymentClaim&&termsMarket&&(!orderStatusAsked||termsPostSale)?salesPaymentTermsRequest(row.message,{paymentContext:termsPaymentContext}):null;
   if(termsAsk){
     try{
       const termsOrderId=(termsPostSale?postSaleOrder.id:null)||candidate?.order_id||dealCandidate?.order_id||null;
@@ -8649,6 +8654,18 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         }
       }
     }catch(error){aiInfo.payment_terms={error:sanitizeOperationalError(error?.message||error)};needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
+  }
+  // ---- Iraqi «شلون ادفع؟ / وين احول؟ / اريد معلومات الصراف»: the transfer details exist only in the owner-approved payment request
+  // (for Iraq usually this order's own exchange / hawala instructions). Nothing is invented; no internal wording reaches the customer.
+  if(!paymentClaim&&!termsAsk&&language==="Iraqi Arabic"&&SALES_PAYMENT_HOWTO_AR.test(paymentClaimNorm(row.message))){
+    const payOrder=postSaleOrder&&["confirmed","partially_paid"].includes(postSaleOrder.status)?postSaleOrder:null;
+    const sentRequest=payOrder?await env.DB.prepare("SELECT id FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status='sent' AND instr(message,'المبلغ المطلوب')>0 LIMIT 1").bind(row.lead_id,row.conversation_id).first().catch(()=>null):null;
+    draft=sentRequest?"تفاصيل التحويل موجودة بالرسالة اللي دزيناها إلك؛ إذا تحتاج أي توضيح تفضل."
+      :payOrder?"تفاصيل التحويل راح نجهزها ونرسلها إلك قريباً."
+      :"بعد ما نثبت الطلب نرسلك تفاصيل التحويل.";
+    action="payment_info";askedField=null;replySource="legacy";needsOwner=false;needsOwnerReason=null;
+    validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
+    aiInfo.payment_info={order_id:payOrder?.id||null,request_sent:!!sentRequest};
   }
   aiInfo.reply_source=replySource;
   timing.validator_ms=Date.now()-validatorStarted;
@@ -8746,7 +8763,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // escalation stays open and the actual commercial answer still requires the owner.
 // The sales agent's answers (answer_price, negotiate, handle_objection, accept_offer, clarify_product, ask_attribute) are composed
 // ONLY from one owner-approved price record of the conversation's market and are re-validated below against exactly that evidence.
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.

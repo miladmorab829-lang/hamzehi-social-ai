@@ -258,22 +258,35 @@ export function salesAiWithoutTermsRelays(text){
   // re-joined exactly as written)
   return String(text||"").split(/(?<=[.!?؟\n؛;])(?=\s|$)/u).filter(raw=>!(SALES_AI_PAY_WORDS.test(raw)&&SALES_AI_RELAY.test(raw)&&!SALES_AI_AGREE.test(raw))).join("");
 }
-// The payment terms a CUSTOMER asks for: {kind:"deposit",percent} (the advance % nearest a payment word), {kind:"full",percent:100}
-// or {kind:"after_delivery",percent:0}; null when the message asks for none.
-export function salesPaymentTermsRequest(message){
+// The payment terms a CUSTOMER asks for: {kind:"deposit",percent} (another advance), {kind:"full",percent:100},
+// {kind:"after_delivery",percent:0}, {kind:"installments"|"cheque",percent|null}; null when the message asks for none.
+// Understood without a fixed word: «30/70», «نص», «ادفع 30%؟», «ادفع كله», «الكل مقدم», «بعد الاستلام», «اقساط», «صك» … In an order's
+// payment context (paymentContext) a bare «ممكن 30%؟» is an advance request too; discount wording («خصم», «تخفیف») never is.
+const TERMS_PAY_VERB=/(?:ادفع|ندفع|تدفع|دفع|الدفع|احول|نحول|حول|اسدد|نسدد|بدم|میدم|بدیم|بپردازم|پرداخت|واریز|pay)/u;
+const TERMS_DEPOSIT_WORD=/(?:بیعانه|پیش\s*پرداخت|پیش\s*قسط|علی\s*الحساب|عربون|العربون|دفعه\s*مقدمه|مقدم|مقدما|سلفه|deposit|advance|upfront)/giu;
+const TERMS_DISCOUNT_WORD=/(?:خصم|تخفیف|تخفيض|discount|off)/iu;
+export function salesPaymentTermsRequest(message,{paymentContext=false}={}){
   const t=gateNorm(String(message||""));
-  if(/(?:(?:پرداخت|تسویه|پول)[^.؟!?]{0,25}(?:بعد|پس)\s*(?:از\s*)?(?:تحویل|دریافت|رسیدن)|(?:بعد|پس)\s*(?:از\s*)?(?:تحویل|دریافت)[^.؟!?]{0,25}(?:پرداخت|تسویه|بدم|میدم|بپردازم)|نسیه|cash\s+on\s+delivery|pay\s+(?:on|after)\s+delivery|عند\s*الاستلام|بعد\s*الاستلام)/iu.test(t))return {kind:"after_delivery",percent:0};
-  if(/(?:(?:کل|تمام|همه)\s*(?:مبلغ|پول|هزینه)?[^.؟!?]{0,15}(?:اول|اولش|پیشاپیش|نقد|یکجا|یک\s*جا|کامل)|(?:پرداخت|تسویه)\s*(?:کامل|یکجا|یک\s*جا|نقدی)|صد\s*درصد|pay\s+in\s+full|full\s+payment|الدفع\s*كامل|كامل\s*المبلغ)/iu.test(t))return {kind:"full",percent:100};
-  const W=/(?:بیعانه|پیش\s*پرداخت|پیش\s*قسط|علی\s*الحساب|عربون|العربون|دفعه\s*مقدمه|مقدم|deposit|advance|upfront)/giu;
-  const words=[...t.matchAll(W)].map(m=>m.index);
+  if(/(?:(?:پرداخت|تسویه|پول)[^.؟!?]{0,25}(?:بعد|پس)\s*(?:از\s*)?(?:تحویل|دریافت|رسیدن)|(?:بعد|پس)\s*(?:از\s*)?(?:تحویل|دریافت)[^.؟!?]{0,25}(?:پرداخت|تسویه|بدم|میدم|بپردازم)|نسیه|cash\s+on\s+delivery|pay\s+(?:on|after)\s+delivery|عند\s*الاستلام|بعد\s*الاستلام|بعد\s*ما\s*(?:یوصل|استلم|نستلم))/iu.test(t))return {kind:"after_delivery",percent:0};
+  if(/(?:(?:کل|تمام|همه)\s*(?:مبلغ|پول|هزینه)?[^.؟!?]{0,15}(?:اول|اولش|پیشاپیش|نقد|یکجا|یک\s*جا|کامل)|(?:پرداخت|تسویه)\s*(?:کامل|یکجا|یک\s*جا|نقدی)|صد\s*درصد|pay\s+in\s+full|full\s+payment|الدفع\s*کامل|کامل\s*المبلغ|المبلغ\s*کامل|(?:ادفع|ندفع|احول|نحول|اسدد)\s*(?:ال)?(?:کل|کله|کلها|کامل|المبلغ\s*کله|المبلغ\s*کامل)(?=\s|$|[؟?.،,!])|(?:^|\s)(?:ال)?کل\s*(?:المبلغ\s*)?(?:مقدم|مقدما|سلف|قبل)|(?:^|\s)100\s*(?:%|٪|بالمیه|بالمئه|درصد))/iu.test(t))return {kind:"full",percent:100};
+  const words=[...t.matchAll(TERMS_DEPOSIT_WORD)].map(m=>m.index);
   const pcts=[...t.matchAll(/([0-9]{1,3})\s*(?:درصد|٪|%|بالمیه|بالمئه|percent)/giu)].map(m=>({value:Number(m[1]),at:m.index})).filter(x=>x.value<=100);
   // Paying in instalments / by cheque is a payment-terms request too (with the advance % the customer named, if any).
   const advance=pcts.length&&words.length?pcts.map(p=>({...p,d:Math.min(...words.map(w=>Math.abs(w-p.at)))})).sort((a,b)=>a.d-b.d)[0].value:null;
   if(SALES_AI_INSTALMENT.test(t.replace(/پیش\s*قسط/gu," ")))return {kind:"installments",percent:advance};
-  if(SALES_AI_CHEQUE.test(t)||/(?<![\p{L}\p{M}])چک(?![\p{L}\p{M}])[^.؟!?]{0,20}(?:قبول|میگیر|می\s*گیر|بدم|میدم|بپرداز|پرداخت)/u.test(t)||/\bcheques?\b/iu.test(t))return {kind:"cheque",percent:advance};
-  if(!pcts.length||!words.length)return null;
-  const best=pcts.map(p=>({...p,d:Math.min(...words.map(w=>Math.abs(w-p.at)))})).sort((a,b)=>a.d-b.d)[0];
-  return {kind:best.value===100?"full":best.value===0?"after_delivery":"deposit",percent:best.value};
+  if(SALES_AI_CHEQUE.test(t)||/(?<![\p{L}\p{M}])چک(?![\p{L}\p{M}])[^.؟!?]{0,20}(?:قبول|میگیر|می\s*گیر|بدم|میدم|بپرداز|پرداخت)/u.test(t)||/\bcheques?\b/iu.test(t)||/(?<![\p{L}\p{M}])(?:صک|بصک)(?![\p{L}\p{M}])/u.test(t))return {kind:"cheque",percent:advance};
+  const deposit=p=>({kind:p===100?"full":p===0?"after_delivery":"deposit",percent:p});
+  // a split that adds up to 100 («30/70», «70-30», «50/50») names the advance first
+  const ratio=t.match(/(?<![0-9x×])([0-9]{1,3})\s*[\/\\\-]\s*([0-9]{1,3})(?![0-9x×])/u);
+  if(ratio&&Number(ratio[1])+Number(ratio[2])===100&&!TERMS_DISCOUNT_WORD.test(t))return deposit(Number(ratio[1]));
+  const payTalk=words.length>0||TERMS_PAY_VERB.test(t)||paymentContext;
+  // «اكدر ادفع نص؟» / «نصف المبلغ مقدم» = half in advance
+  if(payTalk&&/(?:^|\s)(?:نص|نصف|النص|النصف|نصه|نصفه|نیمی|نصف\s*المبلغ|نص\s*المبلغ)(?=\s|$|[؟?.،,!])/u.test(t)&&!TERMS_DISCOUNT_WORD.test(t))return deposit(50);
+  if(!pcts.length)return null;
+  if(words.length){const best=pcts.map(p=>({...p,d:Math.min(...words.map(w=>Math.abs(w-p.at)))})).sort((a,b)=>a.d-b.d)[0];return deposit(best.value);}
+  // a % with a pay verb (or inside an order's payment context) and no discount wording is an advance request
+  if((TERMS_PAY_VERB.test(t)||paymentContext)&&!TERMS_DISCOUNT_WORD.test(t))return deposit(pcts[0].value);
+  return null;
 }
 export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[]}={}){
   const text=String(prose||""),issues=[];
