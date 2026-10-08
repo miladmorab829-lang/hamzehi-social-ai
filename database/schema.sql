@@ -400,7 +400,7 @@ CREATE INDEX IF NOT EXISTS idx_commercial_price_key_active
 ON commercial_price_items(market, product_key, active);
 CREATE TABLE IF NOT EXISTS visual_product_media (
  id TEXT PRIMARY KEY,
- source_platform TEXT NOT NULL CHECK(source_platform IN ('telegram','instagram')),
+ source_platform TEXT NOT NULL CHECK(source_platform IN ('telegram','instagram','r2')),
  source_identity TEXT NOT NULL UNIQUE,
  source_media_id TEXT,
  source_message_id TEXT,
@@ -741,3 +741,13 @@ CREATE TABLE IF NOT EXISTS owner_product_images (
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL
 );
+-- Live product gallery (Smart Visual Sales Engine V1): owner uploads in R2, spec cards, draft photos, photo requests, storage refs.
+CREATE TABLE IF NOT EXISTS gallery_photo_specs (id TEXT PRIMARY KEY, visual_media_id TEXT NOT NULL, version INTEGER NOT NULL CHECK(version>0), status TEXT NOT NULL CHECK(status IN ('pending','approved','superseded')), market TEXT NOT NULL CHECK(market IN ('IRAN','ARAB')), product_key TEXT NOT NULL, product_name TEXT NOT NULL, model TEXT NOT NULL, size TEXT, pieces INTEGER NOT NULL CHECK(pieces IN (2,3)), box_type TEXT, lid_color TEXT NOT NULL, middle_color TEXT, base_color TEXT NOT NULL, printing TEXT, ribbon TEXT, approved_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, CHECK(middle_color IS NULL OR pieces=3), UNIQUE(visual_media_id,version));
+CREATE UNIQUE INDEX IF NOT EXISTS ux_gallery_spec_approved ON gallery_photo_specs(visual_media_id) WHERE status='approved';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_gallery_spec_pending ON gallery_photo_specs(visual_media_id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS idx_gallery_spec_lookup ON gallery_photo_specs(status,market,model);
+CREATE TABLE IF NOT EXISTS lead_outreach_media (id TEXT PRIMARY KEY, outreach_id TEXT NOT NULL, visual_media_id TEXT NOT NULL, spec_id TEXT NOT NULL, position INTEGER NOT NULL CHECK(position BETWEEN 1 AND 10), created_at TEXT NOT NULL, UNIQUE(outreach_id,position), UNIQUE(outreach_id,visual_media_id));
+CREATE TABLE IF NOT EXISTS visual_photo_requests (id TEXT PRIMARY KEY, lead_id TEXT NOT NULL, conversation_id TEXT NOT NULL, inbox_message_id TEXT NOT NULL UNIQUE, market TEXT, product_base TEXT, size TEXT, configuration TEXT, parts_json TEXT NOT NULL DEFAULT '{}', colors_json TEXT NOT NULL DEFAULT '[]', reason TEXT NOT NULL CHECK(reason IN ('product_missing','color_missing')), status TEXT NOT NULL CHECK(status IN ('open','fulfilled','dismissed')), outreach_id TEXT, resolved_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_visual_photo_requests_status ON visual_photo_requests(status,created_at);
+CREATE TABLE IF NOT EXISTS visual_media_storage (id TEXT PRIMARY KEY, visual_media_id TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('r2','telegram_file')), object_key TEXT NOT NULL, sha256 TEXT, bytes INTEGER, content_type TEXT, created_at TEXT NOT NULL, UNIQUE(provider,object_key));
+CREATE INDEX IF NOT EXISTS idx_visual_media_storage_media ON visual_media_storage(visual_media_id,provider);

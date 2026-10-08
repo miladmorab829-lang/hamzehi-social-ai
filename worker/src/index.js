@@ -1580,7 +1580,7 @@ function visualAttributeValue(value){
 async function ensureVisualProductMediaStore(env){
   await ensureMediaVaultStore(env);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS visual_product_media (
-    id TEXT PRIMARY KEY,source_platform TEXT NOT NULL CHECK(source_platform IN ('telegram','instagram')),source_identity TEXT NOT NULL UNIQUE,
+    id TEXT PRIMARY KEY,source_platform TEXT NOT NULL CHECK(source_platform IN ('telegram','instagram','r2')),source_identity TEXT NOT NULL UNIQUE,
     source_media_id TEXT,source_message_id TEXT,source_file_unique_id TEXT,source_post_id TEXT,source_account_id TEXT,
     media_type TEXT NOT NULL CHECK(media_type IN ('photo','video')),source_kind TEXT NOT NULL,ownership_status TEXT NOT NULL CHECK(ownership_status='owned'),
     generated_detected INTEGER NOT NULL DEFAULT 0 CHECK(generated_detected IN (0,1)),candidate_status TEXT NOT NULL CHECK(candidate_status IN ('candidate','verified','rejected','inactive')),
@@ -1694,6 +1694,356 @@ async function retrieveEligibleVisualProductMedia(env,filters,limit){
     items=approximate.results||[];match="approximate";
   }
   return {match,items:await Promise.all(items.map(x=>visualProductMediaWithAttributes(env,{...x,match})))};
+}
+// ==== SMART VISUAL SALES ENGINE (V1): the live product gallery, built on visual_product_media ====
+// SOURCE: photos enter ONLY through the owner's dashboard upload (iPhone camera or phone gallery). Nothing is imported from the Telegram
+// vault, channels, the internet or AI. STORAGE: Cloudflare R2 (binding GALLERY_BUCKET) is the primary, durable copy; D1 holds the
+// photo record and its structured SPEC CARD (product · size · pieces · box type · lid / middle / base colour · printing · ribbon ·
+// market); Telegram is only the delivery channel to a customer (its file reference is cached after the first send). A spec is usable
+// only after the owner approves it; a change to an approved spec waits for its own approval. Customers get photos only inside an
+// owner-approved draft (Draft → SUBMIT → APPROVE → SEND). The gallery tables come from an explicit migration — no runtime DDL.
+const GALLERY_TABLES=["gallery_photo_specs","lead_outreach_media","visual_photo_requests","visual_media_storage"];
+const GALLERY_MAX_ALBUM=10,GALLERY_CAPTION_MAX=1000,GALLERY_SOURCE_KIND="owner_gallery";
+const GALLERY_PHOTO_ASK=/(?:عکس|تصویر|نمونه|نماذج|صور|صورة|photo|picture|sample|show)/iu;
+// Customer colour parts (salesColorPartsPick / memory.color_parts) → the spec roles. «درب» is the lid, «کف» the base; never swapped.
+const GALLERY_PART_ROLE={"بالا":"lid","رویه":"lid","بیرونی":"lid","الأعلى":"lid","الغطاء":"lid","الخارج":"lid","وسط":"middle","الوسط":"middle","پایین":"base","کف":"base","داخل":"base","الأسفل":"base","القاعدة":"base","الداخل":"base"};
+let galleryStoreVerified=false;
+async function galleryStoreReady(env){
+  if(galleryStoreVerified)return true;
+  try{
+    const r=await env.DB.prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN (${GALLERY_TABLES.map(()=>"?").join(",")})`).bind(...GALLERY_TABLES).first();
+    const media=await env.DB.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='visual_product_media' LIMIT 1").first();
+    if(Number(r?.n)===GALLERY_TABLES.length&&/'r2'/.test(String(media?.sql||""))){galleryStoreVerified=true;return true;}
+  }catch{}
+  return false;
+}
+async function requireGalleryStore(env){if(!(await galleryStoreReady(env)))throw Object.assign(Error("The gallery needs its migration (owner-actions/visual-sales-engine-v1/migration-gallery.sql); nothing was changed"),{status:503});}
+function galleryR2(env){return env.GALLERY_BUCKET&&typeof env.GALLERY_BUCKET.put==="function"&&typeof env.GALLERY_BUCKET.get==="function"?env.GALLERY_BUCKET:null;}
+// A catalog item name is «product · size · box type» (or «product · box type»).
+function galleryCatalogParts(name){const p=String(name||"").split(" · ").map(x=>x.trim()).filter(Boolean);return {base:p[0]||String(name||"").trim(),size:p.length>=3?p[1]:null,configuration:p.length>=2?p[p.length-1]:null};}
+const galleryKey=v=>salesTokens(String(v||"")).join(" ");
+function galleryBaseMatches(want,have){const a=galleryKey(want),b=galleryKey(have);if(!a||!b)return false;return a===b||(a.length>=4&&b.length>=4&&(a.includes(b)||b.includes(a)));}
+const GALLERY_SLIDING=/کشویی|كشوي|سحاب|جر(?:ّ)?ارة|جرار/u;
+function galleryPiecesOf(configuration){const c=String(configuration||"");if(/(?:^|\s)3\s*(?:تکه|قطع)|ثلاث\s*قطع|سه\s*تکه/u.test(c))return 3;if(/(?:^|\s)2\s*(?:تکه|قطع)|قطعتين|دو\s*تکه/u.test(c)||GALLERY_SLIDING.test(c))return 2;return null;}
+async function galleryApprovedValues(env,domain){
+  const r=await env.DB.prepare("SELECT market,value_json FROM sales_knowledge_facts WHERE status='active' AND domain=? AND market IN ('IRAN','ARAB','GLOBAL')").bind(domain).all();
+  const out={IRAN:[],ARAB:[],GLOBAL:[]};
+  for(const x of r.results||[]){let v=null;try{v=JSON.parse(x.value_json);}catch{}for(const label of (Array.isArray(v)?v:[v]).filter(s=>typeof s==="string"&&s.trim()))if(!out[x.market].some(o=>galleryKey(o)===galleryKey(label)))out[x.market].push(label.trim());}
+  return out;
+}
+async function galleryOptions(env){
+  await requireGalleryStore(env);
+  const items=(await env.DB.prepare("SELECT product_key,product_name,market FROM commercial_price_items WHERE active=1 AND market IN ('IRAN','ARAB') ORDER BY market,product_name").all()).results||[];
+  return {ok:true,catalog:items.map(x=>{const p=galleryCatalogParts(x.product_name);return {market:x.market,product_key:x.product_key,product_name:x.product_name,...p,pieces:galleryPiecesOf(p.configuration),sliding:GALLERY_SLIDING.test(p.configuration||"")};}),colors:await galleryApprovedValues(env,"color"),printing:await galleryApprovedValues(env,"printing"),max_album:GALLERY_MAX_ALBUM,r2_ready:!!galleryR2(env)};
+}
+// The SPEC CARD of one photo, validated against the owner's approved data: the catalog item must be active in that market; size and box
+// type come from that catalog item; pieces must agree with the box type; each colour (lid / middle / base) must be an approved colour
+// of that market; a middle colour only on a 3-piece box; printing only an approved printing type; ribbon is a short owner note.
+async function galleryValidateSpec(env,input){
+  const market=String(input?.market||"").toUpperCase();if(!["IRAN","ARAB"].includes(market))throw Error("Choose the market (Iran or Iraq)");
+  const item=await env.DB.prepare("SELECT product_key,product_name FROM commercial_price_items WHERE market=? AND product_key=? AND active=1 LIMIT 1").bind(market,String(input?.product_key||"")).first();
+  if(!item)throw Error("Choose a product of the approved price list of that market");
+  const parts=galleryCatalogParts(item.product_name),fromBox=galleryPiecesOf(parts.configuration);
+  const pieces=input?.pieces===undefined||input?.pieces===null||input?.pieces===""?fromBox:Number(input.pieces);
+  if(![2,3].includes(pieces))throw Error("Number of pieces must be 2 or 3");
+  if(fromBox&&pieces!==fromBox)throw Error(`This box type has ${fromBox} pieces, not ${pieces}`);
+  const colors=(await galleryApprovedValues(env,"color"))[market]||[],approved=v=>{if(v===undefined||v===null||String(v).trim()==="")return null;const hit=colors.find(c=>galleryKey(c)===galleryKey(v));if(!hit)throw Error("Not an approved colour of this market: "+String(v).slice(0,60));return hit;};
+  const lid=approved(input?.lid_color),base=approved(input?.base_color),middle=approved(input?.middle_color);
+  if(!lid)throw Error("The lid colour is required");if(!base)throw Error("The base colour is required");
+  if(middle&&pieces!==3)throw Error("A middle colour exists only on a 3-piece box");
+  let printing=null;if(String(input?.printing||"").trim()){const list=(await galleryApprovedValues(env,"printing"))[market]||[];printing=list.find(p=>galleryKey(p)===galleryKey(input.printing))||null;if(!printing)throw Error("Not an approved printing type of this market");}
+  const ribbon=String(input?.ribbon||"").normalize("NFKC").trim().slice(0,60)||null;
+  return {market,product_key:item.product_key,product_name:item.product_name,model:parts.base,size:parts.size,pieces,box_type:parts.configuration,lid_color:lid,middle_color:middle,base_color:base,printing,ribbon};
+}
+const GALLERY_SPEC_FIELDS=["market","product_key","product_name","model","size","pieces","box_type","lid_color","middle_color","base_color","printing","ribbon"];
+// The readable label under a photo, in the market's language: «نیم ست کوچک | 7x9 | ۲ تکه | درب سفید | کف طلایی».
+function galleryPhotoLabel(s,language){
+  if(!s)return "";const ar=language?language==="Iraqi Arabic":s.market==="ARAB",sliding=GALLERY_SLIDING.test(s.box_type||"");
+  const digits=n=>ar?String(n):String(n).replace(/[0-9]/g,d=>"۰۱۲۳۴۵۶۷۸۹"[d]);
+  const lidW=ar?(sliding?"الخارج":"الغطاء"):(sliding?"بیرونی":"درب"),baseW=ar?(sliding?"الداخل":"القاعدة"):(sliding?"داخل":"کف"),midW=ar?"الوسط":"وسط";
+  const pieces=ar?(s.pieces===3?"ثلاث قطع":"قطعتين"):`${digits(s.pieces)} تکه`;
+  // (a box type that already says the pieces — «2 تکه», «ثلاث قطع مائلة» — is shown as is; otherwise pieces · box type)
+  const box=s.box_type&&galleryPiecesOf(s.box_type)===s.pieces&&!GALLERY_SLIDING.test(s.box_type)?digits(s.box_type):[pieces,s.box_type].filter(Boolean).join(" · ");
+  return [s.model,s.size,box,`${lidW} ${s.lid_color}`,s.middle_color?`${midW} ${s.middle_color}`:null,`${baseW} ${s.base_color}`,s.printing,s.ribbon?(ar?"شريط ":"روبان ")+s.ribbon:null].filter(Boolean).join(" | ");
+}
+async function gallerySpecs(env,ids){
+  if(!ids.length)return new Map();
+  const r=await env.DB.prepare(`SELECT * FROM gallery_photo_specs WHERE status IN ('approved','pending') AND visual_media_id IN (${ids.map(()=>"?").join(",")}) ORDER BY version DESC`).bind(...ids).all(),m=new Map();
+  for(const s of r.results||[]){const x=m.get(s.visual_media_id)||m.set(s.visual_media_id,{}).get(s.visual_media_id);if(!x[s.status])x[s.status]=s;}
+  return m;
+}
+// Keeps the older structured attributes in step with the APPROVED spec (versioned, never deleted).
+async function gallerySyncAttributes(env,mediaId,s){
+  const wanted=[{type:"model",value:s.model},...(s.size?[{type:"size",value:s.size}]:[]),...(s.box_type?[{type:"other",value:s.box_type}]:[]),{type:"exterior_color",value:s.lid_color},{type:"interior_color",value:s.base_color},...(s.printing?[{type:"printing",value:s.printing}]:[])];
+  const current=(await env.DB.prepare("SELECT attribute_type,version FROM visual_product_media_attributes WHERE visual_media_id=? AND status='active'").bind(mediaId).all()).results||[];
+  await updateVisualProductAttributes(env,{visual_media_id:mediaId,attributes:wanted.map(a=>({...a,expected_version:current.find(c=>c.attribute_type===a.type)?.version}))});
+}
+// A new spec version is always PENDING: the first one is approved together with the photo (VERIFY); a later one by APPROVE_SPEC.
+async function galleryProposeSpec(env,{visual_media_id,spec}){
+  await requireGalleryStore(env);
+  const media=await env.DB.prepare("SELECT * FROM visual_product_media WHERE id=? AND source_kind=? LIMIT 1").bind(String(visual_media_id||""),GALLERY_SOURCE_KIND).first();
+  if(!media||["rejected","inactive"].includes(media.candidate_status))throw Error("Active gallery photo not found");
+  const s=await galleryValidateSpec(env,spec);
+  const last=await env.DB.prepare("SELECT MAX(version) AS v FROM gallery_photo_specs WHERE visual_media_id=?").bind(media.id).first(),t=now(),id="gspec-"+uid();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE gallery_photo_specs SET status='superseded',updated_at=? WHERE visual_media_id=? AND status='pending'").bind(t,media.id),
+    env.DB.prepare(`INSERT INTO gallery_photo_specs(id,visual_media_id,version,status,${GALLERY_SPEC_FIELDS.join(",")},created_at,updated_at) VALUES(?,?,?,'pending',${GALLERY_SPEC_FIELDS.map(()=>"?").join(",")},?,?)`).bind(id,media.id,Number(last?.v||0)+1,...GALLERY_SPEC_FIELDS.map(f=>s[f]??null),t,t)
+  ]);
+  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Gallery spec proposed by the owner (pending approval)',?,?)").bind("gallery-spec:"+id,"gallery_spec_proposed",JSON.stringify({visual_media_id:media.id,spec_id:id,photo_status:media.candidate_status}),t).run();
+  return {visual_media_id:media.id,spec_id:id,status:"pending",label:galleryPhotoLabel(s)};
+}
+// Owner upload: validate every photo, store the ORIGINAL in R2 first (no R2 → nothing stored), then the D1 record + pending spec.
+// The owner declares the photos real photos of their own product (AI-generated images are not accepted).
+async function handleGalleryUpload(req,env){
+  if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+  const declared=Number(req.headers.get("Content-Length")||NaN);
+  if(!String(req.headers.get("Content-Type")||"").toLowerCase().startsWith("multipart/form-data"))return json({ok:false,error:"multipart/form-data required"},400);
+  if(!Number.isFinite(declared))return json({ok:false,error:"Content-Length is required for uploads"},411);
+  if(declared>OWNER_IMPORT_LIMITS.body_bytes)return json({ok:false,error:"Upload is too large"},413);
+  const form=await req.formData().catch(()=>null);if(!form)return json({ok:false,error:"Invalid multipart body"},400);
+  const files=form.getAll("images").filter(x=>x&&typeof x==="object"&&"arrayBuffer" in x);
+  let spec=null;try{spec=JSON.parse(String(form.get("spec")||"null"));}catch{}
+  const r=await galleryUpload(env,{files,spec,attest:String(form.get("attest_real")||""),note:String(form.get("note")||"")});return json(r.body,r.status);
+}
+async function galleryUpload(env,{files,spec,attest,note}){
+  if(!(await galleryStoreReady(env)))return {status:503,body:{ok:false,error:"The gallery needs its migration first; nothing was stored"}};
+  const bucket=galleryR2(env);if(!bucket)return {status:503,body:{ok:false,error:"Photo storage (R2) is not ready; nothing was stored"}};
+  if(attest!=="yes")return {status:400,body:{ok:false,error:"Confirm that every photo is a real photo of your own product (AI-generated images are not accepted)"}};
+  if(!files.length)return {status:400,body:{ok:false,error:"At least one photo is required"}};
+  if(files.length>OWNER_IMPORT_LIMITS.images)return {status:413,body:{ok:false,error:`At most ${OWNER_IMPORT_LIMITS.images} photos per upload`}};
+  let s;try{s=await galleryValidateSpec(env,spec);}catch(e){return {status:400,body:{ok:false,error:sanitizeOperationalError(e?.message||e)}};}
+  const images=[];let total=0;
+  for(let i=0;i<files.length;i++){
+    const file=files[i],declaredType=String(file.type||"").toLowerCase();
+    if(!/^image\/(?:jpeg|png|webp)$/.test(declaredType))return {status:415,body:{ok:false,error:`Photo ${i+1}: only JPEG, PNG or WEBP are accepted (the dashboard converts iPhone photos automatically)`}};
+    if(Number(file.size)>OWNER_IMPORT_LIMITS.image_bytes)return {status:413,body:{ok:false,error:`Photo ${i+1} exceeds ${OWNER_IMPORT_LIMITS.image_bytes/1024/1024}MB`}};
+    total+=Number(file.size)||0;if(total>OWNER_IMPORT_LIMITS.images_total_bytes)return {status:413,body:{ok:false,error:"Total photo size exceeds the upload limit"}};
+    const bytes=new Uint8Array(await file.arrayBuffer()),kind=customerImageKind(bytes);
+    if(!kind||bytes.length>OWNER_IMPORT_LIMITS.image_bytes)return {status:415,body:{ok:false,error:`Photo ${i+1} is not a valid JPEG/PNG/WEBP file`}};
+    images.push({bytes,kind,sha256:await ownerSha256(bytes)});
+  }
+  const out=[];
+  for(const img of images){
+    const identity="r2:"+img.sha256,existing=await env.DB.prepare("SELECT * FROM visual_product_media WHERE source_identity=? LIMIT 1").bind(identity).first();
+    if(existing){out.push({ok:true,visual_media_id:existing.id,reused:true,status:existing.candidate_status});continue;}
+    const key=`gallery/originals/${img.sha256}.${img.kind.split("/")[1]}`;
+    try{await bucket.put(key,img.bytes,{httpMetadata:{contentType:img.kind},customMetadata:{sha256:img.sha256,source:"owner_dashboard_upload"}});}
+    catch{out.push({ok:false,error:"Photo storage (R2) is unavailable; this photo was not stored"});continue;}
+    const t=now(),id="visual-media-"+uid();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO visual_product_media(id,source_platform,source_identity,source_media_id,source_message_id,source_file_unique_id,source_post_id,source_account_id,media_type,source_kind,ownership_status,generated_detected,candidate_status,verified_real_product,version,created_at,updated_at)
+        VALUES(?,'r2',?,NULL,NULL,NULL,NULL,NULL,'photo',?,'owned',0,'candidate',0,1,?,?)`).bind(id,identity,GALLERY_SOURCE_KIND,t,t),
+      env.DB.prepare("INSERT OR IGNORE INTO visual_media_storage(id,visual_media_id,provider,object_key,sha256,bytes,content_type,created_at) VALUES(?,?,'r2',?,?,?,?,?)").bind("vstore-"+uid(),id,key,img.sha256,img.bytes.length,img.kind,t),
+      env.DB.prepare(`INSERT INTO gallery_photo_specs(id,visual_media_id,version,status,${GALLERY_SPEC_FIELDS.join(",")},created_at,updated_at) VALUES(?,?,1,'pending',${GALLERY_SPEC_FIELDS.map(()=>"?").join(",")},?,?)`).bind("gspec-"+uid(),id,...GALLERY_SPEC_FIELDS.map(f=>s[f]??null),t,t)
+    ]);
+    out.push({ok:true,visual_media_id:id,reused:false,status:"candidate",label:galleryPhotoLabel(s)});
+  }
+  await audit(env,"gallery_upload","Owner uploaded gallery photos to R2",{photos:out.length,stored:out.filter(x=>x.ok&&!x.reused).length,note:String(note||"").slice(0,80)||null});
+  const stored=out.filter(x=>x.ok).length;
+  return {status:stored?200:503,body:{ok:stored===out.length,items:out}};
+}
+// Owner review. VERIFY: the photo + its pending spec become usable together. APPROVE_SPEC: a changed spec of a verified photo replaces
+// the approved one. REJECT / DEACTIVATE: the photo is never used again (nothing is deleted; R2 keeps the original).
+async function galleryReview(env,{id,action,expected_version}){
+  await requireGalleryStore(env);
+  const media=await env.DB.prepare("SELECT * FROM visual_product_media WHERE id=? AND source_kind=? LIMIT 1").bind(String(id||""),GALLERY_SOURCE_KIND).first();
+  if(!media)throw Error("Gallery photo not found");
+  const t=now(),pending=await env.DB.prepare("SELECT * FROM gallery_photo_specs WHERE visual_media_id=? AND status='pending' ORDER BY version DESC LIMIT 1").bind(media.id).first();
+  if(action==="verify"||action==="approve_spec"){
+    if(action==="approve_spec"&&media.candidate_status!=="verified")throw Error("Verify the photo first");
+    if(action==="approve_spec"&&!pending)throw Error("There is no pending spec change");
+    const approvedNow=await env.DB.prepare("SELECT 1 x FROM gallery_photo_specs WHERE visual_media_id=? AND status='approved' LIMIT 1").bind(media.id).first();
+    if(action==="verify"&&!pending&&!approvedNow)throw Error("The photo needs a complete spec before it can be verified");
+    // 1. the spec is re-validated against TODAY's approved data (nothing written yet) …
+    const s=pending?await galleryValidateSpec(env,pending):null;
+    // 2. … the photo is verified (optimistic version check) …
+    const item=action==="verify"?await transitionVisualProductMedia(env,{id:media.id,action:"verify",expected_version:Number.isSafeInteger(expected_version)?expected_version:media.version}):media;
+    // 3. … and only then the pending spec becomes the approved one.
+    if(pending){
+      await env.DB.batch([
+        env.DB.prepare("UPDATE gallery_photo_specs SET status='superseded',updated_at=? WHERE visual_media_id=? AND status='approved'").bind(t,media.id),
+        env.DB.prepare("UPDATE gallery_photo_specs SET status='approved',approved_at=?,updated_at=? WHERE id=? AND status='pending'").bind(t,t,pending.id)
+      ]);
+      await gallerySyncAttributes(env,media.id,s);
+    }
+    await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Gallery photo / spec approved by the owner',?,?)").bind("gallery-review:"+media.id+":"+action+":"+t,"gallery_"+action,JSON.stringify({visual_media_id:media.id,spec_id:pending?.id||null}),t).run();
+    return {item,spec:"approved"};
+  }
+  if(!["reject","deactivate"].includes(action))throw Error("Invalid review action");
+  if(pending)await env.DB.prepare("UPDATE gallery_photo_specs SET status='superseded',updated_at=? WHERE id=?").bind(t,pending.id).run();
+  return {item:await transitionVisualProductMedia(env,{id:media.id,action,expected_version})};
+}
+async function galleryList(env,f={}){
+  await requireGalleryStore(env);
+  const status=["candidate","verified","rejected","inactive","all"].includes(f.status)?f.status:"all";
+  const r=status==="all"?await env.DB.prepare("SELECT * FROM visual_product_media WHERE source_kind=? AND candidate_status IN ('candidate','verified') ORDER BY updated_at DESC LIMIT 300").bind(GALLERY_SOURCE_KIND).all():await env.DB.prepare("SELECT * FROM visual_product_media WHERE source_kind=? AND candidate_status=? ORDER BY updated_at DESC LIMIT 300").bind(GALLERY_SOURCE_KIND,status).all();
+  const rows=r.results||[],specs=await gallerySpecs(env,rows.map(x=>x.id));
+  const market=String(f.market||"").toUpperCase(),color=galleryKey(f.color||""),box=galleryKey(f.box_type||""),product=String(f.product_key||""),q=galleryKey(f.q||"");
+  const pick=s=>s?Object.fromEntries(["id","version",...GALLERY_SPEC_FIELDS].map(k=>[k,s[k]])):null;
+  const items=rows.map(x=>{const sp=specs.get(x.id)||{},use=sp.approved||sp.pending;return {id:x.id,status:x.candidate_status,version:x.version,created_at:x.created_at,verified_at:x.verified_at,spec:pick(sp.approved),pending_spec:pick(sp.pending),label:galleryPhotoLabel(use),pending_label:sp.pending&&sp.approved?galleryPhotoLabel(sp.pending):null};})
+    .filter(x=>{const s=x.spec||x.pending_spec;if(!s)return !market&&!color&&!box&&!product&&!q;return (!market||s.market===market)&&(!product||s.product_key===product)&&(!box||galleryKey(s.box_type)===box)&&(!color||[s.lid_color,s.middle_color,s.base_color].some(c=>galleryKey(c)===color))&&(!q||galleryKey(x.label).includes(q));});
+  return {ok:true,items,r2_ready:!!galleryR2(env),counts:{candidate:items.filter(x=>x.status==="candidate").length,verified:items.filter(x=>x.status==="verified").length,pending_changes:items.filter(x=>x.status==="verified"&&x.pending_spec).length}};
+}
+// The original photo for the owner's dashboard (from R2).
+async function galleryImageResponse(env,id){
+  await requireGalleryStore(env);
+  const row=await env.DB.prepare("SELECT s.object_key,s.content_type FROM visual_media_storage s JOIN visual_product_media m ON m.id=s.visual_media_id WHERE s.visual_media_id=? AND s.provider='r2' AND m.source_kind=? LIMIT 1").bind(String(id||""),GALLERY_SOURCE_KIND).first();
+  if(!row)return json({ok:false,error:"Photo not found"},404);
+  const bucket=galleryR2(env);if(!bucket)return json({ok:false,error:"Photo storage (R2) is not ready"},503);
+  let obj=null;try{obj=await bucket.get(row.object_key);}catch{return json({ok:false,error:"Photo storage (R2) is unavailable"},503);}
+  if(!obj)return json({ok:false,error:"The original is missing in R2"},404);
+  const h=new Headers();h.set("Content-Type",row.content_type||obj.httpMetadata?.contentType||"image/jpeg");h.set("Cache-Control","private, max-age=3600");
+  return new Response(obj.body,{status:200,headers:h});
+}
+// Customer-facing search over VERIFIED photos with an APPROVED spec (owner uploads only). Exact: the product (+ size / box type when
+// known) and the colours — a colour named for a PART (lid / middle / base) must be that part's colour (a white lid is never a white
+// base); a colour named without a part must appear on the box. Suggestions: the colour combinations that DO have verified photos.
+async function gallerySearch(env,{market=null,base=null,size=null,configuration=null,parts={},colors=[],language=null,limit=GALLERY_MAX_ALBUM}={}){
+  if(!(await galleryStoreReady(env)))return {status:"unavailable",items:[],suggestions:[]};
+  if(!base)return {status:"product_unknown",items:[],suggestions:[]};
+  const markets=["IRAN","ARAB"].includes(market)?[market]:["IRAN","ARAB"];
+  const rows=(await env.DB.prepare(`SELECT s.*,m.verified_at FROM gallery_photo_specs s JOIN visual_product_media m ON m.id=s.visual_media_id
+    WHERE s.status='approved' AND m.candidate_status='verified' AND m.verified_real_product=1 AND m.generated_detected=0 AND m.ownership_status='owned'
+    AND m.source_kind=? AND m.source_platform='r2' AND m.media_type='photo' AND s.market IN (${markets.map(()=>"?").join(",")}) ORDER BY m.verified_at DESC`).bind(GALLERY_SOURCE_KIND,...markets).all()).results||[];
+  const model=rows.filter(s=>galleryBaseMatches(base,s.model)&&(!size||!s.size||galleryKey(s.size)===galleryKey(size))&&(!configuration||galleryKey(s.box_type)===galleryKey(configuration)));
+  const want={};for(const [part,color] of Object.entries(parts||{})){const role=GALLERY_PART_ROLE[part];if(role&&color)want[role]=galleryKey(color);}
+  const plain=[...new Set((colors||[]).map(galleryKey).filter(k=>k&&!Object.values(want).includes(k)))];
+  const fits=s=>Object.entries(want).every(([role,k])=>galleryKey(s[role+"_color"])===k)&&plain.every(k=>[s.lid_color,s.middle_color,s.base_color].some(c=>galleryKey(c)===k));
+  const exact=model.filter(fits),asked=Object.keys(want).length||plain.length;
+  const combos=new Map();for(const s of model){if(asked&&fits(s))continue;const k=[s.lid_color,s.middle_color,s.base_color].map(galleryKey).join("|");const c=combos.get(k)||combos.set(k,{s,n:0}).get(k);c.n++;}
+  const lang=language||(market==="ARAB"?"Iraqi Arabic":"Persian");
+  const suggestions=[...combos.values()].sort((a,b)=>b.n-a.n).slice(0,4).map(({s})=>galleryColorPhrase(s,lang));
+  const items=exact.slice(0,Math.min(GALLERY_MAX_ALBUM,limit)).map(s=>({visual_media_id:s.visual_media_id,spec_id:s.id,label:galleryPhotoLabel(s,lang)}));
+  return {status:exact.length?"found":model.length?"color_missing":"product_missing",items,suggestions,wanted:{parts:want,colors:plain},requested:galleryRequestedPhrase(parts,colors,lang)};
+}
+function galleryColorPhrase(s,language){const ar=language==="Iraqi Arabic",sliding=GALLERY_SLIDING.test(s.box_type||"");return [`${ar?(sliding?"الخارج":"الغطاء"):(sliding?"بیرونی":"درب")} ${s.lid_color}`,s.middle_color?`${ar?"الوسط":"وسط"} ${s.middle_color}`:null,`${ar?(sliding?"الداخل":"القاعدة"):(sliding?"داخل":"کف")} ${s.base_color}`].filter(Boolean).join(ar?" و":" و ");}
+function galleryRequestedPhrase(parts,colors,language){
+  const ar=language==="Iraqi Arabic",roleWord={lid:ar?"الغطاء":"درب",middle:ar?"الوسط":"وسط",base:ar?"القاعدة":"کف"};
+  const p=Object.entries(parts||{}).map(([part,c])=>GALLERY_PART_ROLE[part]&&c?`${roleWord[GALLERY_PART_ROLE[part]]} ${c}`:null).filter(Boolean);
+  const plain=(colors||[]).filter(c=>!Object.values(parts||{}).some(v=>galleryKey(v)===galleryKey(c)));
+  return [...p,...plain].join(ar?" و":" و ")||null;
+}
+function galleryReplyText(g,language,name){
+  const ar=language==="Iraqi Arabic",req=g.requested,sug=(g.suggestions||[]).length?g.suggestions.join(ar?"، ":"، "):null;
+  if(g.status==="found")return ar
+    ?`هاي صور حقيقية لـ ${name}${req?` (${req})`:""}.${req?" إذا عجبك، كلي العدد حتى أحسبلك السعر.":sug?` الألوان اللي عدنا صورها: ${sug}. شنو اللون اللي يعجبك؟`:" شنو اللون اللي يعجبك؟"}`
+    :`این‌ها عکس‌های واقعی ${name}${req?` (${req})`:""} هستن.${req?" اگه پسندیدید، تعداد رو بگید تا قیمت رو اعلام کنم.":sug?` ترکیب رنگ‌هایی که عکس واقعی‌شون رو داریم: ${sug}. کدوم رو می‌پسندید؟`:" کدوم رنگ رو می‌پسندید؟"}`;
+  if(g.status==="color_missing")return ar
+    ?`صور ${name}${req?` (${req})`:""} الحقيقية مو متوفرة هسه؛ سجلت طلبك.${sug?` عدنا صور حقيقية بهالألوان: ${sug}. أرسلها إلك؟`:""}`
+    :`عکس واقعی ${name}${req?` (${req})`:""} فعلاً در گالری نیست؛ درخواستتون ثبت شد.${sug?` این ترکیب‌ها رو عکس واقعی داریم: ${sug}. براتون بفرستم؟`:""}`;
+  if(g.status==="product_missing")return ar?`صور ${name} الحقيقية مو متوفرة هسه؛ سجلت طلبك وأول ما تجهز أرسلها إلك.`:`عکس واقعی ${name} فعلاً در گالری نیست؛ درخواستتون ثبت شد و به‌محض آماده شدن براتون می‌فرستیم.`;
+  return ar?"صور أي موديل تريد؟":"عکس کدوم مدل رو می‌خواید؟";
+}
+// After the inbound draft exists: attach the matched photos to THAT draft (sent only after the owner approves it), or queue the request.
+async function persistGalleryTurn(env,{row,gallery,outreach}){
+  if(!gallery||!(await galleryStoreReady(env)))return null;
+  const t=now();
+  if(gallery.status==="found"&&gallery.items.length&&outreach?.id){
+    await env.DB.batch(gallery.items.slice(0,GALLERY_MAX_ALBUM).map((m,i)=>env.DB.prepare("INSERT OR IGNORE INTO lead_outreach_media(id,outreach_id,visual_media_id,spec_id,position,created_at) VALUES(?,?,?,?,?,?)").bind("omedia-"+uid(),outreach.id,m.visual_media_id,m.spec_id,i+1,t)));
+    return {attached:gallery.items.length};
+  }
+  if(["color_missing","product_missing"].includes(gallery.status)){
+    await env.DB.prepare("INSERT OR IGNORE INTO visual_photo_requests(id,lead_id,conversation_id,inbox_message_id,market,product_base,size,configuration,parts_json,colors_json,reason,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'open',?,?)")
+      .bind("vreq-"+uid(),row.lead_id,row.conversation_id,row.id,gallery.market||null,gallery.base||null,gallery.size||null,gallery.configuration||null,JSON.stringify(gallery.parts||{}),JSON.stringify(gallery.colors||[]),gallery.status,t,t).run();
+    return {queued:gallery.status};
+  }
+  return null;
+}
+// The photos of an approved draft at SEND time: every one must still be a verified gallery photo whose approved spec is the one the
+// owner saw; each is sent from its cached Telegram file reference, or uploaded from R2 (no R2 and no cache → the send is refused).
+async function galleryOutreachAlbum(env,outreachId){
+  if(!(await galleryStoreReady(env)))return {items:[]};
+  const rows=(await env.DB.prepare(`SELECT om.position,om.visual_media_id,om.spec_id,m.candidate_status,m.verified_real_product,m.generated_detected,m.ownership_status,m.source_kind,sp.status AS spec_status,
+      (SELECT object_key FROM visual_media_storage x WHERE x.visual_media_id=om.visual_media_id AND x.provider='r2' LIMIT 1) AS r2_key,
+      (SELECT content_type FROM visual_media_storage x WHERE x.visual_media_id=om.visual_media_id AND x.provider='r2' LIMIT 1) AS content_type,
+      (SELECT object_key FROM visual_media_storage x WHERE x.visual_media_id=om.visual_media_id AND x.provider='telegram_file' ORDER BY created_at DESC LIMIT 1) AS file_id
+    FROM lead_outreach_media om LEFT JOIN visual_product_media m ON m.id=om.visual_media_id LEFT JOIN gallery_photo_specs sp ON sp.id=om.spec_id WHERE om.outreach_id=? ORDER BY om.position`).bind(outreachId).all()).results||[];
+  if(!rows.length)return {items:[]};
+  if(rows.length>GALLERY_MAX_ALBUM)return {items:[],blocked:"Too many photos in this draft"};
+  if(rows.some(r=>r.candidate_status!=="verified"||r.verified_real_product!==1||r.generated_detected||r.ownership_status!=="owned"||r.source_kind!==GALLERY_SOURCE_KIND||r.spec_status!=="approved"))return {items:[],blocked:"A photo in this draft is no longer a verified gallery photo (or its spec changed); prepare a new draft"};
+  const bucket=galleryR2(env),items=[];
+  for(const r of rows){
+    if(r.file_id){items.push({...r,source:"telegram_file"});continue;}
+    if(!bucket||!r.r2_key)return {items:[],blocked:"Photo storage (R2) is not available; nothing was sent"};
+    let obj=null;try{obj=await bucket.get(r.r2_key);}catch{return {items:[],blocked:"Photo storage (R2) is unavailable; nothing was sent"};}
+    if(!obj)return {items:[],blocked:"A photo original is missing in R2; nothing was sent"};
+    items.push({...r,source:"r2",bytes:new Uint8Array(await obj.arrayBuffer())});
+  }
+  return {items};
+}
+// Telegram multipart upload with the same outcome classification as telegramBotCall (rejected vs ambiguous).
+async function telegramBotUpload(env,method,form){
+  if(!env.TELEGRAM_BOT_TOKEN)throw Error('Telegram bot token missing');
+  let r;try{r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',body:form,signal:AbortSignal.timeout(30000)});}catch(error){error.telegramOutcome='ambiguous';throw error;}
+  let d;try{d=await r.json();}catch{const error=Error(`Telegram ${method} returned an unreadable response`);error.telegramOutcome='ambiguous';error.httpStatus=r.status;throw error;}
+  if(!r.ok||d?.ok===false){const error=Error(d?.description||`Telegram ${method} failed`);error.telegramOutcome='rejected';error.httpStatus=r.status;throw error;}
+  if(d?.ok!==true||!d.result){const error=Error(`Telegram ${method} returned an unverifiable response`);error.telegramOutcome='ambiguous';error.httpStatus=r.status;throw error;}
+  return d.result;
+}
+async function gallerySendAlbum(env,chatId,album,caption){
+  const form=new FormData();form.append("chat_id",String(chatId));
+  const media=album.map((x,i)=>{const m={type:"photo",media:x.source==="telegram_file"?x.file_id:`attach://photo${i}`};if(i===0)m.caption=caption;if(x.source==="r2")form.append(`photo${i}`,new Blob([x.bytes],{type:x.content_type||"image/jpeg"}),`photo${i}.${String(x.content_type||"image/jpeg").split("/")[1]}`);return m;});
+  let result;
+  if(album.length===1){const one=new FormData();one.append("chat_id",String(chatId));one.append("caption",caption);if(album[0].source==="telegram_file")one.append("photo",album[0].file_id);else one.append("photo",new Blob([album[0].bytes],{type:album[0].content_type||"image/jpeg"}),"photo.jpg");result=[await telegramBotUpload(env,"sendPhoto",one)];}
+  else{form.append("media",JSON.stringify(media));result=await telegramBotUpload(env,"sendMediaGroup",form);}
+  // Telegram is only the delivery path: its file reference is cached so the same photo is not uploaded again.
+  const t=now();
+  for(let i=0;i<album.length&&i<result.length;i++){const p=Array.isArray(result[i]?.photo)?result[i].photo[result[i].photo.length-1]:null;if(p?.file_id&&album[i].source==="r2")try{await env.DB.prepare("INSERT OR IGNORE INTO visual_media_storage(id,visual_media_id,provider,object_key,sha256,bytes,content_type,created_at) VALUES(?,?,'telegram_file',?,NULL,NULL,NULL,?)").bind("vstore-"+uid(),album[i].visual_media_id,String(p.file_id),t).run();}catch{}}
+  return result[0];
+}
+async function galleryRequests(env,{status="open"}={}){
+  await requireGalleryStore(env);
+  const r=await env.DB.prepare("SELECT q.*,l.name AS lead_name FROM visual_photo_requests q LEFT JOIN leads l ON l.id=q.lead_id WHERE (?='all' OR q.status=?) ORDER BY q.created_at DESC LIMIT 200").bind(status,status).all();
+  const items=[];
+  for(const x of r.results||[]){let colors=[],parts={};try{colors=JSON.parse(x.colors_json||"[]");parts=JSON.parse(x.parts_json||"{}");}catch{}
+    const g=x.status==="open"?await gallerySearch(env,{market:x.market,base:x.product_base,size:x.size,configuration:x.configuration,parts:Object.fromEntries(Object.entries(parts).map(([role,c])=>[{lid:"رویه",middle:"وسط",base:"کف"}[role]||role,c])),colors}):null;
+    items.push({...x,colors,parts,requested:g?.requested||null,available_now:g?.status==="found"?g.items.length:0,suggestions:g?.suggestions||[]});}
+  return {ok:true,items};
+}
+// Owner: turn a request whose photos now exist into ONE approval-gated draft with those photos (still Draft → SUBMIT → APPROVE → SEND).
+async function galleryPrepareRequest(env,{id}){
+  await requireGalleryStore(env);
+  const q=await env.DB.prepare("SELECT * FROM visual_photo_requests WHERE id=? LIMIT 1").bind(String(id||"")).first();
+  if(!q)throw Error("Photo request not found");if(q.status!=="open")throw Error("Photo request is already "+q.status);
+  let colors=[],partsRoles={};try{colors=JSON.parse(q.colors_json||"[]");partsRoles=JSON.parse(q.parts_json||"{}");}catch{}
+  let language=null;try{language=JSON.parse((await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+q.inbox_message_id).first())?.details_json||"{}").detected_language||null;}catch{}
+  if(!language){const lead=await env.DB.prepare("SELECT notes FROM leads WHERE id=?").bind(q.lead_id).first();language=outreachLanguage(parseLeadNotes(lead));}
+  const parts=Object.fromEntries(Object.entries(partsRoles).map(([role,c])=>[{lid:language==="Iraqi Arabic"?"الغطاء":"رویه",middle:language==="Iraqi Arabic"?"الوسط":"وسط",base:language==="Iraqi Arabic"?"القاعدة":"کف"}[role]||role,c]));
+  const g=await gallerySearch(env,{market:q.market,base:q.product_base,size:q.size,configuration:q.configuration,parts,colors,language});
+  if(g.status!=="found")throw Error("No verified photo matches this request yet");
+  const draft=await approvalGatedSalesDraft(env,{key:`gallery-request:${q.id}:${g.items.map(x=>x.spec_id).join(",")}`,leadId:q.lead_id,conversationId:q.conversation_id,language,message:galleryReplyText(g,language,q.product_base),eventType:"gallery_request_draft_created",eventMessage:"Approval-gated gallery photo draft created for a waiting photo request",details:{photo_request_id:q.id}});
+  if(!draft.outreach_id)throw Error(draft.reason||"Draft could not be created");
+  await persistGalleryTurn(env,{row:{lead_id:q.lead_id,conversation_id:q.conversation_id,id:q.inbox_message_id},gallery:g,outreach:{id:draft.outreach_id}});
+  await env.DB.prepare("UPDATE visual_photo_requests SET status='fulfilled',outreach_id=?,resolved_at=?,updated_at=? WHERE id=? AND status='open'").bind(draft.outreach_id,now(),now(),q.id).run();
+  return {ok:true,outreach_id:draft.outreach_id,photos:g.items.length,sending_enabled:false};
+}
+async function galleryResolveRequest(env,{id,status}){
+  await requireGalleryStore(env);if(!["dismissed","fulfilled"].includes(status))throw Error("Invalid status");
+  const r=await env.DB.prepare("UPDATE visual_photo_requests SET status=?,resolved_at=?,updated_at=? WHERE id=? AND status='open'").bind(status,now(),now(),String(id||"")).run();
+  if(!Number(r?.meta?.changes))throw Error("Open photo request not found");return {ok:true};
+}
+// Success metric: of the conversations that asked for photos, how many then chose a colour, asked the price and ordered (real data).
+async function galleryFunnel(env){
+  await requireGalleryStore(env);
+  const asked=(await env.DB.prepare(`SELECT conversation_id,MIN(created_at) AS at FROM (SELECT o.conversation_id,o.created_at FROM lead_outreach o JOIN lead_outreach_media m ON m.outreach_id=o.id UNION ALL SELECT conversation_id,created_at FROM visual_photo_requests) GROUP BY conversation_id`).all()).results||[];
+  const out={photo_requests:asked.length,photos_sent:0,color_chosen:0,price_asked:0,ordered:0,paid:0,open_requests:Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM visual_photo_requests WHERE status='open'").first())?.n||0)};
+  for(const a of asked){
+    const [sent,color,price,order]=await Promise.all([
+      env.DB.prepare("SELECT 1 x FROM lead_outreach o JOIN lead_outreach_media m ON m.outreach_id=o.id WHERE o.conversation_id=? AND o.status='sent' LIMIT 1").bind(a.conversation_id).first(),
+      env.DB.prepare("SELECT 1 x FROM conversation_memory_facts WHERE conversation_id=? AND memory_key IN ('selected_colors','color_parts','exterior_color') AND created_at>=? LIMIT 1").bind(a.conversation_id,a.at).first().catch(()=>null),
+      env.DB.prepare("SELECT 1 x FROM inbox_messages WHERE conversation_id=? AND category IN ('asks_price','quote_requested','accepted') AND created_at>=? LIMIT 1").bind(a.conversation_id,a.at).first(),
+      env.DB.prepare("SELECT status FROM lead_orders WHERE conversation_id=? AND created_at>=? ORDER BY created_at DESC LIMIT 1").bind(a.conversation_id,a.at).first().catch(()=>null)
+    ]);
+    if(sent)out.photos_sent++;if(color)out.color_chosen++;if(price)out.price_asked++;if(order){out.ordered++;if(["paid","shipped","fulfilled"].includes(order.status))out.paid++;}
+  }
+  return {ok:true,...out};
+}
+// Recovery manifest: every gallery photo with its R2 key, sha256, approved spec and status — enough to rebuild D1 from R2.
+async function galleryExport(env){
+  await requireGalleryStore(env);
+  const rows=(await env.DB.prepare("SELECT * FROM visual_product_media WHERE source_kind=? ORDER BY created_at").bind(GALLERY_SOURCE_KIND).all()).results||[];
+  const specs=await gallerySpecs(env,rows.map(x=>x.id)),storage=(await env.DB.prepare("SELECT visual_media_id,provider,object_key,sha256 FROM visual_media_storage").all()).results||[];
+  return {ok:true,generated_at:now(),r2_ready:!!galleryR2(env),items:rows.map(x=>{const st=storage.filter(s=>s.visual_media_id===x.id),sp=specs.get(x.id)||{};return {id:x.id,status:x.candidate_status,r2_key:st.find(s=>s.provider==="r2")?.object_key||null,sha256:st.find(s=>s.provider==="r2")?.sha256||null,approved_spec:sp.approved?Object.fromEntries(GALLERY_SPEC_FIELDS.map(k=>[k,sp.approved[k]])):null,pending_spec:sp.pending?Object.fromEntries(GALLERY_SPEC_FIELDS.map(k=>[k,sp.pending[k]])):null};})};
 }
 function vaultChatId(env){return String(env.TELEGRAM_VAULT_CHAT_ID||'').trim()}
 function videoVaultChatId(env){return String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||env.TELEGRAM_VAULT_CHAT_ID||'').trim()}
@@ -8494,6 +8844,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // never demoted to a new offer). A changed deal or a changed approved price is re-offered as before.
   const acceptedAgain=intent==="accepted"&&!formalQuoteReply&&dealCandidate?.status==="accepted"&&!!dealCandidate.offer?.offer_hash&&!dealChanged&&(!currentOfferHash||currentOfferHash===dealCandidate.offer.offer_hash);
   const answeringPriceQuestion=["clarify_product","ask_attribute"].includes(lastAction)||(lastAction==="answer_price"&&newFacts.includes("requested_quantity"))||(lastAction==="ask_destination"&&!!conversationMarket);
+  const galleryOn=await galleryStoreReady(env);
   if(orderStatusAsked){action="order_status";}
   else if(intent==="rejected"){action="acknowledge_rejection";}
   else if(acceptance&&offerFresh){action="accept_offer";}
@@ -8510,6 +8861,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // unrelated question, a new detail — is handled normally, and reaches the same escalation again only if it raises the same
   // owner-only question (escalate() → wait_for_owner, never a second escalation).
   else if(openEscalation&&!newFacts.length&&!kgQuestions.length&&!Object.keys(kgCurrent).length&&SALES_BRAIN_STATUS_PING.test(String(row.message||"").normalize("NFKC"))){action="wait_for_owner";}
+  // Live product gallery: a photo / sample request is answered from VERIFIED gallery photos inside an owner-approved draft.
+  else if(galleryOn&&intent!=="asks_price"&&GALLERY_PHOTO_ASK.test(String(row.message||""))&&!colorPick.special){action="visual";}
   // Generic knowledge: owner-defined hard stops and undecided combinations escalate; approved non-commercial facts/relations are answered.
   // A colour the customer names that is no approved standard option is a special request: the owner decides (never confirmed).
   // A mixed request («مشکی سلفون و بنفش»): the approved part is kept (memory + the SAME order candidate) and said so; the rest goes
@@ -8606,6 +8959,19 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(telegramStartParam(row.message)&&language==="Iraqi Arabic"&&!needsOwner&&!postSaleOrder&&!storedCandidate&&[null,"greet","continue_conversation","acknowledge_details","ask_product","ask_destination"].includes(action)){action="welcome";askedField=null;}
   let salesDraft=null,salesTexts=[];
   if(action==="welcome")salesDraft=SALES_WELCOME_AR;
+  // Gallery: the product (approved price catalog of this market when resolved, else the customer's own product words), the box type /
+  // size when known and the colours asked now (or chosen before). Found → those photos are attached to this draft; missing → queued.
+  let gallery=null,galleryName=null;
+  if(action==="visual"&&galleryOn){
+    const req=pricing?.requirements||{},base=(pricing?.product?.source==="list"?pricing.product.name:null)||pricing?.product_name||model||null;
+    // the colours of this turn first (a part-by-part choice, then plain colours), else what the customer chose before
+    const custParts=partsPick?.parts&&Object.keys(partsPick.parts).length?partsPick.parts:colorParts&&Object.keys(colorParts).length?colorParts:{};
+    const wantColors=colorPick.selected.length?colorPick.selected:selectedColors;
+    const roles=Object.fromEntries(Object.entries(custParts).map(([p,c])=>[GALLERY_PART_ROLE[p],c]).filter(([r,c])=>r&&c));
+    gallery={...await gallerySearch(env,{market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,parts:custParts,colors:wantColors,language}),market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,parts:roles,colors:wantColors};
+    galleryName=pricing?.product_name||base;
+    if(gallery.status==="unavailable")gallery=null;else salesDraft=galleryReplyText(gallery,language,galleryName);
+  }
   if(action==="accept_offer")stage="customer_accepted";
   if(action==="answer_price"){salesDraft=priceReply.parts.join(" ");salesTexts=priceReply.texts;}
   // Colour question: ONE answer composed from approved knowledge (+ the approved price when the deal is priced and not yet offered at
@@ -8683,6 +9049,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const authorityFacts=[...kgEvidenceFacts,...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
   // (the catalog answer is evidenced by exactly the approved catalog it lists: its product names and box types)
   if(action==="answer_catalog")authorityFacts.push({category:"availability",values:[...catalogNames,...catalogModels]});
+  if(gallery)authorityFacts.push({category:"availability",values:[galleryName,gallery.base,gallery.requested,...(gallery.colors||[]),...Object.values(gallery.parts||{}),...(gallery.suggestions||[]),...(gallery.items||[]).map(x=>x.label)].filter(Boolean)});
   if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&salesDraft!==null&&!salesDraft.includes(approvedPrinting))salesDraft=`تمام، سجلت نوع الطباعة: ${approvedPrinting}. `+salesDraft;
   let draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&!String(draft).includes(approvedPrinting)&&String(draft).includes("سجلت نوع الطباعة"))draft=String(draft).replace("سجلت نوع الطباعة","سجلت نوع الطباعة: "+approvedPrinting);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();let validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   // ---- AI-FIRST REPLY. The Sales AI's reply is what the customer gets when it passes the deterministic gate; the authoritative
@@ -8814,7 +9181,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
   const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge"||action==="advise_colors")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details","order_details","ai_answer"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],requested:gallery.requested||null,items:gallery.items||[],suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   // Observability without chain-of-thought: whether the Sales AI ran, model, latency, what it understood, which facts were applied,
   // where the reply came from and why a fallback happened. The send path re-validates an AI reply against the same evidence.
   result.ai_brain=aiInfo;
@@ -8877,6 +9244,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
     VALUES(?,?,?,?,?,'telegram',?,?,?,?,?,?,?,?)`).bind(outreachId,row.lead_id,contact.id,row.conversation_id,inboxId,recipient,message,language,"draft",ownerReviewDraft?"sales_brain_needs_owner":null,ownerReviewDraft?String(brain.needs_owner_reason||"owner_review_required").slice(0,240):null,t,t).run();
   const outreach=await env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();
   if(!outreach)throw Error("Negotiation draft could not be persisted");
+  if(brain.gallery&&outreach.id===outreachId)try{await persistGalleryTurn(env,{row,gallery:brain.gallery,outreach});}catch(error){try{await audit(env,"gallery_turn_failed","Gallery photos / photo request could not be stored; the draft stays text-only",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   const quoteRequest=intent==="quote_requested"?extractQuoteRequestDetails(row.message):null;
   await Promise.all([
     env.DB.prepare("UPDATE inbox_messages SET category=?,reply_suggestion=?,updated_at=? WHERE id=?").bind(intent,outreach.message,now(),inboxId).run(),
@@ -9825,10 +10193,15 @@ async function sendApprovedTelegramOutreach(env,outreachId){
   if(!chatId)return {ok:false,statusCode:409,error:'Telegram recipient is not sendable'};
   const message=String(outreach.message||'');
   if(!message.trim())return {ok:false,statusCode:409,error:'Approved outreach message is empty'};
+  const album=await galleryOutreachAlbum(env,outreach.id);
+  if(album.blocked)return {ok:false,statusCode:409,error:album.blocked};
+  if(album.items.length&&message.length>GALLERY_CAPTION_MAX)return {ok:false,statusCode:409,error:'Photo caption is too long; shorten the draft'};
   const claimed=await env.DB.prepare("UPDATE lead_outreach SET status='sending',error_code=NULL,error_detail=NULL,updated_at=? WHERE id=? AND status='approved'").bind(now(),outreach.id).run();
   if(!claimed.meta?.changes)return {ok:false,statusCode:409,error:'Outreach send was already claimed'};
   let result;
-  try { result=await telegramBotCall(env,'sendMessage',{chat_id:chatId,text:message}); }
+  try {
+    result=album.items.length?await gallerySendAlbum(env,chatId,album.items,message):await telegramBotCall(env,'sendMessage',{chat_id:chatId,text:message});
+  }
   catch(error){
     const rejected=error?.telegramOutcome==='rejected',status=rejected?'send_failed':'send_ambiguous',detail=sanitizeOperationalError(error?.message||error),code=rejected?'telegram_rejected':'telegram_outcome_ambiguous',t=now();
     try { await env.DB.prepare("UPDATE lead_outreach SET status=?,error_code=?,error_detail=?,updated_at=? WHERE id=? AND status='sending'").bind(status,code,detail,t,outreach.id).run(); } catch {}
@@ -11437,6 +11810,26 @@ await pollWeeklyVideoAutopilot(env);
         return json({ok:true,items:await Promise.all((r.results||[]).map(item=>visualProductMediaWithAttributes(env,item)))});
       }
 
+      // ---- Live product gallery (owner): owner uploads only (R2), spec cards, review, photo requests, funnel and the backup manifest.
+      if (u.pathname.startsWith("/api/gallery")) {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        try{
+          if(u.pathname==="/api/gallery/upload"&&req.method==="POST")return await handleGalleryUpload(req,env);
+          if(u.pathname==="/api/gallery/image"&&req.method==="GET")return await galleryImageResponse(env,u.searchParams.get("id"));
+          if(u.pathname==="/api/gallery/options"&&req.method==="GET")return json(await galleryOptions(env));
+          if(u.pathname==="/api/gallery"&&req.method==="GET")return json(await galleryList(env,Object.fromEntries(u.searchParams)));
+          const body=req.method==="POST"?await req.json().catch(()=>({})):{};
+          if(u.pathname==="/api/gallery/spec"&&req.method==="POST")return json({ok:true,...await galleryProposeSpec(env,body)});
+          if(u.pathname==="/api/gallery/review"&&req.method==="POST")return json({ok:true,...await galleryReview(env,body)});
+          if(u.pathname==="/api/gallery/requests"&&req.method==="GET")return json(await galleryRequests(env,{status:u.searchParams.get("status")||"open"}));
+          if(u.pathname==="/api/gallery/requests/prepare"&&req.method==="POST")return json(await galleryPrepareRequest(env,body));
+          if(u.pathname==="/api/gallery/requests/resolve"&&req.method==="POST")return json(await galleryResolveRequest(env,body));
+          if(u.pathname==="/api/gallery/funnel"&&req.method==="GET")return json(await galleryFunnel(env));
+          if(u.pathname==="/api/gallery/export"&&req.method==="GET")return json(await galleryExport(env));
+          return json({ok:false,error:"Not found"},404);
+        }catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},error?.status||409);}
+      }
+
       if (u.pathname === "/api/visual-product-media/eligible" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
         await ensureVisualProductMediaStore(env);
@@ -11449,6 +11842,9 @@ await pollWeeklyVideoAutopilot(env);
 
       if (u.pathname === "/api/visual-product-media/ingest" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        // Product photos are added ONLY by the owner's dashboard upload (/dashboard/gallery); importing from the Telegram vault,
+        // channels or Instagram is switched off (earlier records are kept, never deleted).
+        return json({ok:false,error:"Product photos are added only by the owner's dashboard upload (/dashboard/gallery)"},403);
         const body=await req.json().catch(()=>null);
         try{return json({ok:true,...await ingestVisualProductMedia(env,body)});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
       }
@@ -12782,7 +13178,8 @@ Context: ${context}`;
         const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,c.contact_type,c.raw_value AS contact_raw_value,c.normalized_value AS contact_normalized_value,c.evidence_status,c.source AS contact_source,c.evidence_url
           FROM lead_outreach o JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_contacts c ON c.id=o.contact_id
           ORDER BY o.created_at DESC LIMIT 100`).all();
-        const items=(r.results||[]).map(item=>({...item,telegram_sendable:!!telegramLeadContactChatId({contact_type:item.contact_type,raw_value:item.contact_raw_value,normalized_value:item.contact_normalized_value,evidence_status:item.evidence_status,source:item.contact_source})}));
+        const mediaRows=await galleryStoreReady(env)&&(r.results||[]).length?((await env.DB.prepare(`SELECT outreach_id,visual_media_id,spec_id,position FROM lead_outreach_media WHERE outreach_id IN (${(r.results||[]).map(()=>"?").join(",")}) ORDER BY position`).bind(...(r.results||[]).map(x=>x.id)).all()).results||[]):[];
+        const items=(r.results||[]).map(item=>({...item,media:mediaRows.filter(m=>m.outreach_id===item.id),telegram_sendable:!!telegramLeadContactChatId({contact_type:item.contact_type,raw_value:item.contact_raw_value,normalized_value:item.contact_normalized_value,evidence_status:item.evidence_status,source:item.contact_source})}));
         return json({ok:true,items,sending_enabled:true});
       }
 

@@ -7,7 +7,7 @@ const DASH_HEAD=`<!doctype html><html lang="fa" dir="rtl"><head>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--soft:#f3f4f6;--line:#e6e8ec;--line2:#d5d9e0;--text:#111827;--muted:#6b7280;--ok:#15803d;--okbg:#ecfdf3;--warn:#c2410c;--warnbg:#fff7ed;--bad:#dc2626;--badbg:#fef2f2;--accent:#111827;--r:14px;--nav:60px;
 font-family:-apple-system,BlinkMacSystemFont,"SF Arabic","SF Pro Text","Segoe UI","Vazirmatn",Tahoma,system-ui,sans-serif;background:var(--bg);color:var(--text);-webkit-text-size-adjust:100%}
-*{box-sizing:border-box}html,body{background:var(--bg)}body{margin:0;min-height:100vh;color:var(--text);line-height:1.6;font-size:14px}a{color:inherit}
+*{box-sizing:border-box}[hidden]{display:none!important}html,body{background:var(--bg)}body{margin:0;min-height:100vh;color:var(--text);line-height:1.6;font-size:14px}a{color:inherit}
 .ic{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}
 .wrap{max-width:1120px;margin:auto;padding:0 16px 32px}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
 .ey{font-size:11px;color:var(--muted)}.brand{font-size:18px;font-weight:800;margin:2px 0}.sub{font-size:13px;color:var(--muted)}
@@ -85,6 +85,20 @@ details.fold{margin-top:12px}details.fold>summary{cursor:pointer;font-weight:800
 details.fold>summary::-webkit-details-marker{display:none}details.fold>summary .chev{margin-inline-start:auto;color:#9ca3af;transition:transform .15s}details.fold[open]>summary .chev{transform:rotate(-90deg)}details.fold>summary .ic{color:var(--muted)}
 details.fold>summary b.cnt{background:var(--soft);border-radius:99px;padding:0 8px;font-size:12px}details.fold>summary b.cnt.has{background:var(--warn);color:#fff}
 details.fold>div>.section:first-child,details.fold>.section:first-of-type{margin-top:8px}
+/* live product gallery */
+.ggrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:10px}
+.gcard{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.gimg{width:100%;aspect-ratio:1/1;object-fit:cover;background:var(--soft);display:block}.gmeta{padding:8px;display:flex;flex-direction:column;gap:2px;font-size:12.5px}.gmeta small{color:var(--muted);font-size:11.5px}
+.gmeta .tools{margin-top:6px;gap:6px}.gmeta .btn{min-height:36px;padding:5px 9px;font-size:12px}
+.gpicklist{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:11px;margin-top:6px;padding:4px;background:#fff}
+.gpick{display:flex;align-items:center;gap:6px;padding:6px 6px;font-size:13px;border-radius:8px}.gpick:hover{background:var(--soft)}.gpick input,.chip input{width:18px;height:18px;accent-color:var(--accent)}
+.gprevs{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.gprev{position:relative}.gprev img{width:72px;height:72px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}.gprev .btn{position:absolute;top:-6px;left:-6px;min-height:24px;width:24px;padding:0;border-radius:99px}
+.gcapture{display:flex;gap:8px;flex-wrap:wrap}.gcapture label{flex:1;min-width:140px}.gcapture input[type=file]{display:none}
+.gthumbs{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}.gthumb{width:64px;height:64px;object-fit:cover;border-radius:9px;border:1px solid var(--line);background:var(--soft)}
+.gattest{display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-top:10px}.gattest input{width:20px;height:20px;flex:none;margin-top:2px}
+.gform{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.gform label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);font-weight:700}.gform .full{grid-column:1/-1}
+.glabel{font-size:12.5px;line-height:1.6}.gpreviewlabel{margin-top:8px;padding:8px 10px;border:1px dashed var(--line2);border-radius:10px;font-weight:700;font-size:13px;background:#fff}
+@media(max-width:560px){.gform{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
 `;
 const DASH_SECTIONS={
@@ -523,8 +537,10 @@ async function loadOutreachApprovals(){
  if(!d.ok){status.innerHTML="<span class='bad'>✕ "+esc(d.error||"Outreach queue unavailable")+"</span>";list.innerHTML="";return}
  const items=(d.items||[]).filter(x=>["draft","pending_approval","approved","rejected","sending","sent","send_failed","send_ambiguous"].includes(x.status));
  status.textContent=items.filter(x=>x.status==="pending_approval").length+" مورد در انتظار تأیید · ارسال فقط با دکمه SEND انجام می‌شود.";
- list.innerHTML=items.length?items.map(x=>"<div class='row'><b>"+esc(x.lead_name||x.lead_id)+"</b><div class='mini'>"+esc(x.channel)+" · "+esc(x.recipient)+" · "+esc(x.language)+" · "+esc(x.status)+"</div><div class='mini'>"+(x.channel==="telegram"?(x.telegram_sendable?"<span class='ok'>SENDABLE</span>":"<span class='bad'>NOT SENDABLE</span>")+" · ":"")+"Evidence: "+esc(x.evidence_status||"legacy/manual")+" · "+esc(x.contact_source||"")+"</div><div style='margin-top:6px;white-space:pre-wrap'>"+esc(x.message)+"</div><div class='tools' style='margin-top:8px'>"+(x.status==="draft"?"<button class='btn' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;submit&quot;)'>SUBMIT FOR REVIEW</button>":"")+(x.status==="pending_approval"?"<button class='btn primary' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;approve&quot;)'>APPROVE</button><button class='btn danger' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;reject&quot;)'>REJECT</button>":"")+(x.status==="approved"&&x.channel==="telegram"&&x.telegram_sendable?"<button class='btn primary' onclick='sendTelegramOutreach(&quot;"+esc(x.id)+"&quot;)'>SEND</button>":"")+"</div></div>").join(""):"<div class='hint'>پیش‌نویس ارتباطی وجود ندارد.</div>";
+ list.innerHTML=items.length?items.map(x=>"<div class='row'><b>"+esc(x.lead_name||x.lead_id)+"</b><div class='mini'>"+esc(x.channel)+" · "+esc(x.recipient)+" · "+esc(x.language)+" · "+esc(x.status)+"</div><div class='mini'>"+(x.channel==="telegram"?(x.telegram_sendable?"<span class='ok'>SENDABLE</span>":"<span class='bad'>NOT SENDABLE</span>")+" · ":"")+"Evidence: "+esc(x.evidence_status||"legacy/manual")+" · "+esc(x.contact_source||"")+"</div><div style='margin-top:6px;white-space:pre-wrap'>"+esc(x.message)+"</div>"+(x.media&&x.media.length?"<div class='gthumbs'>"+x.media.map(m=>"<img class='gthumb' data-media='"+esc(m.visual_media_id)+"' alt='عکس "+m.position+"'>").join("")+"</div><div class='mini'>"+x.media.length+" عکس واقعی تأییدشده همراه این پیام ارسال می‌شود (فقط بعد از تأیید و SEND).</div>":"")+"<div class='tools' style='margin-top:8px'>"+(x.status==="draft"?"<button class='btn' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;submit&quot;)'>SUBMIT FOR REVIEW</button>":"")+(x.status==="pending_approval"?"<button class='btn primary' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;approve&quot;)'>APPROVE</button><button class='btn danger' onclick='setOutreachStatus(&quot;"+esc(x.id)+"&quot;,&quot;reject&quot;)'>REJECT</button>":"")+(x.status==="approved"&&x.channel==="telegram"&&x.telegram_sendable?"<button class='btn primary' onclick='sendTelegramOutreach(&quot;"+esc(x.id)+"&quot;)'>SEND</button>":"")+"</div></div>").join(""):"<div class='hint'>پیش‌نویس ارتباطی وجود ندارد.</div>";
+ galOutreachThumbs();
 }
+function galOutreachThumbs(){try{galThumbs($("outreachApprovalItems"))}catch(e){}}
 async function setOutreachStatus(id,action){
  const d=await api("/api/leads/outreach/transition",{method:"POST",body:JSON.stringify({id,action})});
  if(!d.ok){$("outreachApprovalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Outreach update failed")+"</span>";return}
@@ -1538,6 +1554,7 @@ const UX_INDEX=[
  ["خطاها","تلگرام، هوش مصنوعی، رسانه، Worker، API","/dashboard/errors","error errors log خطا لاگ مشکل"],
  ["محصولات و دانش","دانش فروش، کاتالوگ، آموزش","/dashboard/knowledge","product knowledge catalog محصول دانش کاتالوگ رنگ چاپ آموزش teach"],
  ["لیست قیمت","قیمت‌های فعال و نسخه‌ها","/dashboard/knowledge#sec-priceList","price قیمت لیست دلار تومان"],
+ ["گالری محصولات","عکس واقعی، تأیید، درخواست‌های عکس","/dashboard/gallery","gallery photo image camera عکس گالری تصویر دوربین آلبوم"],
  ["درخواست‌های قیمت","Quoteهای منتظر","/dashboard/orders#sec-quotes","quote پیش فاکتور درخواست قیمت"],
  ["محتوا","صف محتوا و پیش‌نویس‌ها","/dashboard/content","content محتوا پست کپشن"],
  ["رسانه","اتوپایلوت عکس و ویدیو","/dashboard/media","media photo video عکس ویدیو رسانه"],
@@ -1611,6 +1628,121 @@ function uxConfirm2(title,body,word){return new Promise(res=>{const d=document.c
 const UX_MASTER={on:["شروع همه (START ALL)","همه اتوماسیون‌های صف خودکار روشن می‌شوند."],pause:["توقف موقت همه (PAUSE ALL)","اجرای Taskهای آماده موقتاً متوقف می‌شود."],stop:["توقف همه (STOP ALL)","صف خودکار خاموش می‌شود."],emergency_stop:["توقف اضطراری (EMERGENCY STOP)","کل صف خودکار فوراً خاموش می‌شود."],run:["اجرای Taskهای آماده (RUN DUE TASKS)","Taskهای آماده همین حالا اجرا می‌شوند."]};
 async function uxMasterConfirm(action){const m=UX_MASTER[action]||[action,""];const ok=await uxConfirm2(m[0],m[1],"تأیید");if(!ok){$("masterHelp").textContent="لغو شد · هیچ تغییری انجام نشد.";$("commandStatus").textContent="لغو شد · هیچ تغییری انجام نشد."}return ok}
 function uxInit(){uxSearchInit();uxLazyInit();on("authFold",()=>{$("authFold").open=!token()})}
+// ---- Live product gallery (owner): photos ONLY from the iPhone camera / phone gallery, stored in R2; every photo has a SPEC CARD
+// (product · size · pieces · box type · lid / middle / base colour · printing · ribbon · market) used only after the owner approves it.
+// Photos reach a customer ONLY inside an owner-approved draft (Draft → SUBMIT → APPROVE → SEND).
+let galOptions=null,galItems=[],galEditing=null,galFiles=[];
+const GAL_THUMBS=new Map();
+async function galThumbUrl(id){if(!id)return null;if(GAL_THUMBS.has(id))return GAL_THUMBS.get(id);const p=fetch("/api/gallery/image?id="+encodeURIComponent(id),{headers:hdr()}).then(r=>r.ok?r.blob():null).then(b=>b?URL.createObjectURL(b):null).catch(()=>null);GAL_THUMBS.set(id,p);return p}
+function galThumbs(root){const imgs=[...(root||document).querySelectorAll("img[data-media]:not([src])")];if(!imgs.length)return;
+ const load=img=>{img.dataset.loading="1";return galThumbUrl(img.getAttribute("data-media")).then(u=>{if(u)img.src=u;else img.alt="عکس در دسترس نیست"})};
+ if(!("IntersectionObserver" in window)){imgs.forEach(load);return}
+ const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){io.unobserve(e.target);load(e.target)}}),{rootMargin:"200px"});imgs.forEach(i=>io.observe(i));
+ // (fallback: if the observer has not fired, e.g. a background tab, the first photos still load)
+ setTimeout(()=>imgs.filter(i=>!i.getAttribute("src")&&!i.dataset.loading).slice(0,24).forEach(i=>{io.unobserve(i);load(i)}),1500)}
+function galMarketName(m){return m==="ARAB"?"عراق":m==="IRAN"?"ایران":m}
+async function loadGalleryOptions(){
+ const d=await api("/api/gallery/options");
+ if(!d.ok){$("galPickerStatus").textContent=d.status===401?uxAuthHint(d):(d.error||"گالری آماده نیست");$("galBackupState").textContent=d.error||"";return}
+ galOptions=d;$("galBackupState").textContent=d.r2_ready?"حافظه دائمی R2 متصل است؛ عکس اصلی در R2 و مشخصات در D1 نگهداری می‌شود.":"حافظه R2 هنوز متصل نیست؛ تا اتصال آن، آپلود عکس انجام نمی‌شود.";
+ $("galR2").textContent=d.r2_ready?"":"حافظه R2 متصل نیست؛ آپلود فعلاً غیرفعال است.";renderGalForm();
+}
+// The spec form: market → product of that market's approved price list (size and box type come from it) → pieces → colours per part.
+function renderGalForm(keep){
+ if(!galOptions)return;const m=$("galMarket").value||"IRAN",q=uxNorm($("galCatQ").value),cur=keep&&keep.product_key||$("galProduct").value;
+ const items=galOptions.catalog.filter(c=>c.market===m&&(!q||uxNorm(c.product_name).includes(q)));
+ $("galProduct").innerHTML="<option value=''>— محصول از لیست قیمت "+esc(galMarketName(m))+" —</option>"+items.map(c=>"<option value='"+esc(c.product_key)+"'"+(c.product_key===cur?" selected":"")+">"+esc(c.product_name)+"</option>").join("");
+ const colors=galOptions.colors[m]||[],opt=(sel,empty)=>"<option value=''>"+empty+"</option>"+colors.map(c=>"<option"+(c===sel?" selected":"")+">"+esc(c)+"</option>").join("");
+ $("galLid").innerHTML=opt(keep?keep.lid_color:$("galLid").value,"— رنگ درب —");$("galBase").innerHTML=opt(keep?keep.base_color:$("galBase").value,"— رنگ کف —");$("galMiddle").innerHTML=opt(keep?keep.middle_color:$("galMiddle").value,"— رنگ وسط (فقط ۳ تکه) —");
+ const pr=galOptions.printing[m]||[],prSel=keep?keep.printing:$("galPrinting").value;$("galPrinting").innerHTML="<option value=''>بدون چاپ / نامشخص</option>"+pr.map(p=>"<option"+(p===prSel?" selected":"")+">"+esc(p)+"</option>").join("");
+ if(keep){$("galPieces").value=String(keep.pieces||"");$("galRibbon").value=keep.ribbon||""}
+ galProductChanged(!!keep);
+}
+function galProductChanged(keepPieces){
+ const c=galOptions&&galOptions.catalog.find(x=>x.market===($("galMarket").value||"IRAN")&&x.product_key===$("galProduct").value);
+ $("galBoxInfo").textContent=c?"سایز: "+(c.size||"—")+" · نوع جعبه: "+(c.configuration||"—"):"";
+ if(c&&c.pieces&&!keepPieces)$("galPieces").value=String(c.pieces);
+ $("galPieces").disabled=!!(c&&c.pieces);$("galMiddleWrap").hidden=$("galPieces").value!=="3";if($("galPieces").value!=="3")$("galMiddle").value="";
+ galPreviewLabel();
+}
+function galSpec(){return {market:$("galMarket").value||"IRAN",product_key:$("galProduct").value,pieces:$("galPieces").value?Number($("galPieces").value):null,lid_color:$("galLid").value,middle_color:$("galMiddle").value||null,base_color:$("galBase").value,printing:$("galPrinting").value||null,ribbon:$("galRibbon").value.trim()||null}}
+function galPreviewLabel(){const s=galSpec(),c=galOptions&&galOptions.catalog.find(x=>x.market===s.market&&x.product_key===s.product_key);
+ $("galLabelPreview").textContent=c?[c.base,c.size,c.configuration||(s.pieces?s.pieces+" تکه":null),s.lid_color?"درب "+s.lid_color:null,s.middle_color?"وسط "+s.middle_color:null,s.base_color?"کف "+s.base_color:null,s.printing,s.ribbon?"روبان "+s.ribbon:null].filter(Boolean).join(" | "):"برچسب عکس پس از انتخاب محصول و رنگ‌ها نمایش داده می‌شود."}
+// iPhone photos (HEIC or very large JPEG) become a JPEG of at most 2048px in the browser before upload.
+async function galResize(file){
+ const t=String(file.type||"").toLowerCase(),web=t==="image/jpeg"||t==="image/png"||t==="image/webp";
+ try{const bmp=await createImageBitmap(file),scale=Math.min(1,2048/Math.max(bmp.width,bmp.height));
+  if(web&&scale===1&&file.size<=4.5*1024*1024)return file;
+  const c=document.createElement("canvas");c.width=Math.round(bmp.width*scale);c.height=Math.round(bmp.height*scale);c.getContext("2d").drawImage(bmp,0,0,c.width,c.height);
+  const blob=await new Promise(r=>c.toBlob(r,"image/jpeg",0.88));return blob?new File([blob],String(file.name||"photo").split(".")[0]+".jpg",{type:"image/jpeg"}):file}catch(e){return file}}
+async function galFilesChosen(input){
+ const picked=[...(input.files||[])];try{input.value=""}catch(e){}
+ for(const f of picked){if(galFiles.length>=8)break;galFiles.push(await galResize(f))}
+ $("galPreview").innerHTML=galFiles.map((f,i)=>"<div class='gprev'><img alt='' src='"+esc(URL.createObjectURL(f))+"'><button type='button' class='btn' onclick='galRemoveFile("+i+")' aria-label='حذف'>×</button></div>").join("");
+ $("galPickerStatus").textContent=galFiles.length?galFiles.length+" عکس آماده بارگذاری (حداکثر ۸)":"";
+}
+function galRemoveFile(i){galFiles.splice(i,1);galFilesChosen({files:[]})}
+async function galSubmit(){
+ const st=$("galPickerStatus"),spec=galSpec();
+ if(galEditing){const d=await api("/api/gallery/spec",{method:"POST",body:JSON.stringify({visual_media_id:galEditing,spec})});st.innerHTML=d.ok?"<span class='ok'>مشخصات ثبت شد و منتظر تأیید شماست: "+esc(d.label)+"</span>":"<span class='bad'>"+esc(d.error||"خطا")+"</span>";if(d.ok){galCancelEdit();await loadGallery()}return}
+ if(!galFiles.length){st.innerHTML="<span class='bad'>ابتدا عکس بگیرید یا از گالری گوشی انتخاب کنید.</span>";return}
+ if(!$("galAttest").checked){st.innerHTML="<span class='bad'>تأیید کنید که عکس‌ها واقعی و از محصول خودتان است (تصاویر ساخته‌شده با هوش مصنوعی پذیرفته نمی‌شوند).</span>";return}
+ const fd=new FormData();galFiles.forEach(f=>fd.append("images",f,f.name||"photo.jpg"));fd.append("attest_real","yes");fd.append("spec",JSON.stringify(spec));fd.append("note",$("galNote").value.trim());
+ st.textContent="در حال بارگذاری…";$("galSubmit").disabled=true;
+ try{const r=await fetch("/api/gallery/upload",{method:"POST",headers:hdr(),body:fd});const d=await r.json().catch(()=>({ok:false,error:"پاسخ نامعتبر"}));
+  const okN=(d.items||[]).filter(x=>x.ok).length;
+  st.innerHTML=okN?"<span class='ok'>"+okN+" عکس در R2 ذخیره شد و منتظر تأیید شماست.</span>"+((d.items||[]).some(x=>!x.ok)?" <span class='warn'>"+esc((d.items||[]).find(x=>!x.ok).error)+"</span>":""):"<span class='bad'>"+esc(d.error||((d.items||[])[0]||{}).error||"بارگذاری انجام نشد")+"</span>";
+  if(okN){galFiles=[];$("galPreview").innerHTML="";$("galAttest").checked=false;await loadGallery()}
+ }catch(e){st.innerHTML="<span class='bad'>"+esc(String(e.message||e))+"</span>"}finally{$("galSubmit").disabled=false}
+}
+function galEdit(id){const x=galItems.find(y=>y.id===id),s=x&&(x.pending_spec||x.spec);if(!s||!galOptions)return;galEditing=id;
+ $("galMarket").value=s.market;$("galCatQ").value="";renderGalForm(s);
+ $("galSubmit").textContent="ثبت تغییر مشخصات (منتظر تأیید)";$("galCancel").hidden=false;$("galCapture").hidden=true;$("galPickerStatus").textContent="ویرایش مشخصات یک عکس؛ تا تأیید شما، مشخصات قبلی استفاده می‌شود.";$("galMarket").scrollIntoView({block:"center"})}
+function galCancelEdit(){galEditing=null;$("galSubmit").textContent="بارگذاری عکس‌ها";$("galCancel").hidden=true;$("galCapture").hidden=false}
+function galCard(x,actions){return "<div class='gcard'><img class='gimg' data-media='"+esc(x.id)+"' alt='"+esc(x.label||"عکس محصول")+"'><div class='gmeta'><b class='glabel'>"+esc(x.label||"بدون مشخصات")+"</b>"+(x.pending_label?"<small class='warn'>تغییر منتظر تأیید: "+esc(x.pending_label)+"</small>":"")+"<div class='tools'>"+actions+"</div></div></div>"}
+function galBtn(label,fn,cls){return "<button class='btn"+(cls?" "+cls:"")+"' onclick='"+fn+"'>"+label+"</button>"}
+async function loadGallery(){
+ const d=await api("/api/gallery?status=all");
+ if(!d.ok){$("galReviewStatus").textContent=d.status===401?uxAuthHint(d):(d.error||"گالری آماده نیست");$("galReviewItems").innerHTML="";$("galLibraryItems").innerHTML="";return}
+ galItems=d.items||[];const cand=galItems.filter(x=>x.status==="candidate"),changes=galItems.filter(x=>x.status==="verified"&&x.pending_spec);
+ $("galReviewStatus").textContent=cand.length||changes.length?cand.length+" عکس جدید و "+changes.length+" تغییر مشخصات منتظر تأیید شما":"موردی منتظر تأیید نیست.";
+ $("galReviewItems").innerHTML=cand.map(x=>galCard(x,galBtn("تأیید عکس","galReview(&quot;"+esc(x.id)+"&quot;,&quot;verify&quot;,"+x.version+")","primary")+galBtn("ویرایش مشخصات","galEdit(&quot;"+esc(x.id)+"&quot;)")+galBtn("رد","galReview(&quot;"+esc(x.id)+"&quot;,&quot;reject&quot;,"+x.version+")","danger"))).join("")
+  +changes.map(x=>galCard(x,galBtn("تأیید تغییر","galReview(&quot;"+esc(x.id)+"&quot;,&quot;approve_spec&quot;,"+x.version+")","primary")+galBtn("ویرایش","galEdit(&quot;"+esc(x.id)+"&quot;)"))).join("");
+ const prods=new Map(),boxes=new Set(),cols=new Set();galItems.filter(x=>x.status==="verified"&&x.spec).forEach(x=>{prods.set(x.spec.product_key,x.spec.product_name);if(x.spec.box_type)boxes.add(x.spec.box_type);[x.spec.lid_color,x.spec.middle_color,x.spec.base_color].filter(Boolean).forEach(c=>cols.add(c))});
+ const keep=(id,opts)=>{const v=$(id).value;$(id).innerHTML=opts;$(id).value=v};
+ keep("galFProduct","<option value=''>همه محصولات</option>"+[...prods].map(([k,n])=>"<option value='"+esc(k)+"'>"+esc(n)+"</option>").join(""));
+ keep("galFBox","<option value=''>همه نوع جعبه‌ها</option>"+[...boxes].map(b=>"<option>"+esc(b)+"</option>").join(""));
+ keep("galFColor","<option value=''>همه رنگ‌ها</option>"+[...cols].map(c=>"<option>"+esc(c)+"</option>").join(""));
+ renderGalleryLibrary();galThumbs($("sec-galleryReview"));
+}
+function renderGalleryLibrary(){
+ const p=$("galFProduct").value,b=uxNorm($("galFBox").value),c=uxNorm($("galFColor").value),m=$("galFMarket").value;
+ const list=galItems.filter(x=>x.status==="verified"&&x.spec&&(!p||x.spec.product_key===p)&&(!b||uxNorm(x.spec.box_type)===b)&&(!c||[x.spec.lid_color,x.spec.middle_color,x.spec.base_color].some(y=>uxNorm(y)===c))&&(!m||x.spec.market===m));
+ $("galLibraryStatus").textContent=list.length+" عکس تأییدشده"+(p||b||c||m?" با این فیلتر":"");
+ $("galLibraryItems").innerHTML=list.map(x=>galCard(x,galBtn("ویرایش مشخصات","galEdit(&quot;"+esc(x.id)+"&quot;)")+galBtn("غیرفعال‌سازی","galReview(&quot;"+esc(x.id)+"&quot;,&quot;deactivate&quot;,"+x.version+")","danger"))).join("")||"<div class='hint'>عکسی نیست. عکس واقعی بگیرید، مشخصاتش را کامل کنید و تأیید کنید؛ بدون تغییر کد یا انتشار.</div>";
+ galThumbs($("sec-galleryLibrary"));
+}
+async function galReview(id,action,version){
+ if(action==="reject"||action==="deactivate"){const ok=await uxConfirm2(action==="reject"?"رد عکس":"غیرفعال‌سازی عکس",action==="reject"?"این عکس وارد گالری نمی‌شود (حذف نمی‌شود).":"این عکس دیگر برای مشتری ارسال نمی‌شود؛ پیش‌نویس‌های قبلیِ دارای این عکس هم ارسال نمی‌شوند.","تأیید");if(!ok)return}
+ const d=await api("/api/gallery/review",{method:"POST",body:JSON.stringify({id,action,expected_version:version})});
+ $("galReviewStatus").innerHTML=d.ok?"<span class='ok'>"+(action==="verify"?"عکس و مشخصاتش تأیید و وارد گالری زنده شد.":action==="approve_spec"?"تغییر مشخصات تأیید شد.":"ثبت شد.")+"</span>":"<span class='bad'>"+esc(d.error||"خطا")+"</span>";await loadGallery();
+}
+async function loadGalleryRequests(){
+ const d=await api("/api/gallery/requests?status=open");
+ if(!d.ok){$("galRequestStatus").textContent=d.status===401?uxAuthHint(d):(d.error||"");$("galRequestItems").innerHTML="";return}
+ const items=d.items||[];$("galRequestStatus").textContent=items.length?items.length+" درخواست عکسِ ناموجود":"درخواست عکس ناموجودی نیست.";
+ $("galRequestItems").innerHTML=items.map(x=>"<div class='row'><b>"+esc(x.product_base||"محصول نامشخص")+"</b>"+(x.requested?" · "+esc(x.requested):"")+" <span class='tag'>"+esc(x.lead_name||"")+"</span><small>"+esc(uxWhen(x.created_at))+" · "+(x.reason==="color_missing"?"این رنگ عکس ندارد":"این محصول عکس ندارد")+(x.suggestions.length?" · موجود: "+esc(x.suggestions.join("، ")):"")+"</small><div class='tools' style='margin-top:6px'>"+(x.available_now?galBtn("آماده‌سازی پیش‌نویس با "+x.available_now+" عکس","galPrepare(&quot;"+esc(x.id)+"&quot;)","primary"):"<span class='hint'>هنوز عکس تأییدشده‌ای منطبق نیست</span>")+galBtn("بستن درخواست","galDismiss(&quot;"+esc(x.id)+"&quot;)")+"</div></div>").join("");
+}
+async function galPrepare(id){const d=await api("/api/gallery/requests/prepare",{method:"POST",body:JSON.stringify({id})});$("galRequestStatus").innerHTML=d.ok?"<span class='ok'>پیش‌نویس با "+d.photos+" عکس ساخته شد؛ در «تأییدیه‌ها» بررسی و ارسال کنید. هیچ پیامی ارسال نشد.</span>":"<span class='bad'>"+esc(d.error||"خطا")+"</span>";await loadGalleryRequests()}
+async function galDismiss(id){const d=await api("/api/gallery/requests/resolve",{method:"POST",body:JSON.stringify({id,status:"dismissed"})});if(!d.ok)$("galRequestStatus").innerHTML="<span class='bad'>"+esc(d.error||"خطا")+"</span>";await loadGalleryRequests()}
+async function loadGalleryFunnel(){
+ const d=await api("/api/gallery/funnel");
+ if(!d.ok){$("galFunnel").innerHTML="<div class='hint'>"+esc(d.status===401?uxAuthHint(d):(d.error||""))+"</div>";return}
+ const s=(label,n,cls)=>"<div class='sum"+(cls?" "+cls:"")+"'><span>"+label+"</span><b>"+uxN(n)+"</b></div>";
+ $("galFunnel").innerHTML=s("درخواست عکس",d.photo_requests)+s("عکس ارسال‌شده",d.photos_sent)+s("انتخاب رنگ",d.color_chosen)+s("استعلام قیمت",d.price_asked)+s("سفارش",d.ordered,d.ordered?"ok":"")+s("درخواست باز",d.open_requests,d.open_requests?"warn":"");
+}
+async function galExport(){const d=await api("/api/gallery/export");if(!d.ok){$("galBackupState").textContent=d.error||"خطا";return}
+ const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(d,null,1)],{type:"application/json"}));a.download="hamzehi-gallery-manifest.json";document.body.appendChild(a);a.click();a.remove();$("galBackupState").textContent=d.items.length+" رکورد (کلید R2 + مشخصات) در فایل ذخیره شد."}
 let refreshInProgress=false,dashTick=1;
 // Every loader of the original single page, each run only where its section is rendered. Money-at-stake also needs the open
 // escalation count (written by loadOwnerEscalations) wherever it is shown.
@@ -1618,7 +1750,7 @@ function dashSectionLoads(){
  return [on("tasks",loadTasks),on("brain",loadBrain),on("revenue",loadRevenue),on("opportunities",loadOpp),on("errors",loadErrors),on("safety",loadSafety),
   on("approvalItems",loadApprovals),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox),on("quoteItems",loadQuotes),
   on("orderItems",loadOrders),on("priceItems",loadPriceItems),on("knowledgeFacts",loadSalesKnowledge),(has("ownerEscalationsItems")||has("siMoney"))?loadOwnerEscalations():null,
-  on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter)];
+  on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter),on("galProduct",loadGalleryOptions),on("galReviewItems",loadGallery),on("galRequestItems",loadGalleryRequests),on("galFunnel",loadGalleryFunnel)];
 }
 // Hub summary: counts from the same existing endpoints the section pages use (nothing estimated or invented).
 async function loadHubSummary(){
@@ -1741,6 +1873,47 @@ DASH_SECTIONS.home=`<section class="section"><div class="stats" id="homeStats">
 DASH_SECTIONS.authFold=`<details class="fold" id="authFold"><summary>${dashIcon("lock")}ورود مدیر (توکن)${dashIcon("chev").replace('class="ic"','class="ic chev"')}</summary>
 ${DASH_SECTIONS.auth}</details>
 `;
+DASH_SECTIONS.galleryFunnel=`<section class="section"><div id="galFunnel" class="summary"><div class="hint">در حال دریافت…</div></div></section>
+`;
+DASH_SECTIONS.galleryUpload=`<section class="card section" id="galleryUploadForm">
+<div class="title"><h2>${dashIcon("camera")}افزودن عکس واقعی محصول</h2></div>
+<div id="galR2" class="hint warn"></div>
+<div class="gcapture" id="galCapture" style="margin-top:8px">
+<label class="btn primary">${dashIcon("camera")}عکس با دوربین<input id="galCamera" type="file" accept="image/*" capture="environment" onchange="galFilesChosen(this)"></label>
+<label class="btn">${dashIcon("image")}انتخاب از گالری گوشی<input id="galLibraryInput" type="file" accept="image/*" multiple onchange="galFilesChosen(this)"></label>
+</div>
+<div id="galPreview" class="gprevs"></div>
+<div class="gform">
+<label>بازار<select id="galMarket" class="input" onchange="renderGalForm()"><option value="IRAN">ایران</option><option value="ARAB">عراق</option></select></label>
+<label>جستجوی محصول<input id="galCatQ" class="input" type="search" placeholder="نام، سایز یا نوع جعبه" oninput="renderGalForm()"></label>
+<label class="full">محصول و مدل (از لیست قیمت تأییدشده)<select id="galProduct" class="input" onchange="galProductChanged()"></select><span id="galBoxInfo" class="hint"></span></label>
+<label>تعداد تکه<select id="galPieces" class="input" onchange="galProductChanged(true)"><option value="">—</option><option value="2">۲ تکه</option><option value="3">۳ تکه</option></select></label>
+<label>رنگ درب<select id="galLid" class="input" onchange="galPreviewLabel()"></select></label>
+<label id="galMiddleWrap" hidden>رنگ وسط<select id="galMiddle" class="input" onchange="galPreviewLabel()"></select></label>
+<label>رنگ کف<select id="galBase" class="input" onchange="galPreviewLabel()"></select></label>
+<label>چاپ<select id="galPrinting" class="input" onchange="galPreviewLabel()"></select></label>
+<label>روبان (اختیاری)<input id="galRibbon" class="input" maxlength="60" placeholder="مثلاً: روبان طلایی" oninput="galPreviewLabel()"></label>
+<label class="full">یادداشت (اختیاری)<input id="galNote" class="input" maxlength="300"></label>
+</div>
+<div id="galLabelPreview" class="gpreviewlabel"></div>
+<label class="gattest"><input id="galAttest" type="checkbox"><span>این عکس‌ها را خودم از محصول واقعی گرفته‌ام؛ عکس اینترنت، کانال یا ساخته‌شده با هوش مصنوعی نیست.</span></label>
+<div class="tools" style="margin-top:10px"><button id="galSubmit" class="btn primary" onclick="galSubmit()">بارگذاری عکس‌ها</button><button id="galCancel" class="btn" onclick="galCancelEdit()" hidden>انصراف از ویرایش</button></div>
+<div id="galPickerStatus" class="hint" style="margin-top:6px"></div>
+</section>
+`;
+DASH_SECTIONS.galleryReview=`<section class="card section"><div class="title"><h2>${dashIcon("check")}منتظر تأیید شما</h2><button class="btn" onclick="loadGallery()" aria-label="به‌روزرسانی">↻</button></div>
+<div id="galReviewStatus" class="hint" style="margin-top:6px">در حال دریافت…</div><div id="galReviewItems" class="ggrid"></div></section>
+`;
+DASH_SECTIONS.galleryLibrary=`<section class="card section"><div class="title"><h2>${dashIcon("image")}گالری زنده (تأییدشده)</h2></div>
+<div class="filters"><select id="galFProduct" class="input" aria-label="محصول" onchange="renderGalleryLibrary()"><option value="">همه محصولات</option></select><select id="galFBox" class="input" aria-label="نوع جعبه" onchange="renderGalleryLibrary()"><option value="">همه نوع جعبه‌ها</option></select><select id="galFColor" class="input" aria-label="رنگ" onchange="renderGalleryLibrary()"><option value="">همه رنگ‌ها</option></select><select id="galFMarket" class="input" aria-label="بازار" onchange="renderGalleryLibrary()"><option value="">هر دو بازار</option><option value="IRAN">ایران</option><option value="ARAB">عراق</option></select></div>
+<div id="galLibraryStatus" class="hint" style="margin-top:6px"></div><div id="galLibraryItems" class="ggrid"></div></section>
+`;
+DASH_SECTIONS.galleryRequests=`<section class="card section"><div class="title"><h2>${dashIcon("clock")}درخواست عکس‌های ناموجود</h2><button class="btn" onclick="loadGalleryRequests()" aria-label="به‌روزرسانی">↻</button></div>
+<div id="galRequestStatus" class="hint" style="margin-top:6px">در حال دریافت…</div><div id="galRequestItems" class="rows"></div></section>
+`;
+DASH_SECTIONS.galleryBackup=`<section class="card section"><div class="title"><h2>${dashIcon("shield")}نگهداری و پشتیبان</h2><button class="btn" onclick="galExport()">دریافت فایل پشتیبان</button></div>
+<div id="galBackupState" class="hint" style="margin-top:6px">…</div></section>
+`;
 DASH_SECTIONS.leadsList=`<section class="card section" id="leadsListSection">
 <div class="title"><h2>${dashIcon("users")}مشتریان و لیدها</h2><button class="btn" onclick="loadLeadsList()" aria-label="به‌روزرسانی">↻</button></div>
 <div class="filters"><input id="leadQ" class="input" type="search" placeholder="جستجوی نام یا شناسه" aria-label="جستجوی مشتری" oninput="renderLeadsList()"><select id="leadStage" class="input" aria-label="مرحله" onchange="renderLeadsList()"><option value="">همه مراحل</option></select></div>
@@ -1773,6 +1946,7 @@ export const DASHBOARD_PAGES={
  approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
  errors:{path:"/dashboard/errors",title:"خطاها",icon:"alert",desc:"خطاهای سیستم و جزئیات",sections:["errorsCenter","errorsCard"]},
  more:{path:"/dashboard/more",title:"بیشتر",icon:"menu",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
+ gallery:{path:"/dashboard/gallery",title:"گالری محصولات",icon:"camera",desc:"عکس واقعی، تأیید، جستجو و درخواست‌ها",sections:["galleryFunnel","galleryUpload","galleryReview","galleryLibrary","galleryRequests","galleryBackup"]},
  knowledge:{path:"/dashboard/knowledge",title:"محصولات و دانش",icon:"book",desc:"قیمت‌ها، کاتالوگ و دانش فروش",sections:["command","knowledge","priceList","catalog"]},
  content:{path:"/dashboard/content",title:"محتوا",icon:"file",desc:"صف و پیش‌نویس محتوا",sections:["contentApproval","channels"]},
  media:{path:"/dashboard/media",title:"رسانه",icon:"image",desc:"اتوپایلوت عکس و ویدیو",sections:["photo","video"]},
@@ -1788,11 +1962,12 @@ export const DASH_FOLDS={
  orders:{money:{title:"پول در جریان و پیگیری وصول",icon:"wallet",lazy:true},quotes:{title:"درخواست‌های قیمت",icon:"receipt",lazy:true}},
  approvals:{quotes:{title:"درخواست‌های قیمت",icon:"receipt",lazy:true,cnt:"quotes"},outreach:{title:"تأیید ارسال پیام",icon:"mail",lazy:true,cnt:"outreach"},contentApproval:{title:"تأیید محتوا",icon:"file",lazy:true,cnt:"contentApproval"}},
  errors:{errorsCard:{title:"Taskها و Retryهای ناموفق (خام)",icon:"list",lazy:true}},
+ gallery:{galleryBackup:{title:"نگهداری و پشتیبان",icon:"shield",lazy:false}},
  system:{channels:{title:"کنترل کانال‌ها",icon:"send",lazy:true},command:{title:"فرمان و آموزش هوش مصنوعی",icon:"spark",lazy:true},taskBrain:{title:"Taskها، مغز کسب‌وکار و فعالیت",icon:"list",lazy:true},diagnostic:{title:"تست اتصال و عیب‌یابی",icon:"activity",lazy:true},safety:{title:"دروازه ایمنی",icon:"shield",lazy:true}}
 };
 const DASH_TABS=["hub","customers","orders","approvals","more"];
-const DASH_MORE_GROUPS=[["محصولات و دانش",["knowledge"]],["محتوا و رسانه",["content","media"]],["کانال‌ها",["channels"]],["درآمد و گزارش‌ها",["revenue","sales"]],["خطاها",["errors"]],["تنظیمات پیشرفته",["system","all"]]];
-const DASH_ORDER=["customers","orders","approvals","errors","knowledge","content","media","channels","revenue","system","sales","all"];
+const DASH_MORE_GROUPS=[["محصولات و دانش",["gallery","knowledge"]],["محتوا و رسانه",["content","media"]],["کانال‌ها",["channels"]],["درآمد و گزارش‌ها",["revenue","sales"]],["خطاها",["errors"]],["تنظیمات پیشرفته",["system","all"]]];
+const DASH_ORDER=["customers","orders","approvals","errors","gallery","knowledge","content","media","channels","revenue","system","sales","all"];
 const dashEsc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 DASH_SECTIONS.moreNav=DASH_MORE_GROUPS.map(([g,keys])=>`<section class="mgroup"><h3>${dashEsc(g)}</h3><nav class="mlist">`+keys.map(k=>{const p=DASHBOARD_PAGES[k];return `<a href="${p.path}"><span class="mi">${dashIcon(p.icon)}</span><span class="mt"><b>${dashEsc(p.title)}</b><small>${dashEsc(p.desc)}</small></span>${dashIcon("chev").replace('class="ic"','class="ic chev"')}</a>`;}).join("")+`</nav></section>`).join("\n")+"\n";
 DASH_SECTIONS.hubNav=DASH_SECTIONS.moreNav;
@@ -1819,7 +1994,7 @@ function dashboardNav(page){
 function dashSection(page,k){
  const f=(DASH_FOLDS[page]||{})[k],html=DASH_SECTIONS[k];
  if(!f)return `<div id="sec-${k}">${html}</div>`;
- return `<div id="sec-${k}"><details class="fold${f.lazy?" lazy":""}"><summary>${dashIcon(f.icon)}${dashEsc(f.title)}${f.cnt?`<b class="cnt" data-cnt="${f.cnt}">…</b>`:""}${dashIcon("chev").replace('class="ic"','class="ic chev"')}</summary>${html}</details></div>`;
+ return `<div id="sec-${k}"><details class="fold${f.lazy?" lazy":""}"${f.open?" open":""}><summary>${dashIcon(f.icon)}${dashEsc(f.title)}${f.cnt?`<b class="cnt" data-cnt="${f.cnt}">…</b>`:""}${dashIcon("chev").replace('class="ic"','class="ic chev"')}</summary>${html}</details></div>`;
 }
 export function liveDashboardHtml(route="hub"){
  const page=DASHBOARD_PAGES[route]?route:"hub";

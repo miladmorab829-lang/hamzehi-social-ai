@@ -12,6 +12,11 @@ database_id = "40b272c5-e368-4c33-8a41-7c63db98d7e8"
 [ai]
 binding = "AI"
 
+# Private product-gallery originals (owner dashboard uploads only; no public access). Read only via /api/gallery/image (admin).
+[[r2_buckets]]
+binding = "GALLERY_BUCKET"
+bucket_name = "hamzehi-gallery"
+
 [vars]
 OPENAI_MODEL = "gpt-5.6-luna"
 # Telegram Sales Brain: AI-first understanding/drafting through the Sales AI Gateway (worker/src/sales-ai-brain.js), grounded and
