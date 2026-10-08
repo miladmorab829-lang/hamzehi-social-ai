@@ -12975,7 +12975,11 @@ Context: ${context}`;
 
       if (u.pathname === "/api/system/events" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        const r = await env.DB.prepare("SELECT id,type,severity,message,details_json,created_at FROM system_events ORDER BY created_at DESC LIMIT 100").all();
+        // ?kind=errors (dashboard Errors page, read-only): only failure-like events, newest first. Without it: unchanged.
+        const errorsOnly = u.searchParams.get("kind") === "errors";
+        const r = errorsOnly
+          ? await env.DB.prepare("SELECT id,type,severity,message,details_json,created_at FROM system_events WHERE severity IN ('warning','error','critical') OR type LIKE '%fail%' OR type LIKE '%error%' OR type LIKE '%timeout%' OR type LIKE '%unavailable%' OR type LIKE '%blocked%' OR type LIKE '%refused%' OR type LIKE '%missing%' ORDER BY created_at DESC LIMIT 200").all()
+          : await env.DB.prepare("SELECT id,type,severity,message,details_json,created_at FROM system_events ORDER BY created_at DESC LIMIT 100").all();
         return json({ items:r.results||[] });
       }
 
