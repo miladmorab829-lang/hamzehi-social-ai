@@ -9202,6 +9202,48 @@ function ownerRecordedDate(value,name){const d=new Date(String(value||"").trim()
 
 function orderPaymentReferenceKey(value){return String(value||"").normalize("NFKC").replace(/\s+/g,"").toLowerCase().slice(0,200);}
 async function orderPaidMinor(env,orderId){const row=await env.DB.prepare("SELECT COALESCE(SUM(amount_minor),0) AS paid FROM lead_order_payments WHERE order_id=?").bind(orderId).first();return Number(row?.paid||0);}
+// The order's RECORDED payment ledger (owner-recorded rows only — never a customer claim): received, outstanding, the latest
+// recorded payment, and a fingerprint that changes with any new payment or reversal (a ledger draft is sendable only while it matches).
+async function orderPaymentLedger(env,order){
+  const rows=((await env.DB.prepare("SELECT id,amount_minor,payment_kind FROM lead_order_payments WHERE order_id=? ORDER BY recorded_at,id").bind(order.id).all()).results)||[];
+  const paid=rows.reduce((s,r)=>s+Number(r.amount_minor||0),0),total=Number(order.total_minor),last=[...rows].reverse().find(r=>r.payment_kind!=="reversal")||null;
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify({v:1,order:order.id,total,currency:order.currency,rows:rows.map(r=>[r.id,Number(r.amount_minor)])})));
+  return {paid,outstanding:total-paid,last_minor:last?Number(last.amount_minor):null,last_id:last?.id||null,count:rows.length,fingerprint:Array.from(new Uint8Array(digest).slice(0,12),b=>b.toString(16).padStart(2,"0")).join("")};
+}
+const ORDER_LEDGER_EVENTS=new Set(["payment_received","balance_request"]);
+// ARAB: the owner gives the exchange / hawala details personally — the bot never sends a destination.
+const ARAB_OWNER_COORDINATES_LINE="تفاصيل التحويل عن طريق الصراف راح يبلغك بيها المسؤول مباشرة.";
+// ONE approval-gated Iraqi Arabic acknowledgement of the FIRST owner-recorded ARAB payment: amounts from the recorded ledger only
+// (never the customer's claim), sent only through Draft → SUBMIT → APPROVE → SEND, stale as soon as the ledger changes.
+async function preparePaymentReceivedNotice(env,order,payment){
+  if(order?.market!=="ARAB"||!payment?.id)return {created:false,reason:"not_applicable"};
+  const ledger=await orderPaymentLedger(env,order);
+  if(ledger.count!==1||ledger.last_id!==payment.id||ledger.paid<=0)return {created:false,reason:"not_first_payment"};
+  const money=m=>customerPaymentAmountText({currency:order.currency,amount_minor:m});
+  const message=[`وصلتنا دفعتكم للطلب ${order.order_number} وتم تسجيلها.`,`المبلغ المستلم: ${money(payment.amount_minor)}`,`مجموع المستلم: ${money(ledger.paid)}`,
+    ledger.outstanding>0?`المبلغ المتبقي: ${money(ledger.outstanding)}`:"تم دفع كامل مبلغ الطلب."].join("\n");
+  return await approvalGatedSalesDraft(env,{key:`lead-order:update-draft:${order.id}:payment_received:${payment.id}`,leadId:order.lead_id,conversationId:order.conversation_id,language:"Iraqi Arabic",message,
+    eventType:"payment_received_draft_created",eventMessage:"Payment-received acknowledgement draft created for owner approval",
+    details:{order_id:order.id,order_number:order.order_number,event:"payment_received",payment_id:payment.id,ledger_fingerprint:ledger.fingerprint,snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}});
+}
+// Owner-initiated request for the outstanding balance of a confirmed ARAB order (never scheduled, never sent here): the exact
+// remaining amount from the recorded ledger, no deadline, no transfer details — the owner coordinates the exchange personally.
+async function prepareBalanceRequest(env,orderId){
+  await ensureOrderStore(env);
+  const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(String(orderId||"").trim()).first();
+  if(!order)throw Error("Order not found");
+  if(order.market!=="ARAB")throw Error("A balance request is available for ARAB orders only");
+  if(!["confirmed","partially_paid"].includes(order.status))throw Error("A balance request needs a confirmed order with an open balance");
+  const ledger=await orderPaymentLedger(env,order);
+  if(ledger.paid<=0)throw Error("No payment is recorded yet: use the order's payment request instead");
+  if(!(ledger.outstanding>0))throw Error("Nothing is outstanding on this order");
+  const money=m=>customerPaymentAmountText({currency:order.currency,amount_minor:m});
+  const message=[`بخصوص طلبكم ${order.order_number}:`,`مجموع الطلب: ${money(order.total_minor)}`,`المبلغ المستلم: ${money(ledger.paid)}`,`المبلغ المتبقي: ${money(ledger.outstanding)}`,ARAB_OWNER_COORDINATES_LINE].join("\n");
+  const result=await approvalGatedSalesDraft(env,{key:`lead-order:update-draft:${order.id}:balance_request:cfg-${ledger.fingerprint}`,leadId:order.lead_id,conversationId:order.conversation_id,language:"Iraqi Arabic",message,
+    eventType:"balance_request_draft_created",eventMessage:"Balance request draft created for owner approval",
+    details:{order_id:order.id,order_number:order.order_number,event:"balance_request",ledger_fingerprint:ledger.fingerprint,outstanding_minor:ledger.outstanding,snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}});
+  return {...result,order_id:order.id,outstanding_minor:ledger.outstanding,currency:order.currency};
+}
 function customerPaymentAmountText({currency,amount_minor}){
   const code=canonicalCurrency(currency),rule=CURRENCY_RULES[code],amount=Number(amount_minor);
   if(!rule||!Number.isSafeInteger(amount)||amount<0)return null;
@@ -9232,7 +9274,10 @@ async function recordOrderPayment(env,body,actor="authenticated_owner"){
   await auditOrderEventOnce(env,`payment:${id}`,"lead_order_payment_recorded","Owner recorded payment; no gateway was invoked",{order_id:orderId,payment_id:id,amount_minor:amount,currency,method,recorded_by:String(actor||"authenticated_owner")});
   const converted=!!results?.[2]?.meta?.changes;
   if(converted)await auditOrderEventOnce(env,`customer:${order.lead_id}`,"lead_converted_to_customer","First owner-recorded payment: lead became a customer",{lead_id:order.lead_id,order_id:orderId,payment_id:id});
-  return {recorded:true,payment,order:updated,payment_engine:false,lead_converted:converted};
+  // ARAB: the FIRST recorded payment gets ONE approval-gated acknowledgement draft (never sent here).
+  let notice=null;
+  if(paidBefore===0&&updated?.market==="ARAB")try{notice=await preparePaymentReceivedNotice(env,updated,payment);}catch(error){await audit(env,"payment_received_draft_failed","Payment-received draft could not be prepared",{order_id:orderId,payment_id:id,error:sanitizeOperationalError(error?.message||error)});}
+  return {recorded:true,payment,order:updated,payment_engine:false,lead_converted:converted,payment_received_draft:notice?.outreach_id||null};
 }
 async function reverseOrderPayment(env,body,actor="authenticated_owner"){
   await ensureOrderStore(env);const paymentId=String(body.payment_id||"").trim(),reason=String(body.reason||"").trim().slice(0,500);if(!paymentId||!reason)throw Error("payment_id and reversal reason are required");
@@ -9761,8 +9806,14 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
     // never pass group by group (18 / 000 / 000).
     const wholeAmounts=s=>String(s??"").replace(/([0-9۰-۹٠-٩])[,٬](?=[0-9۰-۹٠-٩]{3}(?![0-9۰-۹٠-٩]))/g,"$1");
     const allowedNumbers=[order.order_number,order.total_minor,amountText,order.quantity,order.unit_price_minor,unitText,order.product,order.customization,...depositValues,instructions].map(wholeAmounts).flatMap(value=>[...String(value??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger);
+    // A payment-received / balance draft may state ONLY the order's recorded ledger (owner-recorded payments) — re-read here,
+    // never taken from the caller; a draft built on another ledger state is refused.
+    const ledger=ORDER_LEDGER_EVENTS.has(details.event)?await orderPaymentLedger(env,order):null;
+    if(ledger&&ledger.fingerprint!==details.ledger_fingerprint)return await blocked("payment_ledger_changed");
+    const ledgerValues=ledger?[ledger.paid,ledger.outstanding,ledger.last_minor,...[ledger.paid,ledger.outstanding,ledger.last_minor].filter(m=>Number.isSafeInteger(m)&&m>=0).map(m=>customerPaymentAmountText({currency:order.currency,amount_minor:m}))].filter(v=>v!==null&&v!==undefined):[];
+    allowedNumbers.push(...ledgerValues.map(wholeAmounts).flatMap(value=>[...String(value).matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger));
     const methodWords=depositTerms?.source==="owner_override"?{installments:["پرداخت اقساطی","اقساطی","اقساط","قسطی","الدفع بالأقساط","بالأقساط"],cheque:["پرداخت با چک","با چک","چک","الدفع بالصك","بالصك"]}[depositTerms.kind]||[]:[];
-    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||""),amountText,instructions,...methodWords].filter(Boolean)}].map(f=>({...f,values:(f.values||[]).map(wholeAmounts)}));
+    const facts=[...orderAuthoritativeFacts(order),{category:"payment",values:[String(order.total_minor),String(order.payment_terms||""),amountText,instructions,...methodWords,...ledgerValues.map(String)].filter(Boolean)}].map(f=>({...f,values:(f.values||[]).map(wholeAmounts)}));
     // The owner-approved payment instructions are authoritative as an EXACT text: card, IBAN, account and phone identifiers are
     // identifiers, not numbers (too long for a numeric check). Only their verbatim occurrence (never inside a longer digit run) is set
     // aside; every other digit of the draft is validated as before, and an altered identifier no longer matches → it fails closed.
@@ -9780,7 +9831,7 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
     const remainingMinor=depositMinor===null?null:order.total_minor-depositMinor;
     const depositText=depositMinor===null?null:customerPaymentAmountText({currency:order.currency,amount_minor:depositMinor});
     const remainingText=remainingMinor>0?customerPaymentAmountText({currency:order.currency,amount_minor:remainingMinor}):null;
-    const commercial=new Set([order.total_minor,amountText,order.quantity,order.unit_price_minor,unitText,...(depositMinor===null?[]:[depositPct,depositMinor,depositText]),...(remainingMinor>0?[100-depositPct,remainingMinor,remainingText]:[])]
+    const commercial=new Set([order.total_minor,amountText,order.quantity,order.unit_price_minor,unitText,...(depositMinor===null?[]:[depositPct,depositMinor,depositText]),...(remainingMinor>0?[100-depositPct,remainingMinor,remainingText]:[]),...ledgerValues]
       .map(wholeAmounts).flatMap(value=>[...String(value??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0]))).filter(Number.isSafeInteger));
     const strayNumbers=[...new Set([...masked.matchAll(/[0-9۰-۹٠-٩]+/g)].map(match=>knowledgeCommandNumber(match[0])).filter(n=>n===null||!commercial.has(n)))];
     if(strayNumbers.length)return await blocked("unsupported_numeric_claim",{validation:{valid:false,reason:"unsupported_numeric_claim",unsupported_numbers:strayNumbers}});
@@ -9790,6 +9841,8 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
     const NUM="[0-9۰-۹٠-٩][0-9۰-۹٠-٩.,٬]*";
     const labels=[["total",/مبلغ\s*قابل\s*پرداخت|المبلغ\s*المطلوب/u],["deposit",/پیش[‌\s]?پرداخت|بیعانه|العربون(?:\s*المطلوب)?/u],["remaining",/باقی[‌\s]?مانده|المبلغ\s*المتبقي|والباقي|الباقي/u]];
     const expected={total:{amount:firstAmount(amountText),pct:null},deposit:{amount:firstAmount(depositText),pct:depositMinor===null?null:depositPct},remaining:{amount:firstAmount(remainingText),pct:remainingMinor>0?100-depositPct:null}};
+    // (a ledger draft's «remaining» is the recorded outstanding balance, not the deposit split)
+    if(ledger)expected.remaining={amount:firstAmount(customerPaymentAmountText({currency:order.currency,amount_minor:ledger.outstanding})),pct:null};
     const termMismatch=[];
     for(const [name,label] of labels)for(const m of masked.matchAll(new RegExp(`(?:${label.source})\\s*(?:\\(\\s*(${NUM})\\s*[%٪]\\s*\\))?\\s*:?\\s*(?:(${NUM})\\s*([%٪])?)?`,"gu"))){
       const want=expected[name];
@@ -9825,6 +9878,11 @@ async function salesOutreachStillCurrent(env,outreachId){
   }
   // A payment request is current only while the order's payment configuration (instructions version, deposit setting, per-order
   // terms) still has the fingerprint the draft was built on. A draft without one predates this check and is never sendable.
+  // A payment-received / balance draft is current only while the recorded payment ledger is exactly the one it was built on.
+  if(ORDER_LEDGER_EVENTS.has(details.event)){
+    if(!details.ledger_fingerprint)return {current:false,reason:"ledger_fingerprint_missing"};
+    if((await orderPaymentLedger(env,order)).fingerprint!==details.ledger_fingerprint)return {current:false,reason:"payment_ledger_changed"};
+  }
   if(details.event==="payment_request"){
     if(!details.payment_fingerprint)return {current:false,reason:"payment_fingerprint_missing"};
     const config=await paymentRequestConfig(env,order).catch(()=>null);
@@ -12630,6 +12688,12 @@ Context: ${context}`;
           FROM lead_orders o JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_quotes q ON q.id=o.quote_id
           ORDER BY o.created_at DESC LIMIT 200`).all();
         return json({ok:true,items:r.results||[],payment_engine:false,revenue_recognition:false});
+      }
+      // Owner-initiated ARAB balance request: ONE approval-gated draft per recorded-ledger state; nothing is scheduled or sent here.
+      if (u.pathname === "/api/orders/balance-request" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({}));
+        try{return json({ok:true,...(await prepareBalanceRequest(env,b.id)),sending_enabled:false});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
       }
       if (u.pathname === "/api/orders/transition" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
