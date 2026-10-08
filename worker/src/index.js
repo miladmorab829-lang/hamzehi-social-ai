@@ -1895,44 +1895,116 @@ async function galleryImageResponse(env,id){
   const h=new Headers();h.set("Content-Type",row.content_type||obj.httpMetadata?.contentType||"image/jpeg");h.set("Cache-Control","private, max-age=3600");
   return new Response(obj.body,{status:200,headers:h});
 }
-// Customer-facing search over VERIFIED photos with an APPROVED spec (owner uploads only). Exact: the product (+ size / box type when
-// known) and the colours — a colour named for a PART (lid / middle / base) must be that part's colour (a white lid is never a white
-// base); a colour named without a part must appear on the box. Suggestions: the colour combinations that DO have verified photos.
-async function gallerySearch(env,{market=null,base=null,size=null,configuration=null,parts={},colors=[],language=null,limit=GALLERY_MAX_ALBUM}={}){
+// ---- Customer language → an explicit photo request (nothing is guessed). Colloquial Persian and Iraqi Arabic: «۳ تیکه» = «سه تکه» =
+// «3تکه» = «ثلاث قطع»; «سبز طلایی» is two colours in no particular order (a colour FAMILY: «سبز» covers every approved green); a colour
+// is tied to a part only when the customer names the part («درب سبز، وسط طلایی»). Model, size and colour order are never inferred.
+const GALLERY_COLOR_WORDS=["سفید","مشکی","سیاه","قرمز","زرشکی","صورتی","گلبهی","بنفش","یاسی","آبی","سرمه‌ای","سرمه ای","فیروزه‌ای","سبز","زرد","نارنجی","طلایی","نقره‌ای","نقره ای","کرم","کرمی","قهوه‌ای","قهوه ای","طوسی","نوک مدادی","خاکستری","شیری",
+  "ابیض","اسود","احمر","وردی","بنفسجی","ازرق","کحلی","اخضر","اصفر","برتقالی","ذهبی","فضی","کریمی","بنی","قهوائی","رصاصی","رمادی","سمائی","خوخی","شذری","تیفانی"].map(w=>salesNormal(w));
+const GALLERY_ROLE_WORDS={lid:["درب","دربش","رویه","رویش","بالا","بالایی","بالاش","بیرونی","بیرون","غطاء","الغطاء","غطا","الغطا","الاعلی","اعلی","فوق","الفوق","الخارج"],
+  middle:["وسط","وسطی","وسطش","میانی","الوسط"],
+  base:["کف","کفش","پایین","پایینی","پایینش","زیر","زیرش","داخل","داخلی","قاعده","القاعده","الاسفل","اسفل","جوه","الجوه","الداخل"]};
+const GALLERY_ROLE_OF=new Map(Object.entries(GALLERY_ROLE_WORDS).flatMap(([role,words])=>words.map(w=>[salesNormal(w),role])));
+const GALLERY_GENERIC=new Set(["جعبه","جعبه‌ای","باکس","پک","کادو","هدیه","علبه","علب","بوکس","box","عکس","صور","صوره"].map(w=>salesNormal(w)));
+function galleryPiecesInText(text){
+  const t=salesNormal(text).replace(/تیکه|تیکه‌ای/g,"تکه").replace(/(\d)(تکه|قطع)/g,"$1 $2");
+  if(/(?:^|\s)3\s*(?:تکه|قطعه|قطع|پیس)(?:\s|$)|(?:^|\s)سه\s*تکه|ثلاث\s*(?:قطع|قطعات)|(?:^|\s)3\s*قطع/u.test(t))return 3;
+  if(/(?:^|\s)2\s*(?:تکه|قطعه|قطع|پیس)(?:\s|$)|(?:^|\s)دو\s*تکه|قطعتین|(?:^|\s)2\s*قطع/u.test(t))return 2;
+  return null;
+}
+// Colour mentions in order, with the part they are tied to (when a part word precedes them). Vocabulary: the approved colour names of
+// the photos + the common colour words (so an unknown colour such as «بنفش» is still understood as a colour, not ignored).
+function galleryColorMentions(text,labels){
+  const words=salesNormal(text).replace(/[،,؛;.!؟?]/g," ").split(/\s+/).filter(Boolean),labelTokens=labels.map(l=>salesTokens(l)).filter(t=>t.length);
+  const firsts=new Set([...labelTokens.map(t=>t[0]),...GALLERY_COLOR_WORDS.map(w=>w.split(" ")[0])]);
+  const strip=w=>{for(const p of ["و","ال","وال","بال"]){if(w.startsWith(p)&&firsts.has(w.slice(p.length)))return w.slice(p.length);}return w;};
+  const out=[];let role=null,roleAge=0;
+  for(let i=0;i<words.length;i++){
+    const raw=words[i],w=strip(raw),r=GALLERY_ROLE_OF.get(raw)||GALLERY_ROLE_OF.get(raw.replace(/^و/,""));
+    if(r){role=r;roleAge=0;continue;}
+    if(firsts.has(w)){
+      // the longest approved name that starts here («سبز تیفانی» rather than «سبز»)
+      let family=[w],best=1;
+      for(const t of labelTokens)if(t[0]===w){let k=1;while(k<t.length&&i+k<words.length&&strip(words[i+k])===t[k])k++;if(k>best&&k<t.length+1){best=k;family=t.slice(0,k);}}
+      out.push({family:family.join(" "),role:role&&roleAge<=2?role:null});i+=best-1;role=null;continue;
+    }
+    if(role&&++roleAge>2)role=null;
+  }
+  return out;
+}
+// A spec colour belongs to a requested family when its name starts with the family («سبز» ⊂ «سبز سلفون», «سبز تیفانی سلفون»).
+const galleryInFamily=(label,family)=>{const t=salesTokens(label),f=family.split(" ");return f.every((x,i)=>t[i]===x);};
+// Customer-facing search over VERIFIED photos with an APPROVED spec (owner uploads only), in steps: 1. what the customer said explicitly
+// (product when named, pieces, part colours, plain colours); 2. every verified photo compatible with it. Never a guessed model, size or
+// colour order. Too many different models → one short question; nothing to search on → one short question.
+async function gallerySearch(env,{market=null,base=null,size=null,configuration=null,text="",parts={},roles=null,colors=[],language=null,limit=GALLERY_MAX_ALBUM}={}){
   if(!(await galleryStoreReady(env)))return {status:"unavailable",items:[],suggestions:[]};
-  if(!base)return {status:"product_unknown",items:[],suggestions:[]};
-  const markets=["IRAN","ARAB"].includes(market)?[market]:["IRAN","ARAB"];
+  const markets=["IRAN","ARAB"].includes(market)?[market]:["IRAN","ARAB"],lang=language||(market==="ARAB"?"Iraqi Arabic":"Persian");
   const rows=(await env.DB.prepare(`SELECT s.*,m.verified_at FROM gallery_photo_specs s JOIN visual_product_media m ON m.id=s.visual_media_id
     WHERE s.status='approved' AND m.candidate_status='verified' AND m.verified_real_product=1 AND m.generated_detected=0 AND m.ownership_status='owned'
     AND m.source_kind=? AND m.source_platform='r2' AND m.media_type='photo' AND s.market IN (${markets.map(()=>"?").join(",")}) ORDER BY m.verified_at DESC`).bind(GALLERY_SOURCE_KIND,...markets).all()).results||[];
-  const model=rows.filter(s=>galleryBaseMatches(base,s.model)&&(!size||!s.size||galleryKey(s.size)===galleryKey(size))&&(!configuration||galleryKey(s.box_type)===galleryKey(configuration)));
-  const want={};for(const [part,color] of Object.entries(parts||{})){const role=GALLERY_PART_ROLE[part];if(role&&color)want[role]=galleryKey(color);}
-  const plain=[...new Set((colors||[]).map(galleryKey).filter(k=>k&&!Object.values(want).includes(k)))];
-  const fits=s=>Object.entries(want).every(([role,k])=>galleryKey(s[role+"_color"])===k)&&plain.every(k=>[s.lid_color,s.middle_color,s.base_color].some(c=>galleryKey(c)===k));
-  const exact=model.filter(fits),asked=Object.keys(want).length||plain.length;
-  const combos=new Map();for(const s of model){if(asked&&fits(s))continue;const k=[s.lid_color,s.middle_color,s.base_color].map(galleryKey).join("|");const c=combos.get(k)||combos.set(k,{s,n:0}).get(k);c.n++;}
-  const lang=language||(market==="ARAB"?"Iraqi Arabic":"Persian");
+  // 1. the explicit request
+  const labels=[...new Set(rows.flatMap(s=>[s.lid_color,s.middle_color,s.base_color]).filter(Boolean))];
+  const mentions=galleryColorMentions(text,labels);
+  let want={},plain=[];
+  for(const m of mentions){if(m.role&&!want[m.role])want[m.role]=m.family;else if(!m.role&&!plain.includes(m.family))plain.push(m.family);}
+  if(!mentions.length){// nothing said now: colours the customer chose earlier in this conversation (part by part, or plain)
+    const fromRoles=roles||Object.fromEntries(Object.entries(parts||{}).map(([p,c])=>[GALLERY_PART_ROLE[p],c]).filter(([r,c])=>r&&c));
+    for(const [r,c] of Object.entries(fromRoles))want[r]=salesTokens(c).join(" ");
+    plain=[...new Set((colors||[]).map(c=>salesTokens(c).join(" ")).filter(k=>k&&!Object.values(want).includes(k)))];
+  }
+  const pieces=galleryPiecesInText(text)||galleryPiecesOf(configuration);
+  const asked=!!(base||size||configuration||pieces||Object.keys(want).length||plain.length);
+  const requested=galleryRequestedPhrase({want,plain,pieces},lang);
+  if(!asked)return {status:"product_unknown",items:[],suggestions:[],wanted:{},requested:null};
+  // 2. compatible verified photos: product (only when named) → size / box type (only when known) → pieces (only when said) → colours
+  const model=rows.filter(s=>(!base||galleryBaseMatches(base,s.model))&&(!size||!s.size||galleryKey(s.size)===galleryKey(size))&&(!configuration||galleryKey(s.box_type)===galleryKey(configuration))&&(!pieces||s.pieces===pieces));
+  const fits=s=>Object.entries(want).every(([role,f])=>s[role+"_color"]&&galleryInFamily(s[role+"_color"],f))&&plain.every(f=>[s.lid_color,s.middle_color,s.base_color].some(c=>c&&galleryInFamily(c,f)));
+  const exact=model.filter(fits),colorAsked=Object.keys(want).length>0||plain.length>0;
+  const combos=new Map();for(const s of model){if(colorAsked&&fits(s))continue;const k=[s.lid_color,s.middle_color,s.base_color].map(galleryKey).join("|");const c=combos.get(k)||combos.set(k,{s,n:0}).get(k);c.n++;}
   const suggestions=[...combos.values()].sort((a,b)=>b.n-a.n).slice(0,4).map(({s})=>galleryColorPhrase(s,lang));
-  const items=exact.slice(0,Math.min(GALLERY_MAX_ALBUM,limit)).map(s=>({visual_media_id:s.visual_media_id,spec_id:s.id,label:galleryPhotoLabel(s,lang)}));
-  return {status:exact.length?"found":model.length?"color_missing":"product_missing",items,suggestions,wanted:{parts:want,colors:plain},requested:galleryRequestedPhrase(parts,colors,lang)};
+  const models=[...new Map(exact.map(s=>[galleryKey(s.model)+"|"+galleryKey(s.box_type),s])).values()];
+  if(exact.length>Math.min(GALLERY_MAX_ALBUM,limit)&&!base&&models.length>1)return {status:"need_model",items:[],suggestions:[],models:models.slice(0,5).map(s=>[s.model,s.box_type].filter(Boolean).join(" ")),wanted:{parts:want,colors:plain,pieces},requested};
+  const items=exact.slice(0,Math.min(GALLERY_MAX_ALBUM,limit)).map(s=>{const label=galleryPhotoLabel(s,lang),parts=label.split(" | "),n=s.size?3:2;return {visual_media_id:s.visual_media_id,spec_id:s.id,label,head:parts.slice(0,n).join(" | "),tail:parts.slice(n).join(" | ")};});
+  return {status:exact.length?"found":model.length?"color_missing":"product_missing",items,suggestions,wanted:{parts:want,colors:plain,pieces},requested};
+}
+function galleryAllowedNumbers(g){
+  const nums=new Set([g.items.length,...g.items.map((_,i)=>i+1)]);
+  for(const t of [...g.items.map(x=>x.label),...(g.models||[]),...(g.suggestions||[]),g.requested||""])for(const m of String(t).matchAll(/[0-9۰-۹٠-٩]+/g)){const n=knowledgeCommandNumber(m[0]);if(Number.isSafeInteger(n))nums.add(n);}
+  return [...nums];
 }
 function galleryColorPhrase(s,language){const ar=language==="Iraqi Arabic",sliding=GALLERY_SLIDING.test(s.box_type||"");return [`${ar?(sliding?"الخارج":"الغطاء"):(sliding?"بیرونی":"درب")} ${s.lid_color}`,s.middle_color?`${ar?"الوسط":"وسط"} ${s.middle_color}`:null,`${ar?(sliding?"الداخل":"القاعدة"):(sliding?"داخل":"کف")} ${s.base_color}`].filter(Boolean).join(ar?" و":" و ");}
-function galleryRequestedPhrase(parts,colors,language){
+// What the customer asked, in their own terms (part colours only where they named the part).
+function galleryRequestedPhrase({want={},plain=[],pieces=null},language){
   const ar=language==="Iraqi Arabic",roleWord={lid:ar?"الغطاء":"درب",middle:ar?"الوسط":"وسط",base:ar?"القاعدة":"کف"};
-  const p=Object.entries(parts||{}).map(([part,c])=>GALLERY_PART_ROLE[part]&&c?`${roleWord[GALLERY_PART_ROLE[part]]} ${c}`:null).filter(Boolean);
-  const plain=(colors||[]).filter(c=>!Object.values(parts||{}).some(v=>galleryKey(v)===galleryKey(c)));
-  return [...p,...plain].join(ar?" و":" و ")||null;
+  const p=Object.entries(want).map(([r,f])=>`${roleWord[r]} ${f}`);
+  const piecesText=pieces?(ar?(pieces===3?"ثلاث قطع":"قطعتين"):`${String(pieces).replace(/[0-9]/g,d=>"۰۱۲۳۴۵۶۷۸۹"[d])} تکه`):null;
+  const plainText=plain.length?(ar?"باللون ":"با رنگ ")+plain.join(ar?" و":" و "):null;
+  return [piecesText,p.length?p.join(ar?" و":"، "):null,plainText].filter(Boolean).join(ar?" ":" ")||null;
 }
 function galleryReplyText(g,language,name){
-  const ar=language==="Iraqi Arabic",req=g.requested,sug=(g.suggestions||[]).length?g.suggestions.join(ar?"، ":"، "):null;
-  if(g.status==="found")return ar
-    ?`هاي صور حقيقية لـ ${name}${req?` (${req})`:""}.${req?" إذا عجبك، كلي العدد حتى أحسبلك السعر.":sug?` الألوان اللي عدنا صورها: ${sug}. شنو اللون اللي يعجبك؟`:" شنو اللون اللي يعجبك؟"}`
-    :`این‌ها عکس‌های واقعی ${name}${req?` (${req})`:""} هستن.${req?" اگه پسندیدید، تعداد رو بگید تا قیمت رو اعلام کنم.":sug?` ترکیب رنگ‌هایی که عکس واقعی‌شون رو داریم: ${sug}. کدوم رو می‌پسندید؟`:" کدوم رنگ رو می‌پسندید؟"}`;
+  const ar=language==="Iraqi Arabic",fa=n=>String(n).replace(/[0-9]/g,d=>"۰۱۲۳۴۵۶۷۸۹"[d]),req=g.requested,what=[name,req].filter(Boolean).join(ar?" ":" ");
+  const sug=(g.suggestions||[]).length?g.suggestions.join(ar?"، ":"، "):null;
+  if(g.status==="found"&&g.items.length===1)return ar
+    ?`هاي صورة حقيقية لـ ${g.items[0].label}. إذا عجبتك، كلي العدد حتى أحسبلك السعر.`
+    :`این عکس واقعی ${g.items[0].label} هست. اگه پسندیدید، تعداد رو بگید تا قیمت رو اعلام کنم.`;
+  if(g.status==="found"){
+    const same=g.items.every(x=>x.head&&x.head===g.items[0].head),num=i=>ar?i+1:fa(i+1);
+    const list=g.items.map((x,i)=>`${num(i)}) ${same?x.tail:x.label}`).join("\n");
+    return ar
+    ?`عدنا ${g.items.length} صور حقيقية${same?` لـ ${g.items[0].head}`:""} تناسب طلبك:\n${list}\nيا وحدة تعجبك؟`
+    :`${fa(g.items.length)} عکس واقعی${same?` از ${g.items[0].head}`:""} مطابق درخواستتون داریم:\n${list}\nکدوم رو می‌پسندید؟`;}
+  if(g.status==="need_model")return ar?`عدنا أكثر من موديل بهالمواصفات: ${g.models.join("، ")}. يا موديل تريد؟`:`با این مشخصات چند مدل داریم: ${g.models.join("، ")}. کدوم مدل رو می‌خواید؟`;
   if(g.status==="color_missing")return ar
-    ?`صور ${name}${req?` (${req})`:""} الحقيقية مو متوفرة هسه؛ سجلت طلبك.${sug?` عدنا صور حقيقية بهالألوان: ${sug}. أرسلها إلك؟`:""}`
-    :`عکس واقعی ${name}${req?` (${req})`:""} فعلاً در گالری نیست؛ درخواستتون ثبت شد.${sug?` این ترکیب‌ها رو عکس واقعی داریم: ${sug}. براتون بفرستم؟`:""}`;
-  if(g.status==="product_missing")return ar?`صور ${name} الحقيقية مو متوفرة هسه؛ سجلت طلبك وأول ما تجهز أرسلها إلك.`:`عکس واقعی ${name} فعلاً در گالری نیست؛ درخواستتون ثبت شد و به‌محض آماده شدن براتون می‌فرستیم.`;
-  return ar?"صور أي موديل تريد؟":"عکس کدوم مدل رو می‌خواید؟";
+    ?`صور ${what} الحقيقية مو متوفرة هسه؛ سجلت طلبك.${sug?` عدنا صور حقيقية بهالألوان: ${sug}. أرسلها إلك؟`:""}`
+    :`عکس واقعی ${what} فعلاً در گالری نیست؛ درخواستتون ثبت شد.${sug?` این ترکیب‌ها رو عکس واقعی داریم: ${sug}. براتون بفرستم؟`:""}`;
+  if(g.status==="product_missing")return ar?`صور ${what||"هذا الموديل"} الحقيقية مو متوفرة هسه؛ سجلت طلبك وأول ما تجهز أرسلها إلك.`:`عکس واقعی ${what||"این مدل"} فعلاً در گالری نیست؛ درخواستتون ثبت شد و به‌محض آماده شدن براتون می‌فرستیم.`;
+  return ar?"صور أي موديل وأي لون تريد؟":"عکس کدوم مدل و چه رنگی رو می‌خواید؟";
+}
+// The product is used only when the customer named it: the specific words of the catalog name (without «جعبه / علبة / box») must
+// appear in what they wrote. A generic «جعبه» names nothing.
+function galleryExplicitBase(candidate,said){
+  const specific=salesTokens(candidate).filter(t=>!GALLERY_GENERIC.has(t));if(!specific.length)return null;
+  const words=new Set(salesTokens(said));return specific.every(t=>words.has(t))?candidate:null;
 }
 // After the inbound draft exists: attach the matched photos to THAT draft (sent only after the owner approves it), or queue the request.
 async function persistGalleryTurn(env,{row,gallery,outreach}){
@@ -1944,7 +2016,7 @@ async function persistGalleryTurn(env,{row,gallery,outreach}){
   }
   if(["color_missing","product_missing"].includes(gallery.status)){
     await env.DB.prepare("INSERT OR IGNORE INTO visual_photo_requests(id,lead_id,conversation_id,inbox_message_id,market,product_base,size,configuration,parts_json,colors_json,reason,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'open',?,?)")
-      .bind("vreq-"+uid(),row.lead_id,row.conversation_id,row.id,gallery.market||null,gallery.base||null,gallery.size||null,gallery.configuration||null,JSON.stringify(gallery.parts||{}),JSON.stringify(gallery.colors||[]),gallery.status,t,t).run();
+      .bind("vreq-"+uid(),row.lead_id,row.conversation_id,row.id,gallery.market||null,gallery.base||null,gallery.size||null,gallery.configuration||null,JSON.stringify({...(gallery.parts||{}),...(gallery.pieces?{pieces:gallery.pieces}:{})}),JSON.stringify(gallery.colors||[]),gallery.status,t,t).run();
     return {queued:gallery.status};
   }
   return null;
@@ -1996,7 +2068,8 @@ async function galleryRequests(env,{status="open"}={}){
   const r=await env.DB.prepare("SELECT q.*,l.name AS lead_name FROM visual_photo_requests q LEFT JOIN leads l ON l.id=q.lead_id WHERE (?='all' OR q.status=?) ORDER BY q.created_at DESC LIMIT 200").bind(status,status).all();
   const items=[];
   for(const x of r.results||[]){let colors=[],parts={};try{colors=JSON.parse(x.colors_json||"[]");parts=JSON.parse(x.parts_json||"{}");}catch{}
-    const g=x.status==="open"?await gallerySearch(env,{market:x.market,base:x.product_base,size:x.size,configuration:x.configuration,parts:Object.fromEntries(Object.entries(parts).map(([role,c])=>[{lid:"رویه",middle:"وسط",base:"کف"}[role]||role,c])),colors}):null;
+    const {pieces:qp,...qroles}=parts||{};
+    const g=x.status==="open"?await gallerySearch(env,{market:x.market,base:x.product_base,size:x.size,configuration:x.configuration,text:qp?(qp===3?"3 تکه":"2 تکه"):"",roles:qroles,colors}):null;
     items.push({...x,colors,parts,requested:g?.requested||null,available_now:g?.status==="found"?g.items.length:0,suggestions:g?.suggestions||[]});}
   return {ok:true,items};
 }
@@ -2008,8 +2081,8 @@ async function galleryPrepareRequest(env,{id}){
   let colors=[],partsRoles={};try{colors=JSON.parse(q.colors_json||"[]");partsRoles=JSON.parse(q.parts_json||"{}");}catch{}
   let language=null;try{language=JSON.parse((await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+q.inbox_message_id).first())?.details_json||"{}").detected_language||null;}catch{}
   if(!language){const lead=await env.DB.prepare("SELECT notes FROM leads WHERE id=?").bind(q.lead_id).first();language=outreachLanguage(parseLeadNotes(lead));}
-  const parts=Object.fromEntries(Object.entries(partsRoles).map(([role,c])=>[{lid:language==="Iraqi Arabic"?"الغطاء":"رویه",middle:language==="Iraqi Arabic"?"الوسط":"وسط",base:language==="Iraqi Arabic"?"القاعدة":"کف"}[role]||role,c]));
-  const g=await gallerySearch(env,{market:q.market,base:q.product_base,size:q.size,configuration:q.configuration,parts,colors,language});
+  const {pieces:qp,...qroles}=partsRoles||{};
+  const g=await gallerySearch(env,{market:q.market,base:q.product_base,size:q.size,configuration:q.configuration,text:qp?(qp===3?"3 تکه":"2 تکه"):"",roles:qroles,colors,language});
   if(g.status!=="found")throw Error("No verified photo matches this request yet");
   const draft=await approvalGatedSalesDraft(env,{key:`gallery-request:${q.id}:${g.items.map(x=>x.spec_id).join(",")}`,leadId:q.lead_id,conversationId:q.conversation_id,language,message:galleryReplyText(g,language,q.product_base),eventType:"gallery_request_draft_created",eventMessage:"Approval-gated gallery photo draft created for a waiting photo request",details:{photo_request_id:q.id}});
   if(!draft.outreach_id)throw Error(draft.reason||"Draft could not be created");
@@ -8862,7 +8935,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // owner-only question (escalate() → wait_for_owner, never a second escalation).
   else if(openEscalation&&!newFacts.length&&!kgQuestions.length&&!Object.keys(kgCurrent).length&&SALES_BRAIN_STATUS_PING.test(String(row.message||"").normalize("NFKC"))){action="wait_for_owner";}
   // Live product gallery: a photo / sample request is answered from VERIFIED gallery photos inside an owner-approved draft.
-  else if(galleryOn&&intent!=="asks_price"&&GALLERY_PHOTO_ASK.test(String(row.message||""))&&!colorPick.special){action="visual";}
+  else if(galleryOn&&intent!=="asks_price"&&GALLERY_PHOTO_ASK.test(String(row.message||""))){action="visual";}
   // Generic knowledge: owner-defined hard stops and undecided combinations escalate; approved non-commercial facts/relations are answered.
   // A colour the customer names that is no approved standard option is a special request: the owner decides (never confirmed).
   // A mixed request («مشکی سلفون و بنفش»): the approved part is kept (memory + the SAME order candidate) and said so; the rest goes
@@ -8963,13 +9036,15 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // size when known and the colours asked now (or chosen before). Found → those photos are attached to this draft; missing → queued.
   let gallery=null,galleryName=null;
   if(action==="visual"&&galleryOn){
-    const req=pricing?.requirements||{},base=(pricing?.product?.source==="list"?pricing.product.name:null)||pricing?.product_name||model||null;
+    const said=String(row.message||"")+" "+String(model||""),candidate=(pricing?.product?.source==="list"?pricing.product.name:null)||pricing?.product_name||null;
+    const base=(candidate&&galleryExplicitBase(candidate,said))||(model&&galleryExplicitBase(model,said))||null,req=base?(pricing?.requirements||{}):{};
     // the colours of this turn first (a part-by-part choice, then plain colours), else what the customer chose before
     const custParts=partsPick?.parts&&Object.keys(partsPick.parts).length?partsPick.parts:colorParts&&Object.keys(colorParts).length?colorParts:{};
     const wantColors=colorPick.selected.length?colorPick.selected:selectedColors;
     const roles=Object.fromEntries(Object.entries(custParts).map(([p,c])=>[GALLERY_PART_ROLE[p],c]).filter(([r,c])=>r&&c));
-    gallery={...await gallerySearch(env,{market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,parts:custParts,colors:wantColors,language}),market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,parts:roles,colors:wantColors};
-    galleryName=pricing?.product_name||base;
+    const found=await gallerySearch(env,{market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,text:String(row.message||""),parts:custParts,colors:wantColors,language});
+    gallery={...found,market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,parts:found.wanted?.parts||roles,colors:found.wanted?.colors||wantColors,pieces:found.wanted?.pieces||null};
+    galleryName=base?(pricing?.product_name&&galleryExplicitBase(pricing.product_name,said)?pricing.product_name:base):null;
     if(gallery.status==="unavailable")gallery=null;else salesDraft=galleryReplyText(gallery,language,galleryName);
   }
   if(action==="accept_offer")stage="customer_accepted";
@@ -9049,9 +9124,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const authorityFacts=[...kgEvidenceFacts,...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
   // (the catalog answer is evidenced by exactly the approved catalog it lists: its product names and box types)
   if(action==="answer_catalog")authorityFacts.push({category:"availability",values:[...catalogNames,...catalogModels]});
-  if(gallery)authorityFacts.push({category:"availability",values:[galleryName,gallery.base,gallery.requested,...(gallery.colors||[]),...Object.values(gallery.parts||{}),...(gallery.suggestions||[]),...(gallery.items||[]).map(x=>x.label)].filter(Boolean)});
+  if(gallery)authorityFacts.push({category:"availability",values:[galleryName,gallery.base,gallery.requested,...(gallery.models||[]),...(gallery.colors||[]),...Object.values(gallery.parts||{}),...(gallery.suggestions||[]),...(gallery.items||[]).map(x=>x.label)].filter(Boolean)});
   if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&salesDraft!==null&&!salesDraft.includes(approvedPrinting))salesDraft=`تمام، سجلت نوع الطباعة: ${approvedPrinting}. `+salesDraft;
-  let draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&!String(draft).includes(approvedPrinting)&&String(draft).includes("سجلت نوع الطباعة"))draft=String(draft).replace("سجلت نوع الطباعة","سجلت نوع الطباعة: "+approvedPrinting);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();let validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  let draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])],moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&!String(draft).includes(approvedPrinting)&&String(draft).includes("سجلت نوع الطباعة"))draft=String(draft).replace("سجلت نوع الطباعة","سجلت نوع الطباعة: "+approvedPrinting);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();let validation=validateSalesBrainDraft(draft,{allowedNumbers:orderStatusAsked?[...String(postSaleOrder.order_number||"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])).filter(Number.isSafeInteger):action==="visual"&&gallery?galleryAllowedNumbers(gallery):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   // ---- AI-FIRST REPLY. The Sales AI's reply is what the customer gets when it passes the deterministic gate; the authoritative
   // commercial segment of the deterministic decision (approved price / terms / owner holding) is inserted at {{COMMERCIAL}}.
   // Acceptance, order status and quotes stay fully deterministic. Escalations the deterministic layer requires (no approved price,
@@ -9181,7 +9256,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
   const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge"||action==="advise_colors")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details","order_details","ai_answer"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],requested:gallery.requested||null,items:gallery.items||[],suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],pieces:gallery.pieces||null,models:gallery.models||null,requested:gallery.requested||null,items:gallery.items||[],suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   // Observability without chain-of-thought: whether the Sales AI ran, model, latency, what it understood, which facts were applied,
   // where the reply came from and why a fallback happened. The send path re-validates an AI reply against the same evidence.
   result.ai_brain=aiInfo;
