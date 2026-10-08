@@ -24,6 +24,21 @@ CREATE TABLE IF NOT EXISTS lead_identities (
  updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lead_identities_lead ON lead_identities(lead_id);
+-- Telegram pilot campaign codes (owner-issued, single use): only the SHA-256 of a code is stored, never the code itself.
+CREATE TABLE IF NOT EXISTS lead_campaign_codes (
+ id TEXT PRIMARY KEY,
+ code_hash TEXT NOT NULL UNIQUE,
+ lead_id TEXT NOT NULL,
+ campaign TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('active','bound','revoked')),
+ expires_at TEXT,
+ bound_at TEXT,
+ bound_sender_hash TEXT,
+ revoked_at TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lead_campaign_codes_lead ON lead_campaign_codes(lead_id,status);
 CREATE TABLE IF NOT EXISTS lead_contacts (
  id TEXT PRIMARY KEY,
  lead_id TEXT NOT NULL,

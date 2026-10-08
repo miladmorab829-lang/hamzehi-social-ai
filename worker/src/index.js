@@ -5258,18 +5258,25 @@ async function handleTelegramWebhook(env,req){
   const providerSenderId=String(m.from?.id||(privateCustomerChat?m.chat.id:'')||''),providerUsername=String(m.from?.username||(m.chat.type==='private'?m.chat.username:'')||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;
   // Store the raw Telegram media reference first, so a customer photo is visible to this same turn's image resolver.
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
-  if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,String(m.caption||''),isVault?'vault':isReady?'ready':(m.chat.type==='private'&&!internalChat)?'customer':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
+  if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,telegramStoredText(String(m.caption||'')),isVault?'vault':isReady?'ready':(m.chat.type==='private'&&!internalChat)?'customer':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   await ensureLeadOutreachStore(env);
   const unlinkedInbound={leadId:null,conversationId:null,contactId:null},identityStarted=Date.now();
   let linked=privateCustomerChat?await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo}):unlinkedInbound;
-  if(privateCustomerChat&&!linked.leadId&&!linked.ambiguous&&!targets.includes(chatId))linked=await createTelegramInboundLead(env,m,{chatId,providerUsername});
+  // A /start pilot code may bind this sender to the discovered lead it was issued for (validated, conflict-checked, single use).
+  const entry=privateCustomerChat?telegramEntryHints(m):null;
+  if(entry?.pilotCode&&!linked.ambiguous&&!targets.includes(chatId)){
+    let pilot;try{pilot=await claimTelegramPilotCode(env,entry.pilotCode,{chatId,linkedLeadId:linked.leadId});}catch{pilot={status:"error"};}
+    if(pilot.status==="bound"&&!linked.leadId)linked={leadId:pilot.leadId,conversationId:null,contactId:null};
+    if(!pilot.repeat)try{await audit(env,pilot.status==="bound"?"telegram_pilot_code_bound":"telegram_pilot_code_refused",pilot.status==="bound"?"Telegram sender bound to a discovered lead by a pilot code":"Telegram pilot code refused; nothing was linked",{status:pilot.status,code_id:pilot.codeId||null,lead_id:pilot.status==="bound"?pilot.leadId:null});}catch{}
+  }
+  if(privateCustomerChat&&!linked.leadId&&!linked.ambiguous&&!targets.includes(chatId))linked=await createTelegramInboundLead(env,m,{chatId,providerUsername,entry});
   if(privateCustomerChat&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});
   if(!linked.leadId||!linked.conversationId)linked=unlinkedInbound;
   const identityMs=Date.now()-identityStarted,dedupStarted=Date.now();
   const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();
   if(!ex){
     const t=now(),inboxId=uid();
-    await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(inboxId,'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),String(m.text||m.caption||'').trim(),'other','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();
+    await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(inboxId,'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),telegramStoredText(String(m.text||m.caption||'').trim()),'other','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();
     const dedupMs=Date.now()-dedupStarted;
     // A linked private customer's image is attached to this inbox row and analysed (bounded, once) BEFORE the Sales Brain runs.
     // A text-only message never reaches Vision; an image already analysed in this conversation is reused, never re-analysed.
@@ -6501,7 +6508,7 @@ async function recordCustomerConversationMedia(env,{m,body,inboxId,leadId,conver
     return {id:null,analysis_status:"schema_missing",album_follower:false};
   }
   const t=now(),id="customer-media-"+uid(),messageId=String(m.message_id||""),groupId=m.media_group_id?String(m.media_group_id).slice(0,80):null;
-  await env.DB.prepare("INSERT OR IGNORE INTO conversation_customer_media(id,lead_id,conversation_id,inbox_message_id,platform,chat_id,telegram_message_id,update_id,media_group_id,media_type,file_id,file_unique_id,mime_type,file_size,width,height,caption,analysis_status,created_at,updated_at) VALUES(?,?,?,?,'telegram',?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)").bind(id,leadId,conversationId,inboxId,chatId,messageId,body?.update_id!==undefined?String(body.update_id):null,groupId,image.media_type,image.file_id,image.file_unique_id||null,image.mime_type,image.file_size,image.width,image.height,String(m.caption||"").slice(0,1000)||null,t,t).run();
+  await env.DB.prepare("INSERT OR IGNORE INTO conversation_customer_media(id,lead_id,conversation_id,inbox_message_id,platform,chat_id,telegram_message_id,update_id,media_group_id,media_type,file_id,file_unique_id,mime_type,file_size,width,height,caption,analysis_status,created_at,updated_at) VALUES(?,?,?,?,'telegram',?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)").bind(id,leadId,conversationId,inboxId,chatId,messageId,body?.update_id!==undefined?String(body.update_id):null,groupId,image.media_type,image.file_id,image.file_unique_id||null,image.mime_type,image.file_size,image.width,image.height,telegramStoredText(String(m.caption||"")).slice(0,1000)||null,t,t).run();
   const row=await env.DB.prepare("SELECT id,media_group_id,telegram_message_id,analysis_status FROM conversation_customer_media WHERE inbox_message_id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(inboxId,leadId,conversationId).first();
   if(!row)return null;
   // A redelivered update re-attempts only through the bounded stale-recovery rules (never a fresh, unconditional retry).
@@ -6763,6 +6770,7 @@ function outreachLanguage(meta = {}) {
   const country = String(meta.country || meta.market || "").trim().toLowerCase();
   if (["iq","iraq","iraqi","العراق","عراق"].includes(country)) return "Iraqi Arabic";
   if (["ir","iran","iranian","ایران"].includes(country)) return "Persian";
+  if (meta.preferred_language === "Iraqi Arabic") return "Iraqi Arabic";
   return String(meta.type || "").endsWith("_ar") ? "Iraqi Arabic" : "Persian";
 }
 
@@ -7018,6 +7026,7 @@ function salesBrainDraft(action,language){const ar=language==="Iraqi Arabic";con
 };return p[action]||p.ask_details;}
 // Short, natural inbound replies (1–2 sentences). They never state a price, discount, MOQ, capability, timing or terms;
 // a price holding reply only says the price is being checked (never that an order was registered).
+const SALES_WELCOME_AR="هلا وغلا بيك 🌷 وياك HAMZEHI BOX للعلب المخصصة. كلي شنو المنتج اللي تحتاجله علبة، وشكد العدد، ووين يكون التسليم، حتى أساعدك بالموديلات والسعر.";
 const SALES_BRAIN_NATURAL_ACTIONS=new Set(["greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
 const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","commercial_owner_review_required","approved_moq_missing","approved_knowledge_missing"]);
 // A bare follow-up about a pending answer ("any news?", "خبری نشد؟", "شنو صار؟", "؟"): no new detail, no question of its own.
@@ -8591,7 +8600,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   }
   // ---- Sales agent reply + its evidence, and the ORDER CANDIDATE: ONE versioned deal per conversation (memory key order_candidate),
   // rewritten only when it actually changes (same deal → same version; a redelivery writes nothing).
+  // /start in Iraqi Arabic (a valid «iq» campaign, an «ar» Telegram language or an Iraqi lead): ONE fixed welcome with no commercial
+  // claim, asking for the product, the quantity and the delivery city (the city is what can establish the ARAB market). An owner
+  // question, an order or a deal in progress keeps its own reply; a Persian /start is unchanged.
+  if(telegramStartParam(row.message)&&language==="Iraqi Arabic"&&!needsOwner&&!postSaleOrder&&!storedCandidate&&[null,"greet","continue_conversation","acknowledge_details","ask_product","ask_destination"].includes(action)){action="welcome";askedField=null;}
   let salesDraft=null,salesTexts=[];
+  if(action==="welcome")salesDraft=SALES_WELCOME_AR;
   if(action==="accept_offer")stage="customer_accepted";
   if(action==="answer_price"){salesDraft=priceReply.parts.join(" ");salesTexts=priceReply.texts;}
   // Colour question: ONE answer composed from approved knowledge (+ the approved price when the deal is priced and not yet offered at
@@ -8678,7 +8692,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // answered from approved knowledge. Anything that fails validation → the deterministic reply (and why is recorded).
   let replySource="legacy";const aiEvidenceFacts=[],needsOwnerPreAi=needsOwner;
   if(ai&&ai.reply){
-    const DET_ONLY=["accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","ask_image_reference","answer_catalog"];
+    const DET_ONLY=["accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","ask_image_reference","answer_catalog","welcome"];
     const SEGMENT=["answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner"];
     if(orderStatusAsked||DET_ONLY.includes(action))aiInfo.fallback="deterministic_action";
     // Truthfulness: the AI may say the colours are finalised / registered / noted only when they ARE saved (this turn or before).
@@ -8891,7 +8905,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // escalation stays open and the actual commercial answer still requires the owner.
 // The sales agent's answers (answer_price, negotiate, handle_objection, accept_offer, clarify_product, ask_attribute) are composed
 // ONLY from one owner-approved price record of the conversation's market and are re-validated below against exactly that evidence.
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["welcome","answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.
@@ -9610,15 +9624,127 @@ async function matchInboundLead(env, { platform, providerConversationId, provide
   return {leadId,conversationId:id,contactId};
 }
 
+// ---- Telegram entry (/start): welcome language and campaign attribution ----
+// A /start parameter and the Telegram language_code are customer-controlled: they may choose the WELCOME LANGUAGE and record where
+// the customer came from — never a market, a country, a price or any owner decision (ARAB prices still need ARAB evidence).
+// Recognised parameters: the public «iq» campaign, and a single-use pilot code «iq_<22 random base64url chars>» that the owner issued
+// for ONE discovered lead (stored only as a SHA-256 hash). Anything else is ignored, with no hint about which codes exist.
+const TELEGRAM_CAMPAIGN_IQ="iq",TELEGRAM_PILOT_CODE=/^iq_[A-Za-z0-9_-]{22}$/,TELEGRAM_PILOT_CODE_DAYS=30;
+function telegramStartParam(text){const m=String(text||"").trim().match(/^\/start(?:@[A-Za-z0-9_]{1,64})?(?:\s+(\S+))?$/);return m?{param:m[1]||null}:null;}
+function telegramLanguageCode(value){const v=String(value||"").trim().toLowerCase();return /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/.test(v)?v:null;}
+function telegramEntryHints(m){
+  const start=telegramStartParam(m?.text),param=start?.param||null;
+  return {start:!!start,campaign:param===TELEGRAM_CAMPAIGN_IQ?"iq":null,pilotCode:TELEGRAM_PILOT_CODE.test(param||"")?param:null,languageCode:telegramLanguageCode(m?.from?.language_code)};
+}
+// The welcome language of a NEW Telegram lead: the public «iq» campaign, else a language_code «ar…»; otherwise null (the Persian
+// default is unchanged). A validated pilot code needs no hint: it binds to a discovered Iraqi lead, which is answered in Iraqi Arabic.
+function telegramEntryLanguage(hints){if(hints?.campaign==="iq")return "Iraqi Arabic";if(/^ar(?:-|$)/.test(hints?.languageCode||""))return "Iraqi Arabic";return null;}
+// A pilot code is a bearer secret: it is never stored in the inbox, a media caption, the memory or the AI context. A /start with a
+// code is kept as «/start iq»; a code pasted anywhere else (a forwarded link, a caption) is replaced by «iq_[code]».
+const TELEGRAM_PILOT_CODE_ANYWHERE=/(^|[^A-Za-z0-9_-])iq_[A-Za-z0-9_-]{22}(?![A-Za-z0-9_-])/g;
+function telegramStoredText(text){const value=String(text??"");const start=telegramStartParam(value);if(start&&TELEGRAM_PILOT_CODE.test(start.param||""))return "/start iq";return value.replace(TELEGRAM_PILOT_CODE_ANYWHERE,"$1iq_[code]");}
+function newTelegramPilotCode(){const b=crypto.getRandomValues(new Uint8Array(16));return "iq_"+btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");}
+// Created by the owner routes (issue / list / revoke) or database/schema.sql — customer traffic never runs DDL: without the table
+// no code can exist, and a /start code is simply not bound (the inbound continues as a normal new lead).
+let leadCampaignCodeStoreVerified=false;
+async function leadCampaignCodeStoreReady(env){
+  if(leadCampaignCodeStoreVerified)return true;
+  try{const r=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='lead_campaign_codes' LIMIT 1").first();if(r){leadCampaignCodeStoreVerified=true;return true;}}catch{}
+  return false;
+}
+async function ensureLeadCampaignCodeStore(env){return onceEnsured(env,"LeadCampaignCodeStore",async()=>{
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS lead_campaign_codes(id TEXT PRIMARY KEY,code_hash TEXT NOT NULL UNIQUE,lead_id TEXT NOT NULL,campaign TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('active','bound','revoked')),expires_at TEXT,bound_at TEXT,bound_sender_hash TEXT,revoked_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_lead_campaign_codes_lead ON lead_campaign_codes(lead_id,status)").run();
+});}
+// Binds a private Telegram sender to the discovered lead a pilot code was issued for — only while the code is active and unexpired,
+// the sender belongs to no other lead (contact or identity) and the lead has no other Telegram contact. The code is consumed in the
+// same transaction as the sender's identity, so a lost race or an identity owned elsewhere changes nothing. A redelivery by the SAME
+// sender is idempotent; anyone else presenting a used code gets nothing. Never sets a market, a country or a stage.
+async function claimTelegramPilotCode(env,code,{chatId,linkedLeadId=null}){
+  const userId=normalizeTelegramPrivateChatId(chatId);if(!userId||!TELEGRAM_PILOT_CODE.test(String(code||"")))return {status:"invalid"};
+  if(!(await leadCampaignCodeStoreReady(env)))return {status:"unavailable"};
+  const [codeHash,senderHash]=await Promise.all([ownerSha256(code),ownerSha256("telegram_user:"+userId)]);
+  const row=await env.DB.prepare("SELECT * FROM lead_campaign_codes WHERE code_hash=? LIMIT 1").bind(codeHash).first();
+  if(!row)return {status:"unknown"};
+  if(row.status==="bound")return row.bound_sender_hash===senderHash&&(!linkedLeadId||linkedLeadId===row.lead_id)?{status:"bound",leadId:row.lead_id,codeId:row.id,repeat:true}:{status:"used",codeId:row.id};
+  if(row.status!=="active")return {status:row.status,codeId:row.id};
+  if(!row.expires_at||!(Date.parse(row.expires_at)>Date.now()))return {status:"expired",codeId:row.id};
+  if(linkedLeadId&&linkedLeadId!==row.lead_id)return {status:"conflict_sender_linked",codeId:row.id};
+  if(!(await env.DB.prepare("SELECT id FROM leads WHERE id=? LIMIT 1").bind(row.lead_id).first()))return {status:"lead_missing",codeId:row.id};
+  const owned=await env.DB.prepare("SELECT COUNT(*) AS n FROM lead_contacts WHERE lead_id=? AND contact_type='telegram' AND normalized_value<>? AND evidence_status!='invalid'").bind(row.lead_id,userId).first();
+  if(Number(owned?.n||0)>0)return {status:"conflict_lead_owned",codeId:row.id};
+  const elsewhere=await env.DB.prepare("SELECT lead_id FROM lead_contacts WHERE contact_type='telegram' AND normalized_value=? AND lead_id<>? AND evidence_status!='invalid' LIMIT 1").bind(userId,row.lead_id).first();
+  const identityKey=`telegram_user:${userId}`,identity=await env.DB.prepare("SELECT lead_id FROM lead_identities WHERE identity_key=? LIMIT 1").bind(identityKey).first();
+  if(elsewhere||(identity&&identity.lead_id!==row.lead_id))return {status:"conflict_sender_linked",codeId:row.id};
+  const t=now(),stmts=[env.DB.prepare("UPDATE lead_campaign_codes SET status='bound',bound_at=?,bound_sender_hash=?,updated_at=? WHERE id=? AND status='active'").bind(t,senderHash,t,row.id)];
+  if(!identity)stmts.push(env.DB.prepare("INSERT INTO lead_identities(identity_key,identity_type,normalized_value,lead_id,source,created_at,updated_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM lead_campaign_codes WHERE id=? AND status='bound' AND bound_sender_hash=?)").bind(identityKey,"telegram_user",userId,row.lead_id,"telegram_pilot_code",t,t,row.id,senderHash));
+  try{await env.DB.batch(stmts);}catch{return {status:"conflict_sender_linked",codeId:row.id};}
+  const after=await env.DB.prepare("SELECT status,bound_sender_hash FROM lead_campaign_codes WHERE id=? LIMIT 1").bind(row.id).first();
+  if(after?.status!=="bound"||after.bound_sender_hash!==senderHash)return {status:"used",codeId:row.id};
+  const lead=await env.DB.prepare("SELECT notes FROM leads WHERE id=? LIMIT 1").bind(row.lead_id).first(),meta=parseLeadNotes(lead);
+  meta.attribution={campaign:row.campaign,channel:"telegram_pilot_code",code_id:row.id,bound_at:t};
+  await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),t,row.lead_id).run();
+  return {status:"bound",leadId:row.lead_id,codeId:row.id};
+}
+// A discovered lead's stored country is Iraq AND its own provider data agrees (an Iraqi address or a +964 phone). Such a lead is
+// priced in the ARAB market from its CRM country (determineQuoteMarket: lead_country) — a code or a language never sets a country.
+function leadIraqCountryVerified(meta={}){
+  if(!["iq","iraq","العراق","عراق"].includes(String(meta.country||"").trim().toLowerCase()))return false;
+  return /العراق|(?<![A-Za-z])iraq(?![A-Za-z])/i.test(String(meta.address||""))||/^\+964/.test(String(meta.phone||"").replace(/[\s()-]/g,""));
+}
+// Owner-only issuing of pilot codes (one active code per lead; a new one revokes the previous). Only DISCOVERED leads with a verified
+// Iraq country and no Telegram contact qualify. The code is returned ONCE (only its hash is stored); the link uses the configured bot username or a
+// placeholder until it is verified. Issuing a code sends nothing and activates nothing by itself.
+async function issueTelegramPilotCodes(env,input={}){
+  const ids=[...new Set((Array.isArray(input.lead_ids)?input.lead_ids:[]).map(x=>String(x||"").trim()).filter(Boolean))];
+  if(!ids.length||ids.length>50)throw Error("lead_ids must list 1–50 leads");
+  if(input.confirm_issue!==true)throw Error("confirm_issue is required");
+  const days=Math.min(90,Math.max(1,Number.isSafeInteger(input.expires_days)?input.expires_days:TELEGRAM_PILOT_CODE_DAYS));
+  await ensureLeadCampaignCodeStore(env);await ensureLeadContactStore(env);
+  const bot=String(env.TELEGRAM_BOT_USERNAME||"").trim().replace(/^@/,""),botOk=/^[A-Za-z][A-Za-z0-9_]{3,31}bot$/i.test(bot);
+  const items=[];
+  for(const id of ids){
+    const lead=await env.DB.prepare("SELECT id,stage,notes FROM leads WHERE id=? LIMIT 1").bind(id).first();
+    if(!lead||lead.stage!=="discovered"){items.push({lead_id:id,issued:false,reason:"not_a_discovered_lead"});continue;}
+    if(!leadIraqCountryVerified(parseLeadNotes(lead))){items.push({lead_id:id,issued:false,reason:"iraq_country_not_verified"});continue;}
+    const tg=await env.DB.prepare("SELECT COUNT(*) AS n FROM lead_contacts WHERE lead_id=? AND contact_type='telegram' AND evidence_status!='invalid'").bind(id).first();
+    if(Number(tg?.n||0)>0){items.push({lead_id:id,issued:false,reason:"lead_already_has_telegram_contact"});continue;}
+    const code=newTelegramPilotCode(),t=now(),expires=new Date(Date.now()+days*86400000).toISOString(),codeId=uid();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE lead_campaign_codes SET status='revoked',revoked_at=?,updated_at=? WHERE lead_id=? AND status='active'").bind(t,t,id),
+      env.DB.prepare("INSERT INTO lead_campaign_codes(id,code_hash,lead_id,campaign,status,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(codeId,await ownerSha256(code),id,"iq","active",expires,t,t)
+    ]);
+    items.push({lead_id:id,issued:true,code_id:codeId,start_parameter:code,link:`https://t.me/${botOk?bot:"<BOT_USERNAME>"}?start=${code}`,expires_at:expires});
+  }
+  await audit(env,"telegram_pilot_codes_issued","Owner issued Telegram pilot campaign codes",{issued:items.filter(x=>x.issued).map(x=>({lead_id:x.lead_id,code_id:x.code_id})),refused:items.filter(x=>!x.issued).length});
+  return {ok:true,bot_username_verified:botOk,items};
+}
+async function revokeTelegramPilotCodes(env,input={}){
+  const id=String(input.lead_id||"").trim();if(!id)throw Error("lead_id is required");
+  await ensureLeadCampaignCodeStore(env);const t=now();
+  const r=await env.DB.prepare("UPDATE lead_campaign_codes SET status='revoked',revoked_at=?,updated_at=? WHERE lead_id=? AND status='active'").bind(t,t,id).run();
+  await audit(env,"telegram_pilot_codes_revoked","Owner revoked Telegram pilot campaign codes",{lead_id:id,revoked:Number(r?.meta?.changes||0)});
+  return {ok:true,revoked:Number(r?.meta?.changes||0)};
+}
+async function listTelegramPilotCodes(env){
+  await ensureLeadCampaignCodeStore(env);
+  const r=await env.DB.prepare("SELECT c.id AS code_id,c.lead_id,l.name AS lead_name,l.stage,c.campaign,c.status,c.expires_at,c.bound_at,c.revoked_at,c.created_at FROM lead_campaign_codes c LEFT JOIN leads l ON l.id=c.lead_id ORDER BY c.created_at DESC LIMIT 200").all();
+  return {ok:true,items:r.results||[]};
+}
+
 // A first inbound private message carries a provider-verified, stable Telegram user id. That id is the dedup identity,
 // so the existing P0-1 upsert path creates at most one lead per sender; an identity conflict stays unlinked (fail-closed).
-async function createTelegramInboundLead(env, m, {chatId,providerUsername}) {
+// The entry hints (language_code, the public «iq» campaign) are stored for the welcome language and attribution only.
+async function createTelegramInboundLead(env, m, {chatId,providerUsername,entry=null}) {
   const none={leadId:null,conversationId:null,contactId:null};
   const userId=normalizeTelegramPrivateChatId(chatId);
   if(!userId)return none;
   const username=normalizeTelegramIdentity(providerUsername);
   const name=[m?.from?.first_name,m?.from?.last_name].filter(Boolean).join(' ').trim().slice(0,120)||(username?`@${username}`:`Telegram ${userId}`);
   const meta={source:'telegram_inbound',telegram_user_id:userId};
+  if(entry?.languageCode)meta.telegram_language_code=entry.languageCode;
+  if(entry?.campaign)meta.attribution={campaign:entry.campaign,channel:'telegram_start'};
+  const entryLanguage=telegramEntryLanguage(entry);if(entryLanguage)meta.preferred_language=entryLanguage;
   if(username)meta.telegram_username=username;
   let saved;
   try { saved=await upsertDiscoveredLead(env,{name,contact:username?`https://t.me/${username}`:`telegram:${userId}`,stage:'new',priority:'normal',source:'telegram_inbound',meta}); }
@@ -10584,6 +10710,63 @@ async function discoverGooglePlaces(env, textQuery, languageCode = "fa", limit =
     items
   };
 } 
+// Google Places result → target business for this discovery group? IRAN groups keep the original rule unchanged. Iraqi groups are
+// matched on the business NAME and Google TYPES only (an address such as «شارع …» or a family name proves nothing), reject unrelated
+// trades by type or by an Arabic trade word in the name, and keep a perfume shop whose name says so even when Google typed it as a
+// clothing store.
+function customerDiscoveryPlaceAccepted(groupType, place) {
+  if (String(groupType).endsWith("_ar")) return iraqDiscoveryPlaceAccepted(groupType, place);
+  const placeText = [
+    place.name,
+    place.address,
+    ...(Array.isArray(place.types) ? place.types : [])
+  ].filter(Boolean).join(" ");
+
+  const marketPattern =
+    groupType.startsWith("gold_")
+      ? /طلا|طلافروشی|جواهر|جواهرفروشی|زرگر|زرگری|گالری طلا|مجوهرات|ذهب|صياغ|صياغة|صائغ|محل ذهب|gold|jewel/i
+      : groupType.startsWith("perfume_")
+        ? /عطر|عطور|ادکلن|عطر فروشی|برفان|محل عطور|perfume|parfum|fragrance/i
+        : groupType.startsWith("watch_")
+          ? /ساعت|ساعات|ساعت فروشی|ساعت مچی|watch/i
+          : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
+
+  const marketTypePattern =
+    groupType.startsWith("gold_")
+      ? /jewelry_store|goldsmith|jewelry/i
+      : groupType.startsWith("perfume_")
+        ? /perfume|fragrance/i
+        : groupType.startsWith("watch_")
+          ? /watch/i
+          : /jewelry|accessor|gift_shop/i;
+
+  const unrelatedPattern =
+    /car_repair|car_dealer|photographer|photography|tailor|clothing_store|restaurant|cafe|hotel|hospital|clinic|dentist|pharmacy|school|university|real_estate|lawyer|accounting|bank|insurance|auto|تعمیرگاه|عکاسی|خیاط|رستوران|کافه|هتل|بیمارستان|کلینیک|داروخانه|مدرسه|املاک/i;
+
+  return !(
+    unrelatedPattern.test(placeText) ||
+    (!marketPattern.test(placeText) && !marketTypePattern.test(placeText))
+  );
+}
+const IRAQ_DISCOVERY_NAME={
+  gold:/مجوهرات|ذهب|صياغ|صائغ|جواهر|ألماس|الماس|gold|jewel|diamond/i,
+  perfume:/عطور|عطر|برفان|بخور|(?<![\p{L}])(?:ال)?(?:عود|مسك)(?![\p{L}])|perfume|parfum|fragrance|(?<![\p{L}])oud(?![\p{L}])/iu,
+  watch:/ساعات|ساعة|ساعاتي|watch|rolex|casio/i,
+  fashion_jewelry:/اكسسوار|إكسسوار|أكسسوار|(?<![\p{L}])(?:ال)?حلي(?![\p{L}])|مجوهرات|فضة|فضيات|silver|accessor|bijou/iu
+};
+const IRAQ_DISCOVERY_TYPE={gold:/^(jewelry_store)$/,perfume:/^(perfume_store|cosmetics_store|beauty_supply_store)$/,watch:/^$/,fashion_jewelry:/^(jewelry_store)$/};
+const IRAQ_DISCOVERY_UNRELATED_TYPES=new Set(["car_repair","car_dealer","car_wash","car_rental","auto_parts_store","gas_station","general_contractor","electrician","plumber","roofing_contractor","painter","chauffeur_service","transportation_service","taxi_stand","moving_company","apartment_complex","apartment_building","housing_complex","real_estate_agency","corporate_office","event_venue","wedding_venue","banquet_hall","place_of_worship","mosque","church","association_or_organization","restaurant","cafe","bakery","meal_takeaway","lodging","hotel","hospital","doctor","dentist","pharmacy","school","university","lawyer","accounting","bank","insurance_agency","photographer","tailor","supermarket","grocery_store","hardware_store","furniture_store"]);
+const IRAQ_DISCOVERY_UNRELATED_NAME=/تصليح|صيانة|صيانه|سيارات|ورشة|ورشه|زيوت|فلاتر|هادروليك|تحوير|نجار|زجاج|المنيوم|حدادة|حسينية|حسينيه|جامع|مسجد|مطعم|كافيه|فندق|مستشفى|عيادة|صيدلية|مدرسة|جامعة|مول|شركة|مكتب|معمل/;
+function iraqDiscoveryPlaceAccepted(groupType, place) {
+  const kind = String(groupType).replace(/_ar$/, ""), name = String(place?.name || "").normalize("NFKC");
+  const types = (Array.isArray(place?.types) ? place.types : []).map(t => String(t).toLowerCase());
+  if (!IRAQ_DISCOVERY_NAME[kind]) return false;
+  const nameMatch = IRAQ_DISCOVERY_NAME[kind].test(name), typeMatch = types.some(t => IRAQ_DISCOVERY_TYPE[kind].test(t));
+  if (types.some(t => IRAQ_DISCOVERY_UNRELATED_TYPES.has(t))) return false;
+  // A mall listing or an unrelated trade word is decisive only when the name does not say what the shop sells.
+  if ((types.includes("shopping_mall") || IRAQ_DISCOVERY_UNRELATED_NAME.test(name)) && !nameMatch) return false;
+  return nameMatch || typeMatch;
+}
 async function runCustomerLeadDiscoveryOnce(env,input={},reason="manual"){
 const source="customer_discovery";
   const groups=[
@@ -10593,7 +10776,7 @@ const source="customer_discovery";
     ["fashion_jewelry_fa","بدلیجات زیورآلات اکسسوری بدلی فروشی","ایران"],
     ["gold_ar","ذهب مجوهرات صياغة صائغ محل ذهب","العراق"],
     ["perfume_ar","عطور محل عطور برفانات عطر","العراق"],
-    ["watch_ar","ساعات محل ساعات ساعة مچي","العراق"],
+    ["watch_ar","محل ساعات ساعات يد رجالية نسائية","العراق"],
     ["fashion_jewelry_ar","اكسسوارات حلي مجوهرات اكسسوارات نسائية","العراق"]
   ];
 
@@ -10684,37 +10867,7 @@ summary.discovery_diagnostics.push({
           summary.skipped++;
           continue;
         }
-        const placeText = [
-          place.name,
-          place.address,
-          ...(Array.isArray(place.types) ? place.types : [])
-        ].filter(Boolean).join(" ");
-
-        const marketPattern =
-          groupType.startsWith("gold_")
-            ? /طلا|طلافروشی|جواهر|جواهرفروشی|زرگر|زرگری|گالری طلا|مجوهرات|ذهب|صياغ|صياغة|صائغ|محل ذهب|gold|jewel/i
-            : groupType.startsWith("perfume_")
-              ? /عطر|عطور|ادکلن|عطر فروشی|برفان|محل عطور|perfume|parfum|fragrance/i
-              : groupType.startsWith("watch_")
-                ? /ساعت|ساعات|ساعت فروشی|ساعت مچی|watch/i
-                : /بدلیجات|بدلی|زیورآلات|اکسسوری|اكسسوارات|حلي|accessor/i;
-
-        const marketTypePattern =
-          groupType.startsWith("gold_")
-            ? /jewelry_store|goldsmith|jewelry/i
-            : groupType.startsWith("perfume_")
-              ? /perfume|fragrance/i
-              : groupType.startsWith("watch_")
-                ? /watch/i
-                : /jewelry|accessor|gift_shop/i;
-
-        const unrelatedPattern =
-          /car_repair|car_dealer|photographer|photography|tailor|clothing_store|restaurant|cafe|hotel|hospital|clinic|dentist|pharmacy|school|university|real_estate|lawyer|accounting|bank|insurance|auto|تعمیرگاه|عکاسی|خیاط|رستوران|کافه|هتل|بیمارستان|کلینیک|داروخانه|مدرسه|املاک/i;
-
-        if (
-          unrelatedPattern.test(placeText) ||
-          (!marketPattern.test(placeText) && !marketTypePattern.test(placeText))
-        ) {
+        if (!customerDiscoveryPlaceAccepted(groupType, place)) {
           summary.filter_diagnostics.market++;
           continue;
         }
@@ -12736,6 +12889,21 @@ Context: ${context}`;
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
         const b=await req.json().catch(()=>({}));
         try{return json({ok:true,...(await prepareBalanceRequest(env,b.id)),sending_enabled:false});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+      // Owner-only Telegram pilot campaign codes for discovered Iraqi leads: issue (code shown once), revoke, list (never the codes).
+      if (u.pathname === "/api/lead-campaign-codes" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        return json(await listTelegramPilotCodes(env));
+      }
+      if (u.pathname === "/api/lead-campaign-codes/issue" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({}));
+        try{return json(await issueTelegramPilotCodes(env,b));}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+      }
+      if (u.pathname === "/api/lead-campaign-codes/revoke" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({}));
+        try{return json(await revokeTelegramPilotCodes(env,b));}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
       }
       if (u.pathname === "/api/orders/transition" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
