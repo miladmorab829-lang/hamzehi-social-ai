@@ -2,73 +2,89 @@
 // Every section below is the original markup moved verbatim; one shared script drives every page and loads only
 // the data of the sections the current page renders. Nothing was removed: see DASHBOARD_PAGES for where each section lives.
 const DASH_HEAD=`<!doctype html><html lang="fa" dir="rtl"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f6f7f9">
 <title>HAMZEHI SOCIAL AI · Command Center</title>
 <style>
-:root{--bg:#ffffff;--soft:#f6f7f9;--card:#ffffff;--line:#e5e7eb;--line2:#d1d5db;--text:#111827;--muted:#6b7280;--ok:#15803d;--okbg:#ecfdf3;--warn:#c2410c;--warnbg:#fff7ed;--bad:#dc2626;--badbg:#fef2f2;--accent:#111827;
-font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Tahoma,"Vazirmatn",system-ui,sans-serif;background:var(--bg);color:var(--text);-webkit-text-size-adjust:100%}
-*{box-sizing:border-box}html,body{background:var(--bg)}body{margin:0;min-height:100vh;color:var(--text);line-height:1.6}
-a{color:inherit}
-.wrap{max-width:1180px;margin:auto;padding:12px 16px 96px}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
-.ey{font-size:11px;letter-spacing:.08em;color:var(--muted)}.brand{font-size:20px;font-weight:800;margin:2px 0}.sub{font-size:13px;color:var(--muted);line-height:1.8}
-.pill{border:1px solid var(--line2);background:var(--soft);border-radius:999px;padding:6px 12px;white-space:nowrap;font-size:12px;font-weight:700;color:var(--text)}
-.pill.ok{background:var(--okbg);border-color:#bbf7d0}.pill.warn{background:var(--warnbg);border-color:#fed7aa}.pill.bad{background:var(--badbg);border-color:#fecaca}
-.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}.section{margin-top:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:0 1px 2px rgba(17,24,39,.04)}
-.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-.k{font-size:12px;color:var(--muted);font-weight:600}.num{font-size:26px;font-weight:800;margin-top:4px}
-.title{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.title h2{font-size:17px;margin:0;font-weight:800}.hint{font-size:13px;color:var(--muted);line-height:1.8}
-.tools{display:flex;flex-wrap:wrap;gap:8px}
-.btn{border:1px solid var(--line2);background:#fff;color:var(--text);border-radius:12px;padding:10px 14px;min-height:44px;cursor:pointer;font-weight:700;font-size:14px;font-family:inherit;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}
-.btn:hover{border-color:#9ca3af;background:var(--soft)}.btn:focus-visible,.input:focus-visible{outline:3px solid #93c5fd;outline-offset:1px}
-.primary{background:var(--accent);color:#fff;border-color:var(--accent)}.primary:hover{background:#1f2937;color:#fff}
-.danger{border-color:#fca5a5;color:var(--bad);background:#fff}.danger:hover{background:var(--badbg)}
-.input{width:100%;background:#fff;color:var(--text);border:1px solid var(--line2);border-radius:12px;padding:11px 12px;outline:none;font-size:16px;font-family:inherit;min-height:44px}
-textarea.input{min-height:90px}select.input{min-height:44px}
+:root{--bg:#f6f7f9;--card:#fff;--soft:#f3f4f6;--line:#e6e8ec;--line2:#d5d9e0;--text:#111827;--muted:#6b7280;--ok:#15803d;--okbg:#ecfdf3;--warn:#c2410c;--warnbg:#fff7ed;--bad:#dc2626;--badbg:#fef2f2;--accent:#111827;--r:14px;--nav:60px;
+font-family:-apple-system,BlinkMacSystemFont,"SF Arabic","SF Pro Text","Segoe UI","Vazirmatn",Tahoma,system-ui,sans-serif;background:var(--bg);color:var(--text);-webkit-text-size-adjust:100%}
+*{box-sizing:border-box}html,body{background:var(--bg)}body{margin:0;min-height:100vh;color:var(--text);line-height:1.6;font-size:14px}a{color:inherit}
+.ic{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:middle}
+.wrap{max-width:1120px;margin:auto;padding:0 16px 32px}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
+.ey{font-size:11px;color:var(--muted)}.brand{font-size:18px;font-weight:800;margin:2px 0}.sub{font-size:13px;color:var(--muted)}
+.pill{border:1px solid var(--line2);background:#fff;border-radius:999px;padding:3px 10px;white-space:nowrap;font-size:11px;font-weight:700}
+.pill.ok{background:var(--okbg);border-color:#bbf7d0;color:var(--ok)}.pill.warn{background:var(--warnbg);border-color:#fed7aa;color:var(--warn)}.pill.bad{background:var(--badbg);border-color:#fecaca;color:var(--bad)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}.section{margin-top:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.k{font-size:12px;color:var(--muted);font-weight:600}.num{font-size:22px;font-weight:800;margin-top:2px}
+.title{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.title h2{font-size:15px;margin:0;font-weight:800;display:flex;align-items:center;gap:8px}.title h2 .ic{width:18px;height:18px;color:var(--muted)}
+.hint{font-size:12.5px;color:var(--muted);line-height:1.7}.tools{display:flex;flex-wrap:wrap;gap:8px}
+.btn{border:1px solid var(--line2);background:#fff;color:var(--text);border-radius:11px;padding:8px 13px;min-height:42px;cursor:pointer;font-weight:700;font-size:13px;font-family:inherit;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn:hover{background:var(--soft)}.btn:focus-visible,.input:focus-visible,a:focus-visible{outline:3px solid #93c5fd;outline-offset:1px}
+.primary{background:var(--accent);color:#fff;border-color:var(--accent)}.primary:hover{background:#1f2937}.danger{border-color:#fca5a5;color:var(--bad)}.danger:hover{background:var(--badbg)}
+.input{width:100%;background:#fff;color:var(--text);border:1px solid var(--line2);border-radius:11px;padding:9px 11px;outline:none;font-size:16px;font-family:inherit;min-height:42px}textarea.input{min-height:88px}
 .command{display:grid;grid-template-columns:1fr auto;gap:8px}.examples{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
-.example{border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--soft);cursor:pointer}.example b{font-size:13px;display:block}.example span{font-size:12px;color:var(--muted)}
-.channels{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.channel{min-height:150px;position:relative}.channel .head{display:flex;justify-content:space-between;align-items:center}
-.channel .state{font-size:11px;border:1px solid var(--line2);border-radius:999px;padding:3px 8px}.channel h3{margin:8px 0 4px;font-size:15px}.channel p{margin:0;font-size:12px;color:var(--muted);line-height:1.7}
-.channel .actions{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap}.mini{font-size:12px;color:var(--muted)}.switch{accent-color:var(--accent);width:20px;height:20px}
-.rows{display:grid;gap:8px;margin-top:10px}.row{border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:#fff;font-size:13px;line-height:1.8;overflow-wrap:anywhere}
-.row small{display:block;color:var(--muted);font-size:11px}.tag{display:inline-block;border:1px solid var(--line2);border-radius:999px;padding:2px 9px;font-size:11px;margin:2px;background:var(--soft);color:var(--text)}
-.progress{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:8px}.progress i{display:block;height:100%;background:var(--ok);width:0}
-.timeline{max-height:360px;overflow:auto}.dangerbox{border-color:#fecaca}.footer{text-align:center;padding:24px 0;color:var(--muted);font-size:11px}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:12px;direction:ltr;text-align:left}
-dialog{background:#fff;color:var(--text);border:1px solid var(--line2);border-radius:16px;padding:18px;max-width:min(440px,92vw);box-shadow:0 20px 50px rgba(17,24,39,.25)}dialog::backdrop{background:rgba(17,24,39,.35)}
-@media(max-width:1050px){.channels{grid-template-columns:repeat(2,1fr)}.grid4{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}.examples{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:560px){.wrap{padding:10px 16px 96px}.top{flex-direction:column}.channels,.examples{grid-template-columns:1fr}.grid4{grid-template-columns:1fr 1fr}.command{grid-template-columns:1fr}.card{padding:14px}.title h2{font-size:16px}}
-/* App bar + global search (navigation only: never runs a command or changes data). */
-.appbar{position:sticky;top:0;z-index:40;background:rgba(255,255,255,.96);backdrop-filter:saturate(1.4) blur(8px);-webkit-backdrop-filter:saturate(1.4) blur(8px);border-bottom:1px solid var(--line);margin:0 -16px;padding:10px 16px}
-.appbar .bar{display:flex;align-items:center;justify-content:space-between;gap:10px}.appbar .logo{font-weight:800;font-size:16px;text-decoration:none;white-space:nowrap}
-.gsearch{position:relative;margin-top:8px}.gsearch .ic{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:16px;pointer-events:none}
-.gsearch input{padding-right:40px;background:var(--soft);border-color:var(--line)}
-.gresults{position:absolute;inset-inline:0;top:calc(100% + 6px);background:#fff;border:1px solid var(--line2);border-radius:14px;box-shadow:0 16px 40px rgba(17,24,39,.15);max-height:min(70vh,520px);overflow:auto;z-index:50;padding:6px}
-.gresults[hidden]{display:none}.gresults .grp{font-size:11px;color:var(--muted);font-weight:700;padding:8px 10px 2px}
-.gresults a{display:block;text-decoration:none;padding:10px;border-radius:10px;font-size:14px}.gresults a small{display:block;color:var(--muted);font-size:12px}.gresults a:hover,.gresults a.sel{background:var(--soft)}
-.gresults .empty{padding:12px;color:var(--muted);font-size:13px}
-/* Navigation: bottom tab bar on phones, a tab row on desktop. */
-.bnav{display:flex;gap:4px;margin-top:10px}.bnav a{flex:1;text-align:center;text-decoration:none;color:var(--muted);font-size:13px;font-weight:700;padding:8px 6px;border-radius:12px;border:1px solid transparent;min-height:44px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
-.bnav a i{font-style:normal;font-size:19px;line-height:1}.bnav a.cur{color:var(--text);background:var(--soft);border-color:var(--line)}
-.bnav .badge{display:inline-block;min-width:18px;padding:0 5px;border-radius:99px;background:var(--bad);color:#fff;font-size:11px;line-height:18px}
-@media(max-width:900px){.bnav{position:fixed;bottom:0;left:0;right:0;z-index:45;margin:0;background:rgba(255,255,255,.98);border-top:1px solid var(--line);padding:6px 8px calc(6px + env(safe-area-inset-bottom));gap:2px}.bnav a{font-size:11px;padding:4px 2px}}
-.ptitle{display:flex;align-items:baseline;gap:10px;margin-top:14px;flex-wrap:wrap}.ptitle h1{font-size:22px;margin:0;font-weight:800}
-.navcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
-.navcard{display:block;text-decoration:none;color:var(--text);background:#fff;border:1px solid var(--line);border-radius:16px;padding:16px;min-height:104px}.navcard:hover{border-color:#9ca3af;background:var(--soft)}
-.navcard b{display:block;font-size:16px;margin-top:6px}.navcard span{display:block;font-size:12px;color:var(--muted);margin-top:4px;line-height:1.7}.navcard i{font-style:normal;font-size:24px}
-@media(max-width:560px){.navcards{grid-template-columns:1fr 1fr}.navcard{min-height:96px;padding:13px}.ptitle h1{font-size:19px}}
-/* Home + approvals + errors (UI only, data from existing APIs). */
-.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}.stat{display:block;text-decoration:none;background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;min-height:108px}
-.stat:hover{background:var(--soft)}.stat .sk{font-size:13px;color:var(--muted);font-weight:700}.stat b{display:block;font-size:26px;font-weight:800;margin-top:4px}.stat small{display:block;font-size:12px;color:var(--muted);line-height:1.6}
-.stat.warn b{color:var(--warn)}.stat.bad b{color:var(--bad)}.stat.ok b{color:var(--ok)}
-@media(max-width:1050px){.stats{grid-template-columns:repeat(2,1fr)}.stats .stat:first-child{grid-column:1/-1}}
-.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line2);border-radius:999px;padding:8px 12px;min-height:40px;text-decoration:none;font-size:13px;font-weight:700;background:#fff}
-.chip b{background:var(--soft);border-radius:99px;padding:0 8px}.chip.has b{background:var(--warn);color:#fff}
-.filters{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:8px;margin-top:10px}@media(max-width:700px){.filters{grid-template-columns:1fr 1fr}.filters .input:first-child{grid-column:1/-1}}
-.sev{display:inline-block;border-radius:99px;padding:1px 9px;font-size:11px;font-weight:800}.sev.error{background:var(--badbg);color:var(--bad)}.sev.warning{background:var(--warnbg);color:var(--warn)}.sev.ok{background:var(--okbg);color:var(--ok)}
-details.fold{margin-top:14px}details.fold>summary{cursor:pointer;font-weight:800;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--soft);list-style:none;min-height:44px}
-details.fold>summary::-webkit-details-marker{display:none}details.fold[open]>summary{margin-bottom:0}
-.row details summary{cursor:pointer;color:var(--muted);font-size:12px;min-height:32px}
+.example{border:1px solid var(--line);border-radius:11px;padding:9px;background:var(--soft);cursor:pointer}.example b{font-size:12.5px;display:block}.example span{font-size:11.5px;color:var(--muted)}
+.channels{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.channel{position:relative}.channel .head{display:flex;justify-content:space-between;align-items:center}
+.channel .state{font-size:11px;border:1px solid var(--line2);border-radius:999px;padding:2px 8px}.channel h3{margin:6px 0 2px;font-size:14px}.channel p{margin:0;font-size:12px;color:var(--muted)}
+.channel .actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}.mini{font-size:12px;color:var(--muted)}.switch{accent-color:var(--accent);width:20px;height:20px}
+.rows{display:grid;gap:6px;margin-top:8px}.row{border:1px solid var(--line);border-radius:11px;padding:9px 11px;background:#fff;font-size:13px;line-height:1.7;overflow-wrap:anywhere}
+.row small{display:block;color:var(--muted);font-size:11.5px}.tag{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:0 8px;font-size:11px;margin:1px;background:var(--soft)}
+.progress{height:6px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:6px}.progress i{display:block;height:100%;background:var(--ok);width:0}
+.timeline{max-height:340px;overflow:auto}.dangerbox{border-color:#fecaca}.footer{text-align:center;padding:18px 0 4px;color:#9ca3af;font-size:10.5px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--soft);border:1px solid var(--line);border-radius:9px;padding:9px;font-size:11.5px;direction:ltr;text-align:left;margin:6px 0 0;max-height:260px;overflow:auto}
+dialog{background:#fff;color:var(--text);border:1px solid var(--line2);border-radius:16px;padding:18px;max-width:min(420px,92vw);box-shadow:0 20px 50px rgba(17,24,39,.22)}dialog::backdrop{background:rgba(17,24,39,.35)}
+@media(max-width:1050px){.channels{grid-template-columns:repeat(2,1fr)}.grid4{grid-template-columns:repeat(2,1fr)}.grid3,.grid2{grid-template-columns:1fr}.examples{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:700px){.title>div>.hint{display:none}}
+@media(max-width:560px){.wrap{padding:0 12px 24px}.top{flex-direction:column}.channels,.examples{grid-template-columns:1fr}.command{grid-template-columns:1fr}.card{padding:12px}}
+/* app bar + search (read-only navigation) */
+.appbar{position:sticky;top:0;z-index:40;background:rgba(246,247,249,.94);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);margin:0 -16px;padding:calc(8px + env(safe-area-inset-top)) 16px 8px;border-bottom:1px solid var(--line)}
+@media(max-width:560px){.appbar{margin:0 -12px;padding-left:12px;padding-right:12px}}
+.appbar .bar{display:flex;align-items:center;gap:10px}.appbar .logo{font-weight:800;font-size:15px;text-decoration:none;white-space:nowrap;letter-spacing:.02em}
+.gsearch{position:relative;flex:1;min-width:0}.gsearch .ic{position:absolute;right:11px;top:50%;transform:translateY(-50%);width:18px;height:18px;color:var(--muted);pointer-events:none}
+.gsearch input{padding-right:36px;min-height:38px;height:38px;border-radius:10px;background:#fff;border-color:var(--line)}
+.gresults{position:absolute;inset-inline:0;top:calc(100% + 6px);background:#fff;border:1px solid var(--line2);border-radius:13px;box-shadow:0 14px 36px rgba(17,24,39,.14);max-height:min(65vh,480px);overflow:auto;z-index:50;padding:4px}
+.gresults[hidden]{display:none}.gresults .grp{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);font-weight:800;padding:8px 10px 2px}.gresults .grp .ic{position:static;transform:none;width:14px;height:14px}
+.gresults a{display:block;text-decoration:none;padding:8px 10px;border-radius:9px;font-size:13.5px;line-height:1.5}.gresults a small{display:block;color:var(--muted);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gresults a:hover,.gresults a.sel{background:var(--soft)}.gresults .empty{padding:12px;color:var(--muted);font-size:13px}
+/* navigation: bottom tab bar on phones (safe area aware), a tab row on desktop */
+.bnav{display:flex;gap:4px;margin-top:10px;background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:4px}
+.bnav a{flex:1;position:relative;text-decoration:none;color:var(--muted);font-size:12.5px;font-weight:700;border-radius:10px;min-height:44px;display:flex;align-items:center;justify-content:center;gap:6px}
+.bnav a .ic{width:20px;height:20px}.bnav a.cur{color:var(--text);background:var(--soft)}.bnav a.cur .ic{stroke-width:2.2}
+.bnav .badge{position:absolute;top:3px;inset-inline-start:calc(50% + 6px);min-width:17px;padding:0 4px;border-radius:99px;background:var(--bad);color:#fff;font-size:10.5px;line-height:17px;text-align:center}
+@media(max-width:900px){
+ body{padding-bottom:calc(var(--nav) + 12px + env(safe-area-inset-bottom))}
+ .bnav{position:fixed;bottom:0;left:0;right:0;z-index:45;margin:0;border:0;border-top:1px solid var(--line);border-radius:0;background:rgba(255,255,255,.97);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);padding:4px 6px env(safe-area-inset-bottom);gap:0;min-height:calc(var(--nav) + env(safe-area-inset-bottom))}
+ .bnav a{flex-direction:column;gap:2px;font-size:10.5px;min-height:var(--nav);background:none!important}
+ .bnav a.cur::before{content:"";position:absolute;top:0;left:30%;right:30%;height:3px;border-radius:0 0 3px 3px;background:var(--accent)}
+ .bnav .badge{top:6px}
+}
+.ptitle{display:flex;align-items:center;gap:8px;margin-top:14px}.ptitle h1{font-size:19px;margin:0;font-weight:800;display:flex;align-items:center;gap:8px}.ptitle .ic{width:22px;height:22px}
+/* home stats */
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+.stat{display:block;text-decoration:none;background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:11px 12px}.stat:hover{background:#fcfcfd}
+.stat .sk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:700}.stat .sk .ic{width:16px;height:16px}
+.stat b{display:block;font-size:21px;font-weight:800;margin-top:2px;line-height:1.35;overflow-wrap:anywhere}.stat small{display:block;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat.warn b{color:var(--warn)}.stat.bad b{color:var(--bad)}.stat.ok b{color:var(--ok)}.stat.unknown b{color:#9ca3af;font-size:16px}
+@media(max-width:1050px){.stats{grid-template-columns:1fr 1fr}.stats .stat:first-child{grid-column:1/-1}}
+/* "more" list */
+.mgroup{margin-top:12px}.mgroup h3{font-size:11.5px;color:var(--muted);font-weight:800;margin:0 4px 6px}
+.mlist{background:#fff;border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.mlist a{display:flex;align-items:center;gap:12px;padding:10px 14px;text-decoration:none;min-height:56px}.mlist a+a{border-top:1px solid var(--line)}.mlist a:hover{background:var(--soft)}
+.mlist .mi{width:34px;height:34px;border-radius:10px;background:var(--soft);display:flex;align-items:center;justify-content:center;flex:none}
+.mlist .mt{flex:1;min-width:0}.mlist .mt b{display:block;font-size:14px}.mlist .mt small{display:block;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.mlist .chev{color:#9ca3af}
+/* summaries, chips, filters, folds */
+.summary{display:flex;gap:8px;flex-wrap:wrap}.sum{flex:1;min-width:92px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 10px}.sum span{display:block;font-size:11.5px;color:var(--muted);font-weight:700}.sum b{font-size:19px}
+.sum.bad b{color:var(--bad)}.sum.warn b{color:var(--warn)}.sum.ok b{color:var(--ok)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line2);border-radius:999px;padding:5px 11px;min-height:36px;text-decoration:none;font-size:12.5px;font-weight:700;background:#fff}
+.chip .ic{width:15px;height:15px}.chip b{background:var(--soft);border-radius:99px;padding:0 7px;font-size:12px}.chip.has b{background:var(--warn);color:#fff}
+.filters{display:flex;gap:6px;margin-top:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px}.filters .input{flex:none;width:auto;min-height:38px;height:38px;font-size:14px;padding:6px 9px}.filters .input[type=search]{flex:1;min-width:150px;font-size:16px}
+.sev{display:inline-block;border-radius:99px;padding:0 8px;font-size:11px;font-weight:800}.sev.error{background:var(--badbg);color:var(--bad)}.sev.warning{background:var(--warnbg);color:var(--warn)}.sev.ok{background:var(--okbg);color:var(--ok)}
+.erow summary{list-style:none;cursor:pointer}.erow summary::-webkit-details-marker{display:none}.erow .et{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.erow .et b{font-weight:700;font-size:13px}
+details.fold{margin-top:12px}details.fold>summary{cursor:pointer;font-weight:800;padding:11px 14px;border:1px solid var(--line);border-radius:var(--r);background:#fff;list-style:none;min-height:46px;display:flex;align-items:center;gap:8px}
+details.fold>summary::-webkit-details-marker{display:none}details.fold>summary .chev{margin-inline-start:auto;color:#9ca3af;transition:transform .15s}details.fold[open]>summary .chev{transform:rotate(-90deg)}details.fold>summary .ic{color:var(--muted)}
+details.fold>summary b.cnt{background:var(--soft);border-radius:99px;padding:0 8px;font-size:12px}details.fold>summary b.cnt.has{background:var(--warn);color:#fff}
+details.fold>div>.section:first-child,details.fold>.section:first-of-type{margin-top:8px}
 </style></head><body><div class="wrap">
 `;
 const DASH_SECTIONS={
@@ -429,7 +445,7 @@ const DASH_SCRIPT=`<script>
 const DASH_GHOSTS={},dashGhost=id=>DASH_GHOSTS[id]||(DASH_GHOSTS[id]=Object.assign(document.createElement("div"),{id}));
 const A="/api/autonomy",KEY="hamzehi_admin_token",$=id=>document.getElementById(id)||dashGhost(id);
 // has(): is this section on the current page? on(): run a loader only when its section is here (each page loads only its own data).
-const has=id=>!!document.getElementById(id),on=(id,fn)=>has(id)?fn():null;
+const has=id=>{const e=document.getElementById(id);return !!e&&!e.closest("details.lazy:not([open])")},on=(id,fn)=>has(id)?fn():null;
 function esc(x){return String(x??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 function token(){return localStorage.getItem(KEY)||""}
 function hdr(){const t=token();return t?{"Authorization":"Bearer "+t}:{}}
@@ -454,7 +470,16 @@ function clearToken(){
  $("commandStatus").innerHTML="<span class='warn'>توکن پاک شد. برای اتصال دوباره، Admin Token را وارد کن.</span>";
 }
 const DASHBOARD_REQUEST_TIMEOUT_MS=10000;
-async function api(path,opt={}){
+// Identical GETs that are IN FLIGHT at the same time (several panels of one page refreshing together) share ONE request.
+// Nothing is cached after a response: every later call fetches fresh data. A non-GET call never shares.
+const DASH_GET_CACHE=new Map();
+function api(path,opt={}){
+ const method=String(opt.method||"GET").toUpperCase();
+ if(method!=="GET"||opt.body)return apiRequest(path,opt);
+ const hit=DASH_GET_CACHE.get(path);if(hit)return hit;
+ const p=apiRequest(path,opt).finally(()=>{if(DASH_GET_CACHE.get(path)===p)DASH_GET_CACHE.delete(path)});DASH_GET_CACHE.set(path,p);return p;
+}
+async function apiRequest(path,opt={}){
  const controller=new AbortController();
  const timer=setTimeout(()=>controller.abort(),opt.timeoutMs||DASHBOARD_REQUEST_TIMEOUT_MS);
  try{
@@ -1407,21 +1432,27 @@ async function loadOpp(){
  
 async function loadErrors(){const d=await api(A+"/errors");const a=[...(d.tasks||[]),...(d.retries||[])];$("errors").innerHTML=d.ok?rows(a,x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>"):"—"}
 async function loadSafety(){const d=await api("/api/settings");$("safety").textContent=d.ok?"Settings API پاسخ داد · وضعیت Gate از Worker موجود است.":"Settings API در دسترس نیست."}
-// ---- UX layer (light redesign): home summary, customer list, approvals overview, errors center, global search and a two-step
-// confirmation for master controls. Everything here only READS existing authenticated GET APIs and navigates; it never sends a
-// message, changes data or runs a command. Approvals and errors are kept strictly apart.
+// ---- UX layer (V2, compact): home summary, customer list, approvals overview, errors center, global search, lazy sections and a
+// two-step confirmation for master controls. Everything here only READS existing authenticated GET APIs and navigates; it never sends
+// a message, changes data or runs a command. Approvals and errors are kept strictly apart. Unavailable data shows «نامشخص», never 0.
+const UX_UNKNOWN="نامشخص";
+function uxIcon(n){return "<svg class='ic' aria-hidden='true'><use href='#i-"+n+"'/></svg>"}
 function uxN(n){return Number(n||0).toLocaleString("en-US")}
 function uxWhen(v){if(!siValidDate(v))return "";try{return new Date(v).toLocaleString("fa-IR",{dateStyle:"short",timeStyle:"short"})}catch(e){return String(v)}}
-function uxMoney(map){const e=Object.entries(map||{}).filter(([,v])=>Number(v));return e.length?e.map(([c,v])=>"<bdi dir='ltr'>"+esc(siMinor(v,c))+"</bdi>").join(" · "):"0"}
+// Toman as «500,000 تومان», dollars as «$250.00» (isolated LTR); any other currency as stored, never converted.
+function uxAmount(v,c){const k=siCurrencyCode(c),n=Number(v||0);if(k==="TOMAN")return esc(n.toLocaleString("en-US"))+" تومان";if(k==="USD")return "<bdi dir='ltr'>$"+esc((n/100).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}))+"</bdi>";return "<bdi dir='ltr'>"+esc(siMinor(v,c))+"</bdi>"}
+function uxMoney(map){const e=Object.entries(map||{}).filter(([,v])=>Number(v));return e.length?e.map(([c,v])=>uxAmount(v,c)).join(" · "):"0"}
 function uxNorm(s){return String(s??"").toLowerCase().replace(/ي/g,"ی").replace(/ك/g,"ک").replace(/[أإآ]/g,"ا").replace(/ة/g,"ه").replace(/[ًٌٍَُِّْـ]/g,"").trim()}
-function uxAuthHint(d){return d&&d.status===401?"برای دیدن اطلاعات، توکن مدیر را وارد کنید.":"دریافت نشد"}
+function uxAuthHint(d){return d&&d.status===401?"ورود مدیر لازم است":"دریافت نشد"}
+function uxStat(id,value,hint,cls){const b=$(id);b.innerHTML=value===null?UX_UNKNOWN:value;b.parentElement.className="stat"+(value===null?" unknown":cls?" "+cls:"");$(id+"Hint").textContent=hint}
 const UX_STAGE={new:"جدید",discovered:"کشف‌شده",contacted:"تماس گرفته شد",replied:"پاسخ داده",negotiation:"در حال مذاکره",quote_requested:"درخواست قیمت",customer:"مشتری",lost:"از دست رفته",archived:"بایگانی"};
 const UX_SOURCE={telegram_inbound:"تلگرام",customer_discovery:"کشف گوگل",instagram_hashtag_discovery:"اینستاگرام",discovery:"کشف خودکار"};
 const UX_ORDER={order_candidate:"منتظر تأیید",confirmed:"تأییدشده",partially_paid:"پرداخت ناقص",paid:"پرداخت‌شده",shipped:"ارسال‌شده",fulfilled:"تحویل‌شده",cancelled:"لغوشده"};
+const UX_OPEN_ORDERS=["order_candidate","confirmed","partially_paid","paid","shipped"];
 function uxLeadMeta(x){let m={};try{m=JSON.parse(x.notes||"{}")}catch(e){}return m&&typeof m==="object"?m:{}}
 // ---- approvals (owner decisions only — never errors)
 const UX_PRICE_DECISIONS=["QUANTITY_TIER","MOQ_DECISION","MARGIN_RULE","COST_REQUIRED"],UX_PAY_DECISIONS=["PAYMENT_VERIFICATION","PAYMENT_TERMS"],UX_QUOTE_PENDING=["requires_owner_review","waiting_for_owner_price","quote_ready","pending_approval"];
-async function uxContentPending(){try{const r=await fetch("/api/content?status=generated",{headers:hdr(),cache:"no-store"});const d=await r.json().catch(()=>null);if(!r.ok||!d||d.ok===false)return null;return (d.items||[]).filter(x=>x.approval_status==="pending").length}catch(e){return null}}
+async function uxContentPending(){const d=await api("/api/content?status=generated");return d&&d.ok!==false&&Array.isArray(d.items)?d.items.filter(x=>x.approval_status==="pending").length:null}
 async function uxApprovalCounts(){
  const [dec,out,quo,con,escs]=await Promise.all([api("/api/si/decisions?status=PENDING"),api("/api/leads/outreach"),api("/api/quotes"),uxContentPending(),api("/api/owner-escalations")]);
  const d=dec.ok?(dec.items||[]):null,c={auth:dec.status===401};
@@ -1434,31 +1465,40 @@ async function uxApprovalCounts(){
  c.content=con;c.blocking=escs.ok?(escs.items||[]).filter(x=>x.status==="open").length:null;
  const parts=[c.price,c.order,c.payment,c.message,c.content,c.other];
  c.total=parts.every(x=>x===null)?null:parts.reduce((a,x)=>a+(x||0),0);
- c.decisions=d||[];return c;
+ return c;
 }
-const UX_APPROVAL_KINDS=[["price","💲 قیمت","#sec-quotes"],["order","📦 سفارش","#ownerEscalationsPanel"],["payment","💳 پرداخت","#ownerEscalationsPanel"],["message","✉️ ارسال پیام","#sec-outreach"],["content","📝 محتوا","#sec-contentApproval"],["other","🧭 سایر تصمیم‌ها","#ownerEscalationsPanel"],["blocking","⛔ موارد مسدود مشتری","#ownerEscalationsPanel"]];
-function uxApprovalChips(c,base){return UX_APPROVAL_KINDS.map(([k,label,anchor])=>"<a class='chip"+(c[k]?" has":"")+"' href='"+(base||"")+anchor+"'>"+label+" <b>"+(c[k]===null||c[k]===undefined?"—":uxN(c[k]))+"</b></a>").join("")}
-async function loadApprovalsOverview(){const c=await uxApprovalCounts();$("approvalsChips").innerHTML=uxApprovalChips(c,"");$("approvalsOverviewStatus").textContent=c.total===null?uxAuthHint({status:c.auth?401:0}):uxN(c.total)+" مورد منتظر تصمیم شما · «موارد مسدود» جداگانه شمرده شده‌اند و ممکن است با تصمیم‌ها هم‌پوشانی داشته باشند."}
+const UX_APPROVAL_KINDS=[["price","قیمت","tag","#sec-quotes"],["order","سفارش","box","#ownerEscalationsPanel"],["payment","پرداخت","wallet","#ownerEscalationsPanel"],["message","ارسال پیام","mail","#sec-outreach"],["content","محتوا","file","#sec-contentApproval"],["other","سایر تصمیم‌ها","check","#ownerEscalationsPanel"],["blocking","موارد مسدود مشتری","alert","#ownerEscalationsPanel"]];
+function uxApprovalChips(c,base,onlyOpen){return UX_APPROVAL_KINDS.filter(([k])=>!onlyOpen||c[k]).map(([k,label,icon,anchor])=>"<a class='chip"+(c[k]?" has":"")+"' href='"+(base||"")+anchor+"'>"+uxIcon(icon)+label+" <b>"+(c[k]===null||c[k]===undefined?"?":uxN(c[k]))+"</b></a>").join("")}
+function uxFoldCount(key,n){const b=document.querySelector("[data-cnt='"+key+"']");if(b){b.textContent=n===null||n===undefined?"?":uxN(n);b.className="cnt"+(n?" has":"")}}
+async function loadApprovalsOverview(){const c=await uxApprovalCounts();
+ $("approvalsSummary").innerHTML=c.total===null?"<div class='hint'>"+esc(uxAuthHint({status:c.auth?401:0}))+"</div>":"<div class='sum"+(c.total?" warn":" ok")+"'><span>منتظر تصمیم شما</span><b>"+uxN(c.total)+"</b></div><div class='sum"+(c.blocking?" bad":"")+"'><span>موارد مسدود مشتری</span><b>"+(c.blocking===null?"?":uxN(c.blocking))+"</b></div>";
+ $("approvalsChips").innerHTML=c.total===null?"":uxApprovalChips(c,"",false);
+ uxFoldCount("quotes",c.price);uxFoldCount("outreach",c.message);uxFoldCount("contentApproval",c.content)}
 // ---- errors (system faults only — never approval requests)
 const UX_ERR_TYPE=/fail|error|timeout|unavailable|missing|invalid|exception|crash/i,UX_CAT={telegram:"تلگرام",ai:"هوش مصنوعی",media:"رسانه و محتوا",api:"API و وب‌هوک",worker:"Worker و Taskها"};
-const UX_STATUS={open:"باز",retrying:"در حال تلاش مجدد",resolved:"رفع شده",logged:"ثبت‌شده (بدون پیگیری خودکار)"};
+const UX_STATUS={open:"باز",retrying:"تلاش مجدد",resolved:"رفع شده",logged:"ثبت‌شده"};
 function uxErrCategory(t){t=String(t||"").toLowerCase();if(t.includes("telegram"))return "telegram";if(/openai|anthropic|sales_ai|_ai_|ai_brain|brain|vision|model|negotiation/.test(t))return "ai";if(/media|image|photo|video|vault|calendar|content|distribution|publish/.test(t))return "media";if(/api|webhook|http|request|instagram|whatsapp/.test(t))return "api";return "worker"}
 async function uxErrorItems(){
  const [ev,er]=await Promise.all([api("/api/system/events?kind=errors"),api(A+"/errors")]);const items=[],evOk=!!ev&&Array.isArray(ev.items);
- if(evOk)for(const x of ev.items)items.push({src:"event",id:x.id,cat:uxErrCategory(x.type+" "+x.message),sev:["error","critical"].includes(x.severity)||UX_ERR_TYPE.test(x.type)?"error":"warning",title:x.message||x.type,type:x.type,at:x.created_at,status:"logged",details:x.details_json});
- if(er.ok){for(const t of er.tasks||[])items.push({src:"task",id:t.id,cat:uxErrCategory(t.module+" "+t.action),sev:"error",title:t.error||(t.module+" · "+t.action),type:"task_failed · "+t.module,at:t.updated_at,status:"open",details:JSON.stringify({module:t.module,action:t.action,attempts:t.attempts,error:t.error})});
-  for(const r of er.retries||[])items.push({src:"retry",id:r.id,cat:uxErrCategory(r.operation),sev:r.status==="completed"?"ok":r.status==="failed"?"error":"warning",title:r.last_error||r.operation,type:"retry · "+r.operation,at:r.updated_at,status:r.status==="completed"?"resolved":r.status==="failed"?"open":"retrying",details:JSON.stringify({operation:r.operation,status:r.status,attempts:r.attempts,last_error:r.last_error,next_attempt_at:r.next_attempt_at})});}
+ if(evOk)for(const x of ev.items)items.push({id:x.id,cat:uxErrCategory(x.type+" "+x.message),sev:["error","critical"].includes(x.severity)||UX_ERR_TYPE.test(x.type)?"error":"warning",title:x.message||x.type,type:x.type,at:x.created_at,status:"logged",details:x.details_json});
+ if(er.ok){for(const t of er.tasks||[])items.push({id:t.id,cat:uxErrCategory(t.module+" "+t.action),sev:"error",title:t.error||(t.module+" · "+t.action),type:"task_failed · "+t.module,at:t.updated_at,status:"open",details:JSON.stringify({module:t.module,action:t.action,attempts:t.attempts,error:t.error})});
+  for(const r of er.retries||[])items.push({id:r.id,cat:uxErrCategory(r.operation),sev:r.status==="completed"?"ok":r.status==="failed"?"error":"warning",title:r.last_error||r.operation,type:"retry · "+r.operation,at:r.updated_at,status:r.status==="completed"?"resolved":r.status==="failed"?"open":"retrying",details:JSON.stringify({operation:r.operation,status:r.status,attempts:r.attempts,last_error:r.last_error,next_attempt_at:r.next_attempt_at})});}
  items.sort((a,b)=>String(b.at||"").localeCompare(String(a.at||"")));
  return {items,ok:evOk||!!er.ok,status:er.status||ev?.status};
 }
-function uxErrRow(x){return "<div class='row'><span class='sev "+esc(x.sev)+"'>"+(x.sev==="error"?"خطا":x.sev==="ok"?"رفع شد":"هشدار")+"</span> <span class='tag'>"+esc(UX_CAT[x.cat]||x.cat)+"</span> <b>"+esc(String(x.title||"").slice(0,220))+"</b><small>"+esc(uxWhen(x.at))+" · "+esc(UX_STATUS[x.status]||x.status)+" · "+esc(x.type||"")+"</small>"+(x.details?"<details><summary>جزئیات</summary><pre>"+esc(String(x.details).slice(0,4000))+"</pre></details>":"")+"</div>"}
-let uxErrors=[];
-async function loadErrorsCenter(){const r=await uxErrorItems();uxErrors=r.items;$("errorsCenterStatus").textContent=r.ok?"":uxAuthHint(r);renderErrorsCenter()}
+const UX_WEEK=7*86400000;
+function uxImportant(items){const since=Date.now()-UX_WEEK;return items.filter(x=>x.sev==="error"&&x.status!=="resolved"&&Date.parse(x.at||0)>=since)}
+function uxErrRow(x){return "<details class='row erow'><summary><div class='et'><span class='sev "+esc(x.sev)+"'>"+(x.sev==="error"?"خطا":x.sev==="ok"?"رفع شد":"هشدار")+"</span><span class='tag'>"+esc(UX_CAT[x.cat]||x.cat)+"</span><b>"+esc(String(x.title||"").slice(0,160))+"</b></div><small>"+esc(uxWhen(x.at))+" · "+esc(UX_STATUS[x.status]||x.status)+"</small></summary><small>"+esc(x.type||"")+"</small>"+(x.details?"<pre>"+esc(String(x.details).slice(0,4000))+"</pre>":"")+"</details>"}
+let uxErrors=[],uxErrorsOk=false;
+async function loadErrorsCenter(){const r=await uxErrorItems();uxErrors=r.items;uxErrorsOk=r.ok;$("errorsCenterStatus").textContent=r.ok?"":uxAuthHint(r);
+ const imp=uxImportant(uxErrors).length,warn=uxErrors.filter(x=>x.sev==="warning").length,open=uxErrors.filter(x=>x.status==="open"||x.status==="retrying").length;
+ $("errorsSummary").innerHTML=r.ok?"<div class='sum"+(imp?" bad":" ok")+"'><span>خطای مهم (۷ روز)</span><b>"+uxN(imp)+"</b></div><div class='sum"+(open?" warn":"")+"'><span>باز / در حال تلاش</span><b>"+uxN(open)+"</b></div><div class='sum'><span>هشدار</span><b>"+uxN(warn)+"</b></div>":"";
+ renderErrorsCenter()}
 function renderErrorsCenter(){
  const q=uxNorm($("errQ").value),cat=$("errCat").value,sev=$("errSev").value,st=$("errStatus").value;
  const list=uxErrors.filter(x=>(!cat||x.cat===cat)&&(!sev||x.sev===sev)&&(!st||x.status===st)&&(!q||uxNorm(x.title+" "+x.type+" "+x.details).includes(q)));
- if(uxErrors.length)$("errorsCenterStatus").textContent=uxN(list.length)+" از "+uxN(uxErrors.length)+" مورد · فقط مشاهده؛ هیچ اقدامی از اینجا اجرا نمی‌شود.";
- $("errorsCenterItems").innerHTML=list.slice(0,100).map(uxErrRow).join("")||"<div class='hint'>موردی با این فیلتر نیست.</div>";
+ if(uxErrorsOk)$("errorsCenterStatus").textContent=uxN(list.length)+" از "+uxN(uxErrors.length)+" مورد";
+ $("errorsCenterItems").innerHTML=list.slice(0,100).map(uxErrRow).join("")||(uxErrorsOk?"<div class='hint'>موردی با این فیلتر نیست.</div>":"");
 }
 // ---- customers
 let uxLeads=[];
@@ -1468,50 +1508,49 @@ async function loadLeadsList(){const d=await api("/api/leads");if(!Array.isArray
 function renderLeadsList(){
  const q=uxNorm($("leadQ").value),st=$("leadStage").value;
  const list=uxLeads.filter(x=>(!st||x.stage===st)&&(!q||uxNorm(x.name+" "+x.contact+" "+x.stage).includes(q)));
- $("leadsListStatus").textContent=uxN(list.length)+" از "+uxN(uxLeads.length)+" (۲۰۰ مورد آخر CRM) · فقط مشاهده.";
+ $("leadsListStatus").textContent=uxN(list.length)+" از "+uxN(uxLeads.length);
  $("leadsListItems").innerHTML=list.slice(0,80).map(x=>{const m=uxLeadMeta(x),src=UX_SOURCE[m.source]||m.source||"";return "<div class='row'><b>"+esc(x.name||"(بدون نام)")+"</b> <span class='tag'>"+esc(UX_STAGE[x.stage]||x.stage||"")+"</span>"+(src?" <span class='tag'>"+esc(src)+"</span>":"")+(m.attribution&&m.attribution.campaign?" <span class='tag'>کمپین "+esc(m.attribution.campaign)+"</span>":"")+"<small>"+esc(uxWhen(x.updated_at||x.created_at))+"</small></div>"}).join("")||"<div class='hint'>موردی پیدا نشد.</div>";
 }
-// ---- home
+// ---- home (management summary; every number from an existing API, «نامشخص» when it is unavailable)
 async function loadHome(){
  const [ord,leads,ap,er]=await Promise.all([api("/api/orders"),api("/api/leads"),uxApprovalCounts(),uxErrorItems()]);
  if(ord.ok){const items=ord.items||[],paid={},due={};for(const o of items){const c=siCurrencyCode(o.currency)||"?";paid[c]=(paid[c]||0)+Number(o.paid_minor||0);if(["confirmed","partially_paid"].includes(o.status))due[c]=(due[c]||0)+Math.max(0,Number(o.total_minor||0)-Number(o.paid_minor||0))}
-  $("homeRevenue").innerHTML=uxMoney(paid);$("homeRevenueHint").innerHTML="پرداخت‌های ثبت‌شده"+(Object.keys(due).some(k=>due[k])?" · مانده: "+uxMoney(due):"");
-  const active=items.filter(o=>!["cancelled","fulfilled"].includes(o.status)),waiting=items.filter(o=>o.status==="order_candidate").length;
-  $("homeOrders").textContent=uxN(active.length);$("homeOrdersHint").textContent="فعال"+(waiting?" · "+uxN(waiting)+" منتظر تأیید":"")+" · کل: "+uxN(items.length);
- }else{$("homeRevenue").textContent="—";$("homeOrders").textContent="—";$("homeRevenueHint").textContent=uxAuthHint(ord);$("homeOrdersHint").textContent=uxAuthHint(ord)}
- if(Array.isArray(leads.items)){const a=leads.items,cust=a.filter(x=>x.stage==="customer").length,talking=a.filter(x=>["new","replied","negotiation","quote_requested"].includes(x.stage)).length;
-  $("homeCustomers").textContent=uxN(cust);$("homeCustomersHint").textContent="مشتری · "+uxN(talking)+" گفتگوی فعال · "+uxN(a.length)+" لید";
- }else{$("homeCustomers").textContent="—";$("homeCustomersHint").textContent=uxAuthHint(leads)}
- $("homeApprovals").textContent=ap.total===null?"—":uxN(ap.total);$("homeApprovals").parentElement.className="stat"+(ap.total?" warn":ap.total===0?" ok":"");
- $("homeApprovalsHint").textContent=ap.total===null?uxAuthHint({status:ap.auth?401:0}):ap.total?"منتظر تصمیم شما":"موردی منتظر نیست";
- $("homeApprovalChips").innerHTML=ap.total===null?"":uxApprovalChips(ap,"/dashboard/approvals");
- const week=Date.now()-7*86400000,important=er.items.filter(x=>x.sev==="error"&&x.status!=="resolved"&&Date.parse(x.at||0)>=week);
- $("homeErrors").textContent=er.ok?uxN(important.length):"—";$("homeErrors").parentElement.className="stat"+(important.length?" bad":er.ok?" ok":"");
- $("homeErrorsHint").textContent=er.ok?(important.length?"در ۷ روز اخیر":"خطای مهمی در ۷ روز اخیر نیست"):uxAuthHint(er);
- $("homeErrorList").innerHTML=er.ok?(important.slice(0,5).map(uxErrRow).join("")||"<div class='hint'>✓ خطای مهمی ثبت نشده است.</div>"):"<div class='hint'>"+esc(uxAuthHint(er))+"</div>";
+  uxStat("homeRevenue",uxMoney(paid),"پرداخت‌های ثبت‌شده");if(Object.keys(due).some(k=>due[k]))$("homeRevenueHint").innerHTML="پرداخت‌های ثبت‌شده · مانده "+uxMoney(due);
+  const open=items.filter(o=>UX_OPEN_ORDERS.includes(o.status)),waiting=items.filter(o=>o.status==="order_candidate").length;
+  uxStat("homeOrders",uxN(open.length),waiting?uxN(waiting)+" منتظر تأیید شما":"از "+uxN(items.length)+" سفارش",waiting?"warn":"");
+ }else{uxStat("homeRevenue",null,uxAuthHint(ord));uxStat("homeOrders",null,uxAuthHint(ord))}
+ if(Array.isArray(leads.items)){const a=leads.items,since=Date.now()-UX_WEEK,fresh=a.filter(x=>uxLeadMeta(x).source!=="customer_discovery"&&Date.parse(x.created_at||0)>=since).length,cust=a.filter(x=>x.stage==="customer").length;
+  uxStat("homeCustomers",uxN(fresh),"۷ روز اخیر · "+uxN(cust)+" مشتری خریدکرده","");
+ }else uxStat("homeCustomers",null,uxAuthHint(leads));
+ uxStat("homeApprovals",ap.total===null?null:uxN(ap.total),ap.total===null?uxAuthHint({status:ap.auth?401:0}):ap.total?"منتظر تصمیم شما":"موردی منتظر نیست",ap.total?"warn":"ok");
+ $("homeApprovalChips").innerHTML=ap.total?uxApprovalChips(ap,"/dashboard/approvals",true):ap.total===0?"<div class='hint'>همه موارد بررسی شده‌اند.</div>":"<div class='hint'>"+UX_UNKNOWN+"</div>";
+ const important=er.ok?uxImportant(er.items):[];
+ uxStat("homeErrors",er.ok?uxN(important.length):null,er.ok?(important.length?"در ۷ روز اخیر":"بدون خطای مهم"):uxAuthHint(er),important.length?"bad":"ok");
+ $("homeErrorList").innerHTML=er.ok?(important.slice(0,3).map(uxErrRow).join("")||"<div class='hint'>خطای مهمی در ۷ روز اخیر ثبت نشده است.</div>"):"<div class='hint'>"+UX_UNKNOWN+"</div>";
  const bn=document.querySelector(".bnav [data-k=approvals] .badge");if(bn){bn.textContent=ap.total?uxN(ap.total):"";bn.hidden=!ap.total}
 }
 // ---- global search (read-only; navigation only — never a command, never a write, never a message)
 const UX_INDEX=[
- ["خانه","خلاصه فروش، مشتریان، سفارش‌ها، تأییدیه‌ها و خطاها","/dashboard","home dashboard خانه داشبورد"],
+ ["خانه","خلاصه مدیریتی","/dashboard","home dashboard خانه داشبورد"],
  ["مشتریان و لیدها","فهرست CRM، گفتگوها، فرصت‌ها","/dashboard/customers","customer lead crm مشتری لید گفتگو مذاکره inbox فرصت opportunity"],
- ["سفارش‌ها","سفارش‌ها، پرداخت‌ها، پول در جریان","/dashboard/orders","order payment سفارش پرداخت بیعانه مانده ارسال"],
- ["تأییدیه‌ها","قیمت، سفارش، پرداخت، ارسال پیام، محتوا","/dashboard/approvals","approval decision escalation تأیید تصمیم مالک"],
+ ["سفارش‌ها","سفارش، پرداخت، پول در جریان","/dashboard/orders","order payment سفارش پرداخت بیعانه مانده ارسال"],
+ ["تأییدیه‌ها","قیمت، سفارش، پرداخت، پیام، محتوا","/dashboard/approvals","approval decision escalation تأیید تصمیم مالک"],
  ["خطاها","تلگرام، هوش مصنوعی، رسانه، Worker، API","/dashboard/errors","error errors log خطا لاگ مشکل"],
  ["محصولات و دانش","دانش فروش، کاتالوگ، آموزش","/dashboard/knowledge","product knowledge catalog محصول دانش کاتالوگ رنگ چاپ آموزش teach"],
  ["لیست قیمت","قیمت‌های فعال و نسخه‌ها","/dashboard/knowledge#sec-priceList","price قیمت لیست دلار تومان"],
  ["درخواست‌های قیمت","Quoteهای منتظر","/dashboard/orders#sec-quotes","quote پیش فاکتور درخواست قیمت"],
  ["محتوا","صف محتوا و پیش‌نویس‌ها","/dashboard/content","content محتوا پست کپشن"],
  ["رسانه","اتوپایلوت عکس و ویدیو","/dashboard/media","media photo video عکس ویدیو رسانه"],
- ["کانال‌ها","تلگرام، اینستاگرام، کنترل کانال‌ها","/dashboard/channels","channel telegram instagram whatsapp کانال تلگرام اینستاگرام واتساپ"],
- ["درآمد و گزارش‌ها","درآمد، پول در جریان، سفارش‌ها","/dashboard/revenue","revenue report درآمد گزارش سود"],
+ ["کانال‌ها","تلگرام، اینستاگرام","/dashboard/channels","channel telegram instagram whatsapp کانال تلگرام اینستاگرام واتساپ"],
+ ["درآمد و گزارش‌ها","درآمد، پول در جریان","/dashboard/revenue","revenue report درآمد گزارش سود"],
  ["تنظیمات پیشرفته","کنترل مرکزی، Taskها، عیب‌یابی، ایمنی","/dashboard/system","settings advanced master diagnostic automation tasks logs safety تنظیمات پیشرفته"],
- ["کنترل مرکزی (START / STOP / EMERGENCY)","با تأیید دومرحله‌ای","/dashboard/system#sec-master","master start stop emergency توقف اضطراری شروع"],
+ ["کنترل مرکزی","START / STOP / EMERGENCY با تأیید دومرحله‌ای","/dashboard/system#sec-master","master start stop emergency توقف اضطراری شروع"],
  ["ورود مدیر (توکن)","ذخیره یا حذف توکن","/dashboard/system#authPanel","token admin login توکن ورود"],
- ["عیب‌یابی اتوماسیون","Diagnostics","/dashboard/system#sec-diagnostic","diagnostic عیب یابی"],
+ ["تست اتصال‌ها","Telegram / OpenAI / Instagram","/dashboard/system#sec-diagnostic","diagnostic connection test اتصال عیب یابی telegram bot"],
  ["نمای کامل","همه بخش‌ها در یک صفحه","/dashboard/all","full view all همه"]
 ];
-let uxSearchCache=null,uxSearchAt=0,uxSearchTimer=null,uxSel=-1;
+const UX_GROUP_ICON={"بخش‌ها و ابزارها":"grid","مشتریان":"users","سفارش‌ها":"box","محصولات و قیمت‌ها":"tag","تأییدیه‌ها":"check","خطاها":"alert"};
+let uxSearchCache=null,uxSearchAt=0,uxSearchTimer=null,uxSel=-1,uxSearchSeq=0;
 async function uxSearchData(){
  if(uxSearchCache&&Date.now()-uxSearchAt<120000)return uxSearchCache;
  const [leads,ord,prices,dec,escs,errs]=await Promise.all([api("/api/leads"),api("/api/orders"),api("/api/commercial-price-items"),api("/api/si/decisions?status=PENDING"),api("/api/owner-escalations"),uxErrorItems()]);
@@ -1519,22 +1558,22 @@ async function uxSearchData(){
  uxSearchAt=Date.now();return uxSearchCache;
 }
 function uxHit(group,title,sub,url,focus){return {group,title,sub,url,focus}}
+function uxRenderHits(hits,tail){let last="";return hits.map((h,i)=>{const g=h.group!==last?"<div class='grp'>"+uxIcon(UX_GROUP_ICON[h.group]||"grid")+esc(h.group)+"</div>":"";last=h.group;return g+"<a href='"+esc(h.url)+"' data-i='"+i+"' data-focus='"+esc(h.focus??"")+"'>"+esc(h.title)+(h.sub?"<small>"+esc(h.sub)+"</small>":"")+"</a>"}).join("")+(tail||"")}
 async function uxSearch(raw){
- const q=uxNorm(raw),box=$("gResults");if(q.length<2){box.hidden=true;box.innerHTML="";return}
+ const q=uxNorm(raw),box=$("gResults"),seq=++uxSearchSeq;if(q.length<2){box.hidden=true;box.innerHTML="";return}
  const m=s=>uxNorm(s).includes(q),hits=[];
  for(const [t,d,u,k] of UX_INDEX)if(m(t+" "+d+" "+k))hits.push(uxHit("بخش‌ها و ابزارها",t,d,u,null));
- box.hidden=false;if(!hits.length)box.innerHTML="<div class='empty'>در حال جستجو…</div>";
- const data=await uxSearchData();if(uxNorm($("gSearch").value)!==q)return;
- data.leads.filter(x=>m(x.name+" "+x.contact)).slice(0,6).forEach(x=>hits.push(uxHit("مشتریان و لیدها",x.name||"(بدون نام)",UX_STAGE[x.stage]||x.stage||"","/dashboard/customers",x.name||"")));
- data.orders.filter(x=>m(x.order_number+" "+x.lead_name+" "+x.product_name+" "+x.status)).slice(0,6).forEach(x=>hits.push(uxHit("سفارش‌ها",(x.order_number||"سفارش")+" · "+(x.lead_name||""),UX_ORDER[x.status]||x.status||"","/dashboard/orders#sec-orders",x.order_number||"")));
- data.prices.filter(x=>m(x.product_name+" "+x.configuration+" "+x.size+" "+x.market+" "+x.sku)).slice(0,6).forEach(x=>hits.push(uxHit("قیمت‌ها و محصولات",[x.product_name,x.configuration,x.size].filter(Boolean).join(" · "),(x.market||"")+" · "+siMinor(x.unit_price_minor,x.currency)+"‎","/dashboard/knowledge#sec-priceList",x.product_name||"")));
+ box.hidden=false;uxSel=-1;box.innerHTML=uxRenderHits(hits,"<div class='empty'>در حال جستجو در اطلاعات…</div>");
+ const data=await uxSearchData();if(seq!==uxSearchSeq)return;
+ data.leads.filter(x=>m(x.name+" "+x.contact)).slice(0,6).forEach(x=>hits.push(uxHit("مشتریان",x.name||"(بدون نام)",UX_STAGE[x.stage]||x.stage||"","/dashboard/customers",x.name||"")));
+ data.orders.filter(x=>m(x.order_number+" "+x.lead_name+" "+x.product+" "+x.status)).slice(0,6).forEach(x=>hits.push(uxHit("سفارش‌ها",(x.order_number||"سفارش")+" · "+(x.lead_name||""),UX_ORDER[x.status]||x.status||"","/dashboard/orders#sec-orders",x.order_number||"")));
+ data.prices.filter(x=>m(x.product_name+" "+x.product_key+" "+x.market+" "+x.sku)).slice(0,6).forEach(x=>hits.push(uxHit("محصولات و قیمت‌ها",x.product_name||x.product_key||"",(x.market||"")+" · "+(siCurrencyCode(x.currency)==="USD"?"$"+(Number(x.unit_price_minor||0)/100).toFixed(2):siCurrencyCode(x.currency)==="TOMAN"?Number(x.unit_price_minor||0).toLocaleString("en-US")+" تومان":siMinor(x.unit_price_minor,x.currency)),"/dashboard/knowledge#sec-priceList",x.product_name||"")));
  data.decisions.filter(x=>m(x.decision_type+" "+x.title+" "+x.question+" "+x.lead_name)).slice(0,5).forEach(x=>hits.push(uxHit("تأییدیه‌ها",x.title||x.decision_type,x.decision_type||"","/dashboard/approvals#ownerEscalationsPanel",null)));
  data.escalations.filter(x=>m(x.reason_code+" "+x.summary+" "+x.lead_name+" "+x.question)).slice(0,5).forEach(x=>hits.push(uxHit("تأییدیه‌ها",x.summary||x.question||x.reason_code,"مورد مسدود مشتری","/dashboard/approvals#ownerEscalationsPanel",null)));
  data.errors.filter(x=>m(x.title+" "+x.type)).slice(0,5).forEach(x=>hits.push(uxHit("خطاها",String(x.title||"").slice(0,90),(UX_CAT[x.cat]||"")+" · "+uxWhen(x.at),"/dashboard/errors",String(x.title||"").slice(0,60))));
- uxSel=-1;let last="";
- box.innerHTML=hits.length?hits.map((h,i)=>{const g=h.group!==last?"<div class='grp'>"+esc(h.group)+"</div>":"";last=h.group;return g+"<a href='"+esc(h.url)+"' data-i='"+i+"' data-focus='"+esc(h.focus??"")+"'>"+esc(h.title)+(h.sub?"<small>"+esc(h.sub)+"</small>":"")+"</a>"}).join(""):"<div class='empty'>"+(data.auth?"برای جستجوی اطلاعات، ابتدا توکن مدیر را وارد کنید.":"نتیجه‌ای پیدا نشد.")+"</div>";
+ box.innerHTML=hits.length?uxRenderHits(hits,data.auth?"<div class='empty'>برای جستجوی اطلاعات، ابتدا وارد شوید.</div>":""):"<div class='empty'>"+(data.auth?"برای جستجوی اطلاعات، ابتدا وارد شوید.":"نتیجه‌ای پیدا نشد.")+"</div>";
 }
-// A result carries what to highlight on the next page through sessionStorage (never in the URL, so names stay out of links/history).
+// A result hands what to highlight to the next page through sessionStorage (never in the URL: names stay out of links and history).
 function uxGo(a){try{const f=a.getAttribute("data-focus");if(f)sessionStorage.setItem("uxFocus",f);else sessionStorage.removeItem("uxFocus")}catch(e){}}
 function uxApplyFocus(){let f=null;try{f=sessionStorage.getItem("uxFocus")}catch(e){}if(!f)return;
  if(has("leadQ")&&!$("leadQ").value){$("leadQ").value=f;renderLeadsList()}
@@ -1551,6 +1590,16 @@ function uxSearchInit(){
  box.addEventListener("click",e=>{const a=e.target.closest("a");if(a)uxGo(a)});
  document.addEventListener("click",e=>{if(!e.target.closest(".gsearch"))box.hidden=true});
 }
+// ---- lazy sections: a collapsed fold loads its data only when first opened (or when a link/hash points into it)
+function uxOpenHash(){const id=location.hash&&decodeURIComponent(location.hash.slice(1));const t=id&&document.getElementById(id);if(!t)return;const d=t.closest("details")||t.querySelector("details.lazy");if(d&&!d.open)d.open=true}
+// (several folds opened together → ONE refresh; the diagnostic, loaded only at page start in the original, runs when its fold opens)
+let uxLazyQueued=false,uxLazyDiag=false,uxLazyBusy=false;
+function uxLazyRun(){if(refreshInProgress){setTimeout(uxLazyRun,300);return}const diag=uxLazyDiag;uxLazyQueued=false;uxLazyDiag=false;uxLazyBusy=true;
+ refreshAll().then(()=>diag?loadDiagnostic():null).finally(()=>{uxLazyBusy=uxLazyQueued})}
+function uxLazyInit(){
+ document.addEventListener("toggle",e=>{const d=e.target;if(!(d.matches&&d.matches("details.lazy"))||!d.open||d.dataset.loaded)return;d.dataset.loaded="1";if(d.querySelector("#diagMaster"))uxLazyDiag=true;if(!uxLazyQueued){uxLazyQueued=true;uxLazyBusy=true;setTimeout(uxLazyRun,0)}},true);
+ window.addEventListener("hashchange",uxOpenHash);uxOpenHash();
+}
 // ---- two-step confirmation for master controls (step 1: explain; step 2: type the confirmation word)
 function uxConfirm2(title,body,word){return new Promise(res=>{const d=document.createElement("dialog");d.setAttribute("aria-label",title);let step=1,done=false;
  const finish=v=>{if(done)return;done=true;try{d.close()}catch(e){}d.remove();res(v)};
@@ -1561,7 +1610,7 @@ function uxConfirm2(title,body,word){return new Promise(res=>{const d=document.c
  d.addEventListener("cancel",e=>{e.preventDefault();finish(false)});render();document.body.appendChild(d);if(d.showModal)d.showModal();else d.setAttribute("open","")})}
 const UX_MASTER={on:["شروع همه (START ALL)","همه اتوماسیون‌های صف خودکار روشن می‌شوند."],pause:["توقف موقت همه (PAUSE ALL)","اجرای Taskهای آماده موقتاً متوقف می‌شود."],stop:["توقف همه (STOP ALL)","صف خودکار خاموش می‌شود."],emergency_stop:["توقف اضطراری (EMERGENCY STOP)","کل صف خودکار فوراً خاموش می‌شود."],run:["اجرای Taskهای آماده (RUN DUE TASKS)","Taskهای آماده همین حالا اجرا می‌شوند."]};
 async function uxMasterConfirm(action){const m=UX_MASTER[action]||[action,""];const ok=await uxConfirm2(m[0],m[1],"تأیید");if(!ok){$("masterHelp").textContent="لغو شد · هیچ تغییری انجام نشد.";$("commandStatus").textContent="لغو شد · هیچ تغییری انجام نشد."}return ok}
-function uxInit(){uxSearchInit();on("authFold",()=>{$("authFold").open=!token()})}
+function uxInit(){uxSearchInit();uxLazyInit();on("authFold",()=>{$("authFold").open=!token()})}
 let refreshInProgress=false,dashTick=1;
 // Every loader of the original single page, each run only where its section is rendered. Money-at-stake also needs the open
 // escalation count (written by loadOwnerEscalations) wherever it is shown.
@@ -1640,72 +1689,116 @@ DASH_SECTIONS.knowledgeApprovalsLink=`<section class="card section">
 <div class="title"><div><h2>📚 KNOWLEDGE APPROVALS</h2><div class="hint">بررسی پیشنهادهای دانش (Old → Proposed)، Knowledge Imports و APPROVE ALL / REJECT ALL در صفحه Knowledge انجام می‌شود.</div></div><a class="btn primary" href="/dashboard/knowledge#knowledgePanel">OPEN KNOWLEDGE REVIEW</a></div>
 </section>
 `;
-// ---- Light redesign: new UI-only sections. Data comes from the existing authenticated GET APIs (see the UX layer in DASH_SCRIPT).
+// ---- Dashboard V2 (compact, light): UI-only sections, one SVG icon set, compact navigation. Data comes from the existing authenticated
+// GET APIs (see the UX layer in DASH_SCRIPT); the original section markup is unchanged and every original section stays reachable.
+const DASH_ICON_PATHS={
+ home:'<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+ users:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M16.6 14.6c2.3.3 4 2 4.8 4.9"/>',
+ box:'<path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/>',
+ check:'<circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.8 2.8L16.5 9.5"/>',
+ menu:'<path d="M4 6h16M4 12h16M4 18h16"/>',
+ search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+ alert:'<path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5M12 17.5v.01"/>',
+ chart:'<path d="M5 20v-6M11 20V9M17 20V5M3 20h18"/>',
+ book:'<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z"/><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3"/>',
+ image:'<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m21 16-5-5-9 9"/>',
+ file:'<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4M9 12h7M9 16h7"/>',
+ send:'<path d="M21 3 3 10.5l7 2.5 2.5 7z"/><path d="M21 3 10 13"/>',
+ sliders:'<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+ grid:'<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
+ chat:'<path d="M4 5h16v11H9l-5 4z"/>',
+ chev:'<path d="m14.5 6-6 6 6 6"/>',
+ lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+ wallet:'<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M16 14.5h2"/>',
+ tag:'<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="7.5" r="1.3"/>',
+ bolt:'<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+ activity:'<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+ list:'<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>',
+ mail:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 6.5 8.5 6 8.5-6"/>',
+ receipt:'<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>',
+ camera:'<path d="M4 8h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13.5" r="3.5"/>',
+ video:'<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/>',
+ spark:'<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
+ target:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+ shield:'<path d="M12 3 4.5 6v6c0 4.5 3.2 7.8 7.5 9 4.3-1.2 7.5-4.5 7.5-9V6z"/>',
+ brain:'<path d="M9 4a3 3 0 0 0-3 3v.5A3 3 0 0 0 4 10.3 3 3 0 0 0 5 15a3 3 0 0 0 4 4.5V4z"/><path d="M15 4a3 3 0 0 1 3 3v.5a3 3 0 0 1 2 2.8 3 3 0 0 1-1 4.7 3 3 0 0 1-4 4.5V4z"/>',
+ clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'
+};
+const DASH_ICONS=`<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>`+Object.entries(DASH_ICON_PATHS).map(([k,p])=>`<symbol id="i-${k}" viewBox="0 0 24 24">${p}</symbol>`).join("")+`</defs></svg>`;
+const dashIcon=n=>`<svg class="ic" aria-hidden="true"><use href="#i-${n}"/></svg>`;
 DASH_SECTIONS.home=`<section class="section"><div class="stats" id="homeStats">
-<a class="stat" href="/dashboard/revenue"><span class="sk">💰 فروش و درآمد</span><b id="homeRevenue">—</b><small id="homeRevenueHint">در انتظار دریافت…</small></a>
-<a class="stat" href="/dashboard/customers"><span class="sk">👥 مشتریان</span><b id="homeCustomers">—</b><small id="homeCustomersHint">در انتظار دریافت…</small></a>
-<a class="stat" href="/dashboard/orders"><span class="sk">📦 سفارش‌ها</span><b id="homeOrders">—</b><small id="homeOrdersHint">در انتظار دریافت…</small></a>
-<a class="stat" href="/dashboard/approvals"><span class="sk">✅ تأییدیه‌های منتظر</span><b id="homeApprovals">—</b><small id="homeApprovalsHint">در انتظار دریافت…</small></a>
-<a class="stat" href="/dashboard/errors"><span class="sk">🚨 خطاهای مهم</span><b id="homeErrors">—</b><small id="homeErrorsHint">در انتظار دریافت…</small></a>
+<a class="stat" href="/dashboard/revenue"><span class="sk">${dashIcon("wallet")}فروش و درآمد</span><b id="homeRevenue">…</b><small id="homeRevenueHint">در حال دریافت</small></a>
+<a class="stat" href="/dashboard/orders"><span class="sk">${dashIcon("box")}سفارش‌های باز</span><b id="homeOrders">…</b><small id="homeOrdersHint">در حال دریافت</small></a>
+<a class="stat" href="/dashboard/customers"><span class="sk">${dashIcon("users")}مشتریان جدید</span><b id="homeCustomers">…</b><small id="homeCustomersHint">در حال دریافت</small></a>
+<a class="stat" href="/dashboard/approvals"><span class="sk">${dashIcon("check")}تأییدیه‌های منتظر</span><b id="homeApprovals">…</b><small id="homeApprovalsHint">در حال دریافت</small></a>
+<a class="stat" href="/dashboard/errors"><span class="sk">${dashIcon("alert")}خطاهای مهم</span><b id="homeErrors">…</b><small id="homeErrorsHint">در حال دریافت</small></a>
 </div></section>
 <section class="grid2 section">
-<div class="card"><div class="title"><h2>✅ منتظر تصمیم شما</h2><a class="btn" href="/dashboard/approvals">همه تأییدیه‌ها</a></div><div id="homeApprovalChips" class="chips"></div></div>
-<div class="card"><div class="title"><h2>🚨 خطاهای مهم اخیر</h2><a class="btn" href="/dashboard/errors">همه خطاها</a></div><div id="homeErrorList" class="rows">—</div></div>
+<div class="card"><div class="title"><h2>${dashIcon("check")}منتظر تصمیم شما</h2><a class="btn" href="/dashboard/approvals">همه</a></div><div id="homeApprovalChips" class="chips"></div></div>
+<div class="card"><div class="title"><h2>${dashIcon("alert")}خطاهای مهم اخیر</h2><a class="btn" href="/dashboard/errors">همه</a></div><div id="homeErrorList" class="rows"></div></div>
 </section>
 `;
-DASH_SECTIONS.authFold=`<details class="fold" id="authFold"><summary>🔐 ورود مدیر (توکن)</summary>
+DASH_SECTIONS.authFold=`<details class="fold" id="authFold"><summary>${dashIcon("lock")}ورود مدیر (توکن)${dashIcon("chev").replace('class="ic"','class="ic chev"')}</summary>
 ${DASH_SECTIONS.auth}</details>
 `;
 DASH_SECTIONS.leadsList=`<section class="card section" id="leadsListSection">
-<div class="title"><div><h2>👥 مشتریان و لیدها</h2><div class="hint">فهرست CRM · فقط مشاهده؛ هیچ پیامی از اینجا ارسال نمی‌شود.</div></div><button class="btn" onclick="loadLeadsList()">↻ به‌روزرسانی</button></div>
-<div class="filters" style="grid-template-columns:2fr 1fr"><input id="leadQ" class="input" type="search" placeholder="🔍 جستجوی نام یا شناسه" aria-label="جستجوی مشتری" oninput="renderLeadsList()"><select id="leadStage" class="input" aria-label="مرحله" onchange="renderLeadsList()"><option value="">همه مراحل</option></select></div>
-<div id="leadsListStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div><div id="leadsListItems" class="rows"></div>
+<div class="title"><h2>${dashIcon("users")}مشتریان و لیدها</h2><button class="btn" onclick="loadLeadsList()" aria-label="به‌روزرسانی">↻</button></div>
+<div class="filters"><input id="leadQ" class="input" type="search" placeholder="جستجوی نام یا شناسه" aria-label="جستجوی مشتری" oninput="renderLeadsList()"><select id="leadStage" class="input" aria-label="مرحله" onchange="renderLeadsList()"><option value="">همه مراحل</option></select></div>
+<div id="leadsListStatus" class="hint" style="margin-top:6px">در حال دریافت…</div><div id="leadsListItems" class="rows"></div>
 </section>
 `;
-DASH_SECTIONS.approvalsOverview=`<section class="card section" id="approvalsOverview">
-<div class="title"><div><h2>✅ تأییدیه‌های منتظر</h2><div class="hint">فقط درخواست‌های تأیید مالک. خطاهای سیستم در بخش «خطاها» هستند. هیچ موردی بدون اقدام صریح شما انجام نمی‌شود.</div></div><button class="btn" onclick="loadApprovalsOverview()">↻ به‌روزرسانی</button></div>
-<div id="approvalsChips" class="chips"></div><div id="approvalsOverviewStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+DASH_SECTIONS.approvalsOverview=`<section class="section" id="approvalsOverview">
+<div id="approvalsSummary" class="summary"><div class="hint">در حال دریافت…</div></div>
+<div id="approvalsChips" class="chips"></div><div id="approvalsOverviewStatus" class="hint" hidden></div>
 </section>
 `;
-DASH_SECTIONS.errorsCenter=`<section class="card section" id="errorsCenter">
-<div class="title"><div><h2>🚨 مرکز خطاها</h2><div class="hint">فقط خطاها و هشدارهای سیستم (تلگرام، هوش مصنوعی، رسانه، Worker، API). درخواست‌های تأیید اینجا نیستند. فقط مشاهده.</div></div><button class="btn" onclick="loadErrorsCenter()">↻ به‌روزرسانی</button></div>
+DASH_SECTIONS.errorsCenter=`<section class="section" id="errorsCenter">
+<div id="errorsSummary" class="summary"></div>
+<div class="card section"><div class="title"><h2>${dashIcon("alert")}خطاهای سیستم</h2><button class="btn" onclick="loadErrorsCenter()" aria-label="به‌روزرسانی">↻</button></div>
 <div class="filters">
-<input id="errQ" class="input" type="search" placeholder="🔍 جستجو در خطاها" aria-label="جستجو در خطاها" oninput="renderErrorsCenter()">
+<input id="errQ" class="input" type="search" placeholder="جستجو در خطاها" aria-label="جستجو در خطاها" oninput="renderErrorsCenter()">
 <select id="errCat" class="input" aria-label="بخش" onchange="renderErrorsCenter()"><option value="">همه بخش‌ها</option><option value="telegram">تلگرام</option><option value="ai">هوش مصنوعی</option><option value="media">رسانه و محتوا</option><option value="api">API و وب‌هوک</option><option value="worker">Worker و Taskها</option></select>
 <select id="errSev" class="input" aria-label="شدت" onchange="renderErrorsCenter()"><option value="">همه شدت‌ها</option><option value="error">خطا</option><option value="warning">هشدار</option><option value="ok">رفع‌شده</option></select>
-<select id="errStatus" class="input" aria-label="وضعیت" onchange="renderErrorsCenter()"><option value="">همه وضعیت‌ها</option><option value="open">باز</option><option value="retrying">در حال تلاش مجدد</option><option value="resolved">رفع شده</option><option value="logged">ثبت‌شده</option></select>
+<select id="errStatus" class="input" aria-label="وضعیت" onchange="renderErrorsCenter()"><option value="">همه وضعیت‌ها</option><option value="open">باز</option><option value="retrying">تلاش مجدد</option><option value="resolved">رفع شده</option><option value="logged">ثبت‌شده</option></select>
 </div>
-<div id="errorsCenterStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div><div id="errorsCenterItems" class="rows"></div>
+<div id="errorsCenterStatus" class="hint" style="margin-top:6px">در حال دریافت…</div><div id="errorsCenterItems" class="rows"></div></div>
 </section>
 `;
-// Where every section lives (a section may appear on more than one page; each page is its own document). Paths of the earlier
-// routed pages are unchanged; customers / orders / errors / channels / more are new pages built from the same sections.
+// Where every section lives (each page is its own document). Earlier paths are unchanged. FOLDS: sections shown collapsed on that
+// page — the lazy ones load their data only when opened (or when a link points into them).
 export const DASHBOARD_PAGES={
- hub:{path:"/dashboard",title:"خانه",icon:"🏠",desc:"",sections:["home","authFold"]},
- customers:{path:"/dashboard/customers",title:"مشتریان",icon:"👥",desc:"مشتریان و لیدها · گفتگوها · فرصت‌ها",sections:["leadsList","negotiation","opportunities"]},
- orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"📦",desc:"سفارش‌ها · پرداخت‌ها · درخواست‌های قیمت",sections:["orders","money","quotes"]},
- approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"✅",desc:"قیمت · سفارش · پرداخت · ارسال پیام · محتوا · تصمیم‌های مالک",sections:["approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
- errors:{path:"/dashboard/errors",title:"خطاها",icon:"🚨",desc:"تلگرام · هوش مصنوعی · رسانه · Worker · API",sections:["errorsCenter","errorsCard"]},
- more:{path:"/dashboard/more",title:"بیشتر",icon:"☰",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
- knowledge:{path:"/dashboard/knowledge",title:"محصولات و دانش",icon:"📚",desc:"دانش فروش · لیست قیمت · کاتالوگ · آموزش هوش مصنوعی",sections:["command","knowledge","priceList","catalog"]},
- content:{path:"/dashboard/content",title:"محتوا",icon:"📝",desc:"صف محتوا · پیش‌نویس‌ها · کانال‌ها",sections:["contentApproval","channels"]},
- media:{path:"/dashboard/media",title:"رسانه",icon:"📸",desc:"اتوپایلوت عکس · اتوپایلوت ویدیو",sections:["photo","video"]},
- channels:{path:"/dashboard/channels",title:"کانال‌ها",icon:"📡",desc:"تلگرام · اینستاگرام · کنترل مستقل کانال‌ها",sections:["channels"]},
- revenue:{path:"/dashboard/revenue",title:"درآمد و گزارش‌ها",icon:"💰",desc:"درآمد · پول در جریان · سفارش‌ها و پرداخت‌ها",sections:["revenueCard","money","orders"]},
- sales:{path:"/dashboard/sales",title:"فروش (همه بخش‌ها)",icon:"💬",desc:"لیدها · گفتگو · پیام‌ها · قیمت · سفارش",sections:["opportunities","negotiation","outreach","quotes","orders"]},
- system:{path:"/dashboard/system",title:"تنظیمات پیشرفته",icon:"⚙️",desc:"ورود مدیر · کنترل مرکزی · کانال‌ها · Taskها · عیب‌یابی · ایمنی",sections:["auth","kpis","master","channels","command","taskBrain","diagnostic","safety"]},
+ hub:{path:"/dashboard",title:"خانه",icon:"home",desc:"خلاصه مدیریتی",sections:["home","authFold"]},
+ customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["leadsList","negotiation","opportunities"]},
+ orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"box",desc:"سفارش‌ها، پرداخت‌ها و درخواست‌های قیمت",sections:["orders","money","quotes"]},
+ approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
+ errors:{path:"/dashboard/errors",title:"خطاها",icon:"alert",desc:"خطاهای سیستم و جزئیات",sections:["errorsCenter","errorsCard"]},
+ more:{path:"/dashboard/more",title:"بیشتر",icon:"menu",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
+ knowledge:{path:"/dashboard/knowledge",title:"محصولات و دانش",icon:"book",desc:"قیمت‌ها، کاتالوگ و دانش فروش",sections:["command","knowledge","priceList","catalog"]},
+ content:{path:"/dashboard/content",title:"محتوا",icon:"file",desc:"صف و پیش‌نویس محتوا",sections:["contentApproval","channels"]},
+ media:{path:"/dashboard/media",title:"رسانه",icon:"image",desc:"اتوپایلوت عکس و ویدیو",sections:["photo","video"]},
+ channels:{path:"/dashboard/channels",title:"کانال‌ها",icon:"send",desc:"تلگرام و اینستاگرام",sections:["channels"]},
+ revenue:{path:"/dashboard/revenue",title:"درآمد و گزارش‌ها",icon:"chart",desc:"درآمد و پول در جریان",sections:["revenueCard","money","orders"]},
+ sales:{path:"/dashboard/sales",title:"فروش (همه بخش‌ها)",icon:"chat",desc:"لیدها، گفتگو، پیام، قیمت، سفارش",sections:["opportunities","negotiation","outreach","quotes","orders"]},
+ system:{path:"/dashboard/system",title:"تنظیمات پیشرفته",icon:"sliders",desc:"کنترل مرکزی، Taskها، عیب‌یابی، توکن",sections:["auth","kpis","master","channels","command","taskBrain","diagnostic","safety"]},
  // FULL VIEW: every original section on one page in the original order (opt-in safety net; nothing is out of reach).
- all:{path:"/dashboard/all",title:"نمای کامل",icon:"🗂️",desc:"همه بخش‌ها در یک صفحه (چیدمان اصلی)",sections:["kpis","command","knowledge","escalations","auth","contentApproval","outreach","negotiation","quotes","orders","money","priceList","catalog","master","channels","photo","video","taskBrain","diagnostic","revenueCard","opportunities","errorsCard","safety"]}
+ all:{path:"/dashboard/all",title:"نمای کامل",icon:"grid",desc:"همه بخش‌ها در یک صفحه",sections:["kpis","command","knowledge","escalations","auth","contentApproval","outreach","negotiation","quotes","orders","money","priceList","catalog","master","channels","photo","video","taskBrain","diagnostic","revenueCard","opportunities","errorsCard","safety"]}
 };
-const DASH_TABS=["hub","customers","orders","approvals","more"],DASH_MORE=["knowledge","content","media","channels","errors","revenue","system","sales","all"];
-const DASH_ORDER=["customers","orders","approvals","errors",...DASH_MORE.filter(k=>k!=="errors")];
+export const DASH_FOLDS={
+ customers:{opportunities:{title:"فرصت‌ها و لیدهای کشف‌شده",icon:"target",lazy:true}},
+ orders:{money:{title:"پول در جریان و پیگیری وصول",icon:"wallet",lazy:true},quotes:{title:"درخواست‌های قیمت",icon:"receipt",lazy:true}},
+ approvals:{quotes:{title:"درخواست‌های قیمت",icon:"receipt",lazy:true,cnt:"quotes"},outreach:{title:"تأیید ارسال پیام",icon:"mail",lazy:true,cnt:"outreach"},contentApproval:{title:"تأیید محتوا",icon:"file",lazy:true,cnt:"contentApproval"}},
+ errors:{errorsCard:{title:"Taskها و Retryهای ناموفق (خام)",icon:"list",lazy:true}},
+ system:{channels:{title:"کنترل کانال‌ها",icon:"send",lazy:true},command:{title:"فرمان و آموزش هوش مصنوعی",icon:"spark",lazy:true},taskBrain:{title:"Taskها، مغز کسب‌وکار و فعالیت",icon:"list",lazy:true},diagnostic:{title:"تست اتصال و عیب‌یابی",icon:"activity",lazy:true},safety:{title:"دروازه ایمنی",icon:"shield",lazy:true}}
+};
+const DASH_TABS=["hub","customers","orders","approvals","more"];
+const DASH_MORE_GROUPS=[["محصولات و دانش",["knowledge"]],["محتوا و رسانه",["content","media"]],["کانال‌ها",["channels"]],["درآمد و گزارش‌ها",["revenue","sales"]],["خطاها",["errors"]],["تنظیمات پیشرفته",["system","all"]]];
+const DASH_ORDER=["customers","orders","approvals","errors","knowledge","content","media","channels","revenue","system","sales","all"];
 const dashEsc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
-DASH_SECTIONS.moreNav=`<section class="section"><div class="navcards">`+DASH_MORE.map(k=>{const p=DASHBOARD_PAGES[k];return `<a class="navcard" href="${p.path}"><i>${p.icon}</i><b>${dashEsc(p.title)}</b><span>${dashEsc(p.desc)}</span></a>`;}).join("")+`</div></section>
-`;
+DASH_SECTIONS.moreNav=DASH_MORE_GROUPS.map(([g,keys])=>`<section class="mgroup"><h3>${dashEsc(g)}</h3><nav class="mlist">`+keys.map(k=>{const p=DASHBOARD_PAGES[k];return `<a href="${p.path}"><span class="mi">${dashIcon(p.icon)}</span><span class="mt"><b>${dashEsc(p.title)}</b><small>${dashEsc(p.desc)}</small></span>${dashIcon("chev").replace('class="ic"','class="ic chev"')}</a>`;}).join("")+`</nav></section>`).join("\n")+"\n";
 DASH_SECTIONS.hubNav=DASH_SECTIONS.moreNav;
-// Persian section titles (render-time only: the section markup itself is unchanged).
-export const DASH_TITLES=[["🔐 ADMIN TOKEN","🔐 ورود مدیر (توکن)"],["🗂️ KNOWLEDGE MANAGEMENT · STRUCTURED CATALOG","🗂️ کاتالوگ ساختاریافته"],["📡 CHANNEL CONTROL · کنترل مستقل کانال‌ها","📡 کنترل کانال‌ها"],["🤖 AI COMMAND CENTER","🤖 فرمان و آموزش هوش مصنوعی"],["✅ CONTENT APPROVAL","✅ تأیید محتوا"],["🔎 AUTONOMY DIAGNOSTIC","🔎 عیب‌یابی اتوماسیون"],["🚨 ERRORS & RECOVERY","🚨 خطاهای Task و Retry"],["🧭 OWNER DECISION CENTER · ESCALATIONS","🧭 تصمیم‌های مالک و موارد مسدود"],["📚 SALES KNOWLEDGE","📚 دانش فروش"],["🎛️ MASTER CONTROL","🎛️ کنترل مرکزی"],["💰 REVENUE RECOVERY · MONEY AT STAKE","💰 پول در جریان و پیگیری وصول"],["💬 NEGOTIATION INBOX","💬 گفتگوهای مشتریان"],["🎯 OPPORTUNITIES","🎯 فرصت‌ها و لیدهای کشف‌شده"],["📦 ORDERS","📦 سفارش‌ها"],["✉️ OUTREACH APPROVAL","✉️ تأیید ارسال پیام"],["📸 PHOTO AUTOPILOT","📸 اتوپایلوت عکس"],["🏷️ ARAB FIXED PRICE LIST","🏷️ لیست قیمت"],["🧾 QUOTE REQUESTS","🧾 درخواست‌های قیمت"],["💰 REVENUE","💰 درآمد"],["🛡️ SAFETY GATE","🛡️ دروازه ایمنی"],["📋 LIVE TASK MANAGER","📋 مدیریت Taskها"],["🧠 BUSINESS BRAIN","🧠 مغز کسب‌وکار"],["🕒 LIVE ACTIVITY","🕒 فعالیت زنده"],["🎬 VIDEO AUTOPILOT","🎬 اتوپایلوت ویدیو"],["📚 KNOWLEDGE APPROVALS","📚 تأیید دانش"]];
-function dashLocalize(html){let out=html;for(const [en,fa] of DASH_TITLES)out=out.split(`<h2>${en}`).join(`<h2>${fa}`);return out;}
+// Persian section titles with one consistent icon (render-time only: the section markup itself is unchanged).
+export const DASH_TITLES=[["🔐 ADMIN TOKEN","ورود مدیر (توکن)","lock"],["🗂️ KNOWLEDGE MANAGEMENT · STRUCTURED CATALOG","کاتالوگ ساختاریافته","grid"],["📡 CHANNEL CONTROL · کنترل مستقل کانال‌ها","کنترل کانال‌ها","send"],["🤖 AI COMMAND CENTER","فرمان و آموزش هوش مصنوعی","spark"],["✅ CONTENT APPROVAL","تأیید محتوا","file"],["🔎 AUTONOMY DIAGNOSTIC","عیب‌یابی اتوماسیون","activity"],["🚨 ERRORS & RECOVERY","خطاهای Task و Retry","alert"],["🧭 OWNER DECISION CENTER · ESCALATIONS","تصمیم‌های مالک و موارد مسدود","check"],["📚 SALES KNOWLEDGE","دانش فروش","book"],["🎛️ MASTER CONTROL","کنترل مرکزی","bolt"],["💰 REVENUE RECOVERY · MONEY AT STAKE","پول در جریان و پیگیری وصول","wallet"],["💬 NEGOTIATION INBOX","گفتگوهای مشتریان","chat"],["🎯 OPPORTUNITIES","فرصت‌ها و لیدهای کشف‌شده","target"],["📦 ORDERS","سفارش‌ها","box"],["✉️ OUTREACH APPROVAL","تأیید ارسال پیام","mail"],["📸 PHOTO AUTOPILOT","اتوپایلوت عکس","camera"],["🏷️ ARAB FIXED PRICE LIST","لیست قیمت","tag"],["🧾 QUOTE REQUESTS","درخواست‌های قیمت","receipt"],["💰 REVENUE","درآمد","chart"],["🛡️ SAFETY GATE","دروازه ایمنی","shield"],["📋 LIVE TASK MANAGER","مدیریت Taskها","list"],["🧠 BUSINESS BRAIN","مغز کسب‌وکار","brain"],["🕒 LIVE ACTIVITY","فعالیت زنده","clock"],["🎬 VIDEO AUTOPILOT","اتوپایلوت ویدیو","video"],["📚 KNOWLEDGE APPROVALS","تأیید دانش","book"]];
+function dashLocalize(html){let out=html;for(const [en,fa,icon] of DASH_TITLES)out=out.split(`<h2>${en}`).join(`<h2>${dashIcon(icon)}${fa}`);return out;}
 // Resolves /dashboard, /dashboard/<section> (optional trailing slash) to a page key; anything else → null.
 export function dashboardRoute(pathname){
  const p=String(pathname||"").replace(/\/+$/,"")||"/";
@@ -1713,19 +1806,25 @@ export function dashboardRoute(pathname){
  const m=p.match(/^\/dashboard\/([a-z]+)$/);
  return m&&DASHBOARD_PAGES[m[1]]&&m[1]!=="hub"?m[1]:null;
 }
-// App bar (brand, live status pill, global search) + the tab bar: bottom bar on phones, a tab row on desktop.
+// App bar (brand, live status, global search) + the tab bar: a bottom bar on phones (safe-area aware), a tab row on desktop.
 function dashboardNav(page){
  const tab=DASH_TABS.includes(page)?page:"more",cur=DASHBOARD_PAGES[page];
- const tabs=DASH_TABS.map(k=>{const p=DASHBOARD_PAGES[k];return `<a href="${p.path}" data-k="${k}"${k===tab?' class="cur" aria-current="page"':""}><i>${p.icon}</i><span>${dashEsc(p.title)}${k==="approvals"?' <span class="badge" hidden></span>':""}</span></a>`;}).join("");
- return `<header class="appbar"><div class="bar"><a class="logo" href="/dashboard">HAMZEHI BOX</a><span class="pill" id="masterState">CONNECTING…</span></div>`
-  +`<form class="gsearch" role="search" onsubmit="return false"><span class="ic" aria-hidden="true">🔍</span><input id="gSearch" class="input" type="search" autocomplete="off" enterkeyhint="search" placeholder="جستجو: مشتری، سفارش، قیمت، تأییدیه، خطا، تنظیمات…" aria-label="جستجوی سراسری" aria-controls="gResults"><div id="gResults" class="gresults" role="listbox" hidden></div></form></header>`
+ const tabs=DASH_TABS.map(k=>{const p=DASHBOARD_PAGES[k];return `<a href="${p.path}" data-k="${k}"${k===tab?' class="cur" aria-current="page"':""}>${dashIcon(p.icon)}<span>${dashEsc(p.title)}</span>${k==="approvals"?'<span class="badge" hidden></span>':""}</a>`;}).join("");
+ return `<header class="appbar"><div class="bar"><a class="logo" href="/dashboard">HAMZEHI</a>`
+  +`<form class="gsearch" role="search" onsubmit="return false">${dashIcon("search")}<input id="gSearch" class="input" type="search" autocomplete="off" enterkeyhint="search" placeholder="جستجو: مشتری، سفارش، محصول، خطا…" aria-label="جستجوی سراسری" aria-controls="gResults"><div id="gResults" class="gresults" role="listbox" hidden></div></form>`
+  +`<span class="pill" id="masterState">CONNECTING…</span></div></header>`
   +`<nav class="bnav" aria-label="منوی اصلی">${tabs}</nav>`
-  +(page==="hub"?"":`<div class="ptitle"><h1>${cur.icon} ${dashEsc(cur.title)}</h1><span class="hint">${dashEsc(cur.desc)}</span></div>`);
+  +(page==="hub"?"":`<div class="ptitle"><h1>${dashIcon(cur.icon)}${dashEsc(cur.title)}</h1></div>`);
+}
+function dashSection(page,k){
+ const f=(DASH_FOLDS[page]||{})[k],html=DASH_SECTIONS[k];
+ if(!f)return `<div id="sec-${k}">${html}</div>`;
+ return `<div id="sec-${k}"><details class="fold${f.lazy?" lazy":""}"><summary>${dashIcon(f.icon)}${dashEsc(f.title)}${f.cnt?`<b class="cnt" data-cnt="${f.cnt}">…</b>`:""}${dashIcon("chev").replace('class="ic"','class="ic chev"')}</summary>${html}</details></div>`;
 }
 export function liveDashboardHtml(route="hub"){
  const page=DASHBOARD_PAGES[route]?route:"hub";
- const body=DASHBOARD_PAGES[page].sections.map(k=>`<div id="sec-${k}">${DASH_SECTIONS[k]}</div>`).join("\n");
+ const body=DASHBOARD_PAGES[page].sections.map(k=>dashSection(page,k)).join("\n");
  return DASH_HEAD.replace("<title>HAMZEHI SOCIAL AI · Command Center</title>",`<title>HAMZEHI BOX · ${dashEsc(DASHBOARD_PAGES[page].title)}</title>`)
-  +"\n"+dashboardNav(page)+"\n"+dashLocalize(body)+"\n"+DASH_SECTIONS.footer
+  +"\n"+DASH_ICONS+dashboardNav(page)+"\n"+dashLocalize(body)+"\n"+DASH_SECTIONS.footer
   +`\n<script>const DASH_PAGE=${JSON.stringify(page)};</script>`+DASH_SCRIPT;
 }
