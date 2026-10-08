@@ -9210,7 +9210,19 @@ async function orderPaymentLedger(env,order){
   const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify({v:1,order:order.id,total,currency:order.currency,rows:rows.map(r=>[r.id,Number(r.amount_minor)])})));
   return {paid,outstanding:total-paid,last_minor:last?Number(last.amount_minor):null,last_id:last?.id||null,count:rows.length,fingerprint:Array.from(new Uint8Array(digest).slice(0,12),b=>b.toString(16).padStart(2,"0")).join("")};
 }
-const ORDER_LEDGER_EVENTS=new Set(["payment_received","balance_request"]);
+const ORDER_LEDGER_EVENTS=new Set(["payment_received","balance_request","payment_completed"]);
+// ONE approval-gated Iraqi Arabic completion message when a RECORDED payment makes an ARAB order fully paid: the recorded total
+// received and 0.00 outstanding, nothing about shipping or delivery; one draft per ledger state, stale once the ledger changes.
+async function preparePaymentCompletedNotice(env,order,payment){
+  if(order?.market!=="ARAB"||order.status!=="paid"||!payment?.id)return {created:false,reason:"not_applicable"};
+  const ledger=await orderPaymentLedger(env,order);
+  if(ledger.outstanding!==0||ledger.paid!==Number(order.total_minor)||ledger.last_id!==payment.id)return {created:false,reason:"not_fully_paid"};
+  const money=m=>customerPaymentAmountText({currency:order.currency,amount_minor:m});
+  const message=[`تم استلام كامل مبلغ طلبكم ${order.order_number} وتسجيله، شكراً إلكم.`,`مجموع المستلم: ${money(ledger.paid)}`,`المبلغ المتبقي: ${money(0)}`].join("\n");
+  return await approvalGatedSalesDraft(env,{key:`lead-order:update-draft:${order.id}:payment_completed:${ledger.fingerprint}`,leadId:order.lead_id,conversationId:order.conversation_id,language:"Iraqi Arabic",message,
+    eventType:"payment_completed_draft_created",eventMessage:"Payment-completion draft created for owner approval",
+    details:{order_id:order.id,order_number:order.order_number,event:"payment_completed",payment_id:payment.id,ledger_fingerprint:ledger.fingerprint,snapshot:{status:order.status,total_minor:order.total_minor,currency:order.currency}}});
+}
 // ARAB: the owner gives the exchange / hawala details personally — the bot never sends a destination.
 const ARAB_OWNER_COORDINATES_LINE="تفاصيل التحويل عن طريق الصراف راح يبلغك بيها المسؤول مباشرة.";
 // ONE approval-gated Iraqi Arabic acknowledgement of the FIRST owner-recorded ARAB payment: amounts from the recorded ledger only
@@ -9274,10 +9286,14 @@ async function recordOrderPayment(env,body,actor="authenticated_owner"){
   await auditOrderEventOnce(env,`payment:${id}`,"lead_order_payment_recorded","Owner recorded payment; no gateway was invoked",{order_id:orderId,payment_id:id,amount_minor:amount,currency,method,recorded_by:String(actor||"authenticated_owner")});
   const converted=!!results?.[2]?.meta?.changes;
   if(converted)await auditOrderEventOnce(env,`customer:${order.lead_id}`,"lead_converted_to_customer","First owner-recorded payment: lead became a customer",{lead_id:order.lead_id,order_id:orderId,payment_id:id});
-  // ARAB: the FIRST recorded payment gets ONE approval-gated acknowledgement draft (never sent here).
-  let notice=null;
-  if(paidBefore===0&&updated?.market==="ARAB")try{notice=await preparePaymentReceivedNotice(env,updated,payment);}catch(error){await audit(env,"payment_received_draft_failed","Payment-received draft could not be prepared",{order_id:orderId,payment_id:id,error:sanitizeOperationalError(error?.message||error)});}
-  return {recorded:true,payment,order:updated,payment_engine:false,lead_converted:converted,payment_received_draft:notice?.outreach_id||null};
+  // ARAB customer messages (approval-gated drafts, never sent here): the payment that makes the order fully PAID gets ONE completion
+  // draft (a 100% first payment gets only that one); otherwise the FIRST recorded payment gets ONE acknowledgement draft.
+  let notice=null,completion=null;
+  if(updated?.market==="ARAB")try{
+    if(updated.status==="paid")completion=await preparePaymentCompletedNotice(env,updated,payment);
+    else if(paidBefore===0)notice=await preparePaymentReceivedNotice(env,updated,payment);
+  }catch(error){await audit(env,"payment_notice_draft_failed","Payment notification draft could not be prepared",{order_id:orderId,payment_id:id,error:sanitizeOperationalError(error?.message||error)});}
+  return {recorded:true,payment,order:updated,payment_engine:false,lead_converted:converted,payment_received_draft:notice?.outreach_id||null,payment_completed_draft:completion?.outreach_id||null};
 }
 async function reverseOrderPayment(env,body,actor="authenticated_owner"){
   await ensureOrderStore(env);const paymentId=String(body.payment_id||"").trim(),reason=String(body.reason||"").trim().slice(0,500);if(!paymentId||!reason)throw Error("payment_id and reversal reason are required");
