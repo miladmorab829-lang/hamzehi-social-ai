@@ -9465,6 +9465,66 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // escalation stays open and the actual commercial answer still requires the owner.
 // The sales agent's answers (answer_price, negotiate, handle_objection, accept_offer, clarify_product, ask_attribute) are composed
 // ONLY from one owner-approved price record of the conversation's market and are re-validated below against exactly that evidence.
+// ==== SALES AUTHORITY POLICY (AUTO-01 — SHADOW ONLY) =====================================================================
+// Every inbound decision gets a TIER: A Autonomous (the bot may act alone under the target policy), B Owner Review (unknown /
+// out-of-policy / uncertain), C Financial Approval (money: payment claims, payment terms, refunds, price policy — owner only, always).
+// AUTO-01 only RECORDS the tier next to what the live gates actually did ("shadow"); it never sends, approves or changes anything,
+// and there is no "live" mode yet. Master Stop / Pause is part of the decision (a stopped system is never autonomous).
+const SALES_AUTHORITY_CAPABILITIES=["conversation","product_answers","pricing","negotiation","photo_album","order_registration","order_status","proforma","followup","crm"];
+const SALES_AUTHORITY_TIER_C_ACTIONS=new Set(["payment_claim_owner","payment_terms_owner"]);
+const SALES_AUTHORITY_TIER_B_ACTIONS=new Set(["knowledge_owner","price_owner","commercial_owner","moq_owner","wait_for_owner"]);
+const SALES_AUTHORITY_CAPABILITY_OF={visual:"photo_album",order_status:"order_status",payment_info:"order_status",quote:"proforma",accept_offer:"order_registration",accepted:"order_registration",
+  order_details:"order_registration",acknowledge_details:"order_registration",answer_price:"pricing",price_discovery:"pricing",negotiate:"negotiation",handle_objection:"negotiation",
+  answer_knowledge:"product_answers",answer_catalog:"product_answers",advise_colors:"product_answers",answer_moq:"product_answers"};
+const SALES_AUTHORITY_MODES=new Set(["shadow","off"]);
+function salesAuthorityTier(brain){
+  const action=String(brain?.next_sales_action||""),capability=SALES_AUTHORITY_CAPABILITY_OF[action]||"conversation";
+  if(SALES_AUTHORITY_TIER_C_ACTIONS.has(action))return {tier:"C",capability:"financial",reason:action};
+  if(SALES_AUTHORITY_TIER_B_ACTIONS.has(action))return {tier:"B",capability,reason:String(brain?.needs_owner_reason||action)};
+  if(brain?.needs_owner&&brain?.owner_holding_reply!==true)return {tier:"B",capability,reason:String(brain?.needs_owner_reason||"owner_required")};
+  if(brain?.validation?.valid!==true)return {tier:"B",capability,reason:"validation_failed"};
+  if(capability==="order_status"&&!brain?.order_reference?.order_id)return {tier:"B",capability,reason:"order_not_identified"};
+  if(capability==="photo_album"){const st=brain?.gallery?.status;
+    if(st==="found"){const n=(brain.gallery.items||[]).length;return {tier:"A",capability,reason:"verified_photos",photos:n,albums:Math.ceil(n/GALLERY_MAX_ALBUM)};}
+    return {tier:"A",capability,reason:st?"gallery_"+st:"gallery_question"};}
+  return {tier:"A",capability,reason:action||"conversation"};
+}
+async function salesAutonomyPolicy(env){
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+  let v={};try{v=JSON.parse((await env.DB.prepare("SELECT value FROM system_kv WHERE key='sales_autonomy_policy' LIMIT 1").first())?.value||"{}")||{};}catch{v={};}
+  const modes=Object.fromEntries(SALES_AUTHORITY_CAPABILITIES.map(c=>[c,SALES_AUTHORITY_MODES.has(v.modes?.[c])?v.modes[c]:"shadow"]));
+  return {shadow:v.shadow!==false,modes,live_enabled:false};
+}
+async function setSalesAutonomyPolicy(env,body={}){
+  const cur=await salesAutonomyPolicy(env),next={shadow:cur.shadow,modes:{...cur.modes}};
+  if(body.shadow!==undefined){if(typeof body.shadow!=="boolean")throw Error("shadow must be true or false");next.shadow=body.shadow;}
+  if(body.capability!==undefined||body.mode!==undefined){
+    const c=String(body.capability||""),m=String(body.mode||"");
+    if(!SALES_AUTHORITY_CAPABILITIES.includes(c))throw Error("Unknown capability");
+    if(m==="live"||m==="autonomous")throw Error("Live autonomous sending is not available in AUTO-01 (shadow only)");
+    if(!SALES_AUTHORITY_MODES.has(m))throw Error("mode must be shadow or off");
+    next.modes[c]=m;}
+  await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES('sales_autonomy_policy',?,?)").bind(JSON.stringify(next),now()).run();
+  try{await audit(env,"sales_autonomy_policy_changed","Owner changed the sales autonomy (shadow) policy",{shadow:next.shadow,modes:next.modes});}catch{}
+  return {...next,live_enabled:false};
+}
+// Written AFTER the live outcome is settled (so it cannot influence it); one record per inbound message; never throws to the caller.
+async function recordSalesAuthorityShadow(env,{row,brain,outcome,visible}){
+  const policy=await salesAutonomyPolicy(env);if(!policy.shadow)return null;
+  const d=salesAuthorityTier(brain),master=await autonomyMasterGate(env).catch(()=>false),mode=d.capability==="financial"?"owner_only":policy.modes[d.capability]||"shadow";
+  const autonomous=d.tier==="A"&&mode==="shadow"&&master;
+  const details={inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,action:brain?.next_sales_action||null,tier:d.tier,capability:d.capability,reason:d.reason,
+    photos:d.photos??null,albums:d.albums??null,mode,master:master?"on":"off",target_policy:autonomous?"autonomous":d.tier==="C"?"financial_approval":d.tier==="B"?"owner_review":"not_autonomous_now",
+    current_customer_visible:visible,current_reason:outcome?.reason||null,divergence:autonomous&&visible!=="reply"?"held_today_autonomous_in_target":null,live:false};
+  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales authority decision (shadow, not applied)',?,?)")
+    .bind("sales-authority:"+row.id,"sales_authority_shadow",JSON.stringify(details),now()).run();
+  return details;
+}
+async function salesAuthorityShadowReport(env,limit=100){
+  const rows=((await env.DB.prepare("SELECT details_json,created_at FROM system_events WHERE type='sales_authority_shadow' ORDER BY created_at DESC LIMIT ?").bind(Math.min(500,Math.max(1,limit))).all()).results||[]).map(r=>{let d={};try{d=JSON.parse(r.details_json);}catch{}return {...d,created_at:r.created_at};});
+  const count=k=>rows.reduce((m,r)=>(m[r[k]]=(m[r[k]]||0)+1,m),{});
+  return {items:rows,summary:{total:rows.length,by_tier:count("tier"),by_capability:count("capability"),by_target:count("target_policy"),held_today_autonomous_in_target:rows.filter(r=>r.divergence).length},live_enabled:false};
+}
 const INBOUND_AUTO_SEND_ACTIONS=new Set(["welcome","answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
@@ -9582,6 +9642,8 @@ async function settleInboundOutcome(env,{row,brain,outreach,recipient,timing={}}
   const visible=outcome.sent?"reply":outcome.acknowledgement?.sent?outcome.acknowledgement.kind==="handoff"?"handoff":"acknowledgement":"none";
   timing.outcome=visible;
   if(outcome.reason!=="auto_send_error")try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound customer message outcome',?,?)").bind("inbound-outcome:"+row.id,"inbound_outcome",JSON.stringify({inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,customer_visible:visible,reason:outcome.reason||null,acknowledgement_id:outcome.acknowledgement?.id||null}),now()).run();}catch{}
+  // AUTO-01 shadow: the authority tier is recorded next to what really happened (after it happened; never changes it).
+  try{await recordSalesAuthorityShadow(env,{row,brain,outcome,visible});}catch{}
   return outcome;
 }
 // Completes the outcome of a RECENT inbound whose first attempt stopped before deciding it. Only an undecided, unedited draft that
@@ -13527,6 +13589,16 @@ Context: ${context}`;
       }
       if (u.pathname === "/api/revenue/followups/run" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);try{return json({ok:true,...(await prepareOwnerRecordedPaymentRecoveryDrafts(env))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+      }
+      // AUTO-01 sales authority (shadow): owner-only policy controls and the shadow decision log. No live mode exists yet.
+      if (u.pathname === "/api/sales-autonomy/policy" && (req.method === "GET" || req.method === "POST")) {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        try{if(req.method==="GET")return json({ok:true,policy:await salesAutonomyPolicy(env),capabilities:SALES_AUTHORITY_CAPABILITIES,master:(await autonomyMasterGate(env))?"on":"off"});
+          return json({ok:true,policy:await setSalesAutonomyPolicy(env,await req.json().catch(()=>({})))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+      }
+      if (u.pathname === "/api/sales-autonomy/shadow" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        return json({ok:true,...await salesAuthorityShadowReport(env,Number(u.searchParams.get("limit"))||100)});
       }
       if (u.pathname === "/api/commercial-price-items" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);const r=await env.DB.prepare("SELECT * FROM commercial_price_items ORDER BY product_key,version DESC LIMIT 300").all();return json({ok:true,items:r.results||[]});
