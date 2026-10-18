@@ -257,20 +257,38 @@ export const MEMORY_COMMERCIAL_WORDS=["قیمت","قیمتش","چند","چنده
 export const MEMORY_FILLER_WORDS=["سلام","درود","لطفا","لطفاً","ممنون","مرسی","سپاس","میشه","میشد","می‌شه","بی","رو","را","از","برای","با","و","هم","یه","یک","من","ما","شما","ی","ای","هست؟","چی","چیه","کدوم","چه",
   "بیزحمت","بی‌زحمت","خواهش","میخوام","میخواستم","می‌خوام","بدید","بدین","لطف","کنید","کنین","هلا","اهلا","مرحبا","السلام","عليكم","علیکم","رجاء","رجاءا","لو","سمحت","ممکن","ممكن","من","عن","مال","مالت","اريد","ارید","ابي","ابغى","شنو","شو","ايش","ای","كل","کل","the","a","please","hi","hello","do","you","have","any","of","for","show","me","send"];
 const MEMORY_DIGIT_WORDS=new Map([["2","دو"],["3","سه"]]);
+// MEM-04: colloquial words of real chats (Persian + Iraqi Arabic). Intent words only add a meaning the closed parse already knows;
+// fillers carry no meaning (greetings, politeness, address words). Nothing here names a product, colour or quantity.
+const MEMORY_EXTRA_INTENTS={photo:["ابعثلی","ابعثلي","ابعثلنا","دزلنا","دزولي","دزولی","صورهم","صورهن","عکسای","عکسهارو","ببینیم","نشون بدید","نشون بدین","نشونمون","بفرستین"],
+  have:["اکو","اكو","دارین؟","موجودن","موجوده؟","متوفره","تتوفر"],colors:["رنگای","رنگا","الالوان"],size:["سایزا","القياسات","المقاسات"]};
+for(const [k,v] of Object.entries(MEMORY_EXTRA_INTENTS))MEMORY_INTENT_WORDS[k].push(...v);
+MEMORY_FILLER_WORDS.push("واسه","بیزحمت","ببخشید","داداش","آقا","اقا","خانم","عزیزم","خسته","نباشید","باشه","باشد","که","لطفاً","مرسی","ممنونم","قربونت","قربان",
+  "حبيبي","حبیبی","عيوني","عیونی","اخي","اخی","اخوي","اخوی","حجي","حجی","بلا","زحمه","الله","يخليك","یخلیک","تكرم","تکرم","عمي","عمی","هسه","هسه؟","رجاءً","بعد","شلونكم","شلونک","شلونك","تسلم","مشكور","مشکور");
+// colloquial colour forms → the canonical family (applied only when that family is an approved colour of the market)
+export const MEMORY_COLOR_FORMS={"اسود":["سودا","سوداء"],"ابیض":["بیضا","بیضاء"],"ذهبی":["ذهبیه"],"کحلی":["کحلیه"],"فضی":["فضیه"],"احمر":["حمرا","حمراء"],
+  "اخضر":["خضرا","خضراء"],"ازرق":["زرقا","زرقاء"],"وردی":["وردیه"],"بنفسجی":["بنفسجیه"],"مشکی":["سیاه"],"طلایی":["طلائی"]};
 // vocab: one map from a normalised phrase (1–4 tokens) to its canonical meaning
-export function buildMemoryVocabulary({productKeys=[],catalog=[],colors=[],printing=[],placements={},normalize}){
+export function buildMemoryVocabulary({productKeys=[],productTerms=[],catalog=[],colors=[],printing=[],placements={},normalize}){
   const phrases=new Map(),add=(text,entry)=>{const t=normalize(text);if(!t.length||t.length>4)return;const k=t.join(" ");if(!phrases.has(k))phrases.set(k,entry);else if(J(phrases.get(k))!==J(entry))phrases.set(k,{type:"ambiguous"});};
   const J=JSON.stringify;
   for(const p of productKeys){add(p.product,{type:"product",id:p.key});}
+  // approved catalog terms / aliases of the same products (a term shared by two products becomes «ambiguous» → not cacheable)
+  const known=new Set(productKeys.map(p=>p.key));
+  for(const p of productTerms)if(known.has(p.key))for(const t of p.terms||[])add(t,{type:"product",id:p.key});
   for(const c of catalog){
     const key=(productKeys.find(p=>p.product===c.product)||{}).key;if(!key)continue;
+    // a model's DISTINGUISHING word(s) — the tokens no other model of the same product has («کج» → «3 تکه کج», «مايل» →
+    // «ثلاث قطع مايل», «کشویی») — name that model too; a model with no own word («3 تکه») gets none
+    for(const m of c.models||[]){const own=normalize(m).filter(t=>!(c.models||[]).some(o=>o!==m&&normalize(o).includes(t)));if(own.length&&own.length<normalize(m).length)add(own.join(" "),{type:"structure",id:m});}
     for(const m of c.models||[]){add(m,{type:"structure",id:m});const m2=String(m).replace(/^(\d)(?=\s)/,d=>MEMORY_DIGIT_WORDS.get(d)||d);if(m2!==m)add(m2,{type:"structure",id:m});}
-    for(const s of c.sizes||[]){add(s,{type:"size",id:String(s).replace(/\s*[x×*]\s*/g,"x")});}
+    for(const s of c.sizes||[]){const id=String(s).replace(/\s*[x×*]\s*/g,"x");add(s,{type:"size",id});
+      const m=id.match(/^(\d+)x(\d+)$/);if(m)for(const v of [`${m[1]} در ${m[2]}`,`${m[1]} x ${m[2]}`,`${m[1]} ${m[2]}`,`${m[1]} في ${m[2]}`])add(v,{type:"size",id});}
   }
   // a colour is said by its family (first word: «مشکی» for «مشکی سلفون»); a family shared by two approved colours stays a family
   const families=new Map();for(const c of colors){const f=normalize(c)[0];if(f)(families.get(f)||families.set(f,new Set()).get(f)).add(c);}
   for(const [f,set] of families){add(f,{type:"color",id:f,members:[...set].sort()});}
   for(const c of colors)add(c,{type:"color",id:normalize(c)[0],members:[...(families.get(normalize(c)[0])||[c])].sort()});
+  for(const [fam,forms] of Object.entries(MEMORY_COLOR_FORMS)){const f=normalize(fam)[0];if(!families.has(f))continue;for(const w of forms)add(w,{type:"color",id:f,members:[...families.get(f)].sort()});}
   for(const p of printing)add(p,{type:"printing",id:p});
   const role={lid:"top",middle:"middle",base:"bottom"};
   for(const [r,words] of Object.entries(placements))for(const w of words)add(w,{type:"placement",id:role[r]||r});

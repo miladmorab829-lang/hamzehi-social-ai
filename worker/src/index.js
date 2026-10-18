@@ -9651,12 +9651,16 @@ const INBOUND_FIRST_DELIVERY_GUARD_MS=60000;
 // ---- MEM-03 shadow: memory-first measurement without effect. Only a VALID, confident AI reading that agrees with the closed-
 // vocabulary parse may create a candidate; only the owner turns a candidate into shared memory. No customer text is stored.
 const salesMemoryNormalize=t=>salesTokens(salesColloquialFold(t));
-function salesMemoryVocab({pricing,colorOptions,printingOptions}){
-  return buildMemoryVocabulary({productKeys:pricing?.product_keys||[],catalog:pricing?.catalog_summary||[],colors:colorOptions||[],printing:printingOptions||[],placements:GALLERY_ROLE_WORDS,normalize:salesMemoryNormalize});
+function salesMemoryVocab({pricing,colorOptions,printingOptions,productTerms=[]}){
+  return buildMemoryVocabulary({productKeys:pricing?.product_keys||[],productTerms,catalog:pricing?.catalog_summary||[],colors:colorOptions||[],printing:printingOptions||[],placements:GALLERY_ROLE_WORDS,normalize:salesMemoryNormalize});
 }
 async function salesMemoryShadow(env,{row,market,language,pricing,colorOptions,printingOptions,interp}){
-  const vocab=salesMemoryVocab({pricing,colorOptions,printingOptions}),parse=memoryCanonicalize(row.message,vocab,salesMemoryNormalize);
+  // approved catalog terms of THIS market (aliases / alternative names) — one keyed read, shadow mode only
+  const cat=market?await salesPriceCatalog(env,market).catch(()=>null):null;
+  const productTerms=cat?[...cat.listProducts,...cat.siProducts].map(p=>({key:p.key,terms:p.terms||[]})):[];
+  const vocab=salesMemoryVocab({pricing,colorOptions,printingOptions,productTerms}),parse=memoryCanonicalize(row.message,vocab,salesMemoryNormalize);
   const info={mode:"shadow",cacheable:parse.cacheable,reason:parse.reason};
+  if(parse.cacheable)Object.assign(info,{product:parse.product,structure:parse.structure,size:parse.size,intents:parse.intents});
   if(!parse.cacheable)return info;
   const fp=await memoryFingerprint(market,parse);info.fingerprint=fp.slice(0,12);info.placed=parse.placed;info.any_colors=parse.unplaced;
   const look=await memoryLookup(env,{market,fingerprint:fp,vocab});info.lookup=look.status;if(look.entry_id)info.entry_id=look.entry_id;
