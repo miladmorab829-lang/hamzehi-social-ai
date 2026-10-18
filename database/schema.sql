@@ -364,8 +364,13 @@ CREATE TABLE IF NOT EXISTS draft_corrections (outreach_id TEXT PRIMARY KEY, lead
 CREATE TABLE IF NOT EXISTS revenue_attribution (order_id TEXT PRIMARY KEY, lead_id TEXT, market TEXT, currency TEXT, lead_source TEXT, request_class TEXT, product_key TEXT, config_key TEXT, quantity INTEGER,
  quote_id TEXT, price_version_id TEXT, pricing_mode TEXT, discount_minor INTEGER, total_minor INTEGER, paid_minor INTEGER, profit_minor INTEGER, order_status TEXT, repeat_index INTEGER, created_at TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_usage_ledger (id TEXT PRIMARY KEY, module TEXT NOT NULL, task TEXT NOT NULL, provider TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER,
- cost_status TEXT NOT NULL, cost_minor INTEGER, cost_currency TEXT, lead_id TEXT, conversation_id TEXT, quote_id TEXT, order_id TEXT, created_at TEXT NOT NULL);
+ cost_status TEXT NOT NULL, cost_minor INTEGER, cost_currency TEXT, lead_id TEXT, conversation_id TEXT, quote_id TEXT, order_id TEXT, created_at TEXT NOT NULL,
+ -- MEM-02 (same columns, same order as owner-actions/mem-02/02-migration.sql): real provider counts apart from the estimate
+ returned_model TEXT, cache_creation_input_tokens INTEGER, cache_read_input_tokens INTEGER, usage_source TEXT, cost_estimate_micro_usd INTEGER,
+ tariff_version TEXT, outcome TEXT, error_code TEXT, attempt INTEGER, flight_key TEXT, inbox_message_id TEXT, latency_ms INTEGER, fenced_out INTEGER);
 CREATE INDEX IF NOT EXISTS idx_ai_usage_module ON ai_usage_ledger(module,created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_conversation ON ai_usage_ledger(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_inbox ON ai_usage_ledger(inbox_message_id);
 CREATE TRIGGER IF NOT EXISTS trg_price_versions_immutable BEFORE UPDATE ON price_versions WHEN NEW.market IS NOT OLD.market OR NEW.product_key IS NOT OLD.product_key OR NEW.config_key IS NOT OLD.config_key OR NEW.quantity_min IS NOT OLD.quantity_min OR NEW.quantity_max IS NOT OLD.quantity_max OR NEW.currency IS NOT OLD.currency OR NEW.unit_price_minor IS NOT OLD.unit_price_minor OR NEW.moq IS NOT OLD.moq OR NEW.conditions_json IS NOT OLD.conditions_json OR NEW.effective_from IS NOT OLD.effective_from OR NEW.effective_until IS NOT OLD.effective_until OR NEW.version IS NOT OLD.version OR NEW.approved_by IS NOT OLD.approved_by OR NEW.approved_at IS NOT OLD.approved_at OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'price_versions history is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS trg_price_versions_no_delete BEFORE DELETE ON price_versions BEGIN SELECT RAISE(ABORT,'price_versions history cannot be deleted'); END;
 CREATE TRIGGER IF NOT EXISTS trg_cost_versions_immutable BEFORE UPDATE ON cost_versions WHEN NEW.market IS NOT OLD.market OR NEW.product_key IS NOT OLD.product_key OR NEW.config_key IS NOT OLD.config_key OR NEW.quantity_min IS NOT OLD.quantity_min OR NEW.quantity_max IS NOT OLD.quantity_max OR NEW.component IS NOT OLD.component OR NEW.basis IS NOT OLD.basis OR NEW.currency IS NOT OLD.currency OR NEW.amount_minor IS NOT OLD.amount_minor OR NEW.version IS NOT OLD.version OR NEW.approved_by IS NOT OLD.approved_by OR NEW.approved_at IS NOT OLD.approved_at OR NEW.created_at IS NOT OLD.created_at BEGIN SELECT RAISE(ABORT,'cost_versions history is immutable'); END;
@@ -751,3 +756,28 @@ CREATE TABLE IF NOT EXISTS visual_photo_requests (id TEXT PRIMARY KEY, lead_id T
 CREATE INDEX IF NOT EXISTS idx_visual_photo_requests_status ON visual_photo_requests(status,created_at);
 CREATE TABLE IF NOT EXISTS visual_media_storage (id TEXT PRIMARY KEY, visual_media_id TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('r2','telegram_file')), object_key TEXT NOT NULL, sha256 TEXT, bytes INTEGER, content_type TEXT, created_at TEXT NOT NULL, UNIQUE(provider,object_key));
 CREATE INDEX IF NOT EXISTS idx_visual_media_storage_media ON visual_media_storage(visual_media_id,provider);
+-- MEM-02: inbound dedup (one row per platform + external id; rows without an id are never blocked) and single-flight leases.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_inbox_messages_platform_external
+  ON inbox_messages(platform, external_id) WHERE external_id IS NOT NULL AND external_id <> '';
+CREATE TABLE IF NOT EXISTS ai_call_flights (
+  flight_key TEXT PRIMARY KEY,
+  purpose TEXT NOT NULL,
+  lead_id TEXT,
+  conversation_id TEXT,
+  inbox_message_id TEXT,
+  status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed')),
+  owner_token TEXT NOT NULL,
+  fence INTEGER NOT NULL CHECK(fence > 0),
+  attempt INTEGER NOT NULL CHECK(attempt > 0),
+  lease_until TEXT NOT NULL,
+  expires_at TEXT,
+  result_json TEXT CHECK(result_json IS NULL OR json_valid(result_json)),
+  error_code TEXT,
+  provider TEXT,
+  requested_model TEXT,
+  returned_model TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_call_flights_inbox ON ai_call_flights(inbox_message_id);
+CREATE INDEX IF NOT EXISTS idx_ai_call_flights_status ON ai_call_flights(purpose, status, lease_until);

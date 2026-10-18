@@ -1,6 +1,8 @@
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
+import { claimFlight, completeFlight, failFlight, salesAiSingleFlight, purgeAiCallFlights } from "./sales-memory.js";
+import { salesAiProvider, salesAiModel, salesAiTimeoutMs } from "./sales-ai-brain.js";
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
@@ -1709,10 +1711,14 @@ const GALLERY_MAX_ALBUM=10,GALLERY_MAX_TOTAL=40,GALLERY_CAPTION_MAX=1000,GALLERY
 const GALLERY_PHOTO_ASK=/(?:عکس|تصویر|نمونه|نماذج|صور|صورة|photo|picture|sample|show)/iu;
 // «سبز بفرست», «سه تکه بفرست», «دزلي اخضر»: a send verb + a colour or a piece count is a photo request too — never when the
 // message is about something else that can be "sent" (invoice, card number, address, the order, a price…).
-const GALLERY_SEND_VERB=/(?:بفرست|می\s*\u200c?فرست|نشون\s*(?:م\s*)?بد|نشونم\s*بد|ببینم|دز(?:لي|لی|ني|نی)|دز\s+(?:لي|لی)|ارسل|راوين[يی]|وري?ن[يی]|شوفن[يی])/u;
+const GALLERY_SEND_VERB=/(?:بفرست|می\s*\u200c?فرست|نشون\s*(?:م\s*)?بد|نشونم\s*بد|ببینم|دز(?:لي|لی|ني|نی)|دز\s+(?:لي|لی)|ارسل|راوين[يی]|وري?ن[يی]|شوفن[يی]|(?<![\p{L}])[اأن]شوف(?![\p{L}]))/u;
 const GALLERY_NOT_PHOTO=/(?:[0-9۰-۹٠-٩]+\s*(?:تا|عدد|دونه|دانه|حبه|حبة|قطعة|کارتن|كرتون)(?!\p{L})|فاکتور|فکتور|شماره|کارت|حساب|آدرس|ادرس|لوکیشن|رسید|فیش|قیمت|سفارش|لینک|کاتالوگ|سعر|اسعار|فاتور|رقم|عنوان|لوكيشن|موقع|الطلب|طلبي|وصل)/u;
+const GALLERY_SEE_VERB=/(?:ببینم|ببینیم|ببینمش|نشون\s*(?:م\s*)?بد|نشونم\s*بد|(?<![\p{L}])[اأن]شوف(?![\p{L}])|شوفن[يی]|راوين[يی])/u;
+// «another colour of it?» — other real colours of the model just shown
+const GALLERY_OTHER_COLOR=/(?:رنگ|رنگای|رنگهای|رنگ‌های)\s*(?:دیگه|دیگر|دیگش|دیگه‌ش|دیگشو|دیگه‌ای|دیگری)|(?:لون|الوان|ألوان)\s*(?:ثاني|ثانيه|ثانية|اخر|آخر|أخرى|اخرى|غيره|غير)/u;
 function galleryPhotoAsk(text){
   const t=String(text||"").normalize("NFKC");if(GALLERY_PHOTO_ASK.test(t))return true;
+  if((GALLERY_OTHER_COLOR.test(t)||GALLERY_SEE_VERB.test(t))&&!GALLERY_NOT_PHOTO.test(t))return true;
   if(!GALLERY_SEND_VERB.test(t)||GALLERY_NOT_PHOTO.test(t))return false;
   return galleryPiecesInText(t)!==null||galleryColorMentions(t,[]).length>0;
 }
@@ -1941,6 +1947,10 @@ const GALLERY_ROLE_WORDS={lid:["درب","دربش","رویه","رویش","بال
   base:["کف","کفش","پایین","پایینی","پایینش","زیر","زیرش","داخل","داخلی","قاعده","القاعده","الاسفل","اسفل","جوه","الجوه","الداخل"]};
 const GALLERY_ROLE_OF=new Map(Object.entries(GALLERY_ROLE_WORDS).flatMap(([role,words])=>words.map(w=>[salesNormal(w),role])));
 const GALLERY_MODEL_ADJ=new Set(["کوچک","کوچیک","بزرگ","متوسط","مدل","سایز","صغير","صغیر","كبير","کبیر","موديل","حجم"].map(w=>salesNormal(w)));
+// colloquial spellings of the size words → the catalog spelling
+const SALES_COLLOQUIAL_FOLD=[[/(^|[^\p{L}])(?:کوچیک|کوچک|کوچولو)(?:ش|شو|شون|ه|یش|ه‌اش)?(?=$|[^\p{L}])/gu,"$1کوچک"],[/(^|[^\p{L}])بزرگ(?:ش|شو|شون|ه|ه‌اش)?(?=$|[^\p{L}])/gu,"$1بزرگ"]];
+const salesColloquialFold=t=>SALES_COLLOQUIAL_FOLD.reduce((x,[re,to])=>x.replace(re,to),String(t??""));
+const GALLERY_PIECE_WORDS=new Set(["تکه","تیکه","قطع","قطعه","قطعات","قطعتين","قطعتین","ثلاث","سه","دو"].map(w=>salesNormal(w)));
 const GALLERY_GENERIC=new Set(["جعبه","جعبه‌ای","باکس","پک","کادو","هدیه","علبه","علب","بوکس","box","عکس","صور","صوره"].map(w=>salesNormal(w)));
 function galleryPiecesInText(text){
   const t=salesNormal(text).replace(/تیکه|تیکه‌ای/g,"تکه").replace(/(\d)(تکه|قطع)/g,"$1 $2");
@@ -1973,12 +1983,13 @@ const galleryInFamily=(label,family)=>{const t=salesTokens(label),f=family.split
 // Customer-facing search over VERIFIED photos with an APPROVED spec (owner uploads only), in steps: 1. what the customer said explicitly
 // (product when named, pieces, part colours, plain colours); 2. every verified photo compatible with it. Never a guessed model, size or
 // colour order. Too many different models → one short question; nothing to search on → one short question.
-async function gallerySearch(env,{market=null,base=null,size=null,configuration=null,text="",parts={},roles=null,colors=[],language=null,limit=GALLERY_MAX_TOTAL}={}){
+async function gallerySearch(env,{market=null,base=null,size=null,configuration=null,text="",parts={},roles=null,colors=[],language=null,limit=GALLERY_MAX_TOTAL,exclude=[]}={}){
   if(!(await galleryStoreReady(env)))return {status:"unavailable",items:[],suggestions:[]};
   const markets=["IRAN","ARAB"].includes(market)?[market]:["IRAN","ARAB"],lang=language||(market==="ARAB"?"Iraqi Arabic":"Persian");
-  const rows=(await env.DB.prepare(`SELECT s.*,m.verified_at FROM gallery_photo_specs s JOIN visual_product_media m ON m.id=s.visual_media_id
+  const rowsAll=(await env.DB.prepare(`SELECT s.*,m.verified_at FROM gallery_photo_specs s JOIN visual_product_media m ON m.id=s.visual_media_id
     WHERE s.status='approved' AND m.candidate_status='verified' AND m.verified_real_product=1 AND m.generated_detected=0 AND m.ownership_status='owned'
     AND m.source_kind=? AND m.source_platform='r2' AND m.media_type='photo' AND s.market IN (${markets.map(()=>"?").join(",")}) ORDER BY m.verified_at DESC`).bind(GALLERY_SOURCE_KIND,...markets).all()).results||[];
+  const excluded=new Set(exclude||[]);const rows=rowsAll.filter(x=>!excluded.has(x.visual_media_id));
   // 1. the explicit request
   const labels=[...new Set(rows.flatMap(s=>[s.lid_color,s.middle_color,s.base_color]).filter(Boolean))];
   const mentions=galleryColorMentions(text,labels);
@@ -1995,18 +2006,22 @@ async function gallerySearch(env,{market=null,base=null,size=null,configuration=
   // its distinctive words only (not «جعبه», sizes, colours or «کوچک / بزرگ»)
   const saidWords=salesTokens(text),distinct=m=>salesTokens(m).filter(t=>!GALLERY_GENERIC.has(t)&&!GALLERY_MODEL_ADJ.has(t)&&!GALLERY_COLOR_WORDS.includes(t)&&!/^[0-9]+$/.test(t));
   const named=base?[]:[...new Set(rows.map(s=>s.model).filter(Boolean))].filter(m=>distinct(m).some(t=>saidWords.some(w=>w===t||(t.length>=4&&(w===t+"ی"||t===w+"ی")))));
-  const asked=!!(base||named.length||sz||configuration||pieces||Object.keys(want).length||plain.length);
+  const foldedWords=salesTokens(salesColloquialFold(text)),adjSaid=foldedWords.filter(w=>GALLERY_MODEL_ADJ.has(w));
+  let namedModels=named;if(adjSaid.length&&named.length){const k=named.filter(m=>adjSaid.every(a=>salesTokens(m).includes(a)));if(k.length)namedModels=k;}
+  // a box type named by its own distinctive words («کشویی», «کج», «مايل» …), only box types that exist in this gallery
+  const cfgNamed=configuration?[]:[...new Set(rows.map(s=>s.box_type).filter(Boolean))].filter(bt=>{const w=salesTokens(bt).filter(t=>!/^[0-9]+$/.test(t)&&!GALLERY_PIECE_WORDS.has(t));return w.length&&w.every(t=>foldedWords.includes(t));});
+  const asked=!!(base||named.length||cfgNamed.length||sz||configuration||pieces||Object.keys(want).length||plain.length);
   const requested=galleryRequestedPhrase({want,plain,pieces},lang,labels);
   if(!asked)return {status:"product_unknown",items:[],suggestions:[],wanted:{},requested:null};
   // 2. compatible verified photos: product (only when named) → size / box type (only when known) → pieces (only when said) → colours
-  const model=rows.filter(s=>(!base||galleryBaseMatches(base,s.model))&&(!named.length||named.includes(s.model))&&(!sz||!s.size||sizeOf(s.size)===sz)&&(!configuration||galleryKey(s.box_type)===galleryKey(configuration))&&(!pieces||s.pieces===pieces));
+  const model=rows.filter(s=>(!base||galleryBaseMatches(base,s.model))&&(!namedModels.length||namedModels.includes(s.model))&&(!cfgNamed.length||cfgNamed.includes(s.box_type))&&(!sz||!s.size||sizeOf(s.size)===sz)&&(!configuration||galleryKey(s.box_type)===galleryKey(configuration))&&(!pieces||s.pieces===pieces));
   const fits=s=>Object.entries(want).every(([role,f])=>s[role+"_color"]&&galleryInFamily(s[role+"_color"],f))&&plain.every(f=>[s.lid_color,s.middle_color,s.base_color].some(c=>c&&galleryInFamily(c,f)));
   const exact=model.filter(fits),colorAsked=Object.keys(want).length>0||plain.length>0;
   const combos=new Map();for(const s of model){if(colorAsked&&fits(s))continue;const k=[s.lid_color,s.middle_color,s.base_color].map(galleryKey).join("|");const c=combos.get(k)||combos.set(k,{s,n:0}).get(k);c.n++;}
   const suggestions=[...combos.values()].sort((a,b)=>b.n-a.n).slice(0,4).map(({s})=>galleryColorPhrase(s,lang));
   const models=[...new Map(exact.map(s=>[galleryKey(s.model)+"|"+galleryKey(s.box_type),s])).values()];
   // every compatible photo is offered (several models included); more than one album's worth → several albums, each approved alone
-  const toItem=(s,kind=null)=>{const label=galleryPhotoLabel(s,lang),parts=label.split(" | "),n=s.size?3:2;return {visual_media_id:s.visual_media_id,spec_id:s.id,label,head:parts.slice(0,n).join(" | "),tail:parts.slice(n).join(" | "),...(kind?{kind}:{})};};
+  const toItem=(s,kind=null)=>{const label=galleryPhotoLabel(s,lang),parts=label.split(" | "),n=s.size?3:2;return {visual_media_id:s.visual_media_id,spec_id:s.id,model:s.model||null,label,head:parts.slice(0,n).join(" | "),tail:parts.slice(n).join(" | "),...(kind?{kind}:{})};};
   const cap=Math.max(1,Math.min(GALLERY_MAX_TOTAL,limit));
   const items=exact.slice(0,cap).map(s=>toItem(s));
   // No exact photo of what was asked (colours named): honest alternatives, in this order — never presented as the exact product:
@@ -2016,7 +2031,7 @@ async function gallerySearch(env,{market=null,base=null,size=null,configuration=
   const miss=model.length?"color_missing":"product_missing";
   if(!exact.length&&colorAsked){
     const used=new Set(),take=(list,kind)=>list.filter(x=>!used.has(x.id)&&used.add(x.id)).map(x=>toItem(x,kind));
-    const specific=!!(base||named.length||pieces||sz||configuration);
+    const specific=!!(base||named.length||cfgNamed.length||pieces||sz||configuration);
     const t2=specific?take(model,"model_demo"):[],t3=take(rows.filter(x=>!model.includes(x)&&fits(x)),"color_demo");
     const families=[...Object.values(want),...plain],shares=x=>families.some(f=>[x.lid_color,x.middle_color,x.base_color].some(c=>c&&galleryInFamily(c,f)));
     const t4=!t2.length&&!t3.length?take(rows.filter(shares),"near"):[];
@@ -5844,10 +5859,18 @@ async function handleTelegramWebhook(env,req){
   if(privateCustomerChat&&linked.leadId)linked=await enrichTelegramInboundContact(env,linked,{chatId,providerSenderId,providerUsername});
   if(!linked.leadId||!linked.conversationId)linked=unlinkedInbound;
   const identityMs=Date.now()-identityStarted,dedupStarted=Date.now();
-  const ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();
+  let ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();
+  // MEM-02: the insert itself decides who owns the message (one statement; D1 runs it atomically on its single primary). Two
+  // concurrent deliveries of the same update → exactly one row; the loser continues as a duplicate.
+  let fresh=null;
   if(!ex){
     const t=now(),inboxId=uid();
-    await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(inboxId,'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),telegramStoredText(String(m.text||m.caption||'').trim()),'other','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t).run();
+    const ins=await env.DB.prepare("INSERT OR IGNORE INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM inbox_messages WHERE platform='telegram' AND external_id=?)").bind(inboxId,'telegram',externalId,providerUsername||[m.from?.first_name,m.from?.last_name].filter(Boolean).join(' ')||String(m.chat?.title||'unknown'),telegramStoredText(String(m.text||m.caption||'').trim()),'other','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,chatId,replyTo||null,t,t,externalId).run();
+    if(Number(ins?.meta?.changes)===1)fresh={t,inboxId};
+    else ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='telegram' AND external_id=? LIMIT 1").bind(externalId).first();
+  }
+  if(fresh){
+    const {inboxId}=fresh;
     const dedupMs=Date.now()-dedupStarted;
     // A linked private customer's image is attached to this inbox row and analysed (bounded, once) BEFORE the Sales Brain runs.
     // A text-only message never reaches Vision; an image already analysed in this conversation is reused, never re-analysed.
@@ -5858,22 +5881,29 @@ async function handleTelegramWebhook(env,req){
       try{await captureConversationSalesMemory(env,inboxId);}catch{}
     }else if(linked.leadId&&linked.conversationId){
       const timing={webhook_started_at:webhookStarted,identity_ms:identityMs,dedup_ms:dedupMs,media_ms:mediaMs,media_lookup_ms:Math.max(0,mediaMs-(customerMedia?.vision_ms||0)),vision_ms:customerMedia?.vision_called?customerMedia.vision_ms:0,vision_called:!!customerMedia?.vision_called};
-      try { await processNegotiationInbound(env,inboxId,timing); }
+      const proc=await claimInboundProcessing(env,{inboxId,leadId:linked.leadId,conversationId:linked.conversationId});
+      // a concurrent duplicate delivery may have claimed the message first: it processes, this delivery does nothing
+      if(proc.role==="busy"){try{await audit(env,"inbound_duplicate_suppressed","Duplicate Telegram delivery ignored while the message is being processed",{inbox_message_id:inboxId});}catch{}}
+      else try { await processNegotiationInbound(env,inboxId,timing);await settleInboundProcessing(env,inboxId,proc,true); }
       catch(error){
         try { await audit(env,"negotiation_reply_draft_failed","Inbound reply was stored but negotiation enrichment failed",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(error?.message||error)}); } catch {}
         // Telegram is answered 200 either way (a failing update must never stall its queue), so a transient failure is retried
         // ONCE here. Every step is idempotent: an undecided outcome is resumed, a decided one is never repeated.
-        try { await new Promise(resolve=>setTimeout(resolve,250)); await processNegotiationInbound(env,inboxId,{webhook_started_at:webhookStarted,retried:true}); }
-        catch(retryError){ try { await audit(env,"negotiation_reply_retry_failed","Inbound reply retry failed safely; the message stays visible to the owner",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(retryError?.message||retryError)}); } catch {} }
+        try { await new Promise(resolve=>setTimeout(resolve,250)); await processNegotiationInbound(env,inboxId,{webhook_started_at:webhookStarted,retried:true});await settleInboundProcessing(env,inboxId,proc,true); }
+        catch(retryError){ await settleInboundProcessing(env,inboxId,proc,false); try { await audit(env,"negotiation_reply_retry_failed","Inbound reply retry failed safely; the message stays visible to the owner",{inbox_message_id:inboxId,lead_id:linked.leadId,conversation_id:linked.conversationId,error:sanitizeOperationalError(retryError?.message||retryError)}); } catch {} }
       }
     }else if(!internalChat)try{await ensureAmbiguousTelegramIdentityEscalation(env,inboxId);}catch(error){try{await audit(env,"owner_escalation_creation_failed","Unlinked Telegram inbound remained stored after escalation failure",{inbox_message_id:inboxId,error:sanitizeOperationalError(error?.message||error)});}catch{}}
-  }else{
+  }else if(ex){
     const existing=await env.DB.prepare("SELECT lead_id,conversation_id FROM inbox_messages WHERE id=? LIMIT 1").bind(ex.id).first();
+    // MEM-02: a duplicate delivery while another Worker still processes this message does nothing (the first one answers);
+    // after it finished (or crashed: expired lease) the existing idempotent recovery runs exactly as before.
+    const proc=existing?.lead_id&&existing?.conversation_id?await claimInboundProcessing(env,{inboxId:ex.id,leadId:existing.lead_id,conversationId:existing.conversation_id,duplicate:true}):{role:"unlinked"};
+    if(proc.role==="busy"){try{await audit(env,"inbound_duplicate_suppressed","Duplicate Telegram delivery ignored while the message is being processed",{inbox_message_id:ex.id});}catch{}return json({ok:true,duplicate:true});}
     let customerMedia=null;const mediaStarted=Date.now();
     if(privateCustomerChat&&existing?.lead_id&&existing?.conversation_id)try{customerMedia=await recordCustomerConversationMedia(env,{m,body,inboxId:ex.id,leadId:existing.lead_id,conversationId:existing.conversation_id,chatId});}catch{}
     if(customerMedia?.album_follower){}
-    else if(existing?.lead_id&&existing?.conversation_id)try { await processNegotiationInbound(env,ex.id); }
-    catch(error){try { await audit(env,"negotiation_reply_retry_failed","Persisted inbound reply recovery failed safely",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)}); } catch {}}
+    else if(existing?.lead_id&&existing?.conversation_id)try { await processNegotiationInbound(env,ex.id);await settleInboundProcessing(env,ex.id,proc,true); }
+    catch(error){await settleInboundProcessing(env,ex.id,proc,false);try { await audit(env,"negotiation_reply_retry_failed","Persisted inbound reply recovery failed safely",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)}); } catch {}}
     else if(!internalChat)try{await ensureAmbiguousTelegramIdentityEscalation(env,ex.id);}catch(error){try{await audit(env,"owner_escalation_retry_failed","Unlinked Telegram inbound remained stored after escalation retry failure",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   }
   return json({ok:true,media_received:!!media});
@@ -7190,7 +7220,7 @@ function conversationNextAction(intent){
 // a bare هزار/ألف are not guessed: no quantity is stored, so discovery asks for it instead.
 const CUSTOMER_QUANTITY_NUMBER_WORDS=new Set(["یک","دو","سه","چهار","پنج","شش","هفت","هشت","نه","ده","بیست","سی","چهل","پنجاه","شصت","هفتاد","هشتاد","نود","صد","دویست","سیصد","پانصد","واحد","اثنين","ثلاث","ثلاثة","اربع","أربع","اربعة","أربعة","خمس","خمسة","ست","ستة","سبع","سبعة","ثمان","ثمانية","تسع","تسعة","عشر","عشرة","عشرين","مية","مئة","one","two","three","four","five","six","seven","eight","nine","ten","twenty","fifty","hundred"]);
 function extractUnitQuantity(text){
-  const unit="(?:عدد|تا(?!\\s*[0-9۰-۹٠-٩])|تایی|دانه|قطعه|قطعة|حبة|حبه|pcs|pc|pieces|units)(?![\\p{L}])";
+  const unit="(?:عدد|تا(?:ش|شو|شون|ست)?(?!\\s*[0-9۰-۹٠-٩])|تایی|دانه|قطعه|قطعة|حبة|حبه|pcs|pc|pieces|units)(?![\\p{L}])";
   const thousand=text.match(new RegExp(`(?:(?<![0-9۰-۹٠-٩])([0-9۰-۹٠-٩]{1,3})\\s*(?:هزار|ألف|الف|k)|(?<![\\p{L}\\p{N}])(?:هزار|ألف|الف))\\s*${unit}`,"iu"));
   if(thousand){
     if(thousand[1]!==undefined){const n=knowledgeCommandNumber(thousand[1]);return n!==null&&n>0?n*1000:null;}
@@ -7476,7 +7506,7 @@ const SHIPPING_QUESTION={test:text=>SHIPPING_STRONG.test(text)||(SHIPPING_WEAK.t
 // A price question. «چنده» / «چند میشه» alone also asks a size, colour or material («سایزش چنده؟»): it is a price question only when
 // no such attribute word is in the message (an explicit price word always is one).
 const PRICE_WORDS=/(?:\bprice\b|\bcost\b|قیمت|هزینه|سعر|بكم|كم\s*السعر)/iu,PRICE_ATTRIBUTE_WORDS=/(?:سایز|اندازه|ابعاد|رنگ|جنس|مقاس|قياس|القياس|لون|ارتفاع|عرض|طول|size|colou?r|material)/iu;
-const PRICE_QUESTION={test:text=>PRICE_WORDS.test(text)||(/چنده/u.test(text)&&!PRICE_ATTRIBUTE_WORDS.test(text))};
+const PRICE_QUESTION={test:text=>PRICE_WORDS.test(text)||((/چنده/u.test(text)||/(?:^|\s)چند\s*(?:میشه|می‌شه|درمیاد|در\s*میاد|تومنه|تومانه|میفته)?\s*[؟?!]*\s*$/u.test(String(text||"").trim()))&&!PRICE_ATTRIBUTE_WORDS.test(text))};
 function classifyNegotiationIntent(value) {
   const text=String(value||"").trim().toLowerCase();
   if(!text)return "other";
@@ -8095,6 +8125,7 @@ function salesMentionedEntities(records,texts){
 // memorySource: the customer message that stated memoryProduct. The stored product is often only its generic part («علبة خاتم» of
 // «… علبة خاتم صغيرة …»), so when it fits several products, a reply that only adds another detail (a city, a name) keeps the product
 // that message named whole; a message naming one of those products now («لا، الكبيرة») still replaces it.
+const SALES_OPENING_DISTINGUISHER=new RegExp("^\\s*(?:(?:این|اون|همین|همون|هذا|هذي|هاي|هاذ)\\s+)?(?:ال)?(?:کوچک|بزرگ|صغير|صغيره|صغيرة|كبير|كبيره|كبيرة|متوسط)(?=$|[^\\p{L}])","u");
 function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memorySource=null,history,productNamedNow}){
   const all=[...catalog.siProducts,...catalog.listProducts];
   const find=(text,restrict=null)=>{const si=salesProductMatch(catalog.siProducts,text,{restrict});return si.status!=="none"?si:salesProductMatch(catalog.listProducts,text,{restrict});};
@@ -8104,6 +8135,8 @@ function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memo
   // A correction may name only the word that tells two products apart («لا، الكبيرة»): it counts when the message is a correction
   // (or that short answer), never as a word inside another sentence («اريد كمية كبيرة»).
   const correctionLike=SALES_CORRECTION_MARK.test(salesNormal(message))||salesTokens(message).length<=2;
+  // «کوچیکش …» / «هذا الصغير …» / «بزرگش چی؟»: the message OPENS with the word that tells two products apart (or a demonstrative + it)
+  const opensWithDistinguisher=SALES_OPENING_DISTINGUISHER.test(salesNormal(message));
   const kept=candidate?.product?.key?all.find(p=>p.key===candidate.product.key&&p.source===candidate.product.source):null;
   if(kept&&correctionLike){
     // Its siblings: products whose name differs from it in exactly one word («علبة خاتم كبيرة» for «علبة خاتم صغيرة»).
@@ -8113,8 +8146,9 @@ function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memo
   if(kept)return {status:"matched",confidence:candidate.product.confidence||"HIGH",product:kept,basis:"order_candidate",term:candidate.product.name};
   for(const text of [memoryProduct,...history]){
     if(!text)continue;const r=find(text);
+    if(r.status==="ambiguous"&&text!==memoryProduct&&opensWithDistinguisher){const named=find(message,r.candidates.map(p=>p.key));if(named.status==="matched")return {...named,basis:"current_message"};}
     if(r.status==="ambiguous"&&text===memoryProduct){
-      const keys=r.candidates.map(p=>p.key),named=correctionLike?find(message,keys):null;
+      const keys=r.candidates.map(p=>p.key),named=correctionLike||opensWithDistinguisher?find(message,keys):null;
       if(named?.status==="matched")return {...named,basis:"current_message"};
       const whole=memorySource?find(memorySource,keys):null;
       if(whole?.status==="matched")return {...whole,basis:"conversation"};
@@ -8128,6 +8162,25 @@ function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memo
 // phrase wins; spoken numbers and «تیکه» are read like digits and «تکه». Nothing determinable → the one missing choice is asked.
 const salesVariantTokens=v=>salesTokens(String(v||"").replace(/تیکه/gu,"تکه")).map(w=>SALES_NUMBER_WORDS.has(w)&&SALES_NUMBER_WORDS.get(w)<10?String(SALES_NUMBER_WORDS.get(w)):w);
 function salesVariantPhraseIn(text,phrase){const words=salesVariantTokens(text),t=salesVariantTokens(phrase);if(!t.length)return false;for(let i=0;i+t.length<=words.length;i++)if(t.every((x,k)=>salesTokenLike(words[i+k],x)))return true;return false;}
+// a word's candidate stems: the word, without a Persian possessive / object ending («کجش», «کشوییش», «کوچیکشو»), without «ال»
+const SALES_MORPH_ENDINGS=["شون","شو","ش","رو"];
+const salesMorphStems=w=>{const out=[w];for(const e of SALES_MORPH_ENDINGS)if(w.length>e.length+1&&w.endsWith(e))out.push(w.slice(0,-e.length));return [...new Set(out.flatMap(x=>[x,salesStripArticle(x)]))];};
+const salesWordIn=(words,term)=>words.some(w=>salesMorphStems(w).some(x=>salesTokenLike(x,term)));
+// words that mean «the plain one» (the configuration without any structure word)
+const SALES_PREVIOUS_PRODUCT=new RegExp("(?:همون|همان|اون|آن)\\s*(?:قبلی|قبلیه)|(?:مدل|محصول|جعبه)\\s*قبلی|قبلیه|(?:^|\\s)السابق|السابقه|نفس\\s*الاول|اللي\\s*قبل","u");
+// size question answered from the approved price catalog of this market: each matching product with its sizes
+function salesCatalogSizeAnswer(pricing,text,language){
+  const items=(pricing?.catalog_summary||[]).filter(p=>p.sizes&&p.sizes.length);if(!items.length)return null;
+  const words=salesTokens(salesColloquialFold(text)),distinct=n=>salesTokens(n).filter(t=>!GALLERY_GENERIC.has(t)&&!GALLERY_MODEL_ADJ.has(t));
+  const hit=items.filter(p=>{const d=distinct(p.product);return d.length&&d.every(t=>words.some(w=>salesTokenLike(w,t)));});
+  if(!hit.length)return null;const ar=language==="Iraqi Arabic";
+  const list=hit.map(p=>`${p.product}: ${p.sizes.join(ar?"، ":"، ")}`).join(ar?"؛ ":"؛ ");
+  const text2=hit.length>1?(ar?`القياسات المتوفرة: ${list}. يا وحدة تريد؟`:`سایزهای موجود: ${list}. کدوم رو می‌خواید؟`):(ar?`القياس المتوفر: ${list}.`:`سایز موجود: ${list}.`);
+  const nums=[...new Set(hit.flatMap(p=>p.sizes).flatMap(z=>[...String(z).matchAll(/[0-9۰-۹٠-٩]+(?:\.[0-9]+)?/g)].map(m=>Number(knowledgeCommandNumber(m[0])))).filter(Number.isFinite))];
+  return {text:text2,numbers:nums,values:[...hit.map(p=>p.product),...hit.flatMap(p=>p.sizes)]};
+}
+const SALES_PLAIN_WORDS=new Set(["ساده","معمولی","معمولیش","عادی","عادي","العادي","العاديه","العادية","عاديه","عادية","بسيط","البسيط"].map(w=>salesNormal(w)));
+const salesDistinctiveWords=c=>salesVariantTokens(c).filter(t=>!/^[0-9]+$/.test(t)&&!GALLERY_PIECE_WORDS.has(t));
 function salesPickVariant(p,texts){
   let pool=p.variants;const newest=[...(texts||[])].reverse(),dims=s=>ownerDims(s).size;
   if(new Set(pool.map(v=>dims(v.size||"")||v.size)).size>1){
@@ -8138,7 +8191,15 @@ function salesPickVariant(p,texts){
   // when its price is not active — «no active price» (never the nearest other model: «3 تکه کج» is not «3 تکه»).
   const allConfigs=[...new Set([...(p.allConfigurations||[]),...pool.map(v=>v.configuration)])];
   if(allConfigs.length>1)for(const text of newest){
-    const hits=allConfigs.filter(c=>salesVariantPhraseIn(text,c));if(!hits.length)continue;
+    let hits=allConfigs.filter(c=>salesVariantPhraseIn(text,c));
+    if(!hits.length){
+      // not the whole configuration: its distinctive words alone («کج», «کشویی», «مايل»), or «ساده» for the plain one
+      const words=salesVariantTokens(salesColloquialFold(text));
+      const byWords=allConfigs.filter(c=>{const d=salesDistinctiveWords(c);return d.length&&d.every(t=>salesWordIn(words,t));});
+      const plain=words.some(w=>salesMorphStems(w).some(x=>SALES_PLAIN_WORDS.has(x)))?allConfigs.filter(c=>!salesDistinctiveWords(c).length):[];
+      hits=byWords.length?byWords:plain.length===1?plain:[];
+    }
+    if(!hits.length)continue;
     const longest=Math.max(...hits.map(c=>salesVariantTokens(c).length)),best=hits.filter(c=>salesVariantTokens(c).length===longest);
     if(best.length!==1)break;
     const active=pool.find(v=>salesNormal(v.configuration)===salesNormal(best[0]));
@@ -8148,7 +8209,7 @@ function salesPickVariant(p,texts){
   }
   // Only ONE active variant left: it is the answer only if the customer did not name a different piece count (a deactivated or
   // missing model is never silently replaced by another model's price).
-  if(pool.length===1){const have=galleryPiecesOf(pool[0].configuration);if(have!==null)for(const text of newest){const want=galleryPiecesInText(text);if(want===null)continue;if(want!==have)return {unavailable:{pieces:want}};break;}return {variant:pool[0]};}
+  if(pool.length===1){const have=galleryPiecesOf(pool[0].configuration);if(have!==null&&newest.length){const want=galleryPiecesInText(newest[0]);if(want!==null&&want!==have)return {unavailable:{pieces:want}};}return {variant:pool[0]};}
   for(const text of newest){
     const hits=pool.filter(v=>salesVariantPhraseIn(text,v.configuration));
     if(!hits.length)continue;
@@ -8343,11 +8404,19 @@ async function salesPricing(env,{market,message,history,chronological,memoryProd
   if(!["IRAN","ARAB"].includes(market))return {status:"market_unknown"};
   const catalog=await salesPriceCatalog(env,market);
   if(!catalog.siProducts.length&&!catalog.listProducts.length)return {status:"no_catalog"};
+  // «نیمست کوچیک» → «نیم ست کوچک»: a catalog name written without its spaces / ZWNJ, and colloquial size words, read as the catalog name
+  {const names=[...new Set([...catalog.listProducts.map(p=>p.name),...catalog.siProducts.map(p=>p.name)].filter(n=>/\s/.test(String(n||""))))];
+   // every way of writing the name with some of its spaces dropped (\u00ab\u0646\u06cc\u0645\u0633\u062a \u06a9\u0648\u0686\u06a9\u00bb, \u00ab\u0646\u06cc\u0645 \u0633\u062a\u06a9\u0648\u0686\u06a9\u00bb, \u00ab\u0646\u06cc\u0645\u0633\u062a\u06a9\u0648\u0686\u06a9\u00bb)
+   const variants=n=>{const w=String(n).split(/[\s\u200c]+/).filter(Boolean);if(w.length<2||w.length>5)return [];const out=[];for(let m=0;m<(1<<(w.length-1))-1;m++){let v=w[0];for(let i=1;i<w.length;i++)v+=((m>>(i-1))&1)?" "+w[i]:w[i];out.push(v);}return out.filter(v=>v.replace(/\s/g,"").length>=4);};
+   const fold=t=>{let x=salesColloquialFold(t);for(const n of names)for(const c of variants(n))x=x.replace(new RegExp(`(^|[^\\p{L}])${c.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}(?=$|[^\\p{L}])`,"gu"),"$1"+n);return x;};
+   message=fold(message);if(Array.isArray(chronological))chronological=chronological.map(t=>typeof t==="string"?fold(t):t);if(typeof memoryProduct==="string")memoryProduct=fold(memoryProduct);}
   // What this market sells (names, models, sizes — never prices): the Sales AI's catalog context, from the same single read.
   const catalog_summary=[...catalog.listProducts.map(p=>({product:p.name,models:p.variants?[...new Set(p.variants.map(v=>v.configuration))]:[],sizes:p.variants?[...new Set(p.variants.map(v=>v.size).filter(Boolean))]:[]})),...catalog.siProducts.map(p=>({product:p.name,models:[],sizes:[]}))].slice(0,30);
+  // …and the keys those products are identified by (AI-02: the only product_key values an AI interpretation may name).
+  const product_keys=[...new Map([...catalog.listProducts,...catalog.siProducts].filter(p=>p.key&&p.name).map(p=>[p.key,{key:p.key,product:p.name}])).values()].slice(0,30);
   const resolution=salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memorySource,history,productNamedNow});
-  if(resolution.status==="none")return {status:"product_unknown",resolution,catalog_summary};
-  if(resolution.status==="ambiguous")return {status:"product_ambiguous",resolution,candidates:resolution.candidates,catalog_summary};
+  if(resolution.status==="none")return {status:"product_unknown",resolution,catalog_summary,product_keys};
+  if(resolution.status==="ambiguous")return {status:"product_ambiguous",resolution,candidates:resolution.candidates,catalog_summary,product_keys};
   const p=resolution.product,listDiscountRule=await salesListDiscountRule(env,market);
   let result=p.source==="si"?{...await siApprovedPrice(env,{market,productKey:p.key,texts:chronological,quantity}).catch(()=>({status:"no_price"})),source:"si"}:salesListPrice(p,market,quantity,{texts:chronological,discountRule:listDiscountRule});
   // A product SI knows but has not priced may be priced by the same-named approved list of THIS market (IRAN or ARAB; never another).
@@ -8355,7 +8424,7 @@ async function salesPricing(env,{market,message,history,chronological,memoryProd
   const named=result.product_name||p.name,term=resolution.term,inLanguage=t=>!!language&&salesBrainScriptLanguage(t)===language;
   const display=!language||inLanguage(named)?named:term&&inLanguage(term)?term:p.terms.find(inLanguage)||named;
   if(display!==result.product_name)result={...result,product_name:display};
-  return {...result,resolution,product:p,catalog_summary};
+  return {...result,resolution,product:p,catalog_summary,product_keys};
 }
 const SALES_PRICE_STATUSES_PRICED=new Set(["priced","needs_quantity","under_moq"]);
 const SALES_PRICE_STATUSES_OWNER=new Set(["no_price","configuration_not_priced","configuration_not_available","policy_missing","no_tier","tier_conflict","currency_conflict","price_conflict","overflow","no_product"]);
@@ -8674,6 +8743,60 @@ async function salesPaymentClaimTurn(env,{row,order,language}){
   await audit(env,"payment_claim_detected","Customer payment claim recorded for owner verification (no payment recorded)",{decision_id:opened.decision?.id||null,order_id:order.id,inbox_message_id:row.id,media_id:media?.id||null,state:signal.state,receipt_status:imageStatus,mismatch,destination_match:destination.status,ai:ai?(ai.ok?"ok":ai.error):"not_configured"});
   return {decision:opened.decision,reply,created:opened.created};
 }
+// ---- AI-02: structured conversation state for the Sales AI. Everything comes from THIS lead + THIS conversation (and the
+// approved catalog / gallery specs it refers to); nothing from another customer, no prices, no payment details, no message text.
+const SALES_AI_STATE_PRINTING_KEYS=["printing_type","printing","branding"];
+async function salesAiConversationState(env,{row,memory,pricing,dealCandidate,postSaleOrder,priorEvents,priorInbox,lastDecision,knownQuantity}){
+  const txt=(v,n=80)=>typeof v==="string"&&v.trim()?v.trim().slice(0,n):null;
+  // products the brain priced / matched earlier in this conversation (its own recorded decisions), newest first
+  const order=new Map((priorInbox||[]).map((p,i)=>["sales-brain:"+p.id,i]));
+  const priced=[];for(const e of [...(priorEvents||[])].filter(e=>order.has(e.id)).sort((a,b)=>order.get(a.id)-order.get(b.id))){
+    try{const sa=JSON.parse(e.details_json||"{}").sales_agent;const k=sa?.product_match?.product_key;if(typeof k==="string"&&k&&!priced.some(p=>p.key===k))priced.push({key:k.slice(0,80),pricing_status:txt(sa.pricing_status,30)});}catch{}}
+  const keyName=new Map((pricing?.product_keys||[]).map(p=>[p.key,p.product]));
+  for(const p of priced)p.product=keyName.get(p.key)||null;
+  const currentKey=pricing?.product?.key||null;
+  const current=currentKey?{key:currentKey,product:txt(pricing.product?.name)}:txt(memory.product_interest)?{key:null,product:txt(memory.product_interest)}:null;
+  const prev=priced.find(p=>p.key!==currentKey)||null;
+  // the last photo(s) the customer actually received in this conversation (approved spec of the newest sent album)
+  let lastShown=null;
+  try{
+    const r=await env.DB.prepare("SELECT s.product_key,s.product_name,s.model,s.size,s.pieces,s.box_type,s.lid_color,s.middle_color,s.base_color,s.printing,o.id outreach_id FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id JOIN gallery_photo_specs s ON s.visual_media_id=m.visual_media_id AND s.status='approved' WHERE o.conversation_id=? AND o.lead_id=? AND o.status='sent' ORDER BY o.created_at DESC,m.position ASC LIMIT 6").bind(row.conversation_id,row.lead_id).all();
+    const rows=(r.results||[]).filter(x=>x.outreach_id===(r.results||[])[0]?.outreach_id);
+    if(rows.length){const x=rows[0];lastShown={product_key:txt(x.product_key),product:txt(x.product_name)||txt(x.model),model:txt(x.model),size:txt(x.size,20),structure:txt(x.box_type,40),pieces:x.pieces??null,
+      colors:[...new Set(rows.flatMap(y=>[y.lid_color,y.middle_color,y.base_color]).map(c=>txt(c,40)).filter(Boolean))].slice(0,8),printing:txt(x.printing,40),photos:rows.length};}
+  }catch{}
+  const printing=SALES_AI_STATE_PRINTING_KEYS.map(k=>memory[k]).find(v=>typeof v==="string"&&v.trim());
+  return {
+    current_product:current,previous_product:prev?{key:prev.key,product:prev.product}:null,priced_products:priced.slice(0,6),last_shown:lastShown,
+    model:txt(dealCandidate?.requirements?.configuration)||null,size:txt(memory.requested_size,20)||txt(dealCandidate?.requirements?.size,20)||null,
+    structure:txt(dealCandidate?.requirements?.configuration)||null,
+    colors:Array.isArray(memory.selected_colors)?memory.selected_colors.map(c=>txt(c,40)).filter(Boolean).slice(0,8):[],color_parts:memory.color_parts&&typeof memory.color_parts==="object"?memory.color_parts:null,
+    printing:txt(printing,40),quantity:Number.isSafeInteger(knownQuantity)?knownQuantity:null,
+    order:{deal_status:dealCandidate?.status||null,order_registered:!!dealCandidate?.order_id,order_status:postSaleOrder?.status||null},
+    stage:txt(lastDecision?.proposed_next_stage||lastDecision?.current_stage,40),last_assistant_action:txt(lastDecision?.next_sales_action,40)
+  };
+}
+// The AI's interpretation checked against D1. Invalid parts are dropped (and named), never stored or used; the record holds only
+// keys, enums, approved names and catalog values — no customer text.
+function salesAiValidateInterpretation(i,{productKeys=[],catalog=[],colorOptions=[],printingOptions=[],message="",state=null}){
+  if(!i)return {valid:false,issues:["interpretation_missing"],record:null};
+  const issues=[],norm=v=>salesTokens(v).join(" "),keys=new Map(productKeys.map(p=>[p.key,p.product]));
+  let productKey=i.product_key;if(productKey&&!keys.has(productKey)){issues.push("unknown_product_key");productKey=null;}
+  const entry=productKey?catalog.find(c=>c.product===keys.get(productKey)):null,sizes=new Set((entry?[entry]:catalog).flatMap(c=>c.sizes||[]).map(norm)),models=new Set((entry?[entry]:catalog).flatMap(c=>c.models||[]).map(norm));
+  const size=i.requested_size?(sizes.has(norm(i.requested_size))?i.requested_size:(issues.push("size_not_in_catalog"),null)):null;
+  const structure=i.requested_structure?(models.has(norm(i.requested_structure))?i.requested_structure:(issues.push("structure_not_in_catalog"),null)):null;
+  const approved=new Map(colorOptions.map(o=>[norm(o),o])),colors=i.requested_color.map(c=>approved.get(norm(c))).filter(Boolean);
+  const unapprovedColors=i.requested_color.length-colors.length;if(unapprovedColors)issues.push("unapproved_color");
+  const printing=i.requested_printing?(printingOptions.find(o=>norm(o)===norm(i.requested_printing))||(issues.push("unapproved_printing"),null)):null;
+  const quantity=i.quantity&&salesAiMessageQuantities(message).includes(i.quantity)?i.quantity:(i.quantity?(issues.push("quantity_not_in_current_message"),null):null);
+  // a reference must point at something the state actually has
+  const refTarget={current:state?.current_product,previous:state?.previous_product,shown:state?.last_shown}[i.reference];
+  if(i.reference!=="none"&&!refTarget)issues.push("reference_without_target");
+  // fail closed: a wrong product key or a reference to nothing makes the reading unusable; other dropped details are named
+  const valid=!issues.includes("unknown_product_key")&&!issues.includes("reference_without_target");
+  return {valid,issues,record:{primary_intent:i.primary_intent,product_key:productKey,reference:i.reference,requested_size:size,requested_structure:structure,requested_color:colors,unapproved_colors:unapprovedColors,
+    requested_printing:printing,quantity,ambiguity:i.ambiguity,confidence:i.confidence}};
+}
 async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const timing=preloaded.timing||{},started=Date.now();
   // Stage timer for queries that run concurrently: each stage records its own duration (stages overlap within one wave).
@@ -8735,6 +8858,18 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const language=salesBrainLanguage(row.message,row.lead_notes,earlierInbound,{market:conversationMarket,active:salesState?.language});
   const orderStatusAsked=!!postSaleOrder&&(ORDER_STATUS_QUESTION.test(String(row.message||""))||(postSaleOrder.status!=="fulfilled"&&(intent==="asks_shipping"||(intent==="other"&&!galleryPhotoAsk(row.message)&&!galleryShortSpec(row.message)))));let stage=orderStatusAsked?`order_${postSaleOrder.status}`:salesBrainStage(intent,memory);
   const marketClause=` AND market IN (${knowledgeMarkets.map(()=>"?").join(",")})`;
+  // «همون قبلی / مدل قبلی / السابق» → the product discussed BEFORE the current one (from this conversation's own memory history)
+  let previousProductNamed=false;
+  if(SALES_PREVIOUS_PRODUCT.test(salesNormal(String(row.message||"")))){
+    const hist=((await env.DB.prepare("SELECT value_json FROM conversation_memory_facts WHERE conversation_id=? AND lead_id=? AND memory_key='product_interest' ORDER BY created_at DESC").bind(row.conversation_id,row.lead_id).all()).results||[]).map(x=>{try{return JSON.parse(x.value_json);}catch{return null;}}).filter(x=>typeof x==="string"&&x.trim()&&!SALES_PREVIOUS_PRODUCT.test(salesNormal(x)));
+    // the products this conversation was PRICED for (the brain's own earlier matches), newest first
+    const order=new Map(eventIds.map((id,i)=>[id,i]));
+    const priced=[...priorEvents].sort((a,b)=>(order.get(a.id)??0)-(order.get(b.id)??0)).map(e=>{try{const k=JSON.parse(e.details_json||"{}").sales_agent?.product_match?.product_key;return typeof k==="string"&&k.startsWith("list:")?k.slice(5):null;}catch{return null;}}).filter(Boolean);
+    // the product being discussed NOW (latest remembered), then everything earlier — «previous» = the newest one that is different
+    const current=String(hist[0]||priced[0]||"").trim(),key=v=>salesTokens(v).join(" ");
+    const previous=[...priced,...hist].map(h=>String(h).trim()).find(h=>h&&key(h)!==key(current)&&!key(current).includes(key(h))&&!key(h).includes(key(current)));
+    if(current&&previous){memory.product_interest=previous;previousProductNamed=true;await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"product_interest",memory_key:"product_interest",value:previous}});}
+  }
   const model=String(memory.product_interest||"").trim();
   // The message that stated this deal's product (a superseded or pre-deal statement is not in memory and is never read here).
   const modelSourceId=model?memories.find(f=>f.memory_key==="product_interest")?.source_message_id:null;
@@ -8779,7 +8914,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const dealVariant=Object.values(dealCandidate?.requirements||{}).filter(v=>typeof v==="string"&&v.trim());
   const pricingStarted=Date.now();
   const pricingWork=!pricingWanted?null:(conversationMarket
-    ?salesPricing(env,{market:conversationMarket,message:row.message,history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...dealVariant,...[...earlierInbound].reverse(),row.message],memoryProduct:model,memorySource:modelSource,candidate:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:newFactRows.some(f=>f.fact_type==="product_interest"),language})
+    ?salesPricing(env,{market:conversationMarket,message:row.message,history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...dealVariant,...[...earlierInbound].reverse(),row.message],memoryProduct:model,memorySource:modelSource,candidate:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:previousProductNamed||newFactRows.some(f=>f.fact_type==="product_interest"),language})
     :salesPriceIntent?salesPriceCatalog(env,"ARAB").then(c=>({status:"market_unknown",catalog:c.siProducts.length+c.listProducts.length>0})):Promise.resolve(null)
   ).catch(()=>({status:"pricing_error"})).then(r=>{timing.pricing_ms=Date.now()-pricingStarted;return r;});
   // ---- Wave 2: approved knowledge of THIS market (+ GLOBAL) and the customer-photo category match, loaded concurrently.
@@ -8849,20 +8984,26 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const valueText=r=>{const e=r.envelope||{};const v=e.relation?{relation:e.relation.name,members:e.relation.members,allowed:e.value!==false}:e.conditions?.length||e.effect?{when:e.conditions,then:e.effect??e.value}:e.value;return typeof v==="string"?v:JSON.stringify(v);};
     const knowledgeCtx=kgScope.filter(r=>r.concept!=="exterior_colors"&&!knowledgeIsCommercial(r.concept,r.envelope)).map(r=>({topic:r.envelope?.labels?.[lang]||r.concept,about:r.entity_key,value:valueText(r)}));
     const dealCtx=dealCandidate?{product:dealCandidate.product?.name||null,model:dealCandidate.requirements?.configuration||null,size:dealCandidate.requirements?.size||null,quantity:dealCandidate.quantity??null,status:dealCandidate.status,order_registered:!!dealCandidate.order_id}:null;
+    const aiState=await salesAiConversationState(env,{row,memory,pricing,dealCandidate,postSaleOrder,priorEvents,priorInbox,lastDecision,knownQuantity:quantityValid?knownQuantity:null});
     const stillNeeded=dealCandidate?.status==="accepted"?[!memory.customer_name&&"customer_name",!memory.destination&&"destination",colorOptions.length&&!(Array.isArray(memory.selected_colors)&&memory.selected_colors.length)&&"colors"].filter(Boolean):[];
     const input=buildSalesAiInput({market:conversationMarket,language,
       customer:{name:memory.customer_name||null,destination:memory.destination||null,earlier_profile:Object.keys(profile).length?profile:null},
       deal:dealCtx,
       commercial:pricing?{status:pricing.status,product:pricing.product_name||pricing.product?.name||null,quantity:Number.isSafeInteger(pricing.quantity)?pricing.quantity:null,needs:pricing.status==="missing_attribute"?{choice:pricing.attribute?.key||null,options:pricing.attribute?.values||[]}:null}:null,
-      catalog:pricing?.catalog_summary||[],
+      catalog:pricing?.catalog_summary||[],productKeys:pricing?.product_keys||[],state:aiState,
       colors:colorOptions.length?{approved:colorOptions,parts:colorStructure?colorStructure.parts[lang]:Object.fromEntries(SALES_COLOR_STRUCTURES.map(s=>[s.key,s.parts[lang]])),suggestion:colorStructure?.key==="three_piece"?"often top and bottom the same colour, middle different (only a suggestion)":null,chosen:Array.isArray(memory.selected_colors)?memory.selected_colors:[],chosen_parts:memory.color_parts||null}:null,
       knowledge:knowledgeCtx,pending:dealEscalations.map(e=>e.reason_code),stillNeeded,
       summary:conversationSummary?.text||null,summaryRequested:context.length>=12,
       recent:context.filter(x=>x.id!==row.id).map(x=>({from:x.direction==="inbound"?"customer":"assistant",text:x.message})),
       message:row.message});
     timing.ai_context_ms=Date.now()-ctxStarted;
-    const res=await callSalesAi(env,{instructions:salesAiPolicy(language),input});
-    timing.ai_ms=res.ms;Object.assign(aiInfo,{model:res.model,ms:res.ms,error:res.error||null,context_chars:input.length});
+    const aiProvider=salesAiProvider(env),aiRequested=salesAiModel(env);
+    const res=await salesAiSingleFlight(env,{key:"inbox:"+row.id+":sales_brain",row,provider:aiProvider,requestedModel:aiRequested,leaseMs:salesAiTimeoutMs(env)+10000,call:()=>callSalesAi(env,{instructions:salesAiPolicy(language),input})});
+    aiInfo.flight=res.flight?.role||null;if(res.flight?.role==="reuse"||res.flight?.role==="stale_reused_winner")aiInfo.reused_decision=true;
+    if(res.usage)aiInfo.usage={input_tokens:res.usage.input_tokens,output_tokens:res.usage.output_tokens,cache_read_input_tokens:res.usage.cache_read_input_tokens??null};
+    timing.ai_ms=res.ms;Object.assign(aiInfo,{model:res.model,ms:res.ms,error:res.error||null,context_chars:input.length,provider_called:SALES_AI_FLIGHT_CALLED.has(res.flight?.role),provider_succeeded:!!res.ok&&SALES_AI_FLIGHT_CALLED.has(res.flight?.role),requested_model:res.model||null,returned_model:res.returned_model||null});
+    // (3) the structured interpretation, validated against D1 — recorded for AI-03, never used to steer this turn
+    if(res.ok){const v=salesAiValidateInterpretation(res.decision.interpretation,{productKeys:pricing?.product_keys||[],catalog:pricing?.catalog_summary||[],colorOptions,printingOptions,message:row.message,state:aiState});aiInfo.interpretation_valid=v.valid;aiInfo.interpretation=v.record;if(v.issues.length)aiInfo.interpretation_issues=v.issues;}
     if(res.ok){
       // FAIL CLOSED: the model's OWN prose is checked first. An output carrying invented commercial content (price, currency,
       // discount, MOQ, shipping, payment, delivery/status, order confirmation), numbers the conversation never contained, colours
@@ -8945,7 +9086,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // (and without the previous deal's variant).
     const p=pricing.product,texts=[...[...earlierInbound].reverse(),row.message];
     const fresh=await (p.source==="si"?siApprovedPrice(env,{market:conversationMarket,productKey:p.key,texts,quantity:quantityValid?knownQuantity:null}).then(r=>({...r,source:"si"})):salesListDiscountRule(env,conversationMarket).then(rule=>salesListPrice(p,conversationMarket,quantityValid?knownQuantity:null,{texts,discountRule:rule}))).catch(()=>null);
-    if(fresh)pricing={...fresh,product_name:pricing.product_name||fresh.product_name,resolution:pricing.resolution,product:p,catalog_summary:pricing.catalog_summary};
+    if(fresh)pricing={...fresh,product_name:pricing.product_name||fresh.product_name,resolution:pricing.resolution,product:p,catalog_summary:pricing.catalog_summary,product_keys:pricing.product_keys};
   }
   const contextColors=colorPick.selected.length?colorPick.selected:Array.isArray(memory.selected_colors)?memory.selected_colors:[];
   if(contextColors.length){if(kgContext.exterior_color===undefined)kgContext.exterior_color=contextColors;if(kgContext.color===undefined)kgContext.color=contextColors;}
@@ -9000,7 +9141,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(selectedColors.length)known.color=true;
   // An approved printing type the customer names is remembered as exactly that option (own key «printing_type»; the raw «printing»
   // phrase capture is unchanged) unless an owner rule stops it; an out-of-list type is never saved as approved (owner, below).
-  let printingRecorded=false,printingSpecial=false,ribbonAsked=false,priceUnavailable=null;
+  let printingRecorded=false,printingSpecial=false,ribbonAsked=false,priceUnavailable=null,sizeAnswer=null;
   if(printingPick.selected&&!kgHardStop){
     if(memory.printing_type!==printingPick.selected)await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"printing_type",memory_key:"printing_type",value:printingPick.selected}});
     memory.printing_type=printingPick.selected;printingRecorded=true;known.customization=true;
@@ -9154,6 +9295,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A colour / size question approved knowledge could not answer: the product is unclear → ONE clarification naming the owner's
   // products that do have that answer; otherwise the answer is genuinely missing → a scoped owner question with a specific holding
   // reply. Never a held draft with a generic acknowledgement.
+  else if(kgAttrKind==="size"&&!kgIntentExcluded&&(sizeAnswer=salesCatalogSizeAnswer(pricing,row.message,language))){action="answer_sizes";answerNumbers.push(...sizeAnswer.numbers);}
   else if(kgAttrKind&&!kgIntentExcluded){
     const attrPattern=kgAttrKind==="color"?SALES_COLOR_QUESTION:SALES_SIZE_QUESTION;
     const options=kgEntities.matched.length||known.product_or_model?[]:[...new Set(kgRecords.filter(r=>knowledgeText(r.entity_key)!=="global"&&attrPattern.test([r.concept,...Object.values(r.envelope?.labels||{}),...(r.envelope?.keywords||[])].join(" "))).map(r=>r.entity_key))].slice(0,3);
@@ -9235,6 +9377,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     salesDraft=ar?`حالياً ما عدنا سعر فعّال لـ${priceUnavailable.name}${cfg?" "+cfg:""}؛ ما راح أعطيك سعر موديل ثاني، وراح أراجع الموضوع وأرجعلك.`:`در حال حاضر برای ${priceUnavailable.name}${cfg?" "+cfg:""} قیمت فعالی نداریم؛ قیمت مدل دیگه‌ای رو جایگزین نمی‌کنم و موضوع رو بررسی می‌کنم و خبرتون می‌دم.`;}
   if(placementAsk&&action==="order_details"){action="ask_color_placement";askedField="color_placement";const [A,B]=placementAsk;
     salesDraft=language==="Iraqi Arabic"?`تريد الغطاء والقاعدة ${A} والوسط ${B}، لو الغطاء والقاعدة ${B} والوسط ${A}؟`:`درب و کف ${A} باشه و وسط ${B}، یا درب و کف ${B} باشه و وسط ${A}؟`;}
+  if(action==="answer_sizes"&&sizeAnswer)salesDraft=sizeAnswer.text;
   if(action==="clarify_photo_or_order")salesDraft=language==="Iraqi Arabic"?"تريد تشوف صور المتوفر، لو أسجلها لطلبك؟":"عکس‌های موجودش رو می‌خواید ببینید یا برای سفارشتون ثبتش کنم؟";
   let gallery=null,galleryName=null;
   if(action==="visual"&&galleryOn){
@@ -9247,10 +9390,19 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const custParts=partsPick?.parts&&Object.keys(partsPick.parts).length?partsPick.parts:colorParts&&Object.keys(colorParts).length?colorParts:{};
     const wantColors=colorPick.selected.length?colorPick.selected:selectedColors;
     const roles=Object.fromEntries(Object.entries(custParts).map(([p,c])=>[GALLERY_PART_ROLE[p],c]).filter(([r,c])=>r&&c));
-    const found=await gallerySearch(env,{market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,text:String(row.message||""),parts:custParts,colors:wantColors,language});
+    // «another colour?» → the model / structure / size of the LAST photos shown here, other colours, never a photo already shown
+    const otherColour=GALLERY_OTHER_COLOR.test(String(row.message||"").normalize("NFKC"));let lastShown=null,shownIds=[];
+    if(otherColour){shownIds=((await env.DB.prepare("SELECT DISTINCT m.visual_media_id id FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id WHERE o.conversation_id=? AND o.lead_id=?").bind(row.conversation_id,row.lead_id).all()).results||[]).map(x=>x.id);
+      lastShown=await env.DB.prepare("SELECT s.model,s.box_type,s.size FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id JOIN gallery_photo_specs s ON s.visual_media_id=m.visual_media_id AND s.status='approved' WHERE o.conversation_id=? AND o.lead_id=? ORDER BY o.created_at DESC LIMIT 1").bind(row.conversation_id,row.lead_id).first();}
+    const found=lastShown?await gallerySearch(env,{market:conversationMarket,base:lastShown.model,size:lastShown.size||null,configuration:lastShown.box_type||null,text:"",parts:{},colors:[],language,exclude:shownIds})
+      :await gallerySearch(env,{market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,text:String(row.message||""),parts:custParts,colors:wantColors,language});
     gallery={...found,market:conversationMarket,base,size:found.wanted?.size||req.size||null,configuration:req.configuration||null,parts:found.wanted?.parts||roles,colors:found.wanted?.colors||wantColors,pieces:found.wanted?.pieces||null};
     galleryName=base?(pricing?.product_name&&galleryExplicitBase(pricing.product_name,said)?pricing.product_name:base):null;
     if(gallery.status==="unavailable")gallery=null;else salesDraft=galleryReplyText(gallery,language,galleryName);
+    // the customer now looks at ONE model's real photos: that model is the product of this conversation («قیمتش؟» = that model)
+    const shownModels=gallery?.status==="found"?[...new Set((gallery.items||[]).map(i=>i.model).filter(Boolean))]:[];
+    if(shownModels.length===1&&salesNormal(shownModels[0])!==salesNormal(String(memory.product_interest||""))){
+      await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"product_interest",memory_key:"product_interest",value:shownModels[0]}});memory.product_interest=shownModels[0];}
   }
   if(action==="accept_offer")stage="customer_accepted";
   if(action==="answer_price"){salesDraft=priceReply.parts.join(" ");salesTexts=priceReply.texts;}
@@ -9329,9 +9481,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const authorityFacts=[...kgEvidenceFacts,...salesBrainAuthoritativeFacts({knowledge,customerFacts:Object.entries(memory).filter(([key])=>key!=="customer_image_reference").map(([key,value])=>({category:key,value})),visualFacts:visuals,ownerFacts:ownerCaseDecisions.map(x=>({category:x.reason_code,value:x.owner_decision,explicit:true}))}),...(orderStatusAsked?orderAuthoritativeFacts(postSaleOrder):[])];
   // (the catalog answer is evidenced by exactly the approved catalog it lists: its product names and box types)
   if(action==="answer_catalog")authorityFacts.push({category:"availability",values:[...catalogNames,...catalogModels]});
+  if(sizeAnswer)authorityFacts.push({category:"availability",values:sizeAnswer.values});
   if(gallery)authorityFacts.push({category:"availability",values:[galleryName,gallery.base,gallery.requested,...(gallery.models||[]),...(gallery.colors||[]),...Object.values(gallery.parts||{}),...(gallery.suggestions||[]),...(gallery.items||[]).map(x=>x.label)].filter(Boolean)});
   if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&salesDraft!==null&&!salesDraft.includes(approvedPrinting))salesDraft=`تمام، سجلت نوع الطباعة: ${approvedPrinting}. `+salesDraft;
-  let draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])].filter(k=>!((printingPick.unknown||printingSpecial)&&/^printing/.test(k))&&!(ribbonAsked&&/ribbon/.test(k))),moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&!String(draft).includes(approvedPrinting)&&String(draft).includes("سجلت نوع الطباعة"))draft=String(draft).replace("سجلت نوع الطباعة","سجلت نوع الطباعة: "+approvedPrinting);timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();let validation=validateSalesBrainDraft(orderStatusAsked?maskOrderIdentifiers(draft,postSaleOrder):draft,{allowedNumbers:orderStatusAsked?[]:action==="visual"&&gallery?galleryAllowedNumbers(gallery):[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
+  let draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])].filter(k=>!((printingPick.unknown||printingSpecial)&&/^printing/.test(k))&&!(ribbonAsked&&/ribbon/.test(k))),moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&!String(draft).includes(approvedPrinting)&&String(draft).includes("سجلت نوع الطباعة"))draft=String(draft).replace("سجلت نوع الطباعة","سجلت نوع الطباعة: "+approvedPrinting);
+  if(printingRecorded&&approvedPrinting&&action==="answer_price"&&recentReplies.some(x=>salesBrainClaimText(x)===salesBrainClaimText(draft))){action="order_details";draft=language==="Iraqi Arabic"?`تمام، سجلت نوع الطباعة: ${approvedPrinting}.`:`ممنون، نوع چاپ ${approvedPrinting} ثبت شد.`;}timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();let validation=validateSalesBrainDraft(orderStatusAsked?maskOrderIdentifiers(draft,postSaleOrder):draft,{allowedNumbers:orderStatusAsked?[]:action==="visual"&&gallery?galleryAllowedNumbers(gallery):action==="answer_sizes"?answerNumbers:[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   // ---- AI-FIRST REPLY. The Sales AI's reply is what the customer gets when it passes the deterministic gate; the authoritative
   // commercial segment of the deterministic decision (approved price / terms / owner holding) is inserted at {{COMMERCIAL}}.
   // Acceptance, order status and quotes stay fully deterministic. Escalations the deterministic layer requires (no approved price,
@@ -9339,7 +9493,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // answered from approved knowledge. Anything that fails validation → the deterministic reply (and why is recorded).
   let replySource="legacy";const aiEvidenceFacts=[],needsOwnerPreAi=needsOwner;
   if(ai&&ai.reply){
-    const DET_ONLY=["accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","clarify_photo_or_order","ask_image_reference","answer_catalog","welcome"];
+    const DET_ONLY=["accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","clarify_photo_or_order","answer_sizes","ask_color_placement","ask_image_reference","answer_catalog","welcome"];
     const SEGMENT=["answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner"];
     if(orderStatusAsked||DET_ONLY.includes(action))aiInfo.fallback="deterministic_action";
     // Truthfulness: the AI may say the colours are finalised / registered / noted only when they ARE saved (this turn or before).
@@ -9387,6 +9541,13 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A customer saying (or showing) that a payment was made goes to ONE owner verification; the reply stays neutral.
   let paymentClaim=null;
   if(postSaleOrder&&["confirmed","partially_paid"].includes(postSaleOrder.status))try{paymentClaim=await salesPaymentClaimTurn(env,{row,order:postSaleOrder,language});}catch(error){aiInfo.payment_claim={error:sanitizeOperationalError(error?.message||error)};}
+  // A payment claim with NO order awaiting payment (no confirmed / partly paid order) is never ignored or answered with sales talk:
+  // the owner checks it (financial, tier C); the customer only hears that the message reached the owner.
+  if(!paymentClaim&&!(postSaleOrder&&["confirmed","partially_paid"].includes(postSaleOrder.status))&&paymentClaimSignal(String(row.message||""),{awaitingPayment:true,paymentRequested:true}).claim){
+    action="payment_claim_unmatched";askedField=null;replySource="legacy";needsOwner=true;needsOwnerReason="payment_claim_unmatched";
+    draft=language==="Iraqi Arabic"?"وصلت رسالتك بخصوص الدفع؛ راح يتأكد منها المسؤول ويرجعلك.":"پیامتون درباره پرداخت رسید؛ مدیر بررسیش می‌کنه و خبرتون می‌دیم.";
+    validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
+  }
   if(paymentClaim){
     draft=paymentClaim.reply;action="payment_claim_owner";askedField=null;replySource="legacy";needsOwner=false;needsOwnerReason=null;
     validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
@@ -9457,11 +9618,15 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     aiInfo.payment_info={order_id:payOrder?.id||null,deposit_answer:numbers.length>0};
   }
   aiInfo.reply_source=replySource;
+  // AI-02 observability: «called» / «used» stay as before; these say whether the provider was reached, answered, and whether its
+  // reply actually reached the draft (and if not, why) — without any customer text.
+  if(aiInfo.enabled){aiInfo.provider_called=!!aiInfo.provider_called;aiInfo.provider_succeeded=!!aiInfo.provider_succeeded;aiInfo.reply_used=replySource!=="legacy";
+    aiInfo.fallback_reason=aiInfo.reply_used?null:aiInfo.fallback||aiInfo.error||(aiInfo.provider_called?"deterministic_reply":orderStatusAsked?"not_called:order_status":formalQuoteReply?"not_called:formal_quote":"not_called");}
   timing.validator_ms=Date.now()-validatorStarted;
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
   const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge"||action==="advise_colors")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details","order_details","ai_answer"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],pieces:gallery.pieces||null,models:gallery.models||null,requested:gallery.requested||null,items:gallery.items||[],total:gallery.total??(gallery.items||[]).length,miss:gallery.miss||null,name:galleryName||null,language:language,suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,owner_topic:needsOwner?ownerTopic:null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],pieces:gallery.pieces||null,models:gallery.models||null,requested:gallery.requested||null,items:gallery.items||[],total:gallery.total??(gallery.items||[]).length,miss:gallery.miss||null,name:galleryName||null,language:language,suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_sizes"&&sizeAnswer?[{category:"availability",values:sizeAnswer.values}]:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,owner_topic:needsOwner?ownerTopic:null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   // Observability without chain-of-thought: whether the Sales AI ran, model, latency, what it understood, which facts were applied,
   // where the reply came from and why a fallback happened. The send path re-validates an AI reply against the same evidence.
   result.ai_brain=aiInfo;
@@ -9477,6 +9642,24 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   return result;
 }
 
+// MEM-02: one Worker processes an inbound message at a time. Before the migration (no ai_call_flights table) → "unavailable":
+// everything behaves exactly as before. A lease outlives a crashed Worker by at most FLIGHT_DEFAULTS.inbound_processing.leaseMs.
+const SALES_AI_FLIGHT_CALLED=new Set(["owner","unavailable","stale","stale_reused_winner"]);
+const INBOUND_FIRST_DELIVERY_GUARD_MS=60000;
+async function claimInboundProcessing(env,{inboxId,leadId,conversationId,duplicate=false}){
+  let claim;try{claim=await claimFlight(env,{key:"inbox:"+inboxId+":process",purpose:"inbound_processing",leadId,conversationId,inboxId});}catch{claim={role:"unavailable"};}
+  // Without the flights table (before the migration / after a rollback) a DUPLICATE delivery is still kept from processing in
+  // parallel with the first one: while the row is young and nothing was decided for it yet, the first delivery owns it.
+  if(claim.role==="unavailable"&&duplicate)try{
+    const r=await env.DB.prepare("SELECT i.created_at,(SELECT COUNT(*) FROM lead_outreach o WHERE o.inbox_message_id=i.id) drafts,(SELECT COUNT(*) FROM system_events e WHERE e.id='inbound-outcome:'||i.id) outcomes FROM inbox_messages i WHERE i.id=?").bind(inboxId).first();
+    if(r&&!Number(r.drafts)&&!Number(r.outcomes)&&Date.parse(r.created_at||"")>Date.now()-INBOUND_FIRST_DELIVERY_GUARD_MS)return {role:"busy",guard:"first_delivery_in_progress"};
+  }catch{}
+  return claim;
+}
+async function settleInboundProcessing(env,inboxId,claim,ok){
+  if(claim?.role!=="owner")return;
+  try{if(ok)await completeFlight(env,{key:"inbox:"+inboxId+":process",purpose:"inbound_processing",token:claim.token,fence:claim.fence});else await failFlight(env,{key:"inbox:"+inboxId+":process",token:claim.token,fence:claim.fence,errorCode:"processing_failed"});}catch{}
+}
 async function processNegotiationInbound(env,inboxId,timing={}) {
   const started=Date.now();
   await ensureLeadOutreachStore(env);
@@ -9559,11 +9742,11 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
 // AUTO-01 only RECORDS the tier next to what the live gates actually did ("shadow"); it never sends, approves or changes anything,
 // and there is no "live" mode yet. Master Stop / Pause is part of the decision (a stopped system is never autonomous).
 const SALES_AUTHORITY_CAPABILITIES=["conversation","product_answers","pricing","negotiation","photo_album","order_registration","order_status","proforma","followup","crm"];
-const SALES_AUTHORITY_TIER_C_ACTIONS=new Set(["payment_claim_owner","payment_terms_owner"]);
+const SALES_AUTHORITY_TIER_C_ACTIONS=new Set(["payment_claim_owner","payment_terms_owner","payment_claim_unmatched"]);
 const SALES_AUTHORITY_TIER_B_ACTIONS=new Set(["knowledge_owner","price_owner","commercial_owner","moq_owner","wait_for_owner"]);
 const SALES_AUTHORITY_CAPABILITY_OF={visual:"photo_album",order_status:"order_status",payment_info:"order_status",quote:"proforma",accept_offer:"order_registration",accepted:"order_registration",
   order_details:"order_registration",acknowledge_details:"order_registration",ask_color_placement:"order_registration",answer_price:"pricing",price_discovery:"pricing",negotiate:"negotiation",handle_objection:"negotiation",
-  answer_knowledge:"product_answers",answer_catalog:"product_answers",advise_colors:"product_answers",answer_moq:"product_answers"};
+  answer_knowledge:"product_answers",answer_catalog:"product_answers",answer_sizes:"product_answers",advise_colors:"product_answers",answer_moq:"product_answers"};
 const SALES_AUTHORITY_MODES=new Set(["shadow","off","live"]);
 // The ONLY capability that may be switched to «live» (real automatic sending): approved gallery photos (AUTO-02). Default: shadow (off).
 const SALES_AUTHORITY_LIVE_CAPABLE=new Set(["photo_album"]);
@@ -9630,7 +9813,7 @@ async function salesAuthorityShadowReport(env,limit=100){
   const count=k=>rows.reduce((m,r)=>(m[r[k]]=(m[r[k]]||0)+1,m),{});
   return {items:rows,summary:{total:rows.length,by_tier:count("tier"),by_capability:count("capability"),by_target:count("target_policy"),held_today_autonomous_in_target:rows.filter(r=>r.divergence).length},live_enabled:false};
 }
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_color_placement","welcome","answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["answer_sizes","ask_color_placement","welcome","answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.
@@ -12073,6 +12256,8 @@ export default {
     ctx.waitUntil((async()=>{ try { await recoverStaleCustomerMedia(env,{limit:3}); } catch {} })());
     // Bounded order-candidate consistency pass (accepted chat offers without an order candidate); never sends anything.
     ctx.waitUntil((async()=>{ try { await reconcileAcceptedChatOffers(env,{limit:10}); } catch {} })());
+    // MEM-02 retention: per-inbox AI results are cleared after their reuse window, rows after 7 days (bounded; live leases kept).
+    ctx.waitUntil((async()=>{ try { await purgeAiCallFlights(env); } catch {} })());
     if (!(await autonomyMasterGate(env))) return;
     ctx.waitUntil((async()=>{
         await ensureWebsiteGrowthStore(env);

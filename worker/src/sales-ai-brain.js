@@ -12,6 +12,12 @@
 export const SALES_AI_REQUESTS=["greeting","thanks","product_info","colors_available","color_recommendation","choose_colors","price","discount","moq","shipping","payment","production_time","printing","ribbon","size","customization","order_status","acceptance","rejection","provide_details","correction","other"];
 export const SALES_AI_ESCALATIONS=["unknown_capability","custom_color","unapproved_terms","missing_knowledge","conflicting_knowledge"];
 export const SALES_AI_COMMERCIAL_SLOT="{{COMMERCIAL}}";
+// AI-02 structured interpretation: the ONE main thing the customer wants this turn, and what it refers to. Recorded and validated
+// against D1 only; it steers nothing yet (the router keeps its current priority until AI-03).
+export const SALES_AI_PRIMARY_INTENTS=["greeting","thanks","see_photo","see_other_color","price","quantity_change","size_info","size_change","structure_change","color_choice","colors_available","color_placement","printing","negotiate","order","order_status","payment","shipping","product_info","provide_details","acceptance","rejection","other"];
+export const SALES_AI_REFERENCES=["current","previous","shown","none"];
+export const SALES_AI_AMBIGUITY=["none","product","size","structure","color","quantity","reference"];
+export const SALES_AI_CONFIDENCE=["high","medium","low"];
 
 // Off unless configured (SALES_AI_BRAIN=on) and a key exists: unconfigured environments keep the deterministic brain unchanged.
 export function salesAiEnabled(env){return String(env?.SALES_AI_BRAIN||"off").toLowerCase()==="on"&&!!salesAiKey(env,salesAiProvider(env));}
@@ -28,9 +34,15 @@ export function salesAiModel(env){
 const str={type:["string","null"]};
 export const SALES_AI_DECISION_SCHEMA={
   type:"object",additionalProperties:false,
-  required:["requests","facts","acceptance","rejection","owner_escalation_needed","escalation_reason","missing_information","summary_update","reply","reply_colors"],
+  required:["requests","interpretation","facts","acceptance","rejection","owner_escalation_needed","escalation_reason","missing_information","summary_update","reply","reply_colors"],
   properties:{
     requests:{type:"array",items:{type:"string",enum:SALES_AI_REQUESTS}},
+    interpretation:{type:"object",additionalProperties:false,required:["primary_intent","product_key","reference","requested_size","requested_color","requested_structure","requested_printing","quantity","ambiguity","confidence"],properties:{
+      primary_intent:{type:"string",enum:SALES_AI_PRIMARY_INTENTS},
+      product_key:str,reference:{type:"string",enum:SALES_AI_REFERENCES},
+      requested_size:str,requested_color:{type:"array",items:{type:"string"}},requested_structure:str,requested_printing:str,
+      quantity:{type:["integer","null"]},
+      ambiguity:{type:"string",enum:SALES_AI_AMBIGUITY},confidence:{type:"string",enum:SALES_AI_CONFIDENCE}}},
     facts:{type:"object",additionalProperties:false,required:["quantity","product","model","size","destination","customer_name","colors","color_parts","unknown_colors"],properties:{
       quantity:{type:["integer","null"]},product:str,model:str,size:str,destination:str,customer_name:str,
       colors:{type:"array",items:{type:"string"}},
@@ -58,6 +70,7 @@ export function salesAiPolicy(language){
     "COLOURS — offer and recommend only names from colors.approved, written exactly as given. A box model may have parts (colors.parts); each part may take any approved colour; colors.suggestion is only a common suggestion, never a rule. A colour that is not in colors.approved: put it in facts.unknown_colors, do not say it is available, set owner_escalation_needed with escalation_reason custom_color.",
     "If the customer asks for something CONTEXT does not cover (a capability, option or policy), do not guess: say naturally that you will confirm it, and set owner_escalation_needed with the matching reason. Do NOT escalate just because the wording is unusual or several questions were combined, and do not let an old pending question stop you from answering a new answerable one.",
     "FACTS — report only what the customer stated or clearly confirmed in THIS message (resolved with context): quantity as an integer, product/model/size as named in catalog, destination city, the customer's own name, chosen colours (exact approved names) and per-part choices (part names exactly as in colors.parts). Leave everything else null / empty. A later statement that corrects an earlier one is the new value.",
+    "INTERPRETATION — what the customer means in THIS message, resolved with state (current / previous / last shown product, priced products, last assistant action): primary_intent = the single main request; product_key = the key from product_keys of the product meant, never one that is not listed (null when unclear); reference = whether that product is the current one, the previous one, the one in the last shown photo, or none; requested_size / requested_structure = as written in catalog (sizes / models); requested_color = approved colour names asked for; requested_printing = the printing type asked for; quantity = only a number the customer states now; ambiguity = what is still unclear (none when nothing); confidence = how sure the reading is. Prices are never part of the interpretation.",
     "reply_colors: every colour name your reply mentions, exactly as written in the reply (they must all be in colors.approved).",
     "acceptance = the customer clearly accepts the current offer (deal.status offered) to register it; rejection = the customer clearly declines it.",
     "summary_update: only when CONTEXT.summary_requested is true — a factual summary (max 600 characters) of the whole conversation so far (decisions, choices, open questions, promises); otherwise null.",
@@ -75,6 +88,10 @@ export function buildSalesAiInput(ctx){
     deal:ctx.deal||null,
     commercial_now:ctx.commercial||null,
     catalog:(ctx.catalog||[]).slice(0,SALES_AI_BUDGET.catalog_products),
+    // AI-02: the keys a product may be identified by (this market's approved catalog of THIS request) and the structured
+    // conversation state. Neither section is numeric grounding for the reply (see salesAiGroundedNumbers).
+    product_keys:(ctx.productKeys||[]).slice(0,SALES_AI_BUDGET.catalog_products).map(p=>({key:clip(p.key,80),product:clip(p.product,80)})),
+    state:ctx.state||null,
     colors:ctx.colors||null,
     knowledge:(ctx.knowledge||[]).slice(0,SALES_AI_BUDGET.knowledge_items).map(k=>({topic:clip(k.topic,60),about:clip(k.about,60),value:clip(k.value,SALES_AI_BUDGET.knowledge_chars)})),
     pending_owner_questions:ctx.pending||[],
@@ -107,9 +124,9 @@ export async function callSalesAi(env,{instructions,input,timeoutMs=salesAiTimeo
     const data=await r.json();
     let text=typeof data?.output_text==="string"?data.output_text:"";
     if(!text)for(const item of data?.output||[])for(const part of item?.content||[])if(typeof part?.text==="string")text+=part.text;
-    const json=JSON.parse(String(text).match(/\{[\s\S]*\}/)?.[0]||"null");
-    if(!json||typeof json!=="object")return {ok:false,model,ms:Date.now()-started,error:"provider_unparsable"};
-    return {ok:true,model,ms:Date.now()-started,decision:normalizeSalesAiDecision(json)};
+    const json=salesAiParseJson(text);
+    if(!json||typeof json!=="object")return {ok:false,model,ms:Date.now()-started,usage:salesAiUsage(data),error:"provider_unparsable"};
+    return {ok:true,model,returned_model:salesAiReturnedModel(data),ms:Date.now()-started,usage:salesAiUsage(data),decision:normalizeSalesAiDecision(json)};
   }catch(error){return {ok:false,model,ms:Date.now()-started,error:error?.name==="AbortError"?"provider_timeout":"provider_error"};}
   finally{clearTimeout(timer);}
 }
@@ -137,23 +154,40 @@ async function callSalesAiAnthropic(env,{instructions,input,timeoutMs}){
         output_config:{effort:String(env?.SALES_AI_EFFORT||"low"),format:{type:"json_schema",schema:SALES_AI_DECISION_SCHEMA_ANTHROPIC}}})});
     if(!r.ok)return {ok:false,model,ms:Date.now()-started,error:"provider_http_"+r.status};
     const data=await r.json();
-    if(data?.stop_reason==="refusal")return {ok:false,model,ms:Date.now()-started,error:"provider_refusal"};
-    if(data?.stop_reason==="max_tokens")return {ok:false,model,ms:Date.now()-started,error:"provider_truncated"};
+    if(data?.stop_reason==="refusal")return {ok:false,model,ms:Date.now()-started,usage:salesAiUsage(data),returned_model:salesAiReturnedModel(data),error:"provider_refusal"};
+    if(data?.stop_reason==="max_tokens")return {ok:false,model,ms:Date.now()-started,usage:salesAiUsage(data),returned_model:salesAiReturnedModel(data),error:"provider_truncated"};
     const text=(Array.isArray(data?.content)?data.content:[]).filter(b=>b?.type==="text"&&typeof b.text==="string").map(b=>b.text).join("");
-    const json=JSON.parse(String(text).match(/\{[\s\S]*\}/)?.[0]||"null");
-    if(!json||typeof json!=="object")return {ok:false,model,ms:Date.now()-started,error:"provider_unparsable"};
-    return {ok:true,model,ms:Date.now()-started,decision:normalizeSalesAiDecision(json)};
+    const json=salesAiParseJson(text);
+    if(!json||typeof json!=="object")return {ok:false,model,ms:Date.now()-started,usage:salesAiUsage(data),returned_model:salesAiReturnedModel(data),error:"provider_unparsable"};
+    return {ok:true,model,returned_model:salesAiReturnedModel(data),ms:Date.now()-started,usage:salesAiUsage(data),decision:normalizeSalesAiDecision(json)};
   }catch(error){return {ok:false,model,ms:Date.now()-started,error:error?.name==="AbortError"?"provider_timeout":"provider_error"};}
   finally{clearTimeout(timer);}
 }
 
+// Token usage exactly as the provider reported it (counts only; Anthropic: input / output / cache creation / cache read;
+// OpenAI: input / output). null when the provider reported none — never estimated here.
+const salesAiUsage=data=>{const u=data?.usage;if(!u||typeof u!=="object")return null;const n=v=>Number.isSafeInteger(v)&&v>=0?v:null;
+  const out={input_tokens:n(u.input_tokens),output_tokens:n(u.output_tokens),cache_creation_input_tokens:n(u.cache_creation_input_tokens),cache_read_input_tokens:n(u.cache_read_input_tokens)};
+  if(u.cache_creation&&typeof u.cache_creation==="object")out.cache_creation={ephemeral_5m_input_tokens:n(u.cache_creation.ephemeral_5m_input_tokens),ephemeral_1h_input_tokens:n(u.cache_creation.ephemeral_1h_input_tokens)};
+  return out.input_tokens===null&&out.output_tokens===null?null:out;};
+// The model's JSON text → object, or null when it is not valid JSON (then the call is «provider_unparsable» and its reported
+// usage is still recorded — an unreadable answer was billed all the same).
+const salesAiParseJson=text=>{try{const j=JSON.parse(String(text??"").match(/\{[\s\S]*\}/)?.[0]||"null");return j&&typeof j==="object"?j:null;}catch{return null;}};
+// The model id the provider says served the call (observability only; a malformed value is dropped, never logged raw).
+const salesAiReturnedModel=data=>typeof data?.model==="string"&&/^[\w.:\-/]{1,80}$/.test(data.model)?data.model:null;
 // Shape/type sanitising only (semantic validation against D1 happens in the brain).
 export function normalizeSalesAiDecision(raw){
   const s=v=>typeof v==="string"&&v.trim()?v.trim().slice(0,200):null,arr=v=>Array.isArray(v)?v:[];
   const f=raw?.facts&&typeof raw.facts==="object"?raw.facts:{};
   const qty=Number(f.quantity);
+  // An output without a (well-formed) interpretation keeps working exactly as before: interpretation is null.
+  const i=raw?.interpretation&&typeof raw.interpretation==="object"&&!Array.isArray(raw.interpretation)?raw.interpretation:null,iq=Number(i?.quantity);
+  const oneOf=(v,list,dflt)=>list.includes(v)?v:dflt;
   return {
     requests:[...new Set(arr(raw?.requests).filter(x=>SALES_AI_REQUESTS.includes(x)))],
+    interpretation:i&&SALES_AI_PRIMARY_INTENTS.includes(i.primary_intent)?{primary_intent:i.primary_intent,product_key:s(i.product_key),reference:oneOf(i.reference,SALES_AI_REFERENCES,"none"),
+      requested_size:s(i.requested_size),requested_color:[...new Set(arr(i.requested_color).map(s).filter(Boolean))].slice(0,6),requested_structure:s(i.requested_structure),requested_printing:s(i.requested_printing),
+      quantity:i.quantity!==null&&Number.isSafeInteger(iq)&&iq>0&&iq<=10000000?iq:null,ambiguity:oneOf(i.ambiguity,SALES_AI_AMBIGUITY,"none"),confidence:oneOf(i.confidence,SALES_AI_CONFIDENCE,"low")}:null,
     facts:{quantity:Number.isSafeInteger(qty)&&qty>0&&qty<=10000000?qty:null,product:s(f.product),model:s(f.model),size:s(f.size),destination:s(f.destination),customer_name:s(f.customer_name),
       colors:[...new Set(arr(f.colors).map(s).filter(Boolean))].slice(0,12),
       color_parts:arr(f.color_parts).filter(p=>p&&s(p.part)&&s(p.color)).map(p=>({part:s(p.part),color:s(p.color)})).slice(0,6),
