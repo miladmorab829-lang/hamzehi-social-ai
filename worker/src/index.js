@@ -2,6 +2,7 @@ import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { claimFlight, completeFlight, failFlight, salesAiSingleFlight, purgeAiCallFlights } from "./sales-memory.js";
+import { buildMemoryVocabulary, memoryCanonicalize, memoryConceptFromInterpretation, memoryFingerprint, memoryLookup, memoryObserve, memoryReview, memoryList, memoryGalleryRoles, memoryConceptKey, memoryMetrics } from "./sales-memory.js";
 import { salesAiProvider, salesAiModel, salesAiTimeoutMs } from "./sales-ai-brain.js";
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
@@ -9003,6 +9004,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(res.usage)aiInfo.usage={input_tokens:res.usage.input_tokens,output_tokens:res.usage.output_tokens,cache_read_input_tokens:res.usage.cache_read_input_tokens??null};
     timing.ai_ms=res.ms;Object.assign(aiInfo,{model:res.model,ms:res.ms,error:res.error||null,context_chars:input.length,provider_called:SALES_AI_FLIGHT_CALLED.has(res.flight?.role),provider_succeeded:!!res.ok&&SALES_AI_FLIGHT_CALLED.has(res.flight?.role),requested_model:res.model||null,returned_model:res.returned_model||null});
     // (3) the structured interpretation, validated against D1 — recorded for AI-03, never used to steer this turn
+    if(res.ok&&String(env.SALES_MEMORY_MODE||"off").toLowerCase()==="shadow"&&conversationMarket)try{aiInfo.memory=await salesMemoryShadow(env,{row,market:conversationMarket,language,pricing,colorOptions,printingOptions,interp:salesAiValidateInterpretation(res.decision.interpretation,{productKeys:pricing?.product_keys||[],catalog:pricing?.catalog_summary||[],colorOptions,printingOptions,message:row.message,state:aiState})});}catch{aiInfo.memory={mode:"shadow",error:"memory_shadow_failed"};}
     if(res.ok){const v=salesAiValidateInterpretation(res.decision.interpretation,{productKeys:pricing?.product_keys||[],catalog:pricing?.catalog_summary||[],colorOptions,printingOptions,message:row.message,state:aiState});aiInfo.interpretation_valid=v.valid;aiInfo.interpretation=v.record;if(v.issues.length)aiInfo.interpretation_issues=v.issues;}
     if(res.ok){
       // FAIL CLOSED: the model's OWN prose is checked first. An output carrying invented commercial content (price, currency,
@@ -9646,6 +9648,30 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
 // everything behaves exactly as before. A lease outlives a crashed Worker by at most FLIGHT_DEFAULTS.inbound_processing.leaseMs.
 const SALES_AI_FLIGHT_CALLED=new Set(["owner","unavailable","stale","stale_reused_winner"]);
 const INBOUND_FIRST_DELIVERY_GUARD_MS=60000;
+// ---- MEM-03 shadow: memory-first measurement without effect. Only a VALID, confident AI reading that agrees with the closed-
+// vocabulary parse may create a candidate; only the owner turns a candidate into shared memory. No customer text is stored.
+const salesMemoryNormalize=t=>salesTokens(salesColloquialFold(t));
+function salesMemoryVocab({pricing,colorOptions,printingOptions}){
+  return buildMemoryVocabulary({productKeys:pricing?.product_keys||[],catalog:pricing?.catalog_summary||[],colors:colorOptions||[],printing:printingOptions||[],placements:GALLERY_ROLE_WORDS,normalize:salesMemoryNormalize});
+}
+async function salesMemoryShadow(env,{row,market,language,pricing,colorOptions,printingOptions,interp}){
+  const vocab=salesMemoryVocab({pricing,colorOptions,printingOptions}),parse=memoryCanonicalize(row.message,vocab,salesMemoryNormalize);
+  const info={mode:"shadow",cacheable:parse.cacheable,reason:parse.reason};
+  if(!parse.cacheable)return info;
+  const fp=await memoryFingerprint(market,parse);info.fingerprint=fp.slice(0,12);info.placed=parse.placed;info.any_colors=parse.unplaced;
+  const look=await memoryLookup(env,{market,fingerprint:fp,vocab});info.lookup=look.status;if(look.entry_id)info.entry_id=look.entry_id;
+  const {concept,reason}=memoryConceptFromInterpretation(parse,interp?.valid?interp.record:null,{market,language});
+  if(look.status==="hit")info.agrees=!!concept&&memoryConceptKey(concept)===memoryConceptKey(look.concept);
+  if(!concept){info.learn=reason;return info;}
+  const ob=await memoryObserve(env,{market,language,fingerprint:fp,parse,concept,leadId:row.lead_id});info.learn=ob.status;
+  return info;
+}
+// the exact approved photos of a concept (placement kept: top / middle / bottom → lid / middle / base)
+async function salesMemoryPhotos(env,{concept}){
+  const catalog=await salesPriceCatalog(env,concept.market);const p=[...catalog.listProducts,...catalog.siProducts].find(x=>x.key===concept.product_key);
+  if(!p)return {status:"product_not_approved",items:[]};
+  return gallerySearch(env,{market:concept.market,base:p.name,size:concept.size||null,configuration:concept.structure||null,roles:memoryGalleryRoles(concept),colors:concept.any_colors||[],language:concept.language||null});
+}
 async function claimInboundProcessing(env,{inboxId,leadId,conversationId,duplicate=false}){
   let claim;try{claim=await claimFlight(env,{key:"inbox:"+inboxId+":process",purpose:"inbound_processing",leadId,conversationId,inboxId});}catch{claim={role:"unavailable"};}
   // Without the flights table (before the migration / after a rollback) a DUPLICATE delivery is still kept from processing in
@@ -13890,6 +13916,26 @@ Context: ${context}`;
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
         try{if(req.method==="GET")return json({ok:true,policy:await salesAutonomyPolicy(env),capabilities:SALES_AUTHORITY_CAPABILITIES,master:(await autonomyMasterGate(env))?"on":"off"});
           return json({ok:true,policy:await setSalesAutonomyPolicy(env,await req.json().catch(()=>({})))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+      }
+      if (u.pathname === "/api/sales-memory/entries" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        return json(await memoryList(env,{status:u.searchParams.get("status")||null,limit:Number(u.searchParams.get("limit"))||50}));
+      }
+      if (u.pathname === "/api/sales-memory/review" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({}));const r=await memoryReview(env,{id:String(b.id||""),decision:String(b.decision||""),conceptKey:b.concept_key,by:"owner"});
+        return json(r,r.ok?200:409);
+      }
+      if (u.pathname === "/api/sales-memory/photos" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({}));const list=await memoryList(env,{limit:200});const e=(list.items||[]).find(x=>x.id===String(b.id||""));
+        if(!e)return json({ok:false,error:"entry not found"},404);
+        const g=await salesMemoryPhotos(env,{concept:e.concept});
+        return json({ok:true,status:g.status,exact:g.status==="found",items:(g.items||[]).map(x=>({visual_media_id:x.visual_media_id,spec_id:x.spec_id,label:x.label,exact:g.status==="found"}))});
+      }
+      if (u.pathname === "/api/sales-memory/metrics" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        return json({ok:true,metrics:await memoryMetrics(env,{days:Number(u.searchParams.get("days"))||7})});
       }
       if (u.pathname === "/api/sales-autonomy/shadow" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);

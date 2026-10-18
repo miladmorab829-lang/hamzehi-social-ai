@@ -222,11 +222,221 @@ export async function knowledgeVersion(env,market){
 // enters a concept key.
 const kNorm=v=>String(v??"").normalize("NFKC").toLowerCase().replace(/[يى]/g,"ی").replace(/ك/g,"ک").replace(/[ً-ٰٟ]/g,"").replace(/[‌‍]/g," ").replace(/\s+/g," ").trim();
 export const CONCEPT_PLACEMENTS=["top","middle","bottom"];
-export function salesConceptKey({market,language=null,intent,productKey=null,structure=null,size=null,colors={},printing=null,photo=false}){
+export function salesConceptKey({market,language=null,intent,productKey=null,structure=null,size=null,colors={},anyColors=[],printing=null,photo=false}){
   if(!market||!intent)return null;
   const c=colors&&typeof colors==="object"&&!Array.isArray(colors)?colors:{};
   const extra=Object.keys(c).filter(k=>!CONCEPT_PLACEMENTS.includes(k));if(extra.length)throw new Error("colour placement must be top / middle / bottom");
   const fields=[["m",kNorm(market).toUpperCase()],["l",language?kNorm(language):""],["i",kNorm(intent)],["p",kNorm(productKey)],["st",kNorm(structure)],["sz",kNorm(size).replace(/\s*[x×*]\s*/g,"x")],
-    ...CONCEPT_PLACEMENTS.map(p=>["c."+p,kNorm(c[p])]),["pr",kNorm(printing)],["ph",photo?"1":"0"]];
+    ...CONCEPT_PLACEMENTS.map(p=>["c."+p,kNorm(c[p])]),["c.any",[...new Set((anyColors||[]).map(kNorm))].sort().join(",")],["pr",kNorm(printing)],["ph",photo?"1":"0"]];
   return fields.map(([k,v])=>`${k}=${encodeURIComponent(v)}`).join("|");
+}
+
+// ============================================================================================================================
+// MEM-03 — approved shared memory (LOCAL, not wired to customer replies: SALES_MEMORY_MODE off | shadow).
+// What is shared: only the MEANING of a general product question (concept: intent, product key, structure, size, colours per
+// placement, printing), keyed by a canonical fingerprint built from a CLOSED vocabulary (approved catalog names / models / sizes,
+// approved colour families, approved printing, placement words, a few intent words, filler words). Nothing a customer wrote
+// outside that vocabulary is stored; no names, quantities, prices, orders or payments; no reply text (a reply is always rendered
+// from approved data at answer time).
+// A message is cacheable only when it is context-free: it names the product itself, contains no unknown word (so «مشکیش»,
+// «اشوفها», a name, a typo → not cacheable), no bare number (quantity), and no commercial / payment / order word. Anything else —
+// and anything ambiguous — goes to the model as today.
+// Learning: an entry is born «candidate» from a validated AI interpretation that AGREES with the deterministic canonical parse;
+// it is used for other customers only after the OWNER approves it («approved»). A disagreement marks it «conflict» (never used).
+// Validity: an entry is used only while every product / model / size / colour / printing it depends on is still approved.
+// ============================================================================================================================
+export const MEMORY_INTENT_WORDS={
+  photo:["عکس","عکسا","عکسها","عکسهای","تصویر","تصاویر","نمونه","نمونه‌ها","فیلم","صور","صوره","صورة","الصور","نماذج","ببینم","نشون","نشونم","بفرست","بفرستید","بفرستین","دزلی","دزلي","ارسل","ابعث","شوفني","اريد اشوف"],
+  colors:["رنگ","رنگا","رنگها","رنگهای","رنگبندی","رنگ‌بندی","لون","الوان","الالوان","ألوان"],
+  size:["سایز","سایزا","سایزها","سایزهای","اندازه","اندازه‌ها","ابعاد","قیاس","قياس","مقاس","قياسات","مقاسات","حجم"],
+  have:["دارید","دارین","داری","موجود","موجوده","هست","عندکم","عندكم","عدکم","عدكم","یوجد","يوجد","متوفر"]
+};
+// words that make a message commercial / financial / order-related → never shared memory (the validated money path handles it)
+export const MEMORY_COMMERCIAL_WORDS=["قیمت","قیمتش","چند","چنده","چقدر","تخفیف","پرداخت","واریز","رسید","کارت","سفارش","ثبت","فاکتور","پیش","بیعانه","تومان","تومن","دلار",
+  "سعر","سعره","شکد","شكد","بکم","بكم","خصم","تخفيض","دفع","حواله","حوالة","وصل","طلب","اطلب","دینار","دولار","price","cost","discount","pay","payment","order"];
+export const MEMORY_FILLER_WORDS=["سلام","درود","لطفا","لطفاً","ممنون","مرسی","سپاس","میشه","میشد","می‌شه","بی","رو","را","از","برای","با","و","هم","یه","یک","من","ما","شما","ی","ای","هست؟","چی","چیه","کدوم","چه",
+  "بیزحمت","بی‌زحمت","خواهش","میخوام","میخواستم","می‌خوام","بدید","بدین","لطف","کنید","کنین","هلا","اهلا","مرحبا","السلام","عليكم","علیکم","رجاء","رجاءا","لو","سمحت","ممکن","ممكن","من","عن","مال","مالت","اريد","ارید","ابي","ابغى","شنو","شو","ايش","ای","كل","کل","the","a","please","hi","hello","do","you","have","any","of","for","show","me","send"];
+const MEMORY_DIGIT_WORDS=new Map([["2","دو"],["3","سه"]]);
+// vocab: one map from a normalised phrase (1–4 tokens) to its canonical meaning
+export function buildMemoryVocabulary({productKeys=[],catalog=[],colors=[],printing=[],placements={},normalize}){
+  const phrases=new Map(),add=(text,entry)=>{const t=normalize(text);if(!t.length||t.length>4)return;const k=t.join(" ");if(!phrases.has(k))phrases.set(k,entry);else if(J(phrases.get(k))!==J(entry))phrases.set(k,{type:"ambiguous"});};
+  const J=JSON.stringify;
+  for(const p of productKeys){add(p.product,{type:"product",id:p.key});}
+  for(const c of catalog){
+    const key=(productKeys.find(p=>p.product===c.product)||{}).key;if(!key)continue;
+    for(const m of c.models||[]){add(m,{type:"structure",id:m});const m2=String(m).replace(/^(\d)(?=\s)/,d=>MEMORY_DIGIT_WORDS.get(d)||d);if(m2!==m)add(m2,{type:"structure",id:m});}
+    for(const s of c.sizes||[]){add(s,{type:"size",id:String(s).replace(/\s*[x×*]\s*/g,"x")});}
+  }
+  // a colour is said by its family (first word: «مشکی» for «مشکی سلفون»); a family shared by two approved colours stays a family
+  const families=new Map();for(const c of colors){const f=normalize(c)[0];if(f)(families.get(f)||families.set(f,new Set()).get(f)).add(c);}
+  for(const [f,set] of families){add(f,{type:"color",id:f,members:[...set].sort()});}
+  for(const c of colors)add(c,{type:"color",id:normalize(c)[0],members:[...(families.get(normalize(c)[0])||[c])].sort()});
+  for(const p of printing)add(p,{type:"printing",id:p});
+  const role={lid:"top",middle:"middle",base:"bottom"};
+  for(const [r,words] of Object.entries(placements))for(const w of words)add(w,{type:"placement",id:role[r]||r});
+  for(const [intent,words] of Object.entries(MEMORY_INTENT_WORDS))for(const w of words)add(w,{type:"intent",id:intent});
+  const commercial=new Set(MEMORY_COMMERCIAL_WORDS.flatMap(w=>normalize(w))),filler=new Set(MEMORY_FILLER_WORDS.flatMap(w=>normalize(w)));
+  return {phrases,commercial,filler,maxLen:4};
+}
+// → {cacheable, reason, canon:[ids…], product, structure, size, placed:{top,middle,bottom}, unplaced:[families], printing, intents:[…], deps}
+// Colour placement is bound INDEPENDENTLY of word order: the placement / colour mentions of the message, in order, must form one
+// unambiguous pattern — «placement colour placement colour…» («درب مشکی پایین طلایی», «الغطاء اسود والقاعدة ذهبي») or
+// «colour placement colour placement…» («مشکی بالا طلایی پایین») — or contain colours only (no placement). Anything else
+// («مشکی بالا طلایی», «درب مشکی و طلایی», a placement without a colour, one placement with two colours) is not cacheable: it goes to
+// the model (safe fallback), never guessed.
+export function memoryCanonicalize(text,vocab,normalize){
+  const toks=normalize(text),canon=[],out={cacheable:false,reason:null,canon,product:null,structure:null,size:null,placed:{},unplaced:[],printing:null,intents:[],deps:{products:[],structures:[],sizes:[],colors:[],printing:[]}};
+  if(!toks.length)return {...out,reason:"empty"};
+  const marks=[];// placement / colour mentions in order
+  for(let i=0;i<toks.length;){
+    let hit=null,len=0;
+    for(let n=Math.min(vocab.maxLen,toks.length-i);n>=1;n--){const k=toks.slice(i,i+n).join(" ");if(vocab.phrases.has(k)){hit=vocab.phrases.get(k);len=n;break;}}
+    const w=toks[i];
+    if(!hit){
+      if(vocab.commercial.has(w))return {...out,reason:"commercial"};
+      if(/\d/.test(w))return {...out,reason:"number"};
+      // a conjunction / Arabic article on a known word («والقاعدة», «وقاعدة», «الاسود»): dropped for the lookup; at the very START
+      // of the message a «و…» is a follow-up of an earlier turn («والكبيرة؟») → not context-free
+      const bare=[w.replace(/^و?ال(?=\S{2})/,""),w.replace(/^و(?=\S{2})/,"")].find(b=>b!==w&&vocab.phrases.has(b));
+      if(bare){if(i===0&&/^و/.test(w))return {...out,reason:"follow_up"};hit=vocab.phrases.get(bare);len=1;}
+      else if(vocab.filler.has(w)){i++;continue;}
+      else return {...out,reason:"unknown_word"};
+    }
+    if(hit.type==="ambiguous")return {...out,reason:"ambiguous_phrase"};
+    canon.push(hit.type+":"+hit.id);
+    if(hit.type==="product"){if(out.product&&out.product!==hit.id)return {...out,reason:"two_products"};out.product=hit.id;out.deps.products.push(hit.id);}
+    else if(hit.type==="structure"){if(out.structure&&out.structure!==hit.id)return {...out,reason:"two_structures"};out.structure=hit.id;out.deps.structures.push(hit.id);}
+    else if(hit.type==="size"){if(out.size&&out.size!==hit.id)return {...out,reason:"two_sizes"};out.size=hit.id;out.deps.sizes.push(hit.id);}
+    else if(hit.type==="printing"){out.printing=hit.id;out.deps.printing.push(hit.id);}
+    else if(hit.type==="intent"){if(!out.intents.includes(hit.id))out.intents.push(hit.id);}
+    else if(hit.type==="placement")marks.push({k:"P",id:hit.id});
+    else if(hit.type==="color"){out.deps.colors.push(hit.id);marks.push({k:"C",id:hit.id});}
+    i+=len;
+  }
+  // bind placements ↔ colours (order-independent, unambiguous patterns only)
+  const pattern=marks.map(m=>m.k).join("");
+  if(pattern.includes("P")){
+    let pairs=null;
+    if(/^(PC)+$/.test(pattern))pairs=marks.reduce((a,m,i)=>i%2?[...a,[marks[i-1].id,m.id]]:a,[]);        // placement → colour
+    else if(/^(CP)+$/.test(pattern))pairs=marks.reduce((a,m,i)=>i%2?[...a,[m.id,marks[i-1].id]]:a,[]);   // colour → placement
+    if(!pairs)return {...out,reason:"placement_ambiguous"};
+    for(const [place,colour] of pairs){if(out.placed[place]&&out.placed[place]!==colour)return {...out,reason:"placement_conflict"};out.placed[place]=colour;}
+  }else out.unplaced=marks.map(m=>m.id);
+  if(!out.product)return {...out,reason:"no_product_named"};
+  if(!out.intents.length&&!out.unplaced.length&&!Object.keys(out.placed).length)return {...out,reason:"no_intent"};
+  out.unplaced=[...new Set(out.unplaced)].sort();
+  for(const k of Object.keys(out.deps))out.deps[k]=[...new Set(out.deps[k])].sort();
+  return {...out,cacheable:true};
+}
+// the memory intents a shared entry may carry (never price / order / payment / negotiation)
+export const MEMORY_LEARNABLE_INTENTS={see_photo:"photo",see_other_color:"photo",colors_available:"colors",size_info:"size",product_info:"have"};
+// The concept of a cacheable message, confirmed by a validated AI interpretation (AI-02 record). Disagreement → null + reason.
+export function memoryConceptFromInterpretation(parse,interp,{market,language}){
+  if(!parse?.cacheable)return {concept:null,reason:"not_cacheable"};
+  if(!interp)return {concept:null,reason:"no_interpretation"};
+  const mi=MEMORY_LEARNABLE_INTENTS[interp.primary_intent];
+  if(!mi)return {concept:null,reason:"intent_not_shareable"};
+  if(interp.confidence!=="high"||interp.ambiguity!=="none")return {concept:null,reason:"not_confident"};
+  if(interp.product_key!==parse.product)return {concept:null,reason:"product_disagrees"};
+  if(parse.intents.length&&!parse.intents.includes(mi)&&!(mi==="photo"&&parse.intents.includes("have")))return {concept:null,reason:"intent_disagrees"};
+  if(interp.requested_structure&&parse.structure&&interp.requested_structure!==parse.structure)return {concept:null,reason:"structure_disagrees"};
+  const concept={market,language:language||null,intent:mi,product_key:parse.product,structure:parse.structure||interp.requested_structure||null,size:parse.size||null,
+    colors:{...parse.placed},any_colors:parse.unplaced,printing:parse.printing||null,photo:mi==="photo"};
+  return {concept,reason:null};
+}
+export function memoryConceptKey(c){return salesConceptKey({market:c.market,language:c.language,intent:c.intent,productKey:c.product_key,structure:c.structure,size:c.size,colors:c.colors||{},anyColors:c.any_colors||[],printing:c.printing,photo:c.photo});}
+// Order-independent MEANING (placement already bound to its colour by the parse): two wordings of the same question — other filler,
+// other verb of the same intent, other word order — share one fingerprint; top/bottom swapped never do.
+export function memoryMeaning(parse){return {i:[...new Set(parse.intents)].sort(),p:parse.product,st:parse.structure,sz:parse.size,c:{top:parse.placed.top||null,middle:parse.placed.middle||null,bottom:parse.placed.bottom||null},a:[...parse.unplaced].sort(),pr:parse.printing};}
+export async function memoryFingerprint(market,parse){return (await sha256Hex(JSON.stringify([String(market||""),memoryMeaning(parse)]))).slice(0,32);}
+// every dependency still approved (from the vocabulary built from TODAY's approved data)
+export function memoryDepsValid(deps,vocab){
+  const have=t=>new Set([...vocab.phrases.values()].filter(e=>e.type===t).map(e=>e.id));
+  const P=have("product"),S=have("structure"),Z=have("size"),C=have("color"),R=have("printing");
+  return (deps.products||[]).every(x=>P.has(x))&&(deps.structures||[]).every(x=>S.has(x))&&(deps.sizes||[]).every(x=>Z.has(x))&&(deps.colors||[]).every(x=>C.has(x))&&(deps.printing||[]).every(x=>R.has(x));
+}
+let memoryReady=false;
+async function memoryAvailable(env){if(memoryReady)return true;try{await env.DB.prepare("SELECT id FROM sales_memory_entries LIMIT 0").all();memoryReady=true;return true;}catch(e){if(missingTable(e))return false;throw e;}}
+const memSafe=async fn=>{try{return await fn();}catch(e){if(missingTable(e)){memoryReady=false;return {unavailable:true};}throw e;}};
+// lookup: only an APPROVED entry of THIS market, still valid against today's approved data
+export async function memoryLookup(env,{market,fingerprint,vocab}){
+  if(!(await memoryAvailable(env)))return {status:"unavailable"};
+  const r=await memSafe(()=>env.DB.prepare("SELECT id,status,concept_json,deps_json FROM sales_memory_entries WHERE market=? AND fingerprint=?").bind(market,fingerprint).first());
+  if(r?.unavailable)return {status:"unavailable"};
+  if(!r)return {status:"miss"};
+  if(r.status!=="approved")return {status:r.status,entry_id:r.id};
+  let deps={},concept=null;try{deps=JSON.parse(r.deps_json||"{}");concept=JSON.parse(r.concept_json);}catch{return {status:"invalid",entry_id:r.id};}
+  if(!memoryDepsValid(deps,vocab))return {status:"stale",entry_id:r.id};
+  return {status:"hit",entry_id:r.id,concept};
+}
+// observe a validated reading: create / confirm a candidate, or mark a conflict. The lead is kept only as a one-way hash (to count
+// DISTINCT customers who meant the same thing); no customer text is stored.
+export async function memoryObserve(env,{market,language,fingerprint,parse,concept,leadId,knowledgeVersion=null}){
+  if(!(await memoryAvailable(env)))return {status:"unavailable"};
+  const t=nowIso(),cj=JSON.stringify(concept),ck=memoryConceptKey(concept),leadHash=(await sha256Hex("mem-lead:"+String(leadId||""))).slice(0,32);
+  const r=await memSafe(async()=>{
+    const ex=await env.DB.prepare("SELECT id,status,concept_key FROM sales_memory_entries WHERE market=? AND fingerprint=?").bind(market,fingerprint).first();
+    if(ex&&ex.concept_key!==ck){
+      if(ex.status!=="retired")await env.DB.prepare("UPDATE sales_memory_entries SET status='conflict',conflicts=conflicts+1,updated_at=? WHERE id=? AND status<>'retired'").bind(t,ex.id).run();
+      return {status:"conflict",entry_id:ex.id};
+    }
+    const id=ex?.id||"mem-"+token();
+    if(!ex)await env.DB.prepare(`INSERT INTO sales_memory_entries(id,market,language,fingerprint,canonical_json,concept_json,concept_key,deps_json,status,observations,distinct_leads,conflicts,knowledge_version,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,'candidate',0,0,0,?,?,?) ON CONFLICT(market,fingerprint) DO NOTHING`).bind(id,market,language||null,fingerprint,JSON.stringify(parse.canon),cj,ck,JSON.stringify(parse.deps),knowledgeVersion,t,t).run();
+    const cur=await env.DB.prepare("SELECT id,status,concept_key FROM sales_memory_entries WHERE market=? AND fingerprint=?").bind(market,fingerprint).first();
+    if(!cur||cur.concept_key!==ck)return {status:"conflict",entry_id:cur?.id||null};
+    const o=await env.DB.prepare("INSERT INTO sales_memory_observations(entry_id,lead_hash,created_at) VALUES(?,?,?) ON CONFLICT(entry_id,lead_hash) DO NOTHING").bind(cur.id,leadHash,t).run();
+    await env.DB.prepare("UPDATE sales_memory_entries SET observations=observations+1,distinct_leads=distinct_leads+?,updated_at=? WHERE id=?").bind(Number(o?.meta?.changes)===1?1:0,t,cur.id).run();
+    return {status:cur.status==="candidate"?"candidate":cur.status,entry_id:cur.id,new_lead:Number(o?.meta?.changes)===1};
+  });
+  return r?.unavailable?{status:"unavailable"}:r;
+}
+// owner review: approve (only a candidate whose concept is exactly the one reviewed) or retire
+export async function memoryReview(env,{id,decision,conceptKey,by="owner"}){
+  if(!(await memoryAvailable(env)))return {ok:false,error:"memory_not_migrated"};
+  const t=nowIso();
+  if(decision==="approve"){const r=await env.DB.prepare("UPDATE sales_memory_entries SET status='approved',approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status='candidate' AND concept_key=?").bind(t,String(by).slice(0,60),t,id,String(conceptKey||"")).run();return {ok:Number(r?.meta?.changes)===1,error:Number(r?.meta?.changes)===1?null:"not_a_candidate_or_concept_changed"};}
+  if(decision==="retire"){const r=await env.DB.prepare("UPDATE sales_memory_entries SET status='retired',updated_at=? WHERE id=? AND status<>'retired'").bind(t,id).run();return {ok:Number(r?.meta?.changes)===1,error:Number(r?.meta?.changes)===1?null:"not_found_or_retired"};}
+  return {ok:false,error:"decision must be approve or retire"};
+}
+export async function memoryList(env,{status=null,limit=50}={}){
+  if(!(await memoryAvailable(env)))return {ok:false,error:"memory_not_migrated",items:[]};
+  const r=await env.DB.prepare(`SELECT id,market,language,status,canonical_json,concept_json,concept_key,deps_json,observations,distinct_leads,conflicts,created_at,updated_at,approved_at FROM sales_memory_entries ${status?"WHERE status=?":""} ORDER BY distinct_leads DESC,updated_at DESC LIMIT ?`).bind(...(status?[status]:[]),Math.min(200,Math.max(1,Number(limit)||50))).all();
+  return {ok:true,items:(r.results||[]).map(x=>({...x,canonical:JSON.parse(x.canonical_json),concept:JSON.parse(x.concept_json),deps:JSON.parse(x.deps_json)}))};
+}
+// gallery roles of a concept (top / middle / bottom → lid / middle / base)
+export function memoryGalleryRoles(concept){const r={};if(concept?.colors?.top)r.lid=concept.colors.top;if(concept?.colors?.middle)r.middle=concept.colors.middle;if(concept?.colors?.bottom)r.base=concept.colors.bottom;return r;}
+
+// ---- MEM-03 measurement (owner report) ----------------------------------------------------------------------------------------
+// From the brain's own decision records (sales-brain:<inbox>, ai_brain.memory) and the usage ledger, over a window:
+//   turns, memory-checked turns, cacheable / not cacheable (by reason), lookup results (hit / miss / candidate / conflict / stale /
+//   unavailable), hits that AGREE with the model (safe) vs DISAGREE (would have been wrong — quality guard), model calls («Opus
+//   referrals»), and cost: in SHADOW the model is still called on every turn, so actual_saved is 0 by definition and
+//   potential_saved = the ledger's estimated cost of the model calls on turns whose memory hit agreed. Nothing is invented: a turn
+//   without a ledger estimate adds no potential saving and is counted in potential_unknown.
+export async function memoryMetrics(env,{days=7,now=Date.now()}={}){
+  const since=new Date(now-Math.max(1,Math.min(90,Number(days)||7))*86400000).toISOString();
+  const rows=((await env.DB.prepare("SELECT id,details_json FROM system_events WHERE id LIKE 'sales-brain:%' AND created_at>=?").bind(since).all()).results||[]);
+  const m={window_days:Number(days)||7,mode:String(env.SALES_MEMORY_MODE||"off").toLowerCase(),turns:rows.length,memory_checked:0,cacheable:0,not_cacheable:{},lookup:{},hits_agree:0,hits_disagree:0,learned:{},model_calls:0,opus_referrals_after_memory_miss:0,
+    cost:{potential_saved_micro_usd:0,potential_unknown:0,actual_saved_micro_usd:0}};
+  const agreeInbox=[];
+  for(const r of rows){
+    let b=null;try{b=JSON.parse(r.details_json||"{}").ai_brain||null;}catch{}
+    if(!b)continue;
+    const called=b.provider_called===true||(b.provider_called===undefined&&b.called===true);if(called)m.model_calls++;
+    const mem=b.memory;if(!mem)continue;
+    m.memory_checked++;
+    if(!mem.cacheable){m.not_cacheable[mem.reason||"unknown"]=(m.not_cacheable[mem.reason||"unknown"]||0)+1;if(called)m.opus_referrals_after_memory_miss++;continue;}
+    m.cacheable++;m.lookup[mem.lookup||"none"]=(m.lookup[mem.lookup||"none"]||0)+1;
+    if(mem.learn)m.learned[mem.learn]=(m.learned[mem.learn]||0)+1;
+    if(mem.lookup==="hit"){if(mem.agrees===true){m.hits_agree++;agreeInbox.push(r.id.slice("sales-brain:".length));}else m.hits_disagree++;}
+    else if(called)m.opus_referrals_after_memory_miss++;
+  }
+  for(const id of agreeInbox){
+    let c=null;try{c=await env.DB.prepare("SELECT cost_estimate_micro_usd c FROM ai_usage_ledger WHERE inbox_message_id=? AND outcome='success' ORDER BY created_at DESC LIMIT 1").bind(id).first();}catch{c=null;}
+    if(c&&Number.isSafeInteger(c.c))m.cost.potential_saved_micro_usd+=c.c;else m.cost.potential_unknown++;
+  }
+  m.hit_rate=m.cacheable?Math.round(1000*(m.lookup.hit||0)/m.cacheable)/1000:null;
+  m.safe_hit_rate=(m.hits_agree+m.hits_disagree)?Math.round(1000*m.hits_agree/(m.hits_agree+m.hits_disagree))/1000:null;
+  return m;
 }

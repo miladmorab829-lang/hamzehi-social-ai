@@ -781,3 +781,31 @@ CREATE TABLE IF NOT EXISTS ai_call_flights (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_call_flights_inbox ON ai_call_flights(inbox_message_id);
 CREATE INDEX IF NOT EXISTS idx_ai_call_flights_status ON ai_call_flights(purpose, status, lease_until);
+-- MEM-03 (local): approved shared memory (same objects as owner-actions/mem-03/02-migration.sql).
+CREATE TABLE IF NOT EXISTS sales_memory_entries (
+  id TEXT PRIMARY KEY,
+  market TEXT NOT NULL CHECK(market IN ('IRAN','ARAB')),
+  language TEXT,
+  fingerprint TEXT NOT NULL,
+  canonical_json TEXT NOT NULL CHECK(json_valid(canonical_json)),
+  concept_json TEXT NOT NULL CHECK(json_valid(concept_json)),
+  concept_key TEXT NOT NULL,
+  deps_json TEXT NOT NULL CHECK(json_valid(deps_json)),
+  status TEXT NOT NULL CHECK(status IN ('candidate','approved','conflict','retired')),
+  observations INTEGER NOT NULL DEFAULT 0,
+  distinct_leads INTEGER NOT NULL DEFAULT 0,
+  conflicts INTEGER NOT NULL DEFAULT 0,
+  knowledge_version TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  approved_at TEXT,
+  approved_by TEXT,
+  UNIQUE(market, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_sales_memory_status ON sales_memory_entries(status, market);
+CREATE TABLE IF NOT EXISTS sales_memory_observations (
+  entry_id TEXT NOT NULL,
+  lead_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(entry_id, lead_hash)
+);
