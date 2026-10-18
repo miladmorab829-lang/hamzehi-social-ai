@@ -1704,6 +1704,7 @@ async function retrieveEligibleVisualProductMedia(env,filters,limit){
 // only after the owner approves it; a change to an approved spec waits for its own approval. Customers get photos only inside an
 // owner-approved draft (Draft → SUBMIT → APPROVE → SEND). The gallery tables come from an explicit migration — no runtime DDL.
 const GALLERY_TABLES=["gallery_photo_specs","lead_outreach_media","visual_photo_requests","visual_media_storage"];
+const GALLERY_ALBUM_GAP_MS=1100;// Telegram: at most about one media group per second per chat
 const GALLERY_MAX_ALBUM=10,GALLERY_MAX_TOTAL=40,GALLERY_CAPTION_MAX=1000,GALLERY_SOURCE_KIND="owner_gallery";
 const GALLERY_PHOTO_ASK=/(?:عکس|تصویر|نمونه|نماذج|صور|صورة|photo|picture|sample|show)/iu;
 // «سبز بفرست», «سه تکه بفرست», «دزلي اخضر»: a send verb + a colour or a piece count is a photo request too — never when the
@@ -1731,7 +1732,7 @@ function galleryShortSpec(text){
 const GALLERY_CLARIFY_TEXTS=new Set(["عکس‌های موجودش رو می‌خواید ببینید یا برای سفارشتون ثبتش کنم؟","تريد تشوف صور المتوفر، لو أسجلها لطلبك؟"]);
 const GALLERY_CLARIFY_FORBIDDEN=/[0-9۰-۹٠-٩]|قیمت|تومان|ریال|دلار|تخفیف|خصم|سعر|دينار|پرداخت|واریز|دفع|فلوس|تأیید|تایید|قطعی|تأكيد|تاكيد|نهائي|تولید|انتاج|إنتاج|ارسال|شحن|توصيل|تحویل|ثبت شد|سجلت|تم /u;
 const galleryClarifySafe=t=>GALLERY_CLARIFY_TEXTS.has(String(t||""))&&!GALLERY_CLARIFY_FORBIDDEN.test(String(t||"").replace(/ثبتش کنم؟|أسجلها لطلبك؟/g,""));
-const GALLERY_ORDER_SPEC_ACTIONS=new Set(["ask_color","ask_size","ask_customization","ask_details","order_details","ask_quantity","ask_destination","clarify_product","ask_attribute","advise_colors","answer_price","price_discovery","negotiate","handle_objection","quote","accept_offer","accepted"]);
+const GALLERY_ORDER_SPEC_ACTIONS=new Set(["ask_color_placement","ask_color","ask_size","ask_customization","ask_details","order_details","ask_quantity","ask_destination","clarify_product","ask_attribute","advise_colors","answer_price","price_discovery","negotiate","handle_objection","quote","accept_offer","accepted"]);
 // A size is a filter only when the customer writes it («5x5», «۵ در ۵», «7*7», «٥ في ٥»).
 function gallerySizeInText(text){
   const t=String(text||"").replace(/[۰-۹]/g,d=>"۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٠-٩]/g,d=>"٠١٢٣٤٥٦٧٨٩".indexOf(d));
@@ -1995,7 +1996,7 @@ async function gallerySearch(env,{market=null,base=null,size=null,configuration=
   const saidWords=salesTokens(text),distinct=m=>salesTokens(m).filter(t=>!GALLERY_GENERIC.has(t)&&!GALLERY_MODEL_ADJ.has(t)&&!GALLERY_COLOR_WORDS.includes(t)&&!/^[0-9]+$/.test(t));
   const named=base?[]:[...new Set(rows.map(s=>s.model).filter(Boolean))].filter(m=>distinct(m).some(t=>saidWords.some(w=>w===t||(t.length>=4&&(w===t+"ی"||t===w+"ی")))));
   const asked=!!(base||named.length||sz||configuration||pieces||Object.keys(want).length||plain.length);
-  const requested=galleryRequestedPhrase({want,plain,pieces},lang);
+  const requested=galleryRequestedPhrase({want,plain,pieces},lang,labels);
   if(!asked)return {status:"product_unknown",items:[],suggestions:[],wanted:{},requested:null};
   // 2. compatible verified photos: product (only when named) → size / box type (only when known) → pieces (only when said) → colours
   const model=rows.filter(s=>(!base||galleryBaseMatches(base,s.model))&&(!named.length||named.includes(s.model))&&(!sz||!s.size||sizeOf(s.size)===sz)&&(!configuration||galleryKey(s.box_type)===galleryKey(configuration))&&(!pieces||s.pieces===pieces));
@@ -2005,8 +2006,24 @@ async function gallerySearch(env,{market=null,base=null,size=null,configuration=
   const suggestions=[...combos.values()].sort((a,b)=>b.n-a.n).slice(0,4).map(({s})=>galleryColorPhrase(s,lang));
   const models=[...new Map(exact.map(s=>[galleryKey(s.model)+"|"+galleryKey(s.box_type),s])).values()];
   // every compatible photo is offered (several models included); more than one album's worth → several albums, each approved alone
-  const items=exact.slice(0,Math.max(1,Math.min(GALLERY_MAX_TOTAL,limit))).map(s=>{const label=galleryPhotoLabel(s,lang),parts=label.split(" | "),n=s.size?3:2;return {visual_media_id:s.visual_media_id,spec_id:s.id,label,head:parts.slice(0,n).join(" | "),tail:parts.slice(n).join(" | ")};});
-  return {status:exact.length?"found":model.length?"color_missing":"product_missing",items,total:exact.length,models:models.length>1?models.slice(0,5).map(s=>[s.model,s.box_type].filter(Boolean).join(" ")):null,suggestions,wanted:{parts:want,colors:plain,pieces,size:sz},requested,language:lang};
+  const toItem=(s,kind=null)=>{const label=galleryPhotoLabel(s,lang),parts=label.split(" | "),n=s.size?3:2;return {visual_media_id:s.visual_media_id,spec_id:s.id,label,head:parts.slice(0,n).join(" | "),tail:parts.slice(n).join(" | "),...(kind?{kind}:{})};};
+  const cap=Math.max(1,Math.min(GALLERY_MAX_TOTAL,limit));
+  const items=exact.slice(0,cap).map(s=>toItem(s));
+  // No exact photo of what was asked (colours named): honest alternatives, in this order — never presented as the exact product:
+  // 2. the SAME model / size / structure in other colours («model demo»), only when a model, size, structure or piece count was named;
+  // 3. other models / sizes with the requested colours in the requested places («colour demo»);
+  // 4. only when neither exists: photos sharing at least one requested colour («near»).
+  const miss=model.length?"color_missing":"product_missing";
+  if(!exact.length&&colorAsked){
+    const used=new Set(),take=(list,kind)=>list.filter(x=>!used.has(x.id)&&used.add(x.id)).map(x=>toItem(x,kind));
+    const specific=!!(base||named.length||pieces||sz||configuration);
+    const t2=specific?take(model,"model_demo"):[],t3=take(rows.filter(x=>!model.includes(x)&&fits(x)),"color_demo");
+    const families=[...Object.values(want),...plain],shares=x=>families.some(f=>[x.lid_color,x.middle_color,x.base_color].some(c=>c&&galleryInFamily(c,f)));
+    const t4=!t2.length&&!t3.length?take(rows.filter(shares),"near"):[];
+    const alt=[...t2,...t3,...t4].slice(0,cap);
+    if(alt.length)return {status:"alternatives",miss,items:alt,total:alt.length,models:null,suggestions,wanted:{parts:want,colors:plain,pieces,size:sz},requested,language:lang};
+  }
+  return {status:exact.length?"found":miss,items,total:exact.length,models:models.length>1?models.slice(0,5).map(s=>[s.model,s.box_type].filter(Boolean).join(" ")):null,suggestions,wanted:{parts:want,colors:plain,pieces,size:sz},requested,language:lang};
 }
 // The exact order number / tracking reference of the customer's own order is an identifier, not a number: it is masked before the
 // numeric check (only as a whole token; a changed or partial number is still checked and fails closed).
@@ -2016,6 +2033,47 @@ function maskOrderIdentifiers(text,order){
     out=out.replace(new RegExp(`(?<![0-9A-Za-z۰-۹٠-٩-])${id.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}(?![0-9A-Za-z۰-۹٠-٩-])`,"gu")," ");
   return out;
 }
+// What a gallery reply may state (labels, models, requested phrase, colours, suggestions) — the same evidence the brain validated it with.
+function galleryAuthorityValues(g){return [g?.name,g?.base,g?.requested,...(g?.models||[]),...(g?.colors||[]),...Object.values(g?.parts||{}),...(g?.suggestions||[]),...((g?.items)||[]).map(x=>x.label)].filter(Boolean);}
+// AUTO-02: may THIS photo reply be sent automatically? Only when the owner switched photo_album to live, the market is known, the reply is
+// the brain's validated draft and every attached photo matches the brain's list (the central send re-verifies each photo again).
+async function galleryAutoSendBlock(env,{row,brain,outreach}){
+  const policy=await salesAutonomyPolicy(env).catch(()=>null);
+  if(policy?.modes?.photo_album!=="live")return "action_requires_owner_review";
+  if(!salesPhotoPilotAllows(policy,outreach.recipient))return "photo_pilot_not_allowed";
+  const g=brain?.gallery;if(!g)return "action_requires_owner_review";
+  if((g.items||[]).length&&!["IRAN","ARAB"].includes(g.market))return "gallery_market_unknown";
+  const attached=((await env.DB.prepare("SELECT visual_media_id FROM lead_outreach_media WHERE outreach_id=? ORDER BY position").bind(outreach.id).all()).results||[]).map(x=>x.visual_media_id);
+  const expected=(g.items||[]).slice(0,GALLERY_MAX_ALBUM).map(x=>x.visual_media_id);
+  if(JSON.stringify(attached)!==JSON.stringify(expected))return "gallery_media_mismatch";
+  return null;
+}
+// AUTO-02: albums 2… of the same photo reply, strictly in order, each only after the previous one was sent; Master Stop / Pause and the
+// photo_album switch are re-checked before EACH album; a failed or ambiguous album stops the rest (never retried blindly).
+async function sendGalleryFollowUpAlbums(env,{row,brain,outreach,recipient}){
+  const g=brain?.gallery;if(!g||(g.items||[]).length<=GALLERY_MAX_ALBUM)return {albums:0};
+  const evs=((await env.DB.prepare("SELECT details_json FROM system_events WHERE type='gallery_album_draft_created' AND created_at>=? ORDER BY created_at").bind(outreach.created_at||"").all()).results||[])
+    .map(e=>{try{return JSON.parse(e.details_json);}catch{return null;}}).filter(d=>d&&d.inbox_message_id===row.id&&d.first_outreach_id===outreach.id&&d.outreach_id).sort((a,b)=>a.album-b.album);
+  const numbers=galleryAllowedNumbers(g),facts=[{category:"availability",values:galleryAuthorityValues(g)}];let sent=0;
+  for(const d of evs){
+    if(!(await autonomyMasterGate(env)))return {albums:sent,stopped:"master_off"};
+    const pol=await salesAutonomyPolicy(env);if(pol.modes.photo_album!=="live")return {albums:sent,stopped:"photo_album_not_live"};
+    if(!salesPhotoPilotAllows(pol,outreach.recipient))return {albums:sent,stopped:"photo_pilot_not_allowed"};
+    const draft=await env.DB.prepare("SELECT * FROM lead_outreach WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(d.outreach_id,row.lead_id,row.conversation_id).first();
+    if(!draft||draft.status!=="draft"||draft.error_code||String(draft.recipient)!==String(outreach.recipient))return {albums:sent,stopped:"album_draft_not_sendable"};
+    const gate=await inboundSendGateReason(env,{row,outreach:draft,recipient});if(gate)return {albums:sent,stopped:gate};
+    if(!validateSalesBrainDraft(draft.message,{allowedNumbers:numbers,authoritativeFacts:facts}).valid)return {albums:sent,stopped:"validator_blocked"};
+    const check=await galleryOutreachAlbum(env,draft.id);if(check.blocked||!check.items.length)return {albums:sent,stopped:"album_not_sendable"};
+    await new Promise(r=>setTimeout(r,GALLERY_ALBUM_GAP_MS));// spacing after the previous album (Telegram flood limits)
+    const t=now(),ok=await env.DB.prepare("UPDATE lead_outreach SET status='approved',approved_at=?,approved_by='inbound_auto_policy',updated_at=? WHERE id=? AND status='draft' AND error_code IS NULL AND message=?").bind(t,t,draft.id,draft.message).run();
+    if(!Number(ok?.meta?.changes))return {albums:sent,stopped:"draft_changed"};
+    const res=await sendApprovedTelegramOutreach(env,draft.id);
+    try{await audit(env,res.ok?"gallery_album_auto_sent":"gallery_album_auto_send_stopped",res.ok?"Approved gallery album sent automatically (AUTO-02)":"Automatic gallery album send stopped",{outreach_id:draft.id,inbox_message_id:row.id,album:d.album,albums:d.albums,status:res.status||null});}catch{}
+    if(!res.ok)return {albums:sent,stopped:res.status||"send_failed"};
+    sent++;
+  }
+  return {albums:sent};
+}
 function galleryAllowedNumbers(g){
   const nums=new Set([g.items.length,Math.ceil(g.items.length/GALLERY_MAX_ALBUM),...g.items.map((_,i)=>i+1)]);
   for(const t of [...g.items.map(x=>x.label),...(g.models||[]),...(g.suggestions||[]),g.requested||""])for(const m of String(t).matchAll(/[0-9۰-۹٠-٩]+/g)){const n=knowledgeCommandNumber(m[0]);if(Number.isSafeInteger(n))nums.add(n);}
@@ -2023,7 +2081,13 @@ function galleryAllowedNumbers(g){
 }
 function galleryColorPhrase(s,language){const ar=language==="Iraqi Arabic",sliding=GALLERY_SLIDING.test(s.box_type||"");return [`${ar?(sliding?"الخارج":"الغطاء"):(sliding?"بیرونی":"درب")} ${s.lid_color}`,s.middle_color?`${ar?"الوسط":"وسط"} ${s.middle_color}`:null,`${ar?(sliding?"الداخل":"القاعدة"):(sliding?"داخل":"کف")} ${s.base_color}`].filter(Boolean).join(ar?" و":" و ");}
 // What the customer asked, in their own terms (part colours only where they named the part).
-function galleryRequestedPhrase({want={},plain=[],pieces=null},language){
+// A colour family («سرمه ای» after normalisation) written back exactly as the owner registered it («سرمه‌ای»).
+function galleryFamilyDisplay(family,labels){
+  for(const l of labels||[]){const words=String(l).split(/\s+/);for(let k=1;k<=words.length;k++){const pre=words.slice(0,k).join(" ");if(salesTokens(pre).join(" ")===family)return pre;}}
+  return family;
+}
+function galleryRequestedPhrase({want={},plain=[],pieces=null},language,labels=[]){
+  const show=f=>galleryFamilyDisplay(f,labels);want=Object.fromEntries(Object.entries(want).map(([r,f])=>[r,show(f)]));plain=plain.map(show);
   const ar=language==="Iraqi Arabic",roleWord={lid:ar?"الغطاء":"درب",middle:ar?"الوسط":"وسط",base:ar?"القاعدة":"کف"};
   const p=Object.entries(want).map(([r,f])=>`${roleWord[r]} ${f}`);
   const piecesText=pieces?(ar?(pieces===3?"ثلاث قطع":"قطعتين"):`${String(pieces).replace(/[0-9]/g,d=>"۰۱۲۳۴۵۶۷۸۹"[d])} تکه`):null;
@@ -2033,6 +2097,15 @@ function galleryRequestedPhrase({want={},plain=[],pieces=null},language){
 function galleryReplyText(g,language,name){
   const ar=language==="Iraqi Arabic",fa=n=>String(n).replace(/[0-9]/g,d=>"۰۱۲۳۴۵۶۷۸۹"[d]),req=g.requested,what=[name,req].filter(Boolean).join(ar?" ":" ");
   const sug=(g.suggestions||[]).length?g.suggestions.join(ar?"، ":"، "):null;
+  if(g.status==="alternatives"){
+    const heads=ar?{model_demo:"هاي الصورة لعرض موديل العلبة:",color_demo:"هاي الصورة لعرض تركيبة الألوان اللي اخترتها:",near:"نموذج قريب (الألوان مو نفسها بالضبط):"}
+      :{model_demo:"این عکس برای نمایش مدل جعبه است:",color_demo:"این عکس برای نمایش ترکیب رنگ انتخابی شماست:",near:"نمونه نزدیک (رنگ‌ها دقیقاً همون نیست):"};
+    const first=g.items.slice(0,GALLERY_MAX_ALBUM),albums=Math.ceil(g.items.length/GALLERY_MAX_ALBUM);let i=0;const out=[];
+    for(const k of ["model_demo","color_demo","near"]){const grp=first.filter(x=>x.kind===k);if(!grp.length)continue;out.push(heads[k]);for(const x of grp){i++;out.push(`${ar?i:fa(i)}) ${x.label}`);}}
+    const intro=ar?`صورة ${what||"هذا الطلب"} بالضبط مو موجودة هسه؛ سجلت طلبك.`:`عکس دقیق ${what||"این درخواست"} فعلاً در گالری نیست؛ درخواستتون ثبت شد.`;
+    const more=albums>1?(ar?` (الألبوم 1 من ${albums})`:` (آلبوم ۱ از ${fa(albums)})`):"";
+    return `${intro}${more}\n${out.join("\n")}\n${ar?"إذا عجبك واحد منها كلي.":"اگه یکی رو پسندیدید بفرمایید."}`;
+  }
   if(g.status==="found"&&g.items.length===1)return ar
     ?`هاي صورة حقيقية لـ ${g.items[0].label}. إذا عجبتك، كلي العدد حتى أحسبلك السعر.`
     :`این عکس واقعی ${g.items[0].label} هست. اگه پسندیدید، تعداد رو بگید تا قیمت رو اعلام کنم.`;
@@ -2056,7 +2129,8 @@ function galleryReplyText(g,language,name){
 function galleryAlbumText(g,language,k){
   const ar=language==="Iraqi Arabic",fa=n=>String(n).replace(/[0-9]/g,d=>"۰۱۲۳۴۵۶۷۸۹"[d]),albums=Math.ceil(g.items.length/GALLERY_MAX_ALBUM);
   const same=g.items.every(x=>x.head&&x.head===g.items[0].head),from=(k-1)*GALLERY_MAX_ALBUM,chunk=g.items.slice(from,from+GALLERY_MAX_ALBUM);
-  const list=chunk.map((x,i)=>`${ar?from+i+1:fa(from+i+1)}) ${same?x.tail:x.label}`).join("\n");
+  const tag=x=>x.kind?(ar?{model_demo:" — لعرض الموديل",color_demo:" — لعرض تركيبة الألوان",near:" — نموذج قريب"}:{model_demo:" — برای نمایش مدل",color_demo:" — برای نمایش ترکیب رنگ",near:" — نمونه نزدیک"})[x.kind]||"":"";
+  const list=chunk.map((x,i)=>`${ar?from+i+1:fa(from+i+1)}) ${same&&!x.kind?x.tail:x.label}${tag(x)}`).join("\n");
   return ar?`الألبوم ${k} من ${albums} — الصور ${from+1} إلى ${from+chunk.length}:\n${list}`:`آلبوم ${fa(k)} از ${fa(albums)} — عکس‌های ${fa(from+1)} تا ${fa(from+chunk.length)}:\n${list}`;
 }
 // The product is used only when the customer named it: the specific words of the catalog name (without «جعبه / علبة / box») must
@@ -2069,7 +2143,9 @@ function galleryExplicitBase(candidate,said){
 async function persistGalleryTurn(env,{row,gallery,outreach,language=null}){
   if(!gallery||!(await galleryStoreReady(env)))return null;
   const t=now();
-  if(gallery.status==="found"&&gallery.items.length&&outreach?.id){
+    const queueRequest=async reason=>{await env.DB.prepare("INSERT OR IGNORE INTO visual_photo_requests(id,lead_id,conversation_id,inbox_message_id,market,product_base,size,configuration,parts_json,colors_json,reason,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'open',?,?)")
+      .bind("vreq-"+uid(),row.lead_id,row.conversation_id,row.id,gallery.market||null,gallery.base||null,gallery.size||null,gallery.configuration||null,JSON.stringify({...(gallery.parts||{}),...(gallery.pieces?{pieces:gallery.pieces}:{})}),JSON.stringify(gallery.colors||[]),reason,t,t).run();};
+  if((gallery.status==="found"||gallery.status==="alternatives")&&gallery.items.length&&outreach?.id){
     const attach=(outreachId,chunk)=>env.DB.batch(chunk.map((m,i)=>env.DB.prepare("INSERT OR IGNORE INTO lead_outreach_media(id,outreach_id,visual_media_id,spec_id,position,created_at) VALUES(?,?,?,?,?,?)").bind("omedia-"+uid(),outreachId,m.visual_media_id,m.spec_id,i+1,t)));
     const items=gallery.items.slice(0,GALLERY_MAX_TOTAL),albums=Math.ceil(items.length/GALLERY_MAX_ALBUM),lang=language||gallery.language||outreach.language||"Persian",drafts=[outreach.id];
     await attach(outreach.id,items.slice(0,GALLERY_MAX_ALBUM));
@@ -2079,11 +2155,11 @@ async function persistGalleryTurn(env,{row,gallery,outreach,language=null}){
       if(!d.outreach_id)throw Error(d.reason||"Album draft could not be created");
       if(!d.idempotent)await attach(d.outreach_id,chunk);drafts.push(d.outreach_id);
     }
+    if(gallery.status==="alternatives"&&["color_missing","product_missing"].includes(gallery.miss))await queueRequest(gallery.miss);
     return {attached:items.length,albums,drafts};
   }
   if(["color_missing","product_missing"].includes(gallery.status)){
-    await env.DB.prepare("INSERT OR IGNORE INTO visual_photo_requests(id,lead_id,conversation_id,inbox_message_id,market,product_base,size,configuration,parts_json,colors_json,reason,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'open',?,?)")
-      .bind("vreq-"+uid(),row.lead_id,row.conversation_id,row.id,gallery.market||null,gallery.base||null,gallery.size||null,gallery.configuration||null,JSON.stringify({...(gallery.parts||{}),...(gallery.pieces?{pieces:gallery.pieces}:{})}),JSON.stringify(gallery.colors||[]),gallery.status,t,t).run();
+    await queueRequest(gallery.status);
     return {queued:gallery.status};
   }
   return null;
@@ -8911,6 +8987,16 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(JSON.stringify(chosen)!==JSON.stringify(selectedColors))await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"selected_colors",memory_key:"selected_colors",value:chosen}});
     selectedColors=chosen;memory.selected_colors=chosen;colorsRecorded=true;
   }
+  // The answer to «درب و کف X و وسط Y، یا برعکس؟» given as «اولی / دومی» (the parts themselves are read by the parts parser above).
+  if(lastDecision?.next_sales_action==="ask_color_placement"&&colorStructure?.key==="three_piece"&&selectedColors.length===2&&!(partsPick&&Object.keys(partsPick.parts).length)){
+    const t=" "+salesNormal(String(row.message||"")).replace(/[،,.!؟?]/g," ")+" ",hit=list=>list.map(w=>salesNormal(w)).some(w=>t.includes(" "+w+" "));
+    const first=hit(["اول","اولی","اولیش","گزینه اول","حالت اول","الاول","الأول","الاولى","الأولى","اول وحده","الاولي"]),second=hit(["دوم","دومی","دومیش","گزینه دوم","حالت دوم","الثاني","الثانيه","الثانية","ثاني وحده","الثانی"]);
+    if(first!==second){const [A,B]=first?selectedColors:[selectedColors[1],selectedColors[0]],names=colorStructure.parts[language==="Iraqi Arabic"?"ar":"fa"],parts={[names[0]]:A,[names[1]]:B,[names[2]]:A};
+      await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"color_parts",memory_key:"color_parts",value:parts}});
+      colorParts=parts;memory.color_parts=parts;colorsRecorded=true;}
+  }
+  // Two colours for a 3-piece box and no positions yet: the placement is asked once (never for 2-piece / sliding boxes, never twice).
+  const placementAsk=colorsRecorded&&colorStructure?.key==="three_piece"&&selectedColors.length===2&&!Object.keys(colorParts).length&&lastDecision?.next_sales_action!=="ask_color_placement"?[...selectedColors]:null;
   if(selectedColors.length)known.color=true;
   // An approved printing type the customer names is remembered as exactly that option (own key «printing_type»; the raw «printing»
   // phrase capture is unchanged) unless an owner rule stops it; an out-of-list type is never saved as approved (owner, below).
@@ -9147,6 +9233,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const named=priceUnavailable.configuration?String(priceUnavailable.configuration).replace(/(^|\s)[3۳٣]\s*(?=تکه|تیکه)/u,"$1سه ").replace(/(^|\s)[2۲٢]\s*(?=تکه|تیکه)/u,"$1دو ").replace(/(^|\s)[3۳٣]\s*قطع/u,"$1ثلاث قطع").replace(/(^|\s)[2۲٢]\s*قطع/u,"$1قطعتين").trim():null;
     const cfg=named&&!/[0-9۰-۹٠-٩]/.test(named)?named:ar?{2:"قطعتين",3:"ثلاث قطع"}[priceUnavailable.pieces]:{2:"دو تکه",3:"سه تکه"}[priceUnavailable.pieces];
     salesDraft=ar?`حالياً ما عدنا سعر فعّال لـ${priceUnavailable.name}${cfg?" "+cfg:""}؛ ما راح أعطيك سعر موديل ثاني، وراح أراجع الموضوع وأرجعلك.`:`در حال حاضر برای ${priceUnavailable.name}${cfg?" "+cfg:""} قیمت فعالی نداریم؛ قیمت مدل دیگه‌ای رو جایگزین نمی‌کنم و موضوع رو بررسی می‌کنم و خبرتون می‌دم.`;}
+  if(placementAsk&&action==="order_details"){action="ask_color_placement";askedField="color_placement";const [A,B]=placementAsk;
+    salesDraft=language==="Iraqi Arabic"?`تريد الغطاء والقاعدة ${A} والوسط ${B}، لو الغطاء والقاعدة ${B} والوسط ${A}؟`:`درب و کف ${A} باشه و وسط ${B}، یا درب و کف ${B} باشه و وسط ${A}؟`;}
   if(action==="clarify_photo_or_order")salesDraft=language==="Iraqi Arabic"?"تريد تشوف صور المتوفر، لو أسجلها لطلبك؟":"عکس‌های موجودش رو می‌خواید ببینید یا برای سفارشتون ثبتش کنم؟";
   let gallery=null,galleryName=null;
   if(action==="visual"&&galleryOn){
@@ -9373,7 +9461,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
   const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge"||action==="advise_colors")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details","order_details","ai_answer"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],pieces:gallery.pieces||null,models:gallery.models||null,requested:gallery.requested||null,items:gallery.items||[],total:gallery.total??(gallery.items||[]).length,language:language,suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,owner_topic:needsOwner?ownerTopic:null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],pieces:gallery.pieces||null,models:gallery.models||null,requested:gallery.requested||null,items:gallery.items||[],total:gallery.total??(gallery.items||[]).length,miss:gallery.miss||null,name:galleryName||null,language:language,suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,owner_topic:needsOwner?ownerTopic:null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   // Observability without chain-of-thought: whether the Sales AI ran, model, latency, what it understood, which facts were applied,
   // where the reply came from and why a fallback happened. The send path re-validates an AI reply against the same evidence.
   result.ai_brain=aiInfo;
@@ -9474,9 +9562,11 @@ const SALES_AUTHORITY_CAPABILITIES=["conversation","product_answers","pricing","
 const SALES_AUTHORITY_TIER_C_ACTIONS=new Set(["payment_claim_owner","payment_terms_owner"]);
 const SALES_AUTHORITY_TIER_B_ACTIONS=new Set(["knowledge_owner","price_owner","commercial_owner","moq_owner","wait_for_owner"]);
 const SALES_AUTHORITY_CAPABILITY_OF={visual:"photo_album",order_status:"order_status",payment_info:"order_status",quote:"proforma",accept_offer:"order_registration",accepted:"order_registration",
-  order_details:"order_registration",acknowledge_details:"order_registration",answer_price:"pricing",price_discovery:"pricing",negotiate:"negotiation",handle_objection:"negotiation",
+  order_details:"order_registration",acknowledge_details:"order_registration",ask_color_placement:"order_registration",answer_price:"pricing",price_discovery:"pricing",negotiate:"negotiation",handle_objection:"negotiation",
   answer_knowledge:"product_answers",answer_catalog:"product_answers",advise_colors:"product_answers",answer_moq:"product_answers"};
-const SALES_AUTHORITY_MODES=new Set(["shadow","off"]);
+const SALES_AUTHORITY_MODES=new Set(["shadow","off","live"]);
+// The ONLY capability that may be switched to «live» (real automatic sending): approved gallery photos (AUTO-02). Default: shadow (off).
+const SALES_AUTHORITY_LIVE_CAPABLE=new Set(["photo_album"]);
 function salesAuthorityTier(brain){
   const action=String(brain?.next_sales_action||""),capability=SALES_AUTHORITY_CAPABILITY_OF[action]||"conversation";
   if(SALES_AUTHORITY_TIER_C_ACTIONS.has(action))return {tier:"C",capability:"financial",reason:action};
@@ -9492,30 +9582,45 @@ function salesAuthorityTier(brain){
 async function salesAutonomyPolicy(env){
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
   let v={};try{v=JSON.parse((await env.DB.prepare("SELECT value FROM system_kv WHERE key='sales_autonomy_policy' LIMIT 1").first())?.value||"{}")||{};}catch{v={};}
-  const modes=Object.fromEntries(SALES_AUTHORITY_CAPABILITIES.map(c=>[c,SALES_AUTHORITY_MODES.has(v.modes?.[c])?v.modes[c]:"shadow"]));
-  return {shadow:v.shadow!==false,modes,live_enabled:false};
+  const modes=Object.fromEntries(SALES_AUTHORITY_CAPABILITIES.map(c=>{const m=v.modes?.[c];return [c,m==="live"?(SALES_AUTHORITY_LIVE_CAPABLE.has(c)?"live":"shadow"):SALES_AUTHORITY_MODES.has(m)?m:"shadow"];}));
+  const pilot={only:v.pilot?.only!==false,chat_ids:[...new Set((Array.isArray(v.pilot?.chat_ids)?v.pilot.chat_ids:[]).map(x=>String(x)).filter(x=>/^[1-9][0-9]{4,15}$/.test(x)))].slice(0,10)};
+  return {shadow:v.shadow!==false,modes,pilot,live_enabled:Object.values(modes).includes("live")};
+}
+// AUTO-02 pilot: may this private chat receive AUTOMATIC photos? Only a listed test chat while pilot_only is on (default: on, empty list).
+function salesPhotoPilotAllows(policy,chatId){
+  if(policy?.modes?.photo_album!=="live")return false;
+  const p=policy.pilot||{only:true,chat_ids:[]};
+  return p.only===false?true:(p.chat_ids||[]).includes(String(chatId||""));
 }
 async function setSalesAutonomyPolicy(env,body={}){
-  const cur=await salesAutonomyPolicy(env),next={shadow:cur.shadow,modes:{...cur.modes}};
+  const cur=await salesAutonomyPolicy(env),next={shadow:cur.shadow,modes:{...cur.modes},pilot:{...cur.pilot}};
+  if(body.photo_album_pilot_chat_ids!==undefined){
+    const ids=body.photo_album_pilot_chat_ids;
+    if(!Array.isArray(ids)||ids.length>10||!ids.every(x=>/^[1-9][0-9]{4,15}$/.test(String(x))))throw Error("photo_album_pilot_chat_ids must be up to 10 private Telegram chat ids");
+    next.pilot.chat_ids=[...new Set(ids.map(String))];}
+  if(body.pilot_only!==undefined){
+    if(typeof body.pilot_only!=="boolean")throw Error("pilot_only must be true or false");
+    if(body.pilot_only===false&&body.confirm_general_release!==true)throw Error("Sending automatic photos to ALL customers needs confirm_general_release:true");
+    next.pilot.only=body.pilot_only;}
   if(body.shadow!==undefined){if(typeof body.shadow!=="boolean")throw Error("shadow must be true or false");next.shadow=body.shadow;}
   if(body.capability!==undefined||body.mode!==undefined){
     const c=String(body.capability||""),m=String(body.mode||"");
     if(!SALES_AUTHORITY_CAPABILITIES.includes(c))throw Error("Unknown capability");
-    if(m==="live"||m==="autonomous")throw Error("Live autonomous sending is not available in AUTO-01 (shadow only)");
-    if(!SALES_AUTHORITY_MODES.has(m))throw Error("mode must be shadow or off");
+    if(m==="autonomous"||(m==="live"&&!SALES_AUTHORITY_LIVE_CAPABLE.has(c)))throw Error("Live automatic sending is only available for photo_album (AUTO-02)");
+    if(!SALES_AUTHORITY_MODES.has(m))throw Error("mode must be shadow, off or live");
     next.modes[c]=m;}
   await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES('sales_autonomy_policy',?,?)").bind(JSON.stringify(next),now()).run();
-  try{await audit(env,"sales_autonomy_policy_changed","Owner changed the sales autonomy (shadow) policy",{shadow:next.shadow,modes:next.modes});}catch{}
-  return {...next,live_enabled:false};
+  try{await audit(env,"sales_autonomy_policy_changed","Owner changed the sales autonomy (shadow) policy",{shadow:next.shadow,modes:next.modes,pilot_only:next.pilot.only,pilot_chats:next.pilot.chat_ids.length});}catch{}
+  return {...next,live_enabled:Object.values(next.modes).includes("live")};
 }
 // Written AFTER the live outcome is settled (so it cannot influence it); one record per inbound message; never throws to the caller.
 async function recordSalesAuthorityShadow(env,{row,brain,outcome,visible}){
   const policy=await salesAutonomyPolicy(env);if(!policy.shadow)return null;
   const d=salesAuthorityTier(brain),master=await autonomyMasterGate(env).catch(()=>false),mode=d.capability==="financial"?"owner_only":policy.modes[d.capability]||"shadow";
-  const autonomous=d.tier==="A"&&mode==="shadow"&&master;
+  const autonomous=d.tier==="A"&&(mode==="shadow"||mode==="live")&&master;
   const details={inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,action:brain?.next_sales_action||null,tier:d.tier,capability:d.capability,reason:d.reason,
     photos:d.photos??null,albums:d.albums??null,mode,master:master?"on":"off",target_policy:autonomous?"autonomous":d.tier==="C"?"financial_approval":d.tier==="B"?"owner_review":"not_autonomous_now",
-    current_customer_visible:visible,current_reason:outcome?.reason||null,divergence:autonomous&&visible!=="reply"?"held_today_autonomous_in_target":null,live:false};
+    current_customer_visible:visible,current_reason:outcome?.reason||null,divergence:autonomous&&visible!=="reply"?"held_today_autonomous_in_target":null,live:mode==="live"&&visible==="reply"};
   await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales authority decision (shadow, not applied)',?,?)")
     .bind("sales-authority:"+row.id,"sales_authority_shadow",JSON.stringify(details),now()).run();
   return details;
@@ -9525,7 +9630,7 @@ async function salesAuthorityShadowReport(env,limit=100){
   const count=k=>rows.reduce((m,r)=>(m[r[k]]=(m[r[k]]||0)+1,m),{});
   return {items:rows,summary:{total:rows.length,by_tier:count("tier"),by_capability:count("capability"),by_target:count("target_policy"),held_today_autonomous_in_target:rows.filter(r=>r.divergence).length},live_enabled:false};
 }
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["welcome","answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["ask_color_placement","welcome","answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.
@@ -9557,8 +9662,11 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
     const order=await env.DB.prepare("SELECT order_number,tracking_reference FROM lead_orders WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(brain.order_reference.order_id,row.lead_id,row.conversation_id).first();
     if(order&&order.order_number===brain.order_reference.order_number)checked=maskOrderIdentifiers(outreach.message,order);
   }
-  if(brain.validation?.valid!==true||!validateSalesBrainDraft(checked,{allowedNumbers:[...(Number.isSafeInteger(ownQuantity)?[ownQuantity]:[]),...(brain.answer_numbers||[]).filter(Number.isSafeInteger)],authoritativeFacts:brain.knowledge_answer_facts||[]}).valid)return "validator_blocked";
+  // (a photo reply may state exactly its own gallery numbers — count, positions, label sizes — and labels; nothing else changes)
+  const photoReply=brain.next_sales_action==="visual"&&brain.gallery,galleryNumbers=photoReply?galleryAllowedNumbers(brain.gallery):[],galleryFacts=photoReply?[{category:"availability",values:galleryAuthorityValues(brain.gallery)}]:[];
+  if(brain.validation?.valid!==true||!validateSalesBrainDraft(checked,{allowedNumbers:[...(Number.isSafeInteger(ownQuantity)?[ownQuantity]:[]),...(brain.answer_numbers||[]).filter(Number.isSafeInteger),...galleryNumbers],authoritativeFacts:[...(brain.knowledge_answer_facts||[]),...galleryFacts]}).valid)return "validator_blocked";
   if(brain.next_sales_action==="clarify_photo_or_order"){if(!galleryClarifySafe(outreach.message))return "action_requires_owner_review";}
+  else if(brain.next_sales_action==="visual"){const why=await galleryAutoSendBlock(env,{row,brain,outreach});if(why)return why;}
   else if(!INBOUND_AUTO_SEND_ACTIONS.has(brain.next_sales_action))return "action_requires_owner_review";
   if(!brain.draft_customer_reply||outreach.message!==brain.draft_customer_reply||outreach.inbox_message_id!==row.id)return "draft_not_from_validated_brain";
   // An open owner decision no longer freezes the whole conversation here: the brain already scoped it (the same issue only ever
@@ -9587,11 +9695,13 @@ async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing
   const t=now(),approved=await env.DB.prepare("UPDATE lead_outreach SET status='approved',approved_at=?,approved_by='inbound_auto_policy',updated_at=? WHERE id=? AND status='draft' AND inbox_message_id=? AND error_code IS NULL AND message=?").bind(t,t,outreach.id,row.id,outreach.message).run();
   if(!Number(approved?.meta?.changes))return {sent:false,reason:"draft_changed"};
   const telegramStarted=Date.now(),result=await sendApprovedTelegramOutreach(env,outreach.id);timing.telegram_send_ms=Date.now()-telegramStarted;
+  // AUTO-02: the remaining albums of an automatically sent photo reply, in order (each re-gated; stops at the first problem)
+  if(result.ok&&brain.next_sales_action==="visual")try{const more=await sendGalleryFollowUpAlbums(env,{row,brain,outreach,recipient});if(more.albums||more.stopped)timing.gallery_albums=more;}catch(error){try{await audit(env,"gallery_album_auto_send_error","Automatic gallery albums stopped after an error",{inbox_message_id:row.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   try{await audit(env,result.ok?"inbound_auto_reply_sent":"inbound_auto_reply_send_failed",result.ok?"Safe inbound reply auto-sent":"Safe inbound auto-reply did not complete",{...base,status:result.status||null,action:brain.next_sales_action});}catch{}
   return {sent:!!result.ok,status:result.status||null};
 }
 // A held reply (owner-gated, validator-blocked, a would-be repeat or a capped flood) still gets ONE customer-visible message.
-const INBOUND_ACK_REASONS=new Set(["owner_required","validator_blocked","action_requires_owner_review","draft_not_from_validated_brain","repetitive_reply","auto_send_rate_limited"]);
+const INBOUND_ACK_REASONS=new Set(["photo_pilot_not_allowed","gallery_market_unknown","gallery_media_mismatch","owner_required","validator_blocked","action_requires_owner_review","draft_not_from_validated_brain","repetitive_reply","auto_send_rate_limited"]);
 // Acknowledgements say only that the message arrived and is being handled: no price, number, capability, timing or promise.
 const INBOUND_ACKNOWLEDGEMENTS={
   fa:{pending:["پیامتون رسید؛ بررسی می‌کنم و خبرتون می‌دم.","دریافت شد؛ در حال بررسیه و خبرتون می‌دم.","ممنون، پیامتون رسید؛ به‌زودی خبرتون می‌دم.","حتماً، بررسی می‌کنم و نتیجه رو خبرتون می‌دم."],
