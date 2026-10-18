@@ -2,7 +2,7 @@ import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { claimFlight, completeFlight, failFlight, salesAiSingleFlight, purgeAiCallFlights } from "./sales-memory.js";
-import { buildMemoryVocabulary, memoryCanonicalize, memoryConceptFromInterpretation, memoryFingerprint, memoryLookup, memoryObserve, memoryReview, memoryList, memoryGalleryRoles, memoryConceptKey, memoryMetrics } from "./sales-memory.js";
+import { buildMemoryVocabulary, memoryCanonicalize, memoryConceptFromInterpretation, memoryFingerprint, memoryLookup, memoryObserve, memoryReview, memoryList, memoryGalleryRoles, memoryConceptKey, memoryMetrics, memoryConceptAnswer, memoryRenderAnswer, knowledgeVersion } from "./sales-memory.js";
 import { salesAiProvider, salesAiModel, salesAiTimeoutMs } from "./sales-ai-brain.js";
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
@@ -9666,9 +9666,42 @@ async function salesMemoryShadow(env,{row,market,language,pricing,colorOptions,p
   const look=await memoryLookup(env,{market,fingerprint:fp,vocab});info.lookup=look.status;if(look.entry_id)info.entry_id=look.entry_id;
   const {concept,reason}=memoryConceptFromInterpretation(parse,interp?.valid?interp.record:null,{market,language});
   if(look.status==="hit")info.agrees=!!concept&&memoryConceptKey(concept)===memoryConceptKey(look.concept);
+  // MEM-05: what memory WOULD answer (approved facts → fixed natural template → the same validator as every reply)
+  if(look.status==="hit")try{
+    const version=(await knowledgeVersion(env,market)).version;
+    const a=await memoryConceptAnswer(env,{market,conceptKey:memoryConceptKey(look.concept),version,compute:()=>salesMemoryComputeAnswer(env,{concept:look.concept,pricing,colorOptions})});
+    const r=memoryRenderAnswer(a.answer,{language,seed:row.id});
+    const nums=[...new Set(JSON.stringify(a.answer||{}).match(/[0-9]+/g)||[])].map(Number);
+    const v=r?validateSalesBrainDraft(r.text,{allowedNumbers:nums,authoritativeFacts:salesMemoryAnswerEvidence(a.answer),markets:[market]}):null;
+    info.answer={status:a.status,answerable:!!a.answer?.answerable,why_not:a.answer?.why_not||null,template:r?.template_id||null,valid:!!v?.valid,invalid_reason:v&&!v.valid?v.reason:null};
+    info.would_skip_ai=!!(r&&v?.valid);
+  }catch{info.answer={status:"error"};info.would_skip_ai=false;}
   if(!concept){info.learn=reason;return info;}
   const ob=await memoryObserve(env,{market,language,fingerprint:fp,parse,concept,leadId:row.lead_id});info.learn=ob.status;
   return info;
+}
+// Answer FACTS of an approved concept, from approved data only: catalog models / sizes of THIS market, the approved colours of
+// the turn's approved knowledge, the EXACT approved photo. Not answerable (→ the model) when the facts are missing or a photo
+// is only an alternative.
+// the approved answer facts as validator evidence (market-scoped; nothing else is evidence)
+function salesMemoryAnswerEvidence(a){
+  if(!a)return [];const m=a.market||null,out=[];
+  if(a.product)out.push({category:"availability",values:[a.product,...(a.models||[])],market:m});
+  if((a.colors||[]).length)out.push({category:"color",values:[...a.colors],market:m});
+  if((a.sizes||[]).length)out.push({category:"size",values:[...a.sizes],market:m});
+  return out;
+}
+async function salesMemoryComputeAnswer(env,{concept,pricing,colorOptions}){
+  const keys=pricing?.product_keys||[],name=(keys.find(p=>p.key===concept.product_key)||{}).product||null;
+  const entry=(pricing?.catalog_summary||[]).find(c=>c.product===name)||null;
+  const base={intent:concept.intent,market:concept.market,product:name,product_key:concept.product_key};
+  if(!name)return {...base,answerable:false,why_not:"product_not_approved"};
+  if(concept.intent==="colors")return (colorOptions||[]).length?{...base,colors:[...colorOptions],answerable:true}:{...base,answerable:false,why_not:"no_approved_colours"};
+  if(concept.intent==="size")return entry?.sizes?.length?{...base,sizes:[...entry.sizes],answerable:true}:{...base,answerable:false,why_not:"no_catalog_sizes"};
+  if(concept.intent==="have")return {...base,models:[...(entry?.models||[])],answerable:true};
+  if(concept.intent==="photo"){const g=await salesMemoryPhotos(env,{concept});const exact=g.status==="found"&&(g.items||[]).length>0;
+    return exact?{...base,photos:{status:g.status,items:g.items.slice(0,10).map(x=>({visual_media_id:x.visual_media_id,spec_id:x.spec_id}))},answerable:true}:{...base,photos:{status:g.status||"miss",items:[]},answerable:false,why_not:"no_exact_photo"};}
+  return {...base,answerable:false,why_not:"intent_not_answerable"};
 }
 // the exact approved photos of a concept (placement kept: top / middle / bottom → lid / middle / base)
 async function salesMemoryPhotos(env,{concept}){
@@ -13936,6 +13969,21 @@ Context: ${context}`;
         if(!e)return json({ok:false,error:"entry not found"},404);
         const g=await salesMemoryPhotos(env,{concept:e.concept});
         return json({ok:true,status:g.status,exact:g.status==="found",items:(g.items||[]).map(x=>({visual_media_id:x.visual_media_id,spec_id:x.spec_id,label:x.label,exact:g.status==="found"}))});
+      }
+      if (u.pathname === "/api/sales-memory/answer-preview" && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({}));const list=await memoryList(env,{limit:200});const e=(list.items||[]).find(x=>x.id===String(b.id||""));
+        if(!e)return json({ok:false,error:"entry not found"},404);
+        if(e.status!=="approved")return json({ok:false,error:"only an approved entry has an answer",status:e.status},409);
+        // the current-version cached facts (computed from approved data during a live turn) — never request input
+        const version=(await knowledgeVersion(env,e.market)).version;
+        const cached=await env.DB.prepare("SELECT answer_json FROM sales_concept_cache WHERE concept_key=? AND market=? AND knowledge_version=?").bind(e.concept_key,e.market,version).first().catch(()=>null);
+        let a=null;try{a=cached?JSON.parse(cached.answer_json):null;}catch{}
+        if(!a){const pricing=await salesPricing(env,{market:e.market,message:"",history:[],chronological:[]}).catch(()=>null);a=await salesMemoryComputeAnswer(env,{concept:e.concept,pricing,colorOptions:[]});}
+        const lang=b.language==="Iraqi Arabic"?"Iraqi Arabic":"Persian";const n=(memoryRenderAnswer({...a,answerable:true},{language:lang})||{}).variants||0;
+        const nums=[...new Set(JSON.stringify(a||{}).match(/[0-9]+/g)||[])].map(Number);
+        const replies=a.answerable?Array.from({length:n},(_,i)=>memoryRenderAnswer(a,{language:lang,seed:String.fromCharCode(i)})).filter(Boolean).map(r=>{const v=validateSalesBrainDraft(r.text,{allowedNumbers:nums,authoritativeFacts:salesMemoryAnswerEvidence(a),markets:[e.market]});return {...r,valid:!!v.valid,invalid_reason:v.valid?null:v.reason};}):[];
+        return json({ok:true,cached:!!cached,answer:a,replies});
       }
       if (u.pathname === "/api/sales-memory/metrics" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);

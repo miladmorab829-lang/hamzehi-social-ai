@@ -436,7 +436,9 @@ export async function memoryMetrics(env,{days=7,now=Date.now()}={}){
   const since=new Date(now-Math.max(1,Math.min(90,Number(days)||7))*86400000).toISOString();
   const rows=((await env.DB.prepare("SELECT id,details_json FROM system_events WHERE id LIKE 'sales-brain:%' AND created_at>=?").bind(since).all()).results||[]);
   const m={window_days:Number(days)||7,mode:String(env.SALES_MEMORY_MODE||"off").toLowerCase(),turns:rows.length,memory_checked:0,cacheable:0,not_cacheable:{},lookup:{},hits_agree:0,hits_disagree:0,learned:{},model_calls:0,opus_referrals_after_memory_miss:0,
-    cost:{potential_saved_micro_usd:0,potential_unknown:0,actual_saved_micro_usd:0}};
+    cost:{potential_saved_micro_usd:0,potential_unknown:0,actual_saved_micro_usd:0},
+    would_skip_ai:0,unsafe_would_skip:0,answer_status:{},would_skip_saved_micro_usd:0,would_skip_cost_unknown:0};
+  const skipInbox=[];
   const agreeInbox=[];
   for(const r of rows){
     let b=null;try{b=JSON.parse(r.details_json||"{}").ai_brain||null;}catch{}
@@ -448,13 +450,82 @@ export async function memoryMetrics(env,{days=7,now=Date.now()}={}){
     m.cacheable++;m.lookup[mem.lookup||"none"]=(m.lookup[mem.lookup||"none"]||0)+1;
     if(mem.learn)m.learned[mem.learn]=(m.learned[mem.learn]||0)+1;
     if(mem.lookup==="hit"){if(mem.agrees===true){m.hits_agree++;agreeInbox.push(r.id.slice("sales-brain:".length));}else m.hits_disagree++;}
+    if(mem.answer)m.answer_status[mem.answer.status+(mem.answer.answerable?"":":not_answerable")]=(m.answer_status[mem.answer.status+(mem.answer.answerable?"":":not_answerable")]||0)+1;
+    // MEM-05: a turn memory WOULD have answered without the model — unsafe when the model read it differently
+    if(mem.would_skip_ai){m.would_skip_ai++;if(mem.agrees===false)m.unsafe_would_skip++;else skipInbox.push(r.id.slice("sales-brain:".length));}
     else if(called)m.opus_referrals_after_memory_miss++;
   }
   for(const id of agreeInbox){
     let c=null;try{c=await env.DB.prepare("SELECT cost_estimate_micro_usd c FROM ai_usage_ledger WHERE inbox_message_id=? AND outcome='success' ORDER BY created_at DESC LIMIT 1").bind(id).first();}catch{c=null;}
     if(c&&Number.isSafeInteger(c.c))m.cost.potential_saved_micro_usd+=c.c;else m.cost.potential_unknown++;
   }
+  for(const id of skipInbox){
+    let c=null;try{c=await env.DB.prepare("SELECT cost_estimate_micro_usd c FROM ai_usage_ledger WHERE inbox_message_id=? AND outcome='success' ORDER BY created_at DESC LIMIT 1").bind(id).first();}catch{c=null;}
+    if(c&&Number.isSafeInteger(c.c))m.would_skip_saved_micro_usd+=c.c;else m.would_skip_cost_unknown++;
+  }
   m.hit_rate=m.cacheable?Math.round(1000*(m.lookup.hit||0)/m.cacheable)/1000:null;
   m.safe_hit_rate=(m.hits_agree+m.hits_disagree)?Math.round(1000*m.hits_agree/(m.hits_agree+m.hits_disagree))/1000:null;
   return m;
+}
+
+// ============================================================================================================================
+// MEM-05 — shared concept cache (LOCAL; the answering path stays OFF: SALES_MEMORY_MODE is off | shadow, there is no «serve»).
+// For an OWNER-APPROVED concept the answer FACTS are computed from approved data only (catalog models / sizes, approved colours,
+// the exact approved gallery photo) and cached under the concept key + the knowledge version of its market. A version change
+// (price, product, colour, printing, photo) is a different key → recomputed. Concurrent requests for one concept compute once
+// (shared single-flight: the cache holds only approved facts, never customer data, so sharing it across customers is safe).
+// A reply is rendered from those facts by one of several fixed, natural templates (no AI text). Shadow measures: would this turn
+// have been answered without the model (would_skip_ai), and what did the model call actually cost.
+// ============================================================================================================================
+FLIGHT_DEFAULTS.concept_answer={leaseMs:10000,reuseMs:10*60000,maxAttempts:3};
+let conceptCacheReady=false;
+async function conceptCacheAvailable(env){if(conceptCacheReady)return true;try{await env.DB.prepare("SELECT concept_key FROM sales_concept_cache LIMIT 0").all();conceptCacheReady=true;return true;}catch(e){if(missingTable(e))return false;throw e;}}
+const cacheSafe=async fn=>{try{return await fn();}catch(e){if(missingTable(e)){conceptCacheReady=false;return {unavailable:true};}throw e;}};
+// What an answer may contain, per memory intent; anything else is rejected (no customer data, no price, no order).
+const ANSWER_FIELDS=new Set(["intent","market","product","product_key","models","sizes","colors","photos","answerable","why_not"]);
+export function memoryAnswerClean(a){return Object.fromEntries(Object.entries(a||{}).filter(([k])=>ANSWER_FIELDS.has(k)));}
+// → {status:"cache_hit"|"computed"|"flight_reuse"|"uncached"|"busy"|"exhausted", answer}
+export async function memoryConceptAnswer(env,{market,conceptKey,version,compute,leaseMs=FLIGHT_DEFAULTS.concept_answer.leaseMs,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
+  const cacheKey=(await sha256Hex(JSON.stringify([market,conceptKey]))).slice(0,32);
+  const readCache=async()=>{if(!(await conceptCacheAvailable(env)))return null;const r=await cacheSafe(()=>env.DB.prepare("SELECT knowledge_version,answer_json FROM sales_concept_cache WHERE cache_key=? AND market=?").bind(cacheKey,market).first());
+    if(!r||r.unavailable||r.knowledge_version!==version)return null;try{return JSON.parse(r.answer_json);}catch{return null;}};
+  const hit=await readCache();
+  if(hit){await cacheSafe(()=>env.DB.prepare("UPDATE sales_concept_cache SET hits=hits+1,updated_at=? WHERE cache_key=? AND market=?").bind(nowIso(),cacheKey,market).run());return {status:"cache_hit",answer:hit};}
+  if(!(await conceptCacheAvailable(env)))return {status:"uncached",answer:memoryAnswerClean(await compute())};
+  const fkey="concept:"+cacheKey+":"+String(version).slice(0,20);
+  let claim=await claimFlight(env,{key:fkey,purpose:"concept_answer",leaseMs});
+  // wait up to TWO leases: a holder that died just before us lets its lease run out, then exactly one waiter takes over
+  const deadline=Date.now()+leaseMs*2;
+  while(claim.role==="busy"&&Date.now()<deadline){await sleep(Math.max(20,Math.floor(leaseMs/10)));const c=await readCache();if(c)return {status:"cache_hit",answer:c};claim=await claimFlight(env,{key:fkey,purpose:"concept_answer",leaseMs});}
+  if(claim.role==="reuse")return {status:"flight_reuse",answer:memoryAnswerClean(claim.result)};
+  if(claim.role==="unavailable")return {status:"uncached",answer:memoryAnswerClean(await compute())};
+  if(claim.role!=="owner")return {status:claim.role,answer:null};
+  let answer;
+  try{answer=memoryAnswerClean(await compute());}catch(e){await failFlight(env,{key:fkey,token:claim.token,fence:claim.fence,errorCode:"compute_failed"}).catch(()=>false);throw e;}
+  // only the CURRENT fence holder publishes the answer (a stale Worker's computation is dropped)
+  const written=await completeFlight(env,{key:fkey,purpose:"concept_answer",token:claim.token,fence:claim.fence,result:answer});
+  if(written){const t=nowIso();await cacheSafe(()=>env.DB.prepare(`INSERT INTO sales_concept_cache(cache_key,market,concept_key,knowledge_version,answer_json,computes,hits,created_at,updated_at) VALUES(?,?,?,?,?,1,0,?,?)
+    ON CONFLICT(cache_key) DO UPDATE SET knowledge_version=excluded.knowledge_version,answer_json=excluded.answer_json,computes=sales_concept_cache.computes+1,updated_at=excluded.updated_at`).bind(cacheKey,market,conceptKey,version,JSON.stringify(answer),t,t).run());}
+  else{const cur=await readFlight(env,fkey);let w=null;try{w=cur?.result_json?JSON.parse(cur.result_json):null;}catch{}if(w)return {status:"flight_reuse",answer:memoryAnswerClean(w)};}
+  return {status:"computed",answer};
+}
+// Natural replies: several fixed templates per intent and language; the variant is chosen deterministically from a seed (the
+// inbox id), so customers do not all see the same sentence. Placeholders are filled ONLY from the approved answer facts.
+export const MEMORY_ANSWER_TEMPLATES={
+  fa:{colors:["{product} رو توی این رنگ‌ها داریم: {colors}. کدوم رنگ به کارتون میاد؟","رنگ‌های موجود برای {product}: {colors}. بگید کدوم رو می‌پسندید.","برای {product} این رنگ‌ها هست: {colors}. رنگ دلخواهتون کدومه؟"],
+    size:["{product} در این سایزها موجوده: {sizes}.","سایزهای {product}: {sizes}. کدوم سایز رو لازم دارید؟","برای {product} این سایزها رو داریم: {sizes}."],
+    have:["بله، {product} داریم. مدل‌ها: {models}.","{product} موجوده؛ مدل‌هاش: {models}. کدوم مدل رو می‌خواید؟","بله، {product} رو داریم ({models})."],
+    photo:["این عکس {product} هست.","عکس {product} رو براتون گذاشتم.","بفرمایید، این {product} هست."]},
+  ar:{colors:["{product} عدنا بهاي الألوان: {colors}. ياهو اللون اللي يعجبك؟","الألوان المتوفرة لـ{product}: {colors}. شنو تختار؟","{product} موجودة بهاي الألوان: {colors}."],
+    size:["قياسات {product} هي: {sizes}.","قياسات {product}: {sizes}. ياهو القياس اللي تحتاجه؟","{product} قياساتها: {sizes}. شنو القياس اللي يناسبك؟"],
+    have:["إي، {product} موجودة. الموديلات: {models}.","{product} متوفرة؛ موديلاتها: {models}. ياهو الموديل اللي تريده؟","إي عدنا {product} ({models})."],
+    photo:["هاي صورة {product}.","دزيتلك صورة {product}.","تفضل، هاي {product}."]}
+};
+export function memoryRenderAnswer(answer,{language,seed=""}={}){
+  if(!answer?.answerable)return null;
+  const lang=language==="Iraqi Arabic"?"ar":"fa",list=MEMORY_ANSWER_TEMPLATES[lang]?.[answer.intent];if(!list?.length)return null;
+  let h=0;for(const ch of String(seed))h=(h*31+ch.charCodeAt(0))>>>0;const i=h%list.length;
+  const sep=lang==="ar"?"، ":"، ";
+  const text=list[i].replace("{product}",answer.product||"").replace("{colors}",(answer.colors||[]).join(sep)).replace("{sizes}",(answer.sizes||[]).join(sep)).replace("{models}",(answer.models||[]).join(sep));
+  return {template_id:`${lang}.${answer.intent}.${i}`,text,variants:list.length};
 }

@@ -809,3 +809,16 @@ CREATE TABLE IF NOT EXISTS sales_memory_observations (
   created_at TEXT NOT NULL,
   PRIMARY KEY(entry_id, lead_hash)
 );
+-- MEM-05 (local): shared concept cache (same objects as owner-actions/mem-05/02-migration.sql).
+CREATE TABLE IF NOT EXISTS sales_concept_cache (
+  cache_key TEXT PRIMARY KEY,
+  market TEXT NOT NULL CHECK(market IN ('IRAN','ARAB')),
+  concept_key TEXT NOT NULL,
+  knowledge_version TEXT NOT NULL,
+  answer_json TEXT NOT NULL CHECK(json_valid(answer_json)),
+  computes INTEGER NOT NULL DEFAULT 0,
+  hits INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sales_concept_cache_market ON sales_concept_cache(market, updated_at);
