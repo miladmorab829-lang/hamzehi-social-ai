@@ -8798,6 +8798,41 @@ function salesAiValidateInterpretation(i,{productKeys=[],catalog=[],colorOptions
   return {valid,issues,record:{primary_intent:i.primary_intent,product_key:productKey,reference:i.reference,requested_size:size,requested_structure:structure,requested_color:colors,unapproved_colors:unapprovedColors,
     requested_printing:printing,quantity,ambiguity:i.ambiguity,confidence:i.confidence}};
 }
+// ---- MEM-06: ONE source of approved knowledge and colours for the sales brain AND the owner preview -------------------------
+// The approved, effective customer-facing knowledge of the given markets (this market + GLOBAL — never another market).
+function salesApprovedKnowledgeStatement(env,{knowledgeMarkets,at}){
+  const kgDomains=[KNOWLEDGE_DOMAIN,...KNOWLEDGE_TYPED_CUSTOMER_DOMAINS],marketClause=` AND market IN (${knowledgeMarkets.map(()=>"?").join(",")})`;
+  return env.DB.prepare(`SELECT id,version,domain,entity_type,entity_key,attribute,market,member_key,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN (${kgDomains.map(()=>"?").join(",")})`+marketClause+" AND (effective_from IS NULL OR effective_from<=?) AND (effective_until IS NULL OR effective_until>?) ORDER BY created_at DESC LIMIT 600").bind(...kgDomains,...knowledgeMarkets,at,at);
+}
+// The product's knowledge entities, the records in scope (GLOBAL + the matched products) and its approved colours.
+function salesProductColourKnowledge(kgRecords,names){
+  const entities=resolveKnowledgeEntities(kgRecords,names);
+  const scope=kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||entities.matched.includes(r.entity_key));
+  return {entities,scope,colours:salesApprovedColorOptions(scope,entities.matched)};
+}
+// Owner preview: what memory would know about ONE approved product of ONE market. Read-only; nothing invented: a field with no
+// approved data is empty and says so.
+async function salesMemoryOwnerPreview(env,{market,productKey=null}){
+  if(!["IRAN","ARAB"].includes(market))return {ok:false,error:"market must be IRAN or ARAB",status:400};
+  const catalog=await salesPriceCatalog(env,market);
+  const products=[...catalog.listProducts,...catalog.siProducts].map(p=>({key:p.key,name:p.name,source:p.source}));
+  const kv=await knowledgeVersion(env,market);
+  const has=async t=>!!(await env.DB.prepare("SELECT 1 x FROM sqlite_master WHERE type='table' AND name=?").bind(t).first().catch(()=>null));
+  const readiness={serve:"off",shadow_mode:String(env.SALES_MEMORY_MODE||"off").toLowerCase()==="shadow",memory_tables:await has("sales_memory_entries"),concept_cache:await has("sales_concept_cache"),single_flight:await has("ai_call_flights")};
+  const base={ok:true,market,products,knowledge_version:{version:kv.version,components:kv.components},readiness};
+  if(!productKey)return base;
+  const p=products.find(x=>x.key===productKey);
+  if(!p)return {ok:false,error:"product not in the approved catalog of this market",status:404};
+  const pricing=await salesPricing(env,{market,message:"",history:[],chronological:[]}).catch(()=>null);
+  const entry=(pricing?.catalog_summary||[]).find(c=>c.product===p.name)||{models:[],sizes:[]};
+  const rows=((await salesApprovedKnowledgeStatement(env,{knowledgeMarkets:[market,"GLOBAL"],at:now()}).all()).results)||[];
+  const k=salesProductColourKnowledge(hydrateKnowledgeRecords(rows),[p.name]);
+  const g=await gallerySearch(env,{market,base:p.name}).catch(()=>({status:"error",items:[]}));
+  if(readiness.memory_tables){const e=await env.DB.prepare("SELECT status,COUNT(*) n FROM sales_memory_entries WHERE market=? AND json_extract(concept_json,'$.product_key')=? GROUP BY status").bind(market,p.key).all().catch(()=>({results:[]}));readiness.product_entries=Object.fromEntries((e.results||[]).map(x=>[x.status,x.n]));}
+  return {...base,product:{key:p.key,name:p.name,models:[...(entry.models||[])],sizes:[...(entry.sizes||[])]},
+    colours:k.colours.options,colour_records:k.colours.records.length,knowledge_entities:k.entities.matched,
+    photos:{status:g.status||"miss",items:(g.items||[]).slice(0,24).map(x=>({visual_media_id:x.visual_media_id,spec_id:x.spec_id,label:x.label}))}};
+}
 async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const timing=preloaded.timing||{},started=Date.now();
   // Stage timer for queries that run concurrently: each stage records its own duration (stages overlap within one wave).
@@ -8931,7 +8966,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const [knowledge,requirementRules,kgRows,likelyVisualMatches]=await Promise.all([
     env.DB.prepare("SELECT id,version,domain,entity_key,attribute,market,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain<>'knowledge' AND (entity_key='global' OR (?<>'' AND entity_key=?))"+marketClause+" ORDER BY created_at DESC LIMIT 100").bind(model,model,...knowledgeMarkets).all().then(r=>r.results||[]),
     env.DB.prepare(`SELECT id,version,domain,entity_key,attribute,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN ('pricing','product','configuration','size','strategy') AND (entity_key='global'${productKeys.length?` OR entity_key IN (${productKeys.map(()=>"?").join(",")})`:""})${marketClause} ORDER BY created_at DESC LIMIT 100`).bind(...productKeys,...knowledgeMarkets).all().then(r=>r.results||[]),
-    env.DB.prepare(`SELECT id,version,domain,entity_type,entity_key,attribute,market,member_key,value_json FROM sales_knowledge_facts WHERE status='active' AND authority='owner_approved' AND domain IN (${kgDomains.map(()=>"?").join(",")})`+marketClause+" AND (effective_from IS NULL OR effective_from<=?) AND (effective_until IS NULL OR effective_until>?) ORDER BY created_at DESC LIMIT 600").bind(...kgDomains,...knowledgeMarkets,kgNow,kgNow).all().then(r=>r.results||[]),
+    salesApprovedKnowledgeStatement(env,{knowledgeMarkets,at:kgNow}).all().then(r=>r.results||[]),
     (async()=>{if(!imageCategory||imageCategory==="unknown")return [];try{return ((await retrieveEligibleVisualProductMedia(env,[{type:"category",value:visualAttributeValue(imageCategory).normalized}],3)).items||[]).map(x=>({visual_media_id:x.id,match_type:"likely_visual_match",basis:"category",attributes:Object.fromEntries((x.attributes||[]).filter(a=>a.status==="active").map(a=>[a.attribute_type,a.normalized_value]))}));}catch{return [];}})()
   ]);
   timing.knowledge_ms=Date.now()-wave2;
@@ -8945,12 +8980,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // The product this turn is about, for knowledge: the captured name, the photo category, the priced product, or an owner-taught product
   // the customer named in this or a recent message (in their own spelling). A named knowledge product is a known product.
   const kgMentioned=salesMentionedEntities(kgRecords,[row.message,...earlierInbound.slice(0,4)]);
-  const kgEntities=resolveKnowledgeEntities(kgRecords,[model,imageCategory,pricing?.product?.name,...kgMentioned].filter(Boolean));
+  const kgShared=salesProductColourKnowledge(kgRecords,[model,imageCategory,pricing?.product?.name,...kgMentioned].filter(Boolean)),kgEntities=kgShared.entities;
   if(kgEntities.matched.length)known.product_or_model=true;
   // The reply to our "which product?" clarification answers the question that was pending (the previous customer message).
   let lastDecision=null;try{const ev=priorEvents.find(e=>e.id==="sales-brain:"+priorInbox[0]?.id);lastDecision=ev?.details_json?JSON.parse(ev.details_json):null;}catch{}
   const kgQuestionText=lastDecision?.asked_field==="knowledge_product"&&kgEntities.matched.length&&!knowledgeLooksLikeQuestion(row.message)&&earlierInbound[0]?earlierInbound[0]:row.message;
-  const kgScope=kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||kgEntities.matched.includes(r.entity_key));
+  const kgScope=kgShared.scope;
   const kgVocabulary=knowledgeVocabulary(kgScope);
   const kgHistory=[...context.filter(x=>x.direction==="inbound"&&x.id!==row.id).map(x=>x.message),row.message];
   const kgCurrent=recognizeKnowledgeContext([row.message],kgVocabulary),kgRecognized={...recognizeKnowledgeContext(kgHistory,kgVocabulary)};
@@ -8959,7 +8994,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   for(const key of Object.keys(kgContext))if(kgContext[key]===undefined||kgContext[key]===null||kgContext[key]==="")delete kgContext[key];
   // Approved standard colours (Business Knowledge only). The colours the customer chose are part of the context, so the owner's
   // product-specific colour / ribbon rules and relations apply to them exactly as to any other recognised value.
-  const colorKnowledge=salesApprovedColorOptions(kgScope,kgEntities.matched),colorOptions=colorKnowledge.options;
+  const colorKnowledge=kgShared.colours,colorOptions=colorKnowledge.options;
   const colorEvidenceFacts=colorKnowledge.records.length?salesBrainAuthoritativeFacts({knowledge:colorKnowledge.records.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))}):[];
   // Approved standard printing TYPES (Business Knowledge only, read exactly like the colours) and the type this message names.
   const printingKnowledge=salesApprovedColorOptions(kgScope,kgEntities.matched,"printing_methods"),printingOptions=printingKnowledge.options;
@@ -13984,6 +14019,11 @@ Context: ${context}`;
         const nums=[...new Set(JSON.stringify(a||{}).match(/[0-9]+/g)||[])].map(Number);
         const replies=a.answerable?Array.from({length:n},(_,i)=>memoryRenderAnswer(a,{language:lang,seed:String.fromCharCode(i)})).filter(Boolean).map(r=>{const v=validateSalesBrainDraft(r.text,{allowedNumbers:nums,authoritativeFacts:salesMemoryAnswerEvidence(a),markets:[e.market]});return {...r,valid:!!v.valid,invalid_reason:v.valid?null:v.reason};}):[];
         return json({ok:true,cached:!!cached,answer:a,replies});
+      }
+      if (u.pathname === "/api/sales-memory/owner-preview" && req.method === "GET") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);
+        const r=await salesMemoryOwnerPreview(env,{market:String(u.searchParams.get("market")||"").toUpperCase(),productKey:u.searchParams.get("product_key")||null});
+        return json(r,r.ok?200:(r.status||400));
       }
       if (u.pathname === "/api/sales-memory/metrics" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);

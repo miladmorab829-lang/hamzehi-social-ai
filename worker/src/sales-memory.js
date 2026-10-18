@@ -200,20 +200,22 @@ export const KNOWLEDGE_VERSION_SOURCES=[
   {table:"visual_media_storage",component:"photos"}
 ];
 async function sha256Hex(text){const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(text));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");}
+const knowledgeVersionStatement=(env,s,m)=>{const where=s.market?(m?` WHERE ${s.market} IN (?,'GLOBAL')`:` WHERE ${s.market}='GLOBAL'`):"";
+  return env.DB.prepare(`SELECT * FROM ${s.table}${where} ORDER BY id`).bind(...(s.market&&m?[m]:[]));};
 export async function knowledgeVersion(env,market){
   const m=["IRAN","ARAB"].includes(market)?market:null,parts={};
-  for(const s of KNOWLEDGE_VERSION_SOURCES){
-    let rows;
-    try{
-      const where=s.market?(m?` WHERE ${s.market} IN (?,'GLOBAL')`:` WHERE ${s.market}='GLOBAL'`):"";
-      rows=(await env.DB.prepare(`SELECT * FROM ${s.table}${where} ORDER BY id`).bind(...(s.market&&m?[m]:[])).all()).results||[];
-    }catch(e){if(missingTable(e)){rows=null;}else throw e;}
+  // one round trip (a D1 batch is also one consistent snapshot); any batch failure → the per-table path below
+  let all=null,read="batch";
+  try{const res=await env.DB.batch(KNOWLEDGE_VERSION_SOURCES.map(s=>knowledgeVersionStatement(env,s,m)));
+    all=Array.isArray(res)&&res.length===KNOWLEDGE_VERSION_SOURCES.length?res.map(r=>r?.results||[]):null;}catch{all=null;}
+  if(!all){read="sequential";all=[];for(const s of KNOWLEDGE_VERSION_SOURCES){
+    try{all.push((await knowledgeVersionStatement(env,s,m).all()).results||[]);}catch(e){if(missingTable(e))all.push(null);else throw e;}}}
+  KNOWLEDGE_VERSION_SOURCES.forEach((s,i)=>{const rows=all[i];
     const text=rows===null?"(absent)":rows.map(r=>JSON.stringify(Object.keys(r).sort().map(k=>[k,r[k]]))).join("\n");
-    (parts[s.component]||(parts[s.component]=[])).push(s.table+"\n"+text);
-  }
+    (parts[s.component]||(parts[s.component]=[])).push(s.table+"\n"+text);});
   const components={};for(const [k,v] of Object.entries(parts))components[k]=(await sha256Hex(v.join("\n\u0000\n"))).slice(0,16);
   const version=(await sha256Hex(JSON.stringify([m,components]))).slice(0,20);
-  return {market:m,version,components};
+  return {market:m,version,components,read};
 }
 
 // ---- concept key (MEM-03+) --------------------------------------------------------------------------------------------------

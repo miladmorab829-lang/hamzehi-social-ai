@@ -1743,6 +1743,24 @@ async function loadGalleryFunnel(){
 }
 async function galExport(){const d=await api("/api/gallery/export");if(!d.ok){$("galBackupState").textContent=d.error||"خطا";return}
  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(d,null,1)],{type:"application/json"}));a.download="hamzehi-gallery-manifest.json";document.body.appendChild(a);a.click();a.remove();$("galBackupState").textContent=d.items.length+" رکورد (کلید R2 + مشخصات) در فایل ذخیره شد."}
+// ---- MEM-06 owner preview of memory knowledge (read-only, approved data only) ----
+let mpLoaded=false;
+async function mpLoad(withProduct){
+ const st=$("mpStatus");if(!st)return;const market=$("mpMarket").value||"IRAN",pk=withProduct?($("mpProduct").value||""):"";st.textContent="در حال بارگذاری…";
+ const d=await apiRequest("/api/sales-memory/owner-preview?market="+encodeURIComponent(market)+(pk?"&product_key="+encodeURIComponent(pk):""));
+ if(!d.ok){st.textContent=d.status===401?uxAuthHint(d):(d.error||"دریافت نشد");$("mpOut").innerHTML="";return}
+ mpLoaded=true;
+ if(!withProduct){$("mpProduct").innerHTML="<option value=''>انتخاب محصول ("+esc((d.products||[]).length)+")</option>"+(d.products||[]).map(function(p){return "<option value='"+esc(p.key)+"'>"+esc(p.name)+"</option>"}).join("");}
+ const r=d.readiness||{},kv=d.knowledge_version||{},yes=function(b){return b?"<span class='pill ok'>بله</span>":"<span class='pill warn'>خیر</span>"};
+ let h="<div class='row'><b>نسخه دانش "+esc(market)+": "+esc(kv.version||"")+"</b><div class='mini'>"+Object.keys(kv.components||{}).map(function(k){return esc(k)+": "+esc(kv.components[k])}).join(" · ")+"</div>"
+  +"<div class='mini' style='margin-top:4px'>آمادگی حافظه — جدول حافظه: "+yes(r.memory_tables)+" · کش مفهوم: "+yes(r.concept_cache)+" · single-flight: "+yes(r.single_flight)+" · حالت سایه: "+yes(r.shadow_mode)+" · پاسخ از حافظه: <span class='pill'>خاموش</span>"
+  +(r.product_entries?" · مفاهیم این محصول: "+Object.keys(r.product_entries).map(function(k){return esc(k)+" "+esc(r.product_entries[k])}).join("، "):"")+"</div></div>";
+ if(d.product){const p=d.product,list=function(a,empty){return a&&a.length?a.map(function(x){return "<span class='pill'>"+esc(x)+"</span>"}).join(" "):"<span class='mini'>"+empty+"</span>"};
+  h+="<div class='row'><b>"+esc(p.name)+"</b><div style='margin-top:4px'>مدل‌ها: "+list(p.models,"مدل تأییدشده‌ای ثبت نشده")+"</div><div style='margin-top:4px'>سایزهای معتبر: "+list(p.sizes,"سایز تأییدشده‌ای ثبت نشده")+"</div>"
+   +"<div style='margin-top:4px'>رنگ‌های تأییدشده ("+esc((d.colours||[]).length)+"): "+list(d.colours,"رنگ تأییدشده‌ای برای این محصول ثبت نشده")+"</div>"
+   +"<div style='margin-top:6px'>عکس‌های تأییدشده ("+esc(((d.photos||{}).items||[]).length)+"):</div><div class='ggrid'>"+(((d.photos||{}).items||[]).map(function(x){return "<div class='row'><img data-media='"+esc(x.visual_media_id)+"' alt='' style='max-width:120px;border-radius:8px'><div class='mini'>"+esc(x.label)+"</div></div>"}).join("")||"<span class='mini'>عکس تأییدشده‌ای برای این محصول نیست</span>")+"</div></div>";}
+ $("mpOut").innerHTML=h;st.textContent="فقط نمایش؛ از دانش و گالری تأییدشده، بدون پیام مشتری و بدون هوش مصنوعی.";try{galThumbs($("mpOut"))}catch(e){}
+}
 let refreshInProgress=false,dashTick=1;
 // Every loader of the original single page, each run only where its section is rendered. Money-at-stake also needs the open
 // escalation count (written by loadOwnerEscalations) wherever it is shown.
@@ -1750,7 +1768,7 @@ function dashSectionLoads(){
  return [on("tasks",loadTasks),on("brain",loadBrain),on("revenue",loadRevenue),on("opportunities",loadOpp),on("errors",loadErrors),on("safety",loadSafety),
   on("approvalItems",loadApprovals),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox),on("quoteItems",loadQuotes),
   on("orderItems",loadOrders),on("priceItems",loadPriceItems),on("knowledgeFacts",loadSalesKnowledge),(has("ownerEscalationsItems")||has("siMoney"))?loadOwnerEscalations():null,
-  on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter),on("galProduct",loadGalleryOptions),on("galReviewItems",loadGallery),on("galRequestItems",loadGalleryRequests),on("galFunnel",loadGalleryFunnel)];
+  on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter),on("galProduct",loadGalleryOptions),on("galReviewItems",loadGallery),on("galRequestItems",loadGalleryRequests),on("galFunnel",loadGalleryFunnel),on("mpOut",function(){return mpLoaded?null:mpLoad(false)})];
 }
 // Hub summary: counts from the same existing endpoints the section pages use (nothing estimated or invented).
 async function loadHubSummary(){
@@ -1901,6 +1919,14 @@ DASH_SECTIONS.galleryUpload=`<section class="card section" id="galleryUploadForm
 <div id="galPickerStatus" class="hint" style="margin-top:6px"></div>
 </section>
 `;
+DASH_SECTIONS.memoryPreview=`<section class="card section" id="memoryPreviewPanel">
+<div class="title"><div><h2>${dashIcon("book")}پیش‌نمایش حافظه فروش</h2><div class="hint">آنچه حافظه از دانش تأییدشده درباره هر محصول می‌داند. فقط نمایش است؛ چیزی ارسال یا تغییر نمی‌کند و پاسخ‌دهی از حافظه خاموش است.</div></div></div>
+<div class="grid4" style="margin-top:8px">
+<select class="input" id="mpMarket" onchange="mpLoad(false)"><option value="IRAN">ایران</option><option value="ARAB">عراق</option></select>
+<select class="input" id="mpProduct" onchange="mpLoad(true)"><option value="">انتخاب محصول</option></select>
+</div>
+<div id="mpStatus" class="hint" role="status"></div><div id="mpOut" class="rows"></div>
+</section>`;
 DASH_SECTIONS.galleryReview=`<section class="card section"><div class="title"><h2>${dashIcon("check")}منتظر تأیید شما</h2><button class="btn" onclick="loadGallery()" aria-label="به‌روزرسانی">↻</button></div>
 <div id="galReviewStatus" class="hint" style="margin-top:6px">در حال دریافت…</div><div id="galReviewItems" class="ggrid"></div></section>
 `;
@@ -1947,7 +1973,7 @@ export const DASHBOARD_PAGES={
  errors:{path:"/dashboard/errors",title:"خطاها",icon:"alert",desc:"خطاهای سیستم و جزئیات",sections:["errorsCenter","errorsCard"]},
  more:{path:"/dashboard/more",title:"بیشتر",icon:"menu",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
  gallery:{path:"/dashboard/gallery",title:"گالری محصولات",icon:"camera",desc:"عکس واقعی، تأیید، جستجو و درخواست‌ها",sections:["galleryFunnel","galleryUpload","galleryReview","galleryLibrary","galleryRequests","galleryBackup"]},
- knowledge:{path:"/dashboard/knowledge",title:"محصولات و دانش",icon:"book",desc:"قیمت‌ها، کاتالوگ و دانش فروش",sections:["command","knowledge","priceList","catalog"]},
+ knowledge:{path:"/dashboard/knowledge",title:"محصولات و دانش",icon:"book",desc:"قیمت‌ها، کاتالوگ و دانش فروش",sections:["command","knowledge","memoryPreview","priceList","catalog"]},
  content:{path:"/dashboard/content",title:"محتوا",icon:"file",desc:"صف و پیش‌نویس محتوا",sections:["contentApproval","channels"]},
  media:{path:"/dashboard/media",title:"رسانه",icon:"image",desc:"اتوپایلوت عکس و ویدیو",sections:["photo","video"]},
  channels:{path:"/dashboard/channels",title:"کانال‌ها",icon:"send",desc:"تلگرام و اینستاگرام",sections:["channels"]},
@@ -1955,7 +1981,7 @@ export const DASHBOARD_PAGES={
  sales:{path:"/dashboard/sales",title:"فروش (همه بخش‌ها)",icon:"chat",desc:"لیدها، گفتگو، پیام، قیمت، سفارش",sections:["opportunities","negotiation","outreach","quotes","orders"]},
  system:{path:"/dashboard/system",title:"تنظیمات پیشرفته",icon:"sliders",desc:"کنترل مرکزی، Taskها، عیب‌یابی، توکن",sections:["auth","kpis","master","channels","command","taskBrain","diagnostic","safety"]},
  // FULL VIEW: every original section on one page in the original order (opt-in safety net; nothing is out of reach).
- all:{path:"/dashboard/all",title:"نمای کامل",icon:"grid",desc:"همه بخش‌ها در یک صفحه",sections:["kpis","command","knowledge","escalations","auth","contentApproval","outreach","negotiation","quotes","orders","money","priceList","catalog","master","channels","photo","video","taskBrain","diagnostic","revenueCard","opportunities","errorsCard","safety"]}
+ all:{path:"/dashboard/all",title:"نمای کامل",icon:"grid",desc:"همه بخش‌ها در یک صفحه",sections:["kpis","command","knowledge","memoryPreview","escalations","auth","contentApproval","outreach","negotiation","quotes","orders","money","priceList","catalog","master","channels","photo","video","taskBrain","diagnostic","revenueCard","opportunities","errorsCard","safety"]}
 };
 export const DASH_FOLDS={
  customers:{opportunities:{title:"فرصت‌ها و لیدهای کشف‌شده",icon:"target",lazy:true}},
