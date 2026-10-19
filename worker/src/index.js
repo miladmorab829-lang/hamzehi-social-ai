@@ -998,11 +998,18 @@ async function runAutoPilotCycle(env, source='scheduled'){
 const ROUTINE_CONTENT_BLOCK=/رایگان|بلاعوض|هدیه|هدیة|کادو|جایزه|بدون هزینه|مجان|بلاش|علی حسابنا|گارانتی|ضمانت|تضمین|مرجوع|بازگشت وجه|استرداد|جبران|تعهد|کفالة|نضمن|مضمون|استرجاع|تعویض|نتعهد|نوعد|حراج|پیشنهاد ویژه|قیمت|هزینه|ارزان|ارزون|کمترین|پایین ?ترین|فروش ویژه|فقط امروز|فرصت|نیم ?بها|یکی بخر|عروض|اوفر|ارخص|رخیص|تنزیلات|تخفیضات|کوبون|فرصة|تخفیف|خصم|درصد|٪|%|پرداخت|اقساط|نسیه|آجل|بیعانه|عربون|الدفع|تحویل فوری|ارسال رایگان|ارسال سریع|همان روز|همیشه موجود|نفس الیوم|توصیل|تومان|ریال|دلار|دولار|دینار|\b(?:free|gift|bonus|giveaway|guarantee[ds]?|warranty|refunds?|money back|promise[ds]?|risk[- ]free|offers?|sale|price[ds]?|cheap|limited|today only|coupons?|promo|deals?|bogo|discounts?|deposit|installments?|pay later|interest|same day|fast delivery|in stock|usd|iqd)\b/iu;
 // Short words only as whole words (so «عرضه» or «نامحدود» do not trip them).
 const ROUTINE_CONTENT_BLOCK_WORDS=/(?<!\p{L})(?:مفت|قول|عرض|سعر|نصف|قسط|چک|ضمان|محدود|دفع)(?!\p{L})/u;
+// Amounts written without digits (Iraqi/Persian price talk): the Iraqi dinar abbreviation, thousand/million words, and spelled-out
+// Arabic numbers from three upward or Persian tens/hundreds — whole words, optionally with an attached ب / و / ال / بال (e.g. «بخمسة
+// آلاف د.ع», «بألف»). Small Persian number words (یک، دو، نه…) are left out on purpose: they are everyday words, and any price
+// still needs a thousand/hundred word or a currency, which are caught. «ست»/«سته» (Arabic six) are left out: in Persian they are «ست» (a jewellery set) and «بسته» (package).
+const ROUTINE_AMOUNT_ABBR=/د\s?\.\s?ع(?!\p{L})|(?<!\p{L})(?:دینار|دنانیر|تومن|تمن|ریال)/u;
+const ROUTINE_AMOUNT_WORDS=/(?<!\p{L})(?:ب|و|ال|بال|وب)?(?:ألف|الف|آلاف|الاف|ألوف|هزار|ملیون|میلیون|ملایین|ملیار|میلیارد|ثلاث|ثلاثة|ثلاثه|اربع|أربع|اربعة|أربعة|اربعه|خمس|خمسة|خمسه|ستة|سبع|سبعة|سبعه|ثمان|ثمانی|ثمانیة|ثمانیه|تسع|تسعة|تسعه|عشر|عشرة|عشره|عشرین|ثلاثین|اربعین|أربعین|خمسین|ستین|سبعین|ثمانین|تسعین|میة|مية|مئة|مائة|میتین|مئتین|مائتین|بیست|چهل|پنجاه|شصت|هفتاد|هشتاد|نود|صد|دویست|سیصد|چهارصد|پانصد|ششصد|هفتصد|هشتصد|نهصد)(?!\p{L})/u;
 const routineText=c=>[c?.hook,c?.body,c?.caption,c?.cta].filter(Boolean).join("\n").normalize("NFKC").replace(/ي/g,"ی").replace(/ك/g,"ک").replace(/‌/g," ");
 function routineContentIssues(c){
   const text=routineText(c);
   const issues=salesAiProseIssues(text,{allowedNumbers:[]});
   if(ROUTINE_CONTENT_BLOCK.test(text)||ROUTINE_CONTENT_BLOCK_WORDS.test(text))issues.push("commercial_terms");
+  if(ROUTINE_AMOUNT_ABBR.test(text)||ROUTINE_AMOUNT_WORDS.test(text))issues.push("amount_words");
   return [...new Set(issues)];
 }
 // Media on a policy-approved post must come from the owner's marketing vault: every attached item resolves to a
