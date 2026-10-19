@@ -822,19 +822,22 @@ async function loadAgentOps(){
  const st=$("agentOpsStatus");st.textContent="در حال دریافت…";
  const d=await api(A+"/agents/overview");
  if(!d||!d.ok){st.innerHTML="<span class='bad'>✕ "+esc((d&&d.error)||"Unable to read agent health")+"</span>";return}
- if(!d.available){st.innerHTML="<span class='bad'>"+esc(d.reason||"Agent ops tables are not migrated")+"</span> · Orchestrator: "+(d.orchestrator_enabled?"ON":"OFF");["agentOpsAlerts","agentOpsApprovals","agentOpsDead","agentOpsUsage"].forEach(k=>{$(k).innerHTML=""});return}
+ if(!d.available){st.innerHTML="<span class='bad'>"+esc(d.reason||"Agent ops tables are not migrated")+"</span> · Orchestrator: "+(d.orchestrator_enabled?"ON":"OFF");["agentOpsAlerts","agentOpsQuotas","agentOpsPublishing","agentOpsApprovals","agentOpsDead","agentOpsUsage"].forEach(k=>{$(k).innerHTML=""});return}
  st.innerHTML="Orchestrator: <b>"+(d.orchestrator_enabled?"ON":"OFF")+"</b> · Heartbeat: "+(d.heartbeat||[]).map(h=>esc(h.scheduler)+" "+esc(h.last_finished_at)+(h.healthy?" ✓":" ✕")).join(" · ");
  const sev={critical:"bad",warning:"bad",info:""};
  $("agentOpsAlerts").innerHTML=(d.alerts||[]).map(a=>"<div class='row'><b class='"+(sev[a.level]||"")+"'>"+esc(a.level)+"</b> · "+esc(a.agent)+" · "+esc(a.code)+" · ×"+esc(a.occurrences)+"<br><span class='hint'>"+esc(a.first_seen_at)+" → "+esc(a.last_seen_at)+" · "+esc(a.recovery_state)+(a.acknowledged_at?" · acknowledged "+esc(a.acknowledged_at):"")+"</span><br>"+esc(a.cause_redacted||"")+"<br><span class='hint'>Tasks: "+esc((a.affected_tasks||[]).join(", "))+" · Fallback: "+esc(a.fallback_status||"-")+"</span>"+(a.acknowledged_at?"":" <button class='btn' onclick=\\"agentOpsAct('alerts/ack','"+esc(a.id)+"')\\">ACKNOWLEDGE</button>")+"</div>").join("")||"<div class='hint'>هشدار بازی وجود ندارد.</div>";
  $("agentOpsApprovals").innerHTML=(d.approvals||[]).map(a=>"<div class='row'><b>"+esc(a.module)+":"+esc(a.action)+"</b> · "+esc(a.status)+" · task "+esc(a.task_id)+"<br><span class='hint'>"+esc(a.requested_at)+(a.expires_at?" · expires "+esc(a.expires_at):"")+"</span>"+(a.status==="pending"?" <button class='btn' onclick=\\"agentOpsAct('approvals/decide','"+esc(a.id)+"','approve')\\">APPROVE</button> <button class='btn' onclick=\\"agentOpsAct('approvals/decide','"+esc(a.id)+"','reject')\\">REJECT</button>":"")+"</div>").join("")||"<div class='hint'>تأیید در انتظاری وجود ندارد.</div>";
  $("agentOpsDead").innerHTML=(d.dead_letters||[]).map(x=>"<div class='row'><b>"+esc(x.agent)+"</b> · "+esc(x.state)+" · task "+esc(x.task_id)+" · "+esc(x.attempts)+" attempts<br>"+esc(x.error_redacted||"")+"<br><span class='hint'>"+esc(x.created_at)+(x.resolved_at?" · "+esc(x.resolution)+" "+esc(x.resolved_at):"")+"</span>"+(x.resolved_at?"":" <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','retried')\\">REQUEUE</button> <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','dismissed')\\">DISMISS</button>")+"</div>").join("")||"<div class='hint'>صف خطا خالی است.</div>";
+ $("agentOpsQuotas").innerHTML=(d.quotas||[]).map(q=>"<div class='row'><b>"+esc(q.action)+"</b> · "+esc(q.used_today)+" / "+esc(q.daily_quota)+(q.used_today>=q.daily_quota?" <span class='bad'>(سقف امروز پر شد)</span>":"")+"</div>").join("")||"<div class='hint'>—</div>";
+ const pb=d.publishing||{};
+ $("agentOpsPublishing").innerHTML=(!pb.available?"<div class='hint'>—</div>":"<div class='row'>"+((pb.counts||[]).map(c=>esc(c.target)+" "+esc(c.status)+": <b>"+esc(c.n)+"</b>").join(" · ")||"—")+"</div>")+(pb.vault?"<div class='row'>Vault senders: <b class='"+(pb.vault.sender_allow_list==="configured"?"":"bad")+"'>"+esc(pb.vault.sender_allow_list)+"</b>"+(pb.vault.senders?" ("+esc(pb.vault.senders)+")":"")+" · rejected media (7d): <b>"+esc(pb.vault.rejected_7d)+"</b></div>":"")+(pb.problems||[]).map(p=>"<div class='row'><b class='bad'>"+esc(p.target)+" · "+esc(p.status)+"</b> · content "+esc(p.content_id)+"<br>"+esc(p.error||"")+"<br><span class='hint'>"+esc(p.updated_at)+"</span></div>").join("");
  const u=d.usage||{};
  $("agentOpsUsage").innerHTML="<div class='row'>Budget used: <b>"+esc(u.budget_used_pct??"-")+"%</b> (last run "+esc(u.last_run_budget_pct??"-")+"%) · Runs over 80%: <b>"+esc(u.runs_over_80pct??0)+"</b> / "+esc(u.runs??0)+"<br>Units per completed task: <b>"+esc(u.units_per_completed_task??"-")+"</b> · Run time median "+esc(u.duration_median_ms??"-")+" ms, slowest "+esc(u.duration_max_ms??"-")+" ms<br><span class='hint'>Outcomes: "+esc(Object.entries(u.outcome||{}).filter(e=>e[1]).map(e=>e[0]+" "+e[1]).join(" · "))+"</span></div>";
 }
 async function agentOpsAct(route,id,choice){
  const body={id:id};if(route==="approvals/decide")body.decision=choice;if(route==="dead-letters/resolve")body.resolution=choice;
- if(route==="approvals/decide"&&choice==="approve"&&!confirm("Approve this paid action to run once on the next scheduled run?"))return;
- if(route==="dead-letters/resolve"&&choice==="retried"&&!confirm("Put this failed task back in the queue? A paid action still needs a new approval."))return;
+ if(route==="approvals/decide"&&choice==="approve"&&!confirm("Approve this action to run once on the next scheduled run?"))return;
+ if(route==="dead-letters/resolve"&&choice==="retried"&&!confirm("Put this failed task back in the queue? It still counts against its daily quota."))return;
  const d=await api(A+"/agents/"+route,{method:"POST",body:JSON.stringify(body)});
  $("agentOpsStatus").innerHTML=d&&d.ok?"<span class='ok'>✓ "+(d.idempotent?"No change":"Saved")+"</span>":"<span class='bad'>✕ "+esc((d&&d.error)||"Failed")+"</span>";
  loadAgentOps();
@@ -1794,7 +1797,7 @@ function dashSectionLoads(){
 }
 // Hub summary: counts from the same existing endpoints the section pages use (nothing estimated or invented).
 async function loadHubSummary(){
- const [dec,escs,ord,err]=await Promise.all([api("/api/si/decisions?status=PENDING"),api("/api/owner-escalations"),api("/api/orders"),api(A+"/errors")]);
+ const [dec,escs,ord,err,ops]=await Promise.all([api("/api/si/decisions?status=PENDING"),api("/api/owner-escalations"),api("/api/orders"),api(A+"/errors"),api(A+"/agents/overview")]);
  const decisions=dec.ok?(dec.items||[]):null;
  $("hubDecisions").textContent=decisions?decisions.length:"—";
  $("hubEscalations").textContent=escs.ok?(escs.items||[]).filter(x=>x.status==="open").length:"—";
@@ -1804,6 +1807,9 @@ async function loadHubSummary(){
  const alerts=err.ok?[...(err.tasks||[]),...(err.retries||[])]:null;
  $("hubHealth").textContent=alerts===null?"—":alerts.length?alerts.length+" ⚠":"OK";$("hubHealth").className="num "+(alerts===null?"":alerts.length?"warn":"ok");
  $("hubAlerts").innerHTML=alerts===null?"—":rows(alerts.slice(0,5),x=>"<span class='bad'>"+esc(x.error||x.last_error||x.operation||"—")+"</span><small>"+esc(x.updated_at||"")+"</small>");
+ // Only CRITICAL, unacknowledged agent alerts reach the main page; everything else stays in the Agent Control Center.
+ const crit=ops&&ops.ok&&ops.available?(ops.alerts||[]).filter(a=>a.level==="critical"&&!a.acknowledged_at):[];
+ if(crit.length)$("hubAlerts").innerHTML=crit.slice(0,3).map(a=>"<div class='row'><span class='bad'>🤖 "+esc(a.agent)+" · "+esc(a.code)+"</span> <a class='btn' href='/dashboard/agents'>OPEN</a><small>"+esc(a.last_seen_at||"")+"</small></div>").join("")+$("hubAlerts").innerHTML;
 }
 // Full refresh: page load, token save, manual REFRESH and control actions.
 async function refreshAll(){
@@ -1858,10 +1864,12 @@ DASH_SECTIONS.hubSummary=`<section class="grid4 section">
 </section>
 `;
 DASH_SECTIONS.agentOps=`<section class="card section" id="agentOpsPanel">
-<div class="title"><div><h2>🤖 AGENT HEALTH</h2><div class="hint">سلامت عامل‌های پس‌زمینه: هشدارها، تأیید اقدام‌های پرهزینه، صف خطا و مصرف منابع. هیچ اقدامی خودکار تأیید یا اجرا نمی‌شود.</div></div><button class="btn" onclick="loadAgentOps()">↻ CHECK</button></div>
+<div class="title"><div><h2>🤖 AGENT CONTROL CENTER</h2><div class="hint">کارهای غیرمالی (محتوا، کشف سرنخ، CRM، عکس و ویدیو) خودکار و در سقف روزانه اجرا می‌شوند. فقط اقدام‌های مالی یا ناشناخته تأیید مالک می‌خواهند.</div></div><button class="btn" onclick="loadAgentOps()">↻ CHECK</button></div>
 <div id="agentOpsStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
 <h3>⚠️ هشدارها</h3><div id="agentOpsAlerts" class="rows"></div>
-<h3>✅ تأیید اقدام‌ها</h3><div id="agentOpsApprovals" class="rows"></div>
+<h3>📏 سقف روزانه اقدام‌های پرهزینه</h3><div id="agentOpsQuotas" class="rows"></div>
+<h3>📣 انتشار کانال (۷ روز)</h3><div id="agentOpsPublishing" class="rows"></div>
+<h3>✅ تأیید اقدام‌های مالی یا ناشناخته</h3><div id="agentOpsApprovals" class="rows"></div>
 <h3>📮 صف خطا (Dead Letter)</h3><div id="agentOpsDead" class="rows"></div>
 <h3>📊 مصرف منابع (۷ روز)</h3><div id="agentOpsUsage" class="rows"></div>
 </section>

@@ -24,7 +24,7 @@ const FALLBACK={
   dead_letters:"Failed tasks keep status 'failed'; other tasks and the next scheduled run continue",
   budget_exhausted:"Remaining tasks stay queued for the next run",
   deadline_reached:"Remaining tasks stay queued for the next run",
-  capability_blocked:"Side-effect tasks wait in the owner approval queue; nothing is run without approval",
+  capability_blocked:"Financial or unknown actions wait in the owner approval queue; nothing is run without approval",
   invalid_task_graph:"No task was started in this run",
   orchestrator_error:"No task was started in this run"
 };
@@ -130,6 +130,28 @@ export async function decideApproval(env,{id,decision,actor,nowMs=Date.now()}){
   let res;try{res=await env.DB.batch(stmts);}catch{return saveFailed();}
   if(!changed(res[0]))return {ok:false,status:409,error:"Approval changed concurrently; reload"};
   return {ok:true,approval:await env.DB.prepare("SELECT * FROM agent_approvals WHERE id=?").bind(a.id).first()};
+}
+
+// Owner autonomy policy: an open request (pending/approved) for an action that no longer needs approval is closed as 'expired'
+// by 'policy' with an audit row, and its blocked task goes back to the queue — one batch per request. Nothing is deleted, and
+// requests that still need approval (needsApproval true: financial/unknown) are left exactly as they are.
+export async function cancelObsoleteApprovals(env,{needsApproval,nowMs=Date.now()}){
+  if(typeof needsApproval!=="function"||!(await opsAvailable(env)))return {cancelled:0};
+  const open=(await env.DB.prepare("SELECT id,task_id,module,action,status FROM agent_approvals WHERE status IN ('pending','approved') LIMIT 200").all()).results||[];
+  let cancelled=0;
+  for(const a of open){
+    if(needsApproval(a.module,a.action))continue;
+    const t=iso(nowMs),tok=uid(),guard="SELECT 1 FROM agent_approvals WHERE id=? AND action_token=?";
+    try{
+      const res=await env.DB.batch([
+        env.DB.prepare("UPDATE agent_approvals SET status='expired',decided_at=?,decided_by='policy',note=?,action_token=? WHERE id=? AND status IN ('pending','approved')").bind(t,"No approval needed: non-financial action (owner autonomy policy)",tok,a.id),
+        env.DB.prepare(`UPDATE autonomy_tasks SET status='queued',error=NULL,updated_at=? WHERE id=? AND status='blocked' AND EXISTS(${guard})`).bind(t,a.task_id,a.id,tok),
+        auditStmt(env,"agent_approval_cancelled",`Approval no longer needed for ${a.module}:${a.action}`,{approval_id:a.id,task_id:a.task_id,module:a.module,action:a.action,previous_status:a.status,actor:"policy"},t,guard,a.id,tok)
+      ]);
+      if(changed(res[0]))cancelled++;
+    }catch{}
+  }
+  return {cancelled};
 }
 
 /* ------------------------------------------------------------------------------------------- owner actions on alerts / DLQ */

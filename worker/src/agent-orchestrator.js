@@ -7,20 +7,31 @@
 
 export const ORCHESTRATOR_VERSION="1.0.0";
 
-// read = no writes · draft = writes something that still waits for owner approval · side_effect = can reach a customer, publish,
-// spend money or change prices/orders. Stage 1 never runs side_effect: the Approval Gate stays the only way to act on customers.
-export const CAPABILITIES=Object.freeze(["read","draft","side_effect"]);
-// Deny by default: only "read" runs unless the caller explicitly allows "draft"; "side_effect" can never be allowed here.
-const ALLOWABLE=new Set(["read","draft"]);
+// read = no writes · draft = writes something that still waits for owner approval · paid = non-financial work that spends on an
+// approved external API (generation, Google Places), run autonomously but only within its daily quota (owner autonomy policy,
+// 2026-10-19) · side_effect = financial/commercial decisions (prices, discounts, payments, binding commitments), customer sends,
+// publishing, or anything unknown. side_effect never runs without a one-shot owner approval.
+export const CAPABILITIES=Object.freeze(["read","draft","paid","side_effect"]);
+// Deny by default: only "read" runs unless the caller explicitly allows "draft"/"paid"; "side_effect" can never be allowed here.
+const ALLOWABLE=new Set(["read","draft","paid"]);
 
-// The existing autonomy actions (autonomy-engine.js ACTIONS / executeTask) by capability. video/photo generation is treated as a
-// side effect because it can spend on a paid generation API; nothing in ACTIONS sends to customers, publishes or changes prices.
+// The existing autonomy actions (autonomy-engine.js ACTIONS / executeTask) by capability. None of them is financial: nothing in
+// ACTIONS sends to customers, publishes, or touches prices, discounts, quotes, orders or payments (those gates live in index.js).
 export const AUTONOMY_ACTION_CAPABILITY=Object.freeze({
   "telegram:inbox_scan":"read","whatsapp:inbox_scan":"read","instagram:health_and_leads":"read","website:growth_scan":"read",
   "crm:lead_intelligence":"read","revenue:funnel_snapshot":"read",
-  "telegram:inbox_reply":"draft","crm:lead_discovery":"draft","content:generate_and_queue":"draft","ads:discover_opportunities":"draft","learning:run":"draft",
-  "media:video_generate":"side_effect","photo:photo_generate":"side_effect"
+  "telegram:inbox_reply":"draft","ads:discover_opportunities":"draft","learning:run":"draft",
+  "media:video_generate":"paid","photo:photo_generate":"paid","content:generate_and_queue":"paid","crm:lead_discovery":"paid"
 });
+// Daily caps (UTC day, every started attempt counts, failed ones included) for paid actions. The owner can lower or raise them in
+// autonomy_controls key "quotas" (JSON {"module:action":n}); a missing or invalid value falls back to these, never to unlimited.
+// photo/video also keep their own internal locks (photo 1/day, video 1/ISO week); content matches the default 12-hour interval.
+export const AUTONOMY_DAILY_QUOTAS=Object.freeze({"photo:photo_generate":1,"media:video_generate":1,"content:generate_and_queue":2,"crm:lead_discovery":2});
+export const QUOTA_MAX=50;
+export function autonomyDailyQuota(module,action,overrides={}){
+  const key=`${module}:${action}`,base=AUTONOMY_DAILY_QUOTAS[key]??0,v=overrides?.[key];
+  return Number.isInteger(v)&&v>=0?Math.min(v,QUOTA_MAX):base;
+}
 export function autonomyActionCapability(module,action){
   if(action==="status")return "read";
   return AUTONOMY_ACTION_CAPABILITY[`${module}:${action}`]||"side_effect";   // unknown actions are refused, never guessed as safe
@@ -157,7 +168,7 @@ export async function runAgentGraph(tasks,options={}){
       if(key!==null&&seenKeys.has(key)){e.state="deduplicated";canonical.set(id,seenKeys.get(key));continue;}
       if(key!==null)seenKeys.set(key,id);
     }
-    if(report.tasks.some(e=>e.state==="blocked_policy"))report.alerts.push({level:"info",code:"capability_blocked",message:"Some tasks were not run: their capability is not allowed (side effects always need owner approval)"});
+    if(report.tasks.some(e=>e.state==="blocked_policy"))report.alerts.push({level:"info",code:"capability_blocked",message:"Some tasks were not run: their capability is not allowed (financial or unknown actions always need owner approval)"});
     const settledOk=id=>{const c=canonical.get(id)||id,e=entries.get(c);return e?.state==="succeeded";};
     const isSettled=id=>{const c=canonical.get(id)||id,e=entries.get(c);return e?.state!==null&&e?.state!==undefined;};
     let started_count=0,stopReason=null;

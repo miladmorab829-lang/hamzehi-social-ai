@@ -839,8 +839,14 @@ async function getAutoPilotConfig(env){
   let cfg={...AUTO_PILOT_DEFAULT_CONFIG};
   try{if(row?.value)cfg={...cfg,...JSON.parse(row.value)}}catch{}
   cfg.enabled=cfg.enabled!==false;
-  // Scheduled automation may generate drafts, but approval must remain human-controlled.
+  // Owner autonomy policy (2026-10-19, explicitly approved): scheduled autopilot posts are approved by policy ONLY when they are
+  // routine and non-financial and go to the authorised Telegram channel (autoApproveRoutineContent); everything else stays pending
+  // for the owner. Switch: routine_auto_publish (default on; false turns it off). Daily cap: auto_publish_daily_limit (0-4, default 1).
+  // The legacy auto_approve field stays false (older saves always stored false, so it cannot express the owner's choice).
   cfg.auto_approve=false;
+  cfg.routine_auto_publish=cfg.routine_auto_publish!==false;
+  const capRaw=Number(cfg.auto_publish_daily_limit);
+  cfg.auto_publish_daily_limit=Number.isInteger(capRaw)&&capRaw>=0?Math.min(4,capRaw):1;
   cfg.require_media=cfg.require_media!==false;
   cfg.max_approvals_per_cycle=Math.min(10,Math.max(1,Number(cfg.max_approvals_per_cycle)||3));
   return cfg;
@@ -979,10 +985,68 @@ async function runAutoPilotCycle(env, source='scheduled'){
   const cfg=await getAutoPilotConfig(env);
   if(!cfg.enabled) return {ok:true,skipped:true,reason:'disabled'};
   const generated=await runAutoContentGeneration(env,source,false);
+  const decision=generated.content_id?await autoApproveRoutineContent(env,generated.content_id,cfg):{approved:false,reason:'nothing_generated'};
   const pending=await env.DB.prepare("SELECT COUNT(*) n FROM contents c WHERE c.status='generated' AND EXISTS (SELECT 1 FROM approval_queue q WHERE q.content_id=c.id AND q.status='pending')").first();
   const pendingReview=Number(pending?.n||0);
-  await audit(env,'auto_pilot_cycle','Scheduled content remains pending human approval',{source,generated:!!generated.generated,generated_content_id:generated.content_id||null,pending_review:pendingReview});
-  return {ok:true,generated,approved:0,held:0,checked:pendingReview,pending_review:pendingReview};
+  await audit(env,'auto_pilot_cycle',decision.approved?'Routine content approved by owner policy for the Telegram channel':'Scheduled content remains pending human approval',{source,generated:!!generated.generated,generated_content_id:generated.content_id||null,auto_approved:!!decision.approved,hold_reason:decision.approved?null:decision.reason,pending_review:pendingReview});
+  return {ok:true,generated,approved:decision.approved?1:0,held:generated.content_id&&!decision.approved?1:0,checked:pendingReview,pending_review:pendingReview};
+}
+
+// Words that make a post a financial/commercial message (prices, discounts, payment terms, free items, guarantees, offers,
+// delivery/stock promises) in Persian, Iraqi Arabic and English. Matched after ی/ک/ZWNJ normalisation; over-matching only keeps a
+// post pending for the owner, never publishes one.
+const ROUTINE_CONTENT_BLOCK=/رایگان|بلاعوض|هدیه|هدیة|کادو|جایزه|بدون هزینه|مجان|بلاش|علی حسابنا|گارانتی|ضمانت|تضمین|مرجوع|بازگشت وجه|استرداد|جبران|تعهد|کفالة|نضمن|مضمون|استرجاع|تعویض|نتعهد|نوعد|حراج|پیشنهاد ویژه|قیمت|هزینه|ارزان|ارزون|کمترین|پایین ?ترین|فروش ویژه|فقط امروز|فرصت|نیم ?بها|یکی بخر|عروض|اوفر|ارخص|رخیص|تنزیلات|تخفیضات|کوبون|فرصة|تخفیف|خصم|درصد|٪|%|پرداخت|اقساط|نسیه|آجل|بیعانه|عربون|الدفع|تحویل فوری|ارسال رایگان|ارسال سریع|همان روز|همیشه موجود|نفس الیوم|توصیل|تومان|ریال|دلار|دولار|دینار|\b(?:free|gift|bonus|giveaway|guarantee[ds]?|warranty|refunds?|money back|promise[ds]?|risk[- ]free|offers?|sale|price[ds]?|cheap|limited|today only|coupons?|promo|deals?|bogo|discounts?|deposit|installments?|pay later|interest|same day|fast delivery|in stock|usd|iqd)\b/iu;
+// Short words only as whole words (so «عرضه» or «نامحدود» do not trip them).
+const ROUTINE_CONTENT_BLOCK_WORDS=/(?<!\p{L})(?:مفت|قول|عرض|سعر|نصف|قسط|چک|ضمان|محدود|دفع)(?!\p{L})/u;
+const routineText=c=>[c?.hook,c?.body,c?.caption,c?.cta].filter(Boolean).join("\n").normalize("NFKC").replace(/ي/g,"ی").replace(/ك/g,"ک").replace(/‌/g," ");
+function routineContentIssues(c){
+  const text=routineText(c);
+  const issues=salesAiProseIssues(text,{allowedNumbers:[]});
+  if(ROUTINE_CONTENT_BLOCK.test(text)||ROUTINE_CONTENT_BLOCK_WORDS.test(text))issues.push("commercial_terms");
+  return [...new Set(issues)];
+}
+// Media on a policy-approved post must come from the owner's marketing vault: every attached item resolves to a
+// telegram_media_sources row with source_kind 'vault' whose chat is the configured photo/video vault (by id or @username) and is
+// not a private user chat. Anything else — customer, archive, ready, owner_knowledge, a missing row, another source type —
+// fails closed (the post waits for the owner). A post with no media needs no media check.
+async function authorizedMarketingMedia(env,contentId){
+  let rows=[];try{rows=(await env.DB.prepare("SELECT source_type,source_id FROM content_media WHERE content_id=?").bind(String(contentId)).all()).results||[];}catch{return {ok:false,reason:'media_lookup_failed'};}
+  const norm=v=>String(v||'').trim().replace(/^@/,'').toLowerCase();
+  const vaults=[vaultChatId(env),videoVaultChatId(env)].map(norm).filter(Boolean);
+  for(const r of rows){
+    if(!['telegram','telegram_ai'].includes(String(r.source_type)))return {ok:false,reason:'unsupported_media_source'};
+    const s=await env.DB.prepare("SELECT chat_id,chat_username,source_kind FROM telegram_media_sources WHERE id=?").bind(String(r.source_id)).first();
+    if(!s)return {ok:false,reason:'unknown_media_origin'};
+    if(s.source_kind!=='vault')return {ok:false,reason:'not_vault_media'};
+    if(/^\d+$/.test(String(s.chat_id||'').trim()))return {ok:false,reason:'private_chat_media'};
+    if(!vaults.length||!(vaults.includes(norm(s.chat_id))||vaults.includes(norm(s.chat_username))))return {ok:false,reason:'not_configured_vault'};
+  }
+  return {ok:true,count:rows.length};
+}
+// Approve ONE freshly generated scheduled post by policy when every condition holds; otherwise leave it pending (owner decides).
+// Approval goes through setApproval (same audit + distribution path as the owner's button). The post is queued for the Telegram
+// channel only, so no WhatsApp/Instagram row is created, and publishing still re-checks approval, claims and deduplicates.
+async function autoApproveRoutineContent(env,contentId,cfg){
+  try{
+    if(!cfg.routine_auto_publish)return {approved:false,reason:'routine_auto_publish_off'};
+    let modules={};try{modules=JSON.parse((await env.DB.prepare("SELECT value FROM autonomy_controls WHERE key='modules'").first())?.value||"{}")}catch{}
+    if(modules.content===false||modules.telegram===false)return {approved:false,reason:'module_disabled'};
+    const c=await env.DB.prepare("SELECT id,platform,status,hook,body,caption,cta FROM contents WHERE id=?").bind(String(contentId)).first();
+    if(!c||c.status!=='generated')return {approved:false,reason:'not_generated'};
+    if(!['telegram','priority'].includes(String(c.platform)))return {approved:false,reason:'not_telegram_channel'};
+    if(!env.TELEGRAM_BOT_TOKEN||!mainTelegramChatId(env))return {approved:false,reason:'channel_not_configured'};
+    const media=await authorizedMarketingMedia(env,c.id);
+    if(!media.ok){await audit(env,'content_auto_approve_held','Generated post kept for owner approval (media provenance not verified)',{content_id:c.id,reason:media.reason});return {approved:false,reason:'media_provenance_unverified'};}
+    const issues=routineContentIssues(c);
+    if(issues.length){await audit(env,'content_auto_approve_held','Generated post kept for owner approval (financial or commercial wording)',{content_id:c.id,issues:issues.slice(0,10)});return {approved:false,reason:'needs_owner_review',issues};}
+    const day=new Date();day.setUTCHours(0,0,0,0);
+    const used=await env.DB.prepare("SELECT COUNT(*) n FROM approval_queue WHERE status='approved' AND reason LIKE 'Auto-approved by owner policy%' AND created_at>=?").bind(day.toISOString()).first();
+    if(Number(used?.n||0)>=cfg.auto_publish_daily_limit)return {approved:false,reason:'daily_limit'};
+    await queueContentDistribution(env,c.id,["telegram"]);
+    await setApproval(env,c.id,"approved","Auto-approved by owner policy: routine non-financial post for the Telegram channel");
+    await audit(env,'content_auto_approved','Routine content approved by owner policy (Telegram channel only)',{content_id:c.id,daily_limit:cfg.auto_publish_daily_limit,actor:'policy'});
+    return {approved:true};
+  }catch(e){return {approved:false,reason:'error',error:String(e?.message||e).slice(0,200)};}
 }
 
 async function runAutoContentGeneration(env, source = "scheduled", force = false) {
@@ -1183,6 +1247,36 @@ async function getReadyMediaStatus(env,req){
   return json({ok:true,ready_configured:!!readyChatId(env),items:r.results||[]});
 }
 
+// content_media.source_id is our telegram_media_sources id; Telegram needs that row's file_id (fallback: the stored value as is).
+// Vault sender policy (owner-approved). A CHANNEL vault is trusted by its verified channel identity (a channel_post in the configured
+// channel). A GROUP/SUPERGROUP vault accepts media only from Telegram numeric user ids listed in TELEGRAM_VAULT_SENDER_IDS
+// (comma-separated); membership or admin rights alone never count. Anonymous admins (sender_chat / GroupAnonymousBot), linked-channel
+// auto-forwards, bots and messages without a sender are refused. A missing or invalid list fails closed. Refused media is stored
+// as internal 'archive' evidence (never marketing, never a customer).
+const TELEGRAM_USER_ID=/^[1-9]\d{4,14}$/;
+function vaultSenderAllowList(env){
+  const raw=String(env.TELEGRAM_VAULT_SENDER_IDS||"").trim();
+  if(!raw)return {ok:false,reason:"allow_list_missing"};
+  const ids=raw.split(/[\s,]+/).filter(Boolean);
+  // Telegram's service account (777000) and the anonymous-admin bot (1087968824) are never a person: listing them invalidates the list.
+  if(!ids.length||!ids.every(x=>TELEGRAM_USER_ID.test(x)&&x!=="777000"&&x!=="1087968824"))return {ok:false,reason:"allow_list_invalid"};
+  return {ok:true,ids:new Set(ids)};
+}
+function vaultSenderVerdict(env,m,isChannelPost){
+  const type=String(m?.chat?.type||"");
+  if(type==="private")return {ok:false,reason:"private_chat"};
+  if(type==="channel")return isChannelPost?{ok:true,via:"channel"}:{ok:false,reason:"channel_not_channel_post"};
+  if(type!=="group"&&type!=="supergroup")return {ok:false,reason:"unsupported_chat_type"};
+  const list=vaultSenderAllowList(env);if(!list.ok)return list;
+  if(m.sender_chat)return {ok:false,reason:"anonymous_or_channel_sender"};
+  if(m.is_automatic_forward)return {ok:false,reason:"automatic_forward"};
+  if(m.via_bot)return {ok:false,reason:"via_bot"};
+  const from=m.from;if(!from||from.id==null)return {ok:false,reason:"missing_sender"};
+  if(from.is_bot===true)return {ok:false,reason:"bot_sender"};
+  const id=String(from.id);if(!TELEGRAM_USER_ID.test(id))return {ok:false,reason:"invalid_sender_id"};
+  return list.ids.has(id)?{ok:true,via:"allow_list"}:{ok:false,reason:"sender_not_allowed"};
+}
+async function telegramFileIdFor(env,sourceId){const r=await env.DB.prepare("SELECT file_id FROM telegram_media_sources WHERE id=? LIMIT 1").bind(String(sourceId)).first();return String(r?.file_id||sourceId);}
 async function sendTelegramDistribution(env, contentId){
   if(!env.TELEGRAM_BOT_TOKEN||!mainTelegramChatId(env)) throw Error('Telegram credentials missing');
   const c=await env.DB.prepare("SELECT hook,body,caption,cta FROM contents WHERE id=?").bind(contentId).first();
@@ -1214,6 +1308,13 @@ async function processContentDistribution(env){
         continue;
       }
       if(d.target==='telegram'){
+        // One post per content: if the calendar/direct publish() path already sent it (or its outcome is unknown), never send again.
+        let run=null;try{run=await env.DB.prepare("SELECT status FROM production_runs WHERE id=?").bind(`publish:${d.content_id}:telegram`).first();}catch{}
+        if(run&&run.status!=='failed'){
+          const done=run.status==='completed';
+          await env.DB.prepare("UPDATE content_distribution SET status=?,error=?,updated_at=? WHERE id=? AND status='processing'").bind(done?'published':'failed',done?null:'Direct publish is in progress or its outcome is unknown; not re-sent (reconcile in the calendar)',now(),d.id).run();
+          continue;
+        }
         const result=await sendTelegramDistribution(env,d.content_id);
         await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(result.external_id||null,now(),d.id).run();
         await audit(env,'telegram_content_published','Approved content published through Telegram distribution queue',{content_id:d.content_id,external_id:result.external_id||null});
@@ -1467,9 +1568,9 @@ async function publish(env,b){
         let r;
         try {
           if(media?.media_type==='photo'){
-            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,photo:String(media.source_id),caption:text.slice(0,1024)})});
+            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,photo:await telegramFileIdFor(env,media.source_id),caption:text.slice(0,1024)})});
           } else if(media?.media_type==='video'){
-            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,video:String(media.source_id),caption:text.slice(0,1024)})});
+            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,video:await telegramFileIdFor(env,media.source_id),caption:text.slice(0,1024)})});
           } else {
             r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text})});
           }
@@ -5836,7 +5937,7 @@ async function handleTelegramWebhook(env,req){
   const webhookStarted=Date.now();
   if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(provided!==expected)return json({ok:false,error:'Unauthorized webhook'},401);
   const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
-  const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const isVault=isImageVault||isVideoVault;
+  const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const vaultVerdict=(isImageVault||isVideoVault)?vaultSenderVerdict(env,m,!!(body.channel_post||body.edited_channel_post)):null; const isVault=!!vaultVerdict?.ok; /* channel identity, or an allow-listed member of a group vault; never a private chat */
   const isReady=!!readyChatId(env)&& (chatId===readyChatId(env)||username===readyChatId(env).replace(/^@/,'').toLowerCase());
   // Only a private chat with a human sender is a customer identity. A group/channel id, username or title is a shared
   // space, never one customer: such messages are stored UNLINKED and escalated, and are never matched to a lead.
@@ -5847,7 +5948,7 @@ async function handleTelegramWebhook(env,req){
   const providerSenderId=String(m.from?.id||(privateCustomerChat?m.chat.id:'')||''),providerUsername=String(m.from?.username||(m.chat.type==='private'?m.chat.username:'')||''),replyTo=String(m.reply_to_message?.message_id||''),externalId=`${chatId}:${String(m.message_id||body.update_id||uid())}`;
   // Store the raw Telegram media reference first, so a customer photo is visible to this same turn's image resolver.
   const photo=Array.isArray(m.photo)&&m.photo.length?m.photo[m.photo.length-1]:null;const video=m.video||null;const document=m.document||null;const animation=m.animation||null;const media=photo?{type:'photo',file_id:photo.file_id,file_unique_id:photo.file_unique_id}:video?{type:'video',file_id:video.file_id,file_unique_id:video.file_unique_id}:animation?{type:'animation',file_id:animation.file_id,file_unique_id:animation.file_unique_id}:document?{type:'document',file_id:document.file_id,file_unique_id:document.file_unique_id}:null;
-  if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,telegramStoredText(String(m.caption||'')),isVault?'vault':isReady?'ready':(m.chat.type==='private'&&!internalChat)?'customer':'archive',t,t).run();if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
+  if(media){const t=now();const mediaId=uid();await env.DB.prepare("INSERT OR IGNORE INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(mediaId,String(m.chat.id),String(m.chat.username||''),String(m.message_id||body.update_id||''),media.file_id,String(media.file_unique_id||''),media.type,telegramStoredText(String(m.caption||'')),isVault?'vault':(vaultVerdict&&m.chat.type!=='private')?'vault_untrusted':isReady?'ready':(m.chat.type==='private'&&!internalChat)?'customer':'archive',t,t).run();if(vaultVerdict&&!vaultVerdict.ok&&m.chat.type!=='private')await audit(env,'vault_media_rejected','Media in the vault chat was not accepted as marketing media (sender not verified)',{reason:vaultVerdict.reason,chat_type:String(m.chat.type||'')});if(isVault)await env.DB.prepare("INSERT OR IGNORE INTO media_vault_items(id,telegram_media_id,content_id,source_type,ai_status,ai_prompt,parent_media_id,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),mediaId,null,'telegram_vault','none',null,null,'',t,t).run();await audit(env,'telegram_media_received','Telegram channel media received',{message_id:externalId,media_type:media.type});}
   await ensureLeadOutreachStore(env);
   const unlinkedInbound={leadId:null,conversationId:null,contactId:null},identityStarted=Date.now();
   let linked=privateCustomerChat?await matchInboundLead(env,{platform:'telegram',providerConversationId:chatId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo}):unlinkedInbound;
@@ -11447,8 +11548,10 @@ function mergeLeadMetadata(existing, incoming, source, identities) {
     telegram: normalizeTelegramIdentity(add.telegram_username || add.telegram_url),
     email: normalizeLeadEmail(add.email || add.contact)
   };
-  const signature = JSON.stringify(entry);
-  if (!evidence.some(x => JSON.stringify(x) === signature)) evidence.push(entry);
+  // The same evidence found again (only discovered_at differs) is not a change, so a rediscovery does not rewrite the lead.
+  const sig = x => JSON.stringify({ ...x, discovered_at: undefined });
+  const signature = sig(entry);
+  if (!evidence.some(x => sig(x) === signature)) evidence.push(entry);
   out.provider_evidence = evidence.slice(-30);
   out.strong_identities = [...new Set([...(Array.isArray(out.strong_identities) ? out.strong_identities : []), ...identities.map(x => x.identity_key)])];
   return out;
@@ -11553,13 +11656,24 @@ async function upsertDiscoveredLead(env, input) {
     await auditLeadIdentityConflict(env, identities, leadIds, source);
     return { conflict: true, lead_ids: leadIds, created: false };
   }
-  let existingMeta = {};
-  try { existingMeta = JSON.parse(existingLead.notes || "{}"); } catch {}
+  // CRM protection (autonomous discovery): a lead the owner or the sales flow already works with, or whose notes are not discovery
+  // JSON (owner free text), is never rewritten here — it only gets the missing identity claims above. Elsewhere metadata is only
+  // added (mergeLeadMetadata fills empty keys), and the row (incl. updated_at) is written only when something actually changed.
+  let existingMeta = null;
+  try { const parsed = JSON.parse(existingLead.notes || "{}"); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existingMeta = parsed; } catch {}
+  const automated = !DISCOVERY_OWNER_SOURCES.has(source);
+  if (!existingMeta || (automated && DISCOVERY_PROTECTED_STAGES.has(String(existingLead.stage || "")))) return { id: leadId, created: false, conflict: false, preserved: true };
   const mergedMeta = mergeLeadMetadata(existingMeta, input.meta || {}, source, identities);
+  const name = existingLead.name || input.name || null, contact = existingLead.contact || input.contact || null;
+  if (JSON.stringify(mergedMeta) === JSON.stringify(existingMeta) && name === (existingLead.name ?? null) && contact === (existingLead.contact ?? null)) return { id: leadId, created: false, conflict: false, unchanged: true };
   await env.DB.prepare("UPDATE leads SET name=?,contact=?,notes=?,updated_at=? WHERE id=?")
-    .bind(existingLead.name || input.name || null, existingLead.contact || input.contact || null, JSON.stringify(mergedMeta), t, leadId).run();
+    .bind(name, contact, JSON.stringify(mergedMeta), t, leadId).run();
   return { id: leadId, created: false, conflict: false };
 }
+// Stages past first contact (the owner or the sales flow manages them): automated discovery never rewrites these leads.
+const DISCOVERY_PROTECTED_STAGES = new Set(["contacted", "replied", "negotiation", "customer", "converted", "rejected", "archived"]);
+// The customer's own inbound message and the owner's manual entry are not automated discovery: they may still fill missing metadata.
+const DISCOVERY_OWNER_SOURCES = new Set(["telegram_inbound", "manual"]);
 
 function parseLeadNotes(lead) {
   try {
@@ -13097,6 +13211,8 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const b=await req.json().catch(()=>({})); const cfg=await getAutoPilotConfig(env);
         if(b.enabled!==undefined)cfg.enabled=!!b.enabled;
         cfg.auto_approve=false;
+        if(b.routine_auto_publish!==undefined)cfg.routine_auto_publish=!!b.routine_auto_publish;
+        if(b.auto_publish_daily_limit!==undefined){const n=Number(b.auto_publish_daily_limit);cfg.auto_publish_daily_limit=Number.isInteger(n)&&n>=0?Math.min(4,n):1;}
         if(b.require_media!==undefined)cfg.require_media=!!b.require_media;
         if(b.max_approvals_per_cycle!==undefined)cfg.max_approvals_per_cycle=Math.min(10,Math.max(1,Number(b.max_approvals_per_cycle)||3));
         const t=now(); await ensureAutoContentStore(env);
