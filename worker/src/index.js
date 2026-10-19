@@ -6,7 +6,7 @@ import { buildMemoryVocabulary, memoryCanonicalize, memoryConceptFromInterpretat
 import { salesAiProvider, salesAiModel, salesAiTimeoutMs } from "./sales-ai-brain.js";
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
-import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice } from "./sales-intelligence.js";
+import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -8520,6 +8520,16 @@ async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null
   if(!offer.offer_hash||!Number.isSafeInteger(offer.quantity)||offer.quantity<=0||!Number.isSafeInteger(price.unit_price_minor)||!Number.isSafeInteger(price.total_minor)||!price.currency||!["IRAN","ARAB"].includes(candidate.market))throw Error("Accepted offer snapshot is incomplete");
   const existing=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(ref).first();
   if(existing)return {order:existing,created:false};
+  // ONE order per deal: while this conversation has an open order from an accepted formal quote, a chat acceptance never creates a
+  // second order silently — the owner decides (same deal or a new order); the caller then claims nothing to the customer.
+  const quoteOrder=await env.DB.prepare("SELECT id,order_number,quote_id,product,quantity,currency,total_minor FROM lead_orders WHERE conversation_id=? AND status IN ('order_candidate','confirmed','partially_paid') AND quote_id NOT LIKE 'chat-offer:%' LIMIT 1").bind(row.conversation_id).first();
+  if(quoteOrder){
+    await openOrderFlag(env,{type:"ORDER_DUPLICATE_CHECK",subject:ref,lead_id:row.lead_id,conversation_id:row.conversation_id,market:candidate.market,quote_id:quoteOrder.quote_id,order_id:quoteOrder.id,
+      question:`The customer accepted a chat offer, but this conversation already has open order ${quoteOrder.order_number} from an accepted quote; no second order was created`,
+      known:{existing_order:quoteOrder,chat_offer:{product:candidate.product?.name||null,quantity:offer.quantity,currency:price.currency,total_minor:price.total_minor}},
+      recommendation:"Decide whether this is the same deal (keep the existing order) or a new order."});
+    throw Error("An open order from an accepted quote already exists for this conversation; owner review required");
+  }
   const t=now(),acceptedAt=row.created_at||t,id=uid(),orderNumber=await deterministicOrderNumber(ref,acceptedAt),req=candidate.requirements||{};
   const product=[candidate.product?.name,req.configuration&&!String(candidate.product?.name||"").includes(req.configuration)?req.configuration:null].filter(Boolean).join(" ")||candidate.product?.key||"product";
   const priceRef=price.price_version||price.price_item||null,discount=Number.isSafeInteger(price.discount?.amount_minor)?price.discount.amount_minor:0;
@@ -10128,14 +10138,30 @@ async function deterministicOrderNumber(quoteId,acceptedAt){
   return `HB-${date}-${suffix}`;
 }
 
+// An order-path issue the owner must SEE (an owner decision, not only an audit row): one per issue and subject, never a knowledge gap,
+// no side effect when resolved. A failure to open it is audited and never breaks the caller.
+async function openOrderFlag(env,{type,subject,lead_id=null,conversation_id=null,market=null,quote_id=null,order_id=null,question,known={},recommendation=null}){
+  try{return (await openDecision(env,{decision_type:type,fingerprint:`${type}|${subject}`,priority:20,lead_id,conversation_id,market,quote_id,order_id,question,known,recommendation,
+    risk:"Nothing was sent, confirmed or charged by this check.",payload:{resolution:"order_flag"}})).decision?.id||null;}
+  catch(error){try{await audit(env,"order_flag_failed","Owner order flag could not be opened",{type,subject,error:sanitizeOperationalError(error?.message||error)});}catch{}return null;}
+}
+
 function validateAcceptedQuoteOrderSnapshot(row){
   if(!row||row.status!=="accepted")throw Error("Only an accepted quote can create an order candidate");
   if(!row.lead_id||!row.conversation_id||!row.outreach_id||!row.acceptance_inbox_message_id||!row.quote_provider_message_id||!row.customer_accepted_at)throw Error("Deterministic quote acceptance evidence is incomplete");
-  if(!["IRAN","ARAB"].includes(row.market)||!["variable_owner","fixed_list"].includes(row.pricing_mode))throw Error("Accepted quote pricing mode is invalid");
+  const engine=QUOTE_ENGINE_PRICING_MODES.has(row.pricing_mode);
+  if(!["IRAN","ARAB"].includes(row.market)||!(engine||["variable_owner","fixed_list"].includes(row.pricing_mode)))throw Error("Accepted quote pricing mode is invalid");
   if(!String(row.product||"").trim()||!String(row.currency||"").trim()||!String(row.approved_quote_text||"").trim())throw Error("Accepted quote snapshot is incomplete");
   safeCommercialInteger(row.quantity,{nullable:false,positive:true});
   for(const field of ["unit_price_minor","subtotal_minor","discount_minor","shipping_minor","tax_minor","other_fees_minor","total_minor"])safeCommercialInteger(row[field],{nullable:false});
   if(row.moq!==null&&row.moq!==undefined)safeCommercialInteger(row.moq,{nullable:false,positive:true});
+  // An engine quote's evidence is its approval reference (checked again at submit, approve and send); the order keeps the price the
+  // customer was SENT — nothing is re-priced at acceptance.
+  if(engine){
+    if(row.pricing_mode==="versioned_price"&&!String(row.price_version_id||"").trim())throw Error("Accepted engine quote has no approved price version");
+    if(row.pricing_mode==="custom_owner"&&!String(row.custom_price_decision_id||"").trim())throw Error("Accepted custom quote has no owner price decision");
+    return;
+  }
   if(row.market==="IRAN"&&row.pricing_mode!=="variable_owner")throw Error("Iran quote pricing snapshot is invalid");
   if(row.market==="ARAB"&&(!row.price_item_id||!Number.isSafeInteger(Number(row.price_item_version))||Number(row.price_item_version)<=0||row.pricing_mode!=="fixed_list"))throw Error("Arab quote price version snapshot is invalid");
 }
@@ -10177,6 +10203,14 @@ async function ensureOrderCandidateFromAcceptedQuote(env,quoteId,inboxId){
   const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE quote_id=? LIMIT 1").bind(quoteId).first();
   if(!order)throw Error("Accepted quote order candidate could not be persisted");
   await auditOrderEventOnce(env,`candidate:${order.id}`,"lead_order_candidate_created","Accepted quote created an order candidate",{order_id:order.id,order_number:order.order_number,quote_id:order.quote_id,lead_id:order.lead_id,acceptance_inbox_message_id:order.acceptance_inbox_message_id,status:"order_candidate"});
+  // Accepted after the quote's validity ended: the candidate still exists at the SENT price (nothing is final before CONFIRM ORDER),
+  // and the owner is told once, so a late "yes" is neither lost nor honoured silently.
+  const expiry=Date.parse(row.expires_at||""),acceptedAt=Date.parse(row.customer_accepted_at||"");
+  if(inserted.meta?.changes&&Number.isFinite(expiry)&&Number.isFinite(acceptedAt)&&acceptedAt>expiry)
+    await openOrderFlag(env,{type:"ORDER_LATE_ACCEPTANCE",subject:order.id,lead_id:order.lead_id,conversation_id:order.conversation_id,market:order.market,quote_id:order.quote_id,order_id:order.id,
+      question:`The customer accepted quote ${order.order_number} after it expired; the order candidate was created at the sent price and waits for your decision`,
+      known:{order_number:order.order_number,quote_id:order.quote_id,expires_at:row.expires_at,customer_accepted_at:row.customer_accepted_at,currency:order.currency,total_minor:order.total_minor},
+      recommendation:"Confirm the order at the sent price, or cancel it and send a new quote."});
   return {created:!!inserted.meta?.changes,idempotent:!inserted.meta?.changes,order};
 }
 
@@ -10430,6 +10464,29 @@ async function exactArabPriceMatch(env,{priceItemId,sku,product}){
   if(valid.length>1)return {status:"multiple",item:null};
   return {status:"none",item:null};
 }
+// Amounts written in a quote text: Persian/Arabic digits, thousands separators and هزار/میلیون/ألف/مليون are normalised; an amount is
+// "money" when a currency word or sign is attached to it.
+const QUOTE_TEXT_MULTIPLIERS=[[/^(?:میلیارد|ملیارد|مليار)/u,1e9],[/^(?:میلیون|ملیون|ميليون|مليون)/u,1e6],[/^(?:هزار|ألف|الف|آلاف|الاف)/u,1e3]];
+const QUOTE_TEXT_CURRENCY=/^(?:TOMANS?|IRT|USD|US\$|IQD|تومان|تومن|ریال|ريال|دلار|دولار|دینار|دينار|\$)/iu;
+function quoteTextAmounts(text){
+  const s=String(text||"").replace(/[۰-۹]/g,d=>String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))).replace(/[٠-٩]/g,d=>String("٠١٢٣٤٥٦٧٨٩".indexOf(d))).replace(/٫/g,".");
+  const re=/(\$\s*)?(\d{1,3}(?:[,٬،]\d{3})+|\d+)(?:\.(\d+))?/g,out=[];let m;
+  while((m=re.exec(s))){
+    let after=s.slice(re.lastIndex).replace(/^\s+/,""),mult=1;
+    for(const [word,x] of QUOTE_TEXT_MULTIPLIERS)if(word.test(after)){mult=x;after=after.replace(/^\S+\s*/,"");break;}
+    out.push({value:Number(m[2].replace(/[,٬،]/g,"")+(m[3]?"."+m[3]:""))*mult,money:!!m[1]||QUOTE_TEXT_CURRENCY.test(after)});
+  }
+  return out;
+}
+function quoteTextPriceIssues(quote){
+  const exponent=CURRENCY_RULES[canonicalCurrency(quote.currency)]?.exponent??0,minor=v=>Math.round(v*10**exponent);
+  const amounts=quoteTextAmounts(quote.approved_quote_text),total=Number(quote.total_minor),issues=[];
+  const own=new Set(["unit_price_minor","subtotal_minor","discount_minor","shipping_minor","tax_minor","other_fees_minor","total_minor"].map(f=>quote[f]).filter(v=>v!==null&&v!==undefined&&v!=="").map(Number));
+  if(!amounts.some(a=>minor(a.value)===total))issues.push("total_not_stated");
+  for(const a of amounts)if(a.money&&!own.has(minor(a.value)))issues.push(`amount_not_in_quote:${a.value}`);
+  return issues;
+}
+
 function calculateQuoteValues(quote){
   const quantity=safeCommercialInteger(quote.quantity,{nullable:true,positive:true}),unit=safeCommercialInteger(quote.unit_price_minor);
   const result={subtotal_minor:null,total_minor:null,error:null};
@@ -10452,14 +10509,22 @@ function quoteReadiness(quote){
   if(!String(quote.currency||"").trim())missing.push("currency");
   try{safeCommercialInteger(quote.unit_price_minor,{nullable:false});}catch{missing.push("unit_price");}
   for(const f of ["discount_minor","shipping_minor","tax_minor","other_fees_minor"])try{safeCommercialInteger(quote[f],{nullable:false});}catch{missing.push(f);}
-  if(quote.market==="IRAN"&&quote.pricing_mode!=="variable_owner")missing.push("owner_price_confirmation");
-  if(quote.market==="ARAB"&&(!quote.price_item_id||!Number.isSafeInteger(Number(quote.price_item_version))||quote.pricing_mode!=="fixed_list"))missing.push("approved_price_item");
+  // Sales-intelligence quotes carry their own approval reference (owner-approved price version or resolved owner price decision); it is re-verified against D1 at submit/approve.
+  const siPricing=quote.pricing_mode==="versioned_price"||quote.pricing_mode==="custom_owner";
+  if(quote.pricing_mode==="versioned_price"&&!String(quote.price_version_id||"").trim())missing.push("approved_price_version");
+  if(quote.pricing_mode==="custom_owner"&&!String(quote.custom_price_decision_id||"").trim())missing.push("owner_price_decision");
+  if(!siPricing&&quote.market==="IRAN"&&quote.pricing_mode!=="variable_owner")missing.push("owner_price_confirmation");
+  if(!siPricing&&quote.market==="ARAB"&&(!quote.price_item_id||!Number.isSafeInteger(Number(quote.price_item_version))||quote.pricing_mode!=="fixed_list"))missing.push("approved_price_item");
   if(quantity!==null&&quote.moq!==null&&quote.moq!==undefined&&quantity<Number(quote.moq))missing.push("moq");
   if(!String(quote.payment_terms||"").trim())missing.push("payment_terms");
   if(!String(quote.delivery_terms||"").trim())missing.push("delivery_terms");
   if(!String(quote.approved_quote_text||"").trim())missing.push("quote_text");
   const calc=calculateQuoteValues(quote);if(calc.error||calc.total_minor===null)missing.push(calc.error||"total");
-  return {ready:missing.length===0,missing:[...new Set(missing)],...calc};
+  // The text is what the customer receives: it must state the verified total, and every amount it names next to a currency must be
+  // one of the quote's own amounts. Enforced for engine-prepared quotes; an owner-written legacy quote only gets a warning.
+  const warnings=[],textIssues=String(quote.approved_quote_text||"").trim()&&!calc.error&&calc.total_minor!==null?quoteTextPriceIssues({...quote,...calc}):[];
+  if(textIssues.length)(quote.request_id?missing:warnings).push("quote_text_price_mismatch");
+  return {ready:missing.length===0,missing:[...new Set(missing)],warnings,...calc};
 }
 
 async function ensureQuoteFromInbox(env,inboxId,ownerMarket=null){
@@ -10501,17 +10566,56 @@ async function recordQuoteDecisionFromInbound(env,inboxId,intent){
   const changed=await env.DB.prepare("UPDATE lead_quotes SET status=?,updated_at=? WHERE id=? AND status='sent'").bind(target,now(),id).run();
   if(changed.meta?.changes)await audit(env,"lead_quote_customer_decision","Customer decision deterministically linked to sent quote",{quote_id:id,inbox_message_id:inboxId,status:target});
   if(target==="accepted"){
-    const orderResult=await ensureOrderCandidateFromAcceptedQuote(env,id,inboxId);
+    // The quote is already 'accepted': an order candidate that cannot be created is shown to the owner (never just swallowed).
+    const failed=reason=>openOrderFlag(env,{type:"ORDER_CREATION_FAILED",subject:id,lead_id:row.lead_id,conversation_id:row.conversation_id,quote_id:id,
+      question:"The customer accepted a sent quote, but no order candidate could be created; nothing was confirmed or charged",
+      known:{quote_id:id,inbox_message_id:inboxId,reason:sanitizeOperationalError(reason)},recommendation:"Review the quote and create or confirm the order manually."});
+    let orderResult;
+    try{orderResult=await ensureOrderCandidateFromAcceptedQuote(env,id,inboxId);}catch(error){await failed(error?.message||error);throw error;}
+    if(!orderResult.order)await failed(orderResult.reason||"order_candidate_not_created");
     return {updated:!!changed.meta?.changes,quote_id:id,status:target,order:orderResult.order||null,order_created:!!orderResult.created,idempotent:!!orderResult.idempotent};
   }
   return {updated:!!changed.meta?.changes,quote_id:id,status:target};
 }
 
+const QUOTE_ENGINE_PRICING_MODES=new Set(["versioned_price","custom_owner"]);
+// Commercial inputs of an owner save. The dashboard save sends every field each time, so a change is a VALUE difference from the stored
+// quote, parsed exactly as the save parses it (NULL and '' are equal; currency compared canonically; market only when one is given).
+function quoteOwnerCommercialChanges(current,body,destination){
+  const has=f=>Object.prototype.hasOwnProperty.call(body,f),blank=v=>v===null||v===undefined||String(v).trim()==="",changed=[];
+  const currency=v=>blank(v)?null:canonicalCurrency(String(v).trim().slice(0,12));
+  for(const f of ["product","customization"])if(has(f)&&String(body[f]??"").trim().slice(0,2000)!==String(current[f]??"").trim())changed.push(f);
+  if(body.market&&determineQuoteMarket({ownerMarket:body.market,leadCountry:null,destination}).market!==current.market)changed.push("market");
+  if(has("currency")&&currency(body.currency)!==currency(current.currency))changed.push("currency");
+  for(const [f,opts] of [["quantity",{nullable:true,positive:true}],["unit_price_minor",{}],["moq",{nullable:true,positive:true}],["discount_minor",{}],["shipping_minor",{}],["tax_minor",{}],["other_fees_minor",{}]])
+    if(has(f)&&safeCommercialInteger(body[f],opts)!==(blank(current[f])?null:Number(current[f])))changed.push(f);
+  if(!blank(body.price_item_id)&&String(body.price_item_id).trim()!==String(current.price_item_id??""))changed.push("price_item_id");
+  if(!blank(body.sku))changed.push("sku");
+  return changed;
+}
+// Margin of an owner-priced quote, recomputed for its NEW price and quantity; never left describing the engine price it replaced.
+// A changed product, market or customization has no approved cost basis on this request, so its margin is UNKNOWN, not guessed.
+async function ownerEditedQuoteMargin(env,quote,changes=[]){
+  if(!quote.request_id)return quote.margin_json??null;
+  if(["product","market","customization"].some(f=>changes.includes(f)))return JSON.stringify({status:"UNKNOWN",message:"MARGIN = UNKNOWN",reason:"configuration_changed_by_owner",selling_minor:quote.total_minor===null||quote.total_minor===undefined?null:Number(quote.total_minor)-Number(quote.tax_minor||0),currency:quote.currency??null});
+  try{
+    const req=await env.DB.prepare("SELECT product_key,case_overrides_json FROM sales_requests WHERE id=? AND lead_id=? LIMIT 1").bind(quote.request_id,quote.lead_id).first();
+    if(!req)return JSON.stringify({status:"UNKNOWN",message:"MARGIN = UNKNOWN",reason:"sales_request_not_found"});
+    let overrides={};try{overrides=JSON.parse(req.case_overrides_json||"{}")||{};}catch{}
+    return JSON.stringify(await marginGuard(env,{...quote,product_key:req.product_key},overrides));
+  }catch{return JSON.stringify({status:"UNKNOWN",message:"MARGIN = UNKNOWN",reason:"margin_recompute_failed"});}
+}
+
 async function updateQuoteByOwner(env,id,body){
-  await ensureQuoteStore(env);const current=await env.DB.prepare("SELECT * FROM lead_quotes WHERE id=? LIMIT 1").bind(id).first();
+  await ensureQuoteStore(env);await ensureSalesIntelligenceStore(env);const current=await env.DB.prepare("SELECT * FROM lead_quotes WHERE id=? LIMIT 1").bind(id).first();
   if(!current)throw Error("Quote not found");if(!QUOTE_MUTABLE_STATUSES.has(current.status))throw Error("Approved or sent quote cannot be edited");
+  // Financial history is never rewritten: a quote that already produced an order is not editable (a failed lookup refuses the edit too).
+  await ensureOrderStore(env);if(await env.DB.prepare("SELECT id FROM lead_orders WHERE quote_id=? LIMIT 1").bind(id).first())throw Error("Quote already has an order and cannot be edited");
   const next={...current};
   for(const f of ["product","customization","destination","requested_price_discount","customer_notes","payment_terms","delivery_terms","notes","approved_quote_text","expires_at"]){if(Object.prototype.hasOwnProperty.call(body,f))next[f]=body[f]==null?null:String(body[f]).trim().slice(0,f==="approved_quote_text"?4000:2000)||null;}
+  // A save that changes no commercial value keeps an engine quote's pricing mode, approved price version / owner price decision and margin.
+  const changes=quoteOwnerCommercialChanges(current,body,next.destination),engineKept=QUOTE_ENGINE_PRICING_MODES.has(current.pricing_mode)&&!changes.length;
+  if(!engineKept){
   if(Object.prototype.hasOwnProperty.call(body,"quantity"))next.quantity=safeCommercialInteger(body.quantity,{nullable:true,positive:true});
   const market=determineQuoteMarket({ownerMarket:body.market,leadCountry:null,destination:next.destination});
   if(body.market){next.market=market.market;next.market_source="owner";}
@@ -10529,18 +10633,54 @@ async function updateQuoteByOwner(env,id,body){
     next._priceMatch=match.status;
   }else{next.pricing_mode=null;next.price_item_id=null;next.price_item_version=null;next.currency=null;next.unit_price_minor=null;}
   for(const f of ["discount_minor","shipping_minor","tax_minor","other_fees_minor"])if(Object.prototype.hasOwnProperty.call(body,f))next[f]=safeCommercialInteger(body[f]);
+  }
+  // A real commercial edit makes the price the owner's own: the engine's approval references no longer describe it (the previous
+  // ones stay in the audit), and the quote is marked owner-priced so the engine never overwrites it.
+  const commercial=!engineKept&&(changes.length>0||["market","pricing_mode","currency","unit_price_minor","moq","price_item_id","price_item_version"].some(f=>String(next[f]??"")!==String(current[f]??"")));
+  if(commercial){next.market_source="owner";next.price_version_id=null;next.custom_price_decision_id=null;next.discount_reason=null;if(changes.includes("product")||changes.includes("market"))next.config_key=null;}
+  // The customer receives the TEXT: when the owner changes the price of an engine-prepared quote but leaves its text as it was, the text
+  // is rebuilt from the new values with the engine's template; a changed product/market/customization has no template basis, so the
+  // text is cleared and the owner writes it (the quote is not ready until then). Owner-written text is kept and checked by readiness.
+  const textEdited=Object.prototype.hasOwnProperty.call(body,"approved_quote_text")&&String(next.approved_quote_text??"")!==String(current.approved_quote_text??"").trim();
+  let textRegenerated=false;
+  if(commercial&&next.request_id&&!textEdited){
+    const calc=calculateQuoteValues(next);
+    next.approved_quote_text=["product","market","customization"].some(f=>changes.includes(f))||calc.error||calc.total_minor===null?null:await engineQuoteText(env,{...next,...calc});
+    textRegenerated=!!next.approved_quote_text;
+  }
   const ready=quoteReadiness(next);next.subtotal_minor=ready.subtotal_minor;next.total_minor=ready.total_minor;
+  if(commercial)next.margin_json=await ownerEditedQuoteMargin(env,next,changes);
   if(ready.ready)next.status="quote_ready";
   else if(!next.product||!next.quantity)next.status="needs_details";
+  else if(engineKept)next.status="draft";
   else if(next.market==="requires_owner_review")next.status="requires_owner_review";
   else if(next.market==="IRAN"&&next.unit_price_minor===null)next.status="waiting_for_owner_price";
   else if(next.market==="ARAB"&&next._priceMatch==="multiple")next.status="requires_owner_review";
   else if(next.market==="ARAB"&&!next.price_item_id)next.status="waiting_for_price_match";
   else next.status="draft";
   const t=now();
-  await env.DB.prepare(`UPDATE lead_quotes SET market=?,market_source=?,pricing_mode=?,price_item_id=?,price_item_version=?,product=?,quantity=?,customization=?,destination=?,requested_price_discount=?,customer_notes=?,currency=?,unit_price_minor=?,subtotal_minor=?,discount_minor=?,shipping_minor=?,tax_minor=?,other_fees_minor=?,total_minor=?,moq=?,payment_terms=?,delivery_terms=?,notes=?,approved_quote_text=?,status=?,expires_at=?,updated_at=? WHERE id=?`).bind(next.market,next.market_source,next.pricing_mode,next.price_item_id,next.price_item_version,next.product,next.quantity,next.customization,next.destination,next.requested_price_discount,next.customer_notes,next.currency,next.unit_price_minor,next.subtotal_minor,next.discount_minor,next.shipping_minor,next.tax_minor,next.other_fees_minor,next.total_minor,next.moq,next.payment_terms,next.delivery_terms,next.notes,next.approved_quote_text,next.status,next.expires_at,t,id).run();
-  await audit(env,"lead_quote_owner_updated","Owner updated quote commercial fields",{quote_id:id,status:next.status,market:next.market,missing:ready.missing});
+  await env.DB.prepare(`UPDATE lead_quotes SET market=?,market_source=?,pricing_mode=?,price_item_id=?,price_item_version=?,product=?,quantity=?,customization=?,destination=?,requested_price_discount=?,customer_notes=?,currency=?,unit_price_minor=?,subtotal_minor=?,discount_minor=?,shipping_minor=?,tax_minor=?,other_fees_minor=?,total_minor=?,moq=?,payment_terms=?,delivery_terms=?,notes=?,approved_quote_text=?,status=?,expires_at=?,price_version_id=?,custom_price_decision_id=?,discount_reason=?,margin_json=?,config_key=?,updated_at=? WHERE id=?`).bind(next.market,next.market_source,next.pricing_mode,next.price_item_id,next.price_item_version,next.product,next.quantity,next.customization,next.destination,next.requested_price_discount,next.customer_notes,next.currency,next.unit_price_minor,next.subtotal_minor,next.discount_minor,next.shipping_minor,next.tax_minor,next.other_fees_minor,next.total_minor,next.moq,next.payment_terms,next.delivery_terms,next.notes,next.approved_quote_text,next.status,next.expires_at,next.price_version_id??null,next.custom_price_decision_id??null,next.discount_reason??null,next.margin_json??null,next.config_key??null,t,id).run();
+  await audit(env,"lead_quote_owner_updated","Owner updated quote commercial fields",{quote_id:id,status:next.status,market:next.market,missing:ready.missing,commercial_change:commercial,changed_fields:changes,
+    previous_pricing_mode:current.pricing_mode??null,previous_price_version_id:current.price_version_id??null,previous_custom_price_decision_id:current.custom_price_decision_id??null,
+    text_regenerated:textRegenerated,text_cleared:commercial&&!!next.request_id&&!textEdited&&!next.approved_quote_text,warnings:ready.warnings});
   return await env.DB.prepare("SELECT * FROM lead_quotes WHERE id=?").bind(id).first();
+}
+
+// An owner-written (legacy) quote whose text does not match its price is not blocked, but the owner's submit/approve is audited with it.
+async function auditQuoteTextWarnings(env,q,readiness,action){
+  if(!readiness.warnings?.length)return;
+  try{await audit(env,"lead_quote_text_price_warning","Quote text does not state the quote's own price (owner-written quote; not blocked)",{quote_id:q.id,action,warnings:readiness.warnings,issues:quoteTextPriceIssues({...q,...calculateQuoteValues(q)})});}catch{}
+}
+
+// Re-checked at submit AND approve: an expired quote or a price that no longer matches its approval source never reaches the customer.
+// IRAN variable_owner prices are entered only by the authenticated owner (updateQuoteByOwner), so there is no external source to re-match.
+async function verifyQuotePricing(env,q){
+  if(q.expires_at){const exp=Date.parse(q.expires_at);if(!Number.isFinite(exp))throw Error("Quote expiry date is invalid; fix expires_at before submit or approval");if(exp<=Date.now())throw Error("Quote has expired; re-prepare it before submit or approval");}
+  if(q.pricing_mode==="versioned_price"||q.pricing_mode==="custom_owner")return await verifyQuotePriceVersion(env,q);
+  if(q.market==="ARAB"){
+    const price=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=? AND version=? LIMIT 1").bind(q.price_item_id,q.price_item_version).first();
+    if(!priceItemEffective(price)||price.currency!==q.currency||Number(price.unit_price_minor)!==Number(q.unit_price_minor)||Number(price.moq??0)!==Number(q.moq??0))throw Error("Approved Arab price version is no longer an exact active match");
+  }
 }
 
 async function transitionQuote(env,id,action,actor="admin"){
@@ -10548,10 +10688,7 @@ async function transitionQuote(env,id,action,actor="admin"){
   const t=now();
   if(action==="submit"){
     if(q.status!=="quote_ready")throw Error("Only quote_ready can be submitted");const readiness=quoteReadiness(q);if(!readiness.ready)throw Error(`Quote is incomplete: ${readiness.missing.join(",")}`);
-    if(q.market==="ARAB"){
-      const price=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=? AND version=? LIMIT 1").bind(q.price_item_id,q.price_item_version).first();
-      if(!priceItemEffective(price)||price.currency!==q.currency||Number(price.unit_price_minor)!==Number(q.unit_price_minor)||Number(price.moq??0)!==Number(q.moq??0))throw Error("Approved Arab price version is no longer an exact active match");
-    }
+    await verifyQuotePricing(env,q);await auditQuoteTextWarnings(env,q,readiness,"submit");
     const c=await env.DB.prepare("SELECT c.*,lc.raw_value,lc.normalized_value,lc.contact_type,lc.evidence_status,lc.source FROM lead_conversations c LEFT JOIN lead_contacts lc ON lc.id=c.contact_id WHERE c.id=? AND c.lead_id=? AND c.platform='telegram' LIMIT 1").bind(q.conversation_id,q.lead_id).first();
     const recipient=telegramLeadContactChatId(c);if(!recipient)throw Error("Quote conversation has no sendable Telegram contact");
     if(q.outreach_id)throw Error("Quote already has an outreach record");
@@ -10560,6 +10697,8 @@ async function transitionQuote(env,id,action,actor="admin"){
     if(!results?.[0]?.meta?.changes||!results?.[1]?.meta?.changes)throw Error("Quote submission transition failed");
   }else if(action==="approve"){
     if(q.status!=="pending_approval"||!q.outreach_id)throw Error("Only pending quote can be approved");
+    const readiness=quoteReadiness(q);if(!readiness.ready)throw Error(`Quote is incomplete: ${readiness.missing.join(",")}`);
+    await verifyQuotePricing(env,q);await auditQuoteTextWarnings(env,q,readiness,"approve");
     const results=await env.DB.batch([env.DB.prepare("UPDATE lead_outreach SET status='approved',approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status='pending_approval'").bind(t,actor,t,q.outreach_id),env.DB.prepare("UPDATE lead_quotes SET status='approved',approved_by=?,approved_at=?,updated_at=? WHERE id=? AND status='pending_approval'").bind(actor,t,t,id)]);
     if(!results?.[0]?.meta?.changes||!results?.[1]?.meta?.changes)throw Error("Quote approval transition failed");
   }else if(action==="reject"){
@@ -10827,6 +10966,26 @@ async function persistTelegramOutreachSuccess(env,outreach,contact,result){
   throw lastError||Error('Unable to persist Telegram outreach result');
 }
 
+// Last check before a quote-linked outreach is claimed for sending: an unapproved or expired quote, or a price that no longer matches its
+// approval source, is never sent — no status change, no Telegram call, no renewal; the reason is audited for the owner to re-prepare it.
+async function quoteSendBlock(env,outreachId,message){
+  let quote=null;
+  try{
+    await ensureQuoteStore(env);quote=await env.DB.prepare("SELECT * FROM lead_quotes WHERE outreach_id=? LIMIT 1").bind(outreachId).first();
+    if(!quote)return null;
+    if(quote.status!=="approved")throw Error("Quote is not approved for sending");
+    // The message about to be sent must be exactly the approved quote text, and (engine-prepared quotes) state the verified price.
+    if(String(message??"").trim()!==String(quote.approved_quote_text??"").trim())throw Error("The outgoing message is not the approved quote text");
+    if(quote.request_id&&quoteTextPriceIssues(quote).length)throw Error("The quote text does not state the verified price");
+    if(QUOTE_ENGINE_PRICING_MODES.has(quote.pricing_mode))await ensureSalesIntelligenceStore(env);
+    await verifyQuotePricing(env,quote);return null;
+  }catch(error){
+    const reason=sanitizeOperationalError(error?.message||error);
+    try{await audit(env,"lead_quote_send_blocked","Quote send blocked by the send-time price check; nothing was sent",{quote_id:quote?.id||null,outreach_id:outreachId,reason});}catch{}
+    return `Quote price check failed; nothing was sent. Re-prepare the quote: ${reason}`;
+  }
+}
+
 async function sendApprovedTelegramOutreach(env,outreachId){
   await ensureLeadOutreachStore(env);
   const outreach=await env.DB.prepare(`SELECT o.*,l.id AS canonical_lead_id,l.stage AS lead_stage,
@@ -10850,6 +11009,8 @@ async function sendApprovedTelegramOutreach(env,outreachId){
   const album=await galleryOutreachAlbum(env,outreach.id);
   if(album.blocked)return {ok:false,statusCode:409,error:album.blocked};
   if(album.items.length&&message.length>GALLERY_CAPTION_MAX)return {ok:false,statusCode:409,error:'Photo caption is too long; shorten the draft'};
+  const quoteBlocked=await quoteSendBlock(env,outreach.id,message);
+  if(quoteBlocked)return {ok:false,statusCode:409,error:quoteBlocked,status:outreach.status};
   const claimed=await env.DB.prepare("UPDATE lead_outreach SET status='sending',error_code=NULL,error_detail=NULL,updated_at=? WHERE id=? AND status='approved'").bind(now(),outreach.id).run();
   if(!claimed.meta?.changes)return {ok:false,statusCode:409,error:'Outreach send was already claimed'};
   let result;

@@ -376,7 +376,7 @@ export async function openDecision(env,d){
 }
 async function recordKnowledgeGap(env,d,decisionId){
   // A customer's acceptance waiting for owner approval is an approval step, not missing knowledge.
-  if(d.payload?.resolution==="learning"||d.payload?.resolution==="order_candidate"||d.payload?.resolution==="payment_verification")return;
+  if(d.payload?.resolution==="learning"||d.payload?.resolution==="order_candidate"||d.payload?.resolution==="payment_verification"||d.payload?.resolution==="owner_edit_conflict"||d.payload?.resolution==="order_flag")return;
   const fp=gapFingerprint(d),t=now(),gap=await first(env,"SELECT * FROM knowledge_gaps WHERE fingerprint=?",fp);
   if(!gap){await env.DB.prepare(`INSERT OR IGNORE INTO knowledge_gaps(fingerprint,decision_type,product_key,attribute_key,value_text,occurrences,lead_ids_json,examples_json,first_seen,last_seen,status,updated_at)
     VALUES(?,?,?,?,?,1,?,?,?,?,'open',?)`).bind(fp,d.decision_type,d.product_key||null,normKey(d.payload?.attribute)||null,normText(d.payload?.value)||null,JSON.stringify(d.lead_id?[d.lead_id]:[]),JSON.stringify([decisionId]),t,t,t).run();}
@@ -644,6 +644,14 @@ async function quoteCharges(env,req,ctx,overrides,out,base){
   return r;
 }
 function formatMoney(currency,minor){const f=D.customerPaymentAmountText?.({currency,amount_minor:minor});return f||`${minor} ${currency} (minor units)`;}
+// The engine's quote text for a quote's CURRENT values (same template as buildQuote), used when the owner changes the price of an
+// engine-prepared quote without rewriting its text; null when it cannot be built (the owner then writes the text).
+export async function engineQuoteText(env,quote){
+  if(!quote?.request_id||quote.total_minor===null||quote.total_minor===undefined||!quote.payment_terms||!quote.delivery_terms)return null;
+  const req=await first(env,"SELECT * FROM sales_requests WHERE id=? AND lead_id=?",quote.request_id,quote.lead_id||"");if(!req)return null;
+  const k=await currentProductKnowledge(env,req.product_key||"");
+  return quoteText(req,k,quote,D.outreachLanguage({country:quote.market==="IRAN"?"iran":"iraq"}));
+}
 function quoteText(req,k,q,language){
   const ar=language==="Iraqi Arabic",flat=flatRequirements(req),spec=Object.entries(flat).map(([a,v])=>`${(k.attributes.find(x=>x.attribute_key===a)||{}).label||a}: ${v}`).join(" · ");
   const lines=ar?[`عرض سعر: ${k.product?.name||req.product_text}`,spec,`الكمية: ${q.quantity}`,`سعر الوحدة: ${formatMoney(q.currency,q.unit_price_minor)}`,q.discount_minor?`الخصم: ${formatMoney(q.currency,q.discount_minor)}`:null,`المجموع: ${formatMoney(q.currency,q.total_minor)}`,`شروط الدفع: ${q.payment_terms}`,`التسليم: ${q.delivery_terms}`]
@@ -674,6 +682,12 @@ async function prepareFastQuote(env,req,matched,out){
 async function buildQuote(env,req,{mode,price=null,unit_price_minor=null,decisionId=null,configKey=null},out){
   const base={lead_id:req.lead_id,conversation_id:req.conversation_id,market:req.market,product_key:req.product_key,request_id:req.id},ctx={market:req.market,product_key:req.product_key,config_key:configKey||undefined};
   const overrides=parseJson(req.case_overrides_json,{}),k=await currentProductKnowledge(env,req.product_key||"");
+  // The engine only ever writes versioned_price/custom_owner to the request's quote, so any other mode means the owner changed it
+  // commercially: the owner's quote is kept (checked before any charge/cost/margin decision is opened for an engine price that will
+  // not be used), and a changed customer request becomes ONE owner decision — never a new price.
+  const current=req.quote_id?await first(env,"SELECT * FROM lead_quotes WHERE id=?",req.quote_id):null;
+  if(current&&QUOTE_REFRESH_STATUSES.includes(current.status)&&!ENGINE_PRICING_MODES.includes(current.pricing_mode)){
+    await ownerEditConflict(env,base,current,{product:k.product?.name||req.product_text,quantity:req.quantity},out);return current;}
   const charges=await quoteCharges(env,req,ctx,overrides,out,base);
   const currency=MARKET_CURRENCY[req.market],unit=price?price.unit_price_minor:unit_price_minor,subtotal=unit*req.quantity;
   if(!Number.isSafeInteger(subtotal))throw Error("Quote subtotal overflow");
@@ -693,7 +707,7 @@ async function buildQuote(env,req,{mode,price=null,unit_price_minor=null,decisio
     out.decisions.push((await openDecision(env,{...base,decision_type:"MARGIN_RULE",priority:60,question:"Which cost components are required before margin is considered known?",known:{market:req.market,product:req.product_key},payload:{resolution:"setting",setting_key:"required_cost_components",scope:{market:req.market,product_key:req.product_key}}})).decision?.id);
   const ready=D.quoteReadiness(q),status=ready.ready?"quote_ready":"draft",t=now();
   const existing=req.quote_id?await first(env,"SELECT * FROM lead_quotes WHERE id=?",req.quote_id):null;
-  const mutable=["draft","needs_details","requires_owner_review","waiting_for_owner_price","waiting_for_price_match","quote_ready"];
+  const mutable=QUOTE_REFRESH_STATUSES;
   // In-flight/sent/accepted quotes are never touched or duplicated; a new quote starts only after rejection/expiry or an owner request reset.
   if(existing&&!mutable.includes(existing.status)&&!["rejected","expired"].includes(existing.status))return existing;
   if(existing&&!mutable.includes(existing.status)){req.quote_id=null;}
@@ -705,6 +719,23 @@ async function buildQuote(env,req,{mode,price=null,unit_price_minor=null,decisio
   const saved=await first(env,"SELECT * FROM lead_quotes WHERE id=?",req.quote_id);
   await auditSafe(env,"sales_quote_prepared","Quote prepared for owner approval (not sent)",{quote_id:saved.id,request_id:req.id,pricing_mode:mode,price_version_id:q.price_version_id,status});
   return saved;
+}
+const QUOTE_REFRESH_STATUSES=["draft","needs_details","requires_owner_review","waiting_for_owner_price","waiting_for_price_match","quote_ready"];
+const ENGINE_PRICING_MODES=["versioned_price","custom_owner"];
+// Only what the CUSTOMER asks for is compared (product, quantity): the owner's own price differing from the engine's is the owner's
+// decision, not a conflict.
+async function ownerEditConflict(env,base,existing,request,out){
+  const view=x=>({product:String(x.product??"").trim()||null,quantity:x.quantity===null||x.quantity===undefined?null:Number(x.quantity)});
+  const owner=view(existing),engine=view(request);
+  if(JSON.stringify(owner)===JSON.stringify(engine))return;
+  // One decision per distinct customer change (any status), and never a second one while one is still pending for this quote.
+  const fingerprint=["QUOTE_OWNER_EDIT_CONFLICT",existing.id,JSON.stringify(engine)].join("|");
+  if(await first(env,"SELECT id FROM owner_decisions WHERE fingerprint=? OR (decision_type='QUOTE_OWNER_EDIT_CONFLICT' AND quote_id=? AND status='PENDING') LIMIT 1",fingerprint,existing.id))return;
+  const opened=await openDecision(env,{...base,quote_id:existing.id,decision_type:"QUOTE_OWNER_EDIT_CONFLICT",fingerprint,priority:30,
+    question:"The customer's request changed after the owner edited this quote; the owner's quote was kept unchanged",
+    known:{quote_id:existing.id,owner_quote:{...owner,currency:existing.currency??null,unit_price_minor:existing.unit_price_minor??null,total_minor:existing.total_minor??null},customer_request:engine},recommendation:"Edit the quote to match the new request, or keep the owner's quote.",
+    risk:"The engine never replaces an owner-edited price; nothing is sent without owner approval.",payload:{resolution:"owner_edit_conflict",quote_id:existing.id}});
+  if(opened.decision?.id)out?.decisions?.push(opened.decision.id);
 }
 /* ------------------------------------------- customer price answer (read-only) */
 // The Sales Brain's immediate answer to "how much?": ONLY current, effective, owner-approved rows of THIS market (catalog, attribute
@@ -753,11 +784,18 @@ export async function siApprovedPrice(env,{market,productKey,texts=[],quantity=n
   return {...shared,status:"priced",quantity:q,price_version:{id:tier.price.id,version:tier.price.version},unit_price_minor:unit,subtotal_minor:subtotal,discount,total_minor:subtotal===null?null:subtotal-(discount?.amount_minor||0)};
 }
 export async function verifyQuotePriceVersion(env,q){
-  if(q.pricing_mode==="custom_owner"){const d=await first(env,"SELECT status,owner_decision FROM owner_decisions WHERE id=?",q.custom_price_decision_id||"");if(!d||d.status!=="RESOLVED")throw Error("Custom price requires a resolved owner pricing decision");return;}
+  if(q.pricing_mode==="custom_owner"){const d=await first(env,"SELECT status,owner_answer_json,lead_id,request_id,payload_json FROM owner_decisions WHERE id=?",q.custom_price_decision_id||"");if(!d||d.status!=="RESOLVED")throw Error("Custom price requires a resolved owner pricing decision");
+    // Fail closed: the decision must be a price answer for exactly this customer AND this request (any price decision type).
+    if(!d.lead_id||d.lead_id!==q.lead_id)throw Error("Owner pricing decision belongs to another lead");
+    if(!d.request_id||d.request_id!==q.request_id)throw Error("Owner pricing decision belongs to another request");
+    if(parseJson(d.payload_json,{})?.resolution!=="price")throw Error("Owner decision is not a pricing decision");
+    let approved=NaN;try{approved=safeInt(parseJson(d.owner_answer_json,{})?.unit_price_minor,{min:1,name:"unit_price_minor"});}catch{}
+    if(!Number.isSafeInteger(approved)||approved!==Number(q.unit_price_minor))throw Error("Quote price differs from the owner's approved custom price");return;}
   if(q.pricing_mode!=="versioned_price")return;
   const p=await first(env,"SELECT * FROM price_versions WHERE id=?",q.price_version_id||"");
   if(!p||p.status!=="current")throw Error("Approved price version is no longer current; re-prepare the quote");
-  if(Number(p.unit_price_minor)!==Number(q.unit_price_minor)||canonicalCurrency(p.currency)!==canonicalCurrency(q.currency)||p.market!==q.market)throw Error("Quote no longer matches its approved price version");
+  const t=now();if((p.effective_from&&p.effective_from>t)||(p.effective_until&&p.effective_until<t))throw Error("Approved price version is outside its effective dates; re-prepare the quote");
+  if(Number(p.unit_price_minor)!==Number(q.unit_price_minor)||canonicalCurrency(p.currency)!==canonicalCurrency(q.currency)||p.market!==q.market||Number(p.moq??0)!==Number(q.moq??0))throw Error("Quote no longer matches its approved price version");
 }
 
 /* ----------------------------------------------------------- cost + margin */
