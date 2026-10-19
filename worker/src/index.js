@@ -7,6 +7,7 @@ import { salesAiProvider, salesAiModel, salesAiTimeoutMs } from "./sales-ai-brai
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
+import { bearerMatches } from "./secure-compare.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -327,8 +328,9 @@ async function rate(env, req) {
 }
 
 function auth(req, env) {
+  // Same header comparison as before, done in constant time (no early exit on the first differing byte).
   return !!env.ADMIN_TOKEN &&
-    req.headers.get("Authorization") === `Bearer ${env.ADMIN_TOKEN}`;
+    bearerMatches(req.headers.get("Authorization"), env.ADMIN_TOKEN);
 }
 
 async function audit(env, type, msg, details = {}) {

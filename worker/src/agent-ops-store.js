@@ -1,0 +1,186 @@
+// AGENT OPS STORE — Stage 2B. Durable run reports, deduplicated persistent alerts, the dead-letter queue, heartbeat and the owner
+// approval queue for side-effect autonomy tasks. The tables come ONLY from owner-actions/agent-orchestrator-stage2b/
+// 02-migration-draft.sql: this module never creates or alters a table. When they are missing it reports "not migrated" and every
+// write is skipped, so the orchestrator falls back to its Stage 2A behaviour. All writes are best-effort and never throw into the
+// caller; nothing here sends a message, approves anything by itself, or touches sales/CRM tables (approvals are kept out of
+// owner_decisions on purpose).
+import { redact, safeErrorText } from "./agent-orchestrator.js";
+
+export const OPS_TABLES=Object.freeze(["agent_runs","agent_dead_letters","agent_alerts","agent_heartbeat","agent_approvals"]);
+export const APPROVAL_TTL_MS=24*60*60*1000;
+const iso=ms=>new Date(ms).toISOString();
+const uid=()=>crypto.randomUUID();
+const READY=new WeakMap();
+
+// Probe each table with a zero-row read; a positive answer is cached per database, a negative one is re-checked next time.
+export async function opsAvailable(env){
+  if(!env?.DB)return false;
+  if(READY.get(env.DB))return true;
+  try{for(const t of OPS_TABLES)await env.DB.prepare(`SELECT * FROM ${t} LIMIT 0`).all();READY.set(env.DB,true);return true;}
+  catch{return false;}
+}
+
+const FALLBACK={
+  dead_letters:"Failed tasks keep status 'failed'; other tasks and the next scheduled run continue",
+  budget_exhausted:"Remaining tasks stay queued for the next run",
+  deadline_reached:"Remaining tasks stay queued for the next run",
+  capability_blocked:"Side-effect tasks wait in the owner approval queue; nothing is run without approval",
+  invalid_task_graph:"No task was started in this run",
+  orchestrator_error:"No task was started in this run"
+};
+
+// Persist one orchestrator report: the run row, its dead letters, the heartbeat, and the alert lifecycle (open → recovered →
+// acknowledged). Returns {stored:boolean}.
+export async function recordRun(env,scheduler,report,extra={}){
+  try{
+    if(!(await opsAvailable(env)))return {stored:false,reason:"not_migrated"};
+    const t=report.finished_at||new Date().toISOString(),healthy=report.heartbeat?.healthy?1:0;
+    const counts={...report.counts,...Object.fromEntries(Object.entries(extra).filter(([,v])=>typeof v==="number"))};
+    await env.DB.prepare("INSERT OR IGNORE INTO agent_runs(run_id,scheduler,orchestrator_version,started_at,finished_at,duration_ms,counts_json,budget_spent,budget_limit,alert_codes_json,healthy) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(report.run_id,scheduler,report.orchestrator_version,report.started_at,t,report.duration_ms,JSON.stringify(counts),report.budget?.spent??0,report.budget?.limit??0,JSON.stringify(report.alerts.map(a=>a.code)),healthy).run();
+    for(const d of report.dead_letters)await env.DB.prepare("INSERT INTO agent_dead_letters(id,run_id,task_id,agent,agent_version,state,attempts,error_redacted,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+      .bind(uid(),report.run_id,d.task_id,d.agent,d.version||null,d.state,d.attempts,safeErrorText(d.error),d.at||t).run();
+    await env.DB.prepare("INSERT INTO agent_heartbeat(scheduler,last_run_id,last_finished_at,healthy) VALUES(?,?,?,?) ON CONFLICT(scheduler) DO UPDATE SET last_run_id=excluded.last_run_id,last_finished_at=excluded.last_finished_at,healthy=excluded.healthy")
+      .bind(scheduler,report.run_id,t,healthy).run();
+    // Alerts: dead letters are raised per agent (with the affected tasks); run-level warnings/criticals under "orchestrator".
+    const raised=[];
+    const byAgent=new Map();for(const d of report.dead_letters){const l=byAgent.get(d.agent)||[];l.push(d);byAgent.set(d.agent,l);}
+    for(const [agent,list] of byAgent)raised.push({code:"dead_letters",agent,level:"warning",cause:list[list.length-1].error,tasks:list.map(d=>d.task_id)});
+    for(const a of report.alerts)if(a.code!=="dead_letters"&&a.level!=="info")raised.push({code:a.code,agent:"orchestrator",level:a.level,cause:a.message,tasks:report.tasks.filter(x=>["budget_exhausted","deadline_reached","not_run"].includes(x.state)).map(x=>x.id)});
+    for(const a of extra.blockedForApproval||[])raised.push({code:"capability_blocked",agent:a.agent,level:"info",cause:"Waiting for owner approval",tasks:[a.task_id]});
+    const raisedKeys=new Set();
+    for(const a of raised){
+      raisedKeys.add(`${a.code}|${a.agent}`);
+      const open=await env.DB.prepare("SELECT id,affected_tasks_json FROM agent_alerts WHERE scheduler=? AND code=? AND agent=? AND acknowledged_at IS NULL LIMIT 1").bind(scheduler,a.code,a.agent).first();
+      if(open){
+        let tasks=[];try{tasks=JSON.parse(open.affected_tasks_json||"[]")}catch{}
+        tasks=[...new Set([...tasks,...a.tasks])].slice(-50);
+        await env.DB.prepare("UPDATE agent_alerts SET level=?,cause_redacted=?,affected_tasks_json=?,fallback_status=?,recovery_state='open',recovered_at=NULL,last_run_id=?,last_seen_at=?,occurrences=occurrences+1 WHERE id=?")
+          .bind(a.level,safeErrorText(a.cause),JSON.stringify(tasks),FALLBACK[a.code]||null,report.run_id,t,open.id).run();
+      }else{
+        await env.DB.prepare("INSERT INTO agent_alerts(id,scheduler,code,agent,level,cause_redacted,affected_tasks_json,fallback_status,recovery_state,last_run_id,first_seen_at,last_seen_at,occurrences) VALUES(?,?,?,?,?,?,?,?,'open',?,?,?,1)")
+          .bind(uid(),scheduler,a.code,a.agent,a.level,safeErrorText(a.cause),JSON.stringify(a.tasks.slice(-50)),FALLBACK[a.code]||null,report.run_id,t,t).run();
+      }
+    }
+    // Recovery: an open alert whose cause did not recur in a healthy run is marked recovered; it stays visible until acknowledged.
+    if(healthy){
+      const opens=await env.DB.prepare("SELECT id,code,agent FROM agent_alerts WHERE scheduler=? AND acknowledged_at IS NULL AND recovery_state='open'").bind(scheduler).all();
+      for(const o of opens.results||[])if(!raisedKeys.has(`${o.code}|${o.agent}`))
+        await env.DB.prepare("UPDATE agent_alerts SET recovery_state='recovered',recovered_at=? WHERE id=? AND recovery_state='open'").bind(t,o.id).run();
+    }
+    return {stored:true};
+  }catch(error){return {stored:false,reason:"store_error",error:redact(error)};}
+}
+
+/* ------------------------------------------------------------------------------------------- owner approval queue */
+// A side-effect task gets ONE live approval request (pending or approved) bound to its id and exact payload key.
+export async function approvalForTask(env,{taskId,dedupKey,nowMs=Date.now()}){
+  if(!(await opsAvailable(env)))return {available:false};
+  // Unused approvals expire; expiry never approves anything.
+  await env.DB.prepare("UPDATE agent_approvals SET status='expired' WHERE status='approved' AND expires_at IS NOT NULL AND expires_at<=?").bind(iso(nowMs)).run();
+  const live=await env.DB.prepare("SELECT * FROM agent_approvals WHERE task_id=? AND status IN ('pending','approved') LIMIT 1").bind(taskId).first();
+  if(live&&live.dedup_key!==dedupKey){   // the task changed since the request: the old request no longer covers it
+    await env.DB.prepare("UPDATE agent_approvals SET status='expired',note='task payload changed' WHERE id=? AND status IN ('pending','approved')").bind(live.id).run();
+    return {available:true,approval:null};
+  }
+  return {available:true,approval:live||null};
+}
+// Every owner/run transition below is ONE D1 batch (a transaction): the compare-and-set UPDATE stamps a per-request action_token,
+// and the dependent UPDATE and the audit INSERT only apply WHERE EXISTS(row carrying THAT token). So the audit row exists if and
+// only if this request's transition happened; a refused CAS writes nothing, and a failing audit insert rolls the transition back.
+const AUDIT_SQL="INSERT INTO autonomy_events(id,type,module,message,meta_json,created_at) SELECT ?,?,NULL,?,?,? WHERE EXISTS(";
+const auditStmt=(env,type,message,meta,t,guard,...guardBinds)=>env.DB.prepare(AUDIT_SQL+guard+")").bind(uid(),type,String(message).slice(0,300),JSON.stringify(meta).slice(0,2000),t,...guardBinds);
+const changed=r=>Number(r?.meta?.changes||0)===1;
+const actorOf=actor=>String(actor||"owner").slice(0,120);
+const saveFailed=()=>({ok:false,status:500,error:"The change could not be saved; nothing was changed"});
+
+export async function requestApproval(env,{taskId,module,action,dedupKey,capability,nowMs=Date.now()}){
+  if(!(await opsAvailable(env)))return null;
+  const id=uid(),t=iso(nowMs),tok=uid();
+  try{
+    await env.DB.batch([
+      env.DB.prepare("INSERT OR IGNORE INTO agent_approvals(id,task_id,module,action,dedup_key,capability,status,requested_at,action_token) VALUES(?,?,?,?,?,?,'pending',?,?)").bind(id,taskId,module,action,dedupKey,capability,t,tok),
+      auditStmt(env,"agent_approval_requested",`Approval requested for ${module}:${action}`,{approval_id:id,task_id:taskId,module,action,capability},t,"SELECT 1 FROM agent_approvals WHERE id=? AND action_token=?",id,tok)
+    ]);
+  }catch{return null;}
+  return await env.DB.prepare("SELECT * FROM agent_approvals WHERE task_id=? AND status IN ('pending','approved') LIMIT 1").bind(taskId).first();
+}
+// One-shot: the approval is consumed (approved → used) atomically BEFORE the task runs; only the run that consumes it may run.
+export async function consumeApproval(env,{approvalId,taskId,dedupKey,nowMs=Date.now()}){
+  const t=iso(nowMs),tok=uid();
+  try{
+    const res=await env.DB.batch([
+      env.DB.prepare("UPDATE agent_approvals SET status='used',used_at=?,action_token=? WHERE id=? AND task_id=? AND dedup_key=? AND status='approved' AND (expires_at IS NULL OR expires_at>?)").bind(t,tok,approvalId,taskId,dedupKey,t),
+      auditStmt(env,"agent_approval_used","Owner approval consumed by the scheduled run",{approval_id:approvalId,task_id:taskId},t,"SELECT 1 FROM agent_approvals WHERE id=? AND action_token=?",approvalId,tok)
+    ]);
+    return changed(res[0]);
+  }catch{return false;}
+}
+// Owner decision (admin route only). APPROVE puts exactly that blocked task back in the queue; REJECT leaves it blocked.
+export async function decideApproval(env,{id,decision,actor,nowMs=Date.now()}){
+  if(!(await opsAvailable(env)))return {ok:false,status:503,error:"Agent ops tables are not migrated"};
+  if(!["approve","reject"].includes(decision))return {ok:false,status:400,error:"decision must be approve or reject"};
+  const a=await env.DB.prepare("SELECT * FROM agent_approvals WHERE id=?").bind(String(id||"")).first();
+  if(!a)return {ok:false,status:404,error:"Approval not found"};
+  if(a.status!=="pending"){const same=(decision==="approve"&&["approved","used"].includes(a.status))||(decision==="reject"&&a.status==="rejected");return same?{ok:true,idempotent:true,approval:a}:{ok:false,status:409,error:`Approval is already ${a.status}`};}
+  const t=iso(nowMs),tok=uid(),status=decision==="approve"?"approved":"rejected",guard="SELECT 1 FROM agent_approvals WHERE id=? AND action_token=?";
+  const stmts=[env.DB.prepare("UPDATE agent_approvals SET status=?,decided_at=?,decided_by=?,expires_at=?,action_token=? WHERE id=? AND status='pending'").bind(status,t,actorOf(actor),decision==="approve"?iso(nowMs+APPROVAL_TTL_MS):null,tok,a.id)];
+  if(decision==="approve")stmts.push(env.DB.prepare(`UPDATE autonomy_tasks SET status='queued',error=NULL,updated_at=? WHERE id=? AND status='blocked' AND EXISTS(${guard})`).bind(t,a.task_id,a.id,tok));
+  stmts.push(auditStmt(env,"agent_approval_decided",`Owner ${status} ${a.module}:${a.action}`,{approval_id:a.id,task_id:a.task_id,module:a.module,action:a.action,decision:status,actor:actorOf(actor)},t,guard,a.id,tok));
+  let res;try{res=await env.DB.batch(stmts);}catch{return saveFailed();}
+  if(!changed(res[0]))return {ok:false,status:409,error:"Approval changed concurrently; reload"};
+  return {ok:true,approval:await env.DB.prepare("SELECT * FROM agent_approvals WHERE id=?").bind(a.id).first()};
+}
+
+/* ------------------------------------------------------------------------------------------- owner actions on alerts / DLQ */
+export async function acknowledgeAlert(env,{id,actor,nowMs=Date.now()}){
+  if(!(await opsAvailable(env)))return {ok:false,status:503,error:"Agent ops tables are not migrated"};
+  const alertId=String(id||""),t=iso(nowMs),tok=uid();
+  let res;try{res=await env.DB.batch([
+    env.DB.prepare("UPDATE agent_alerts SET acknowledged_at=?,acknowledged_by=?,action_token=? WHERE id=? AND acknowledged_at IS NULL").bind(t,actorOf(actor),tok,alertId),
+    auditStmt(env,"agent_alert_acknowledged","Owner acknowledged an agent alert",{alert_id:alertId,actor:actorOf(actor)},t,"SELECT 1 FROM agent_alerts WHERE id=? AND action_token=?",alertId,tok)
+  ]);}catch{return saveFailed();}
+  if(changed(res[0]))return {ok:true};
+  const a=await env.DB.prepare("SELECT acknowledged_at FROM agent_alerts WHERE id=?").bind(alertId).first();
+  return a?{ok:true,idempotent:true}:{ok:false,status:404,error:"Alert not found"};
+}
+// dismiss: record that the owner saw it; requeue: put the failed autonomy task back in the queue (owner's choice). A requeued
+// side-effect task still needs a NEW owner approval before it can run again (its previous approval was consumed).
+export async function resolveDeadLetter(env,{id,resolution,actor,nowMs=Date.now()}){
+  if(!(await opsAvailable(env)))return {ok:false,status:503,error:"Agent ops tables are not migrated"};
+  if(!["dismissed","retried"].includes(resolution))return {ok:false,status:400,error:"resolution must be dismissed or retried"};
+  const d=await env.DB.prepare("SELECT * FROM agent_dead_letters WHERE id=?").bind(String(id||"")).first();
+  if(!d)return {ok:false,status:404,error:"Dead letter not found"};
+  if(d.resolved_at)return d.resolution===resolution?{ok:true,idempotent:true}:{ok:false,status:409,error:`Already ${d.resolution}`};
+  const t=iso(nowMs),tok=uid(),guard="SELECT 1 FROM agent_dead_letters WHERE id=? AND action_token=?";
+  const stmts=[env.DB.prepare("UPDATE agent_dead_letters SET resolved_at=?,resolved_by=?,resolution=?,action_token=? WHERE id=? AND resolved_at IS NULL").bind(t,actorOf(actor),resolution,tok,d.id)];
+  if(resolution==="retried")stmts.push(env.DB.prepare(`UPDATE autonomy_tasks SET status='queued',error=NULL,updated_at=? WHERE id=? AND status='failed' AND EXISTS(${guard})`).bind(t,d.task_id,d.id,tok));
+  stmts.push(auditStmt(env,"agent_dead_letter_resolved",`Owner ${resolution} a dead-letter task`,{dead_letter_id:d.id,task_id:d.task_id,agent:d.agent,resolution,actor:actorOf(actor)},t,guard,d.id,tok));
+  let res;try{res=await env.DB.batch(stmts);}catch{return saveFailed();}
+  if(!changed(res[0]))return {ok:false,status:409,error:"Dead letter changed concurrently; reload"};
+  return {ok:true};
+}
+
+/* ------------------------------------------------------------------------------------------- dashboard reads */
+export async function opsOverview(env,{nowMs=Date.now()}={}){
+  if(!(await opsAvailable(env)))return {available:false,reason:"Agent ops tables are not migrated (owner-actions/agent-orchestrator-stage2b)"};
+  const all=async(sql,...b)=>((await env.DB.prepare(sql).bind(...b).all()).results||[]);
+  const since7=iso(nowMs-7*86400000);
+  const alerts=(await all("SELECT * FROM agent_alerts WHERE acknowledged_at IS NULL OR last_seen_at>=? ORDER BY acknowledged_at IS NOT NULL, CASE level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, last_seen_at DESC LIMIT 100",since7))
+    .map(a=>({...a,affected_tasks:(()=>{try{return JSON.parse(a.affected_tasks_json||"[]")}catch{return []}})()}));
+  const heartbeat=await all("SELECT * FROM agent_heartbeat");
+  const runs=await all("SELECT * FROM agent_runs WHERE started_at>=? ORDER BY started_at DESC LIMIT 500",since7);
+  const approvals=await all("SELECT id,task_id,module,action,capability,status,requested_at,decided_at,decided_by,expires_at,used_at,note FROM agent_approvals WHERE status IN ('pending','approved') OR requested_at>=? ORDER BY status='pending' DESC, requested_at DESC LIMIT 100",since7);
+  const deadLetters=await all("SELECT * FROM agent_dead_letters WHERE resolved_at IS NULL OR created_at>=? ORDER BY resolved_at IS NOT NULL, created_at DESC LIMIT 100",since7);
+  // Resource and cost use (7 days): budget %, runs over 80 % of budget, units per completed task, outcome mix, run durations.
+  const parse=r=>{try{return JSON.parse(r.counts_json||"{}")}catch{return {}}};
+  const spent=runs.reduce((s,r)=>s+Number(r.budget_spent||0),0),limit=runs.reduce((s,r)=>s+Number(r.budget_limit||0),0);
+  const outcome={};for(const r of runs)for(const [k,v] of Object.entries(parse(r)))outcome[k]=(outcome[k]||0)+Number(v||0);
+  const completed=outcome.succeeded||0,durations=runs.map(r=>Number(r.duration_ms||0)).sort((a,b)=>a-b);
+  const usage={runs:runs.length,budget_spent:spent,budget_limit:limit,budget_used_pct:limit?Math.round(spent*1000/limit)/10:null,
+    last_run_budget_pct:runs[0]&&runs[0].budget_limit?Math.round(runs[0].budget_spent*1000/runs[0].budget_limit)/10:null,
+    runs_over_80pct:runs.filter(r=>r.budget_limit&&r.budget_spent/r.budget_limit>0.8).length,
+    units_per_completed_task:completed?Math.round(spent*100/completed)/100:null,outcome,
+    duration_median_ms:durations.length?durations[Math.floor((durations.length-1)/2)]:null,duration_max_ms:durations.length?durations[durations.length-1]:null};
+  return {available:true,alerts,heartbeat,approvals,dead_letters:deadLetters,usage,recent_runs:runs.slice(0,20)};
+}

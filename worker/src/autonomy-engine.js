@@ -1,3 +1,6 @@
+import { runAgentGraph, autonomyActionCapability, autonomyTaskDedupKey, redact, safeErrorText } from "./agent-orchestrator.js";
+import { recordRun, approvalForTask, requestApproval, consumeApproval, decideApproval, acknowledgeAlert, resolveDeadLetter, opsOverview } from "./agent-ops-store.js";
+import { bearerMatches } from "./secure-compare.js";
 const now=()=>new Date().toISOString();
 const uid=()=>crypto.randomUUID();
 
@@ -184,7 +187,7 @@ User command: ${raw}`;
   const p=extractJson(text);if(!p||!Array.isArray(p.tasks))throw new Error("AI planner returned invalid plan");
   const inferredBlocked=fallbackPlan(raw).blocked_modules||[];
   return applyPlanSafety({...p,source:"ai",blocked_modules:[...(Array.isArray(p.blocked_modules)?p.blocked_modules:[]),...inferredBlocked]},raw);
- }catch(e){const p=fallbackPlan(raw);p.planner_error=String(e.message||e);return p}
+ }catch(e){const p=fallbackPlan(raw);p.planner_error=safeErrorText(e);return p}
 }
 async function actionEnabled(env,module,action){
  const r=await env.DB.prepare("SELECT enabled FROM autonomy_action_controls WHERE module=? AND action=?").bind(module,action).first();
@@ -386,7 +389,115 @@ function taskAllowedByParentPlan(task){
  ).tasks.length===1;
 }
 
+// Background autonomy tasks through the bounded orchestrator (Stage 2A). OFF unless the Worker var AUTONOMY_ORCHESTRATOR is
+// exactly "on"; when OFF, runTasks below runs the original sequential loop unchanged. Customer replies never pass through here
+// (runTasks is reached only from the cron and the admin /api/autonomy/tasks/run route).
+function orchestratorEnabled(env){return env?.AUTONOMY_ORCHESTRATOR==="on"}
+const ORCHESTRATOR_EVENT_MAX=4000;
+export async function runTasksOrchestrated(env,req,limit=20,{executor=executeTask,limits={}}={}){
+ const c=await controls(env);if(c.master!=="on")return {ok:true,paused:true,executed:0,failed:0,blocked:0,orchestrator:true};
+ await recoverStaleLocks(env);
+ const rows=await env.DB.prepare("SELECT t.*,c.plan_json AS parent_plan_json,c.raw_command AS parent_raw_command FROM autonomy_tasks t LEFT JOIN autonomy_commands c ON c.id=t.command_id WHERE t.status='queued' AND (t.scheduled_at IS NULL OR t.scheduled_at<=?) ORDER BY t.priority DESC,t.created_at ASC LIMIT ?").bind(now(),limit).all();
+ let executed=0,failed=0,blocked=0,requeued=0;
+ const tasks=[],lastByModule=new Map(),seen=new Map(),claims=new Map(),lockBusy=new Map(),approvedTasks=new Map(),blockedForApproval=[];
+ const block=async(t,reason,meta={})=>{const r=await env.DB.prepare("UPDATE autonomy_tasks SET status='blocked',error=?,updated_at=? WHERE id=? AND status='queued'").bind(reason,now(),t.id).run();if(Number(r.meta?.changes||0)===1){blocked++;await event(env,"task_blocked",t.module,`Task blocked: ${t.action}`,{task_id:t.id,...meta});}};
+ for(const t of rows.results||[]){
+  if(!taskAllowedByParentPlan(t)){await block(t,"Blocked by parent plan policy");continue;}
+  if(c.modules[t.module]===false||!(await actionEnabled(env,t.module,t.action))){await block(t,"Blocked by module/action control");continue;}
+  // Deny by default: an action that can spend or act outside (or is unknown) waits for the owner instead of running.
+  const capability=autonomyActionCapability(t.module,t.action);
+  let payload={};try{payload=JSON.parse(t.payload_json||"{}")}catch{}
+  const key=autonomyTaskDedupKey(t.module,t.action,payload);
+  if(capability==="side_effect"){
+   // Only an owner-approved, unexpired approval for THIS task and payload lets it run (once); otherwise it waits in the approval
+   // queue (when the Stage 2B tables exist) and stays blocked. Nothing is approved automatically.
+   const ap=await approvalForTask(env,{taskId:t.id,dedupKey:key}).catch(()=>({available:false}));
+   if(ap.available&&ap.approval?.status==="approved")approvedTasks.set(t.id,{approvalId:ap.approval.id,dedupKey:key});
+   else{
+    let reason="Requires owner approval (orchestrator policy): this action can spend or act externally";
+    if(ap.available){const pending=ap.approval||await requestApproval(env,{taskId:t.id,module:t.module,action:t.action,dedupKey:key,capability}).catch(()=>null);
+     if(pending)reason=`Waiting for owner approval in the agent approval queue (${pending.id})`;blockedForApproval.push({agent:`autonomy:${t.module}`,task_id:t.id});}
+    await block(t,reason,{capability});continue;
+   }
+  }
+  if(seen.has(key)){await block(t,`Duplicate of task ${seen.get(key)} in this run`);continue;}
+  seen.set(key,t.id);
+  // Same-module tasks run one after another (ordering only), so the module lock is never contended inside one run.
+  const prev=lastByModule.get(t.module);lastByModule.set(t.module,t.id);
+  tasks.push({id:t.id,agent:`autonomy:${t.module}`,version:"autonomy-engine",capability,after:prev?[prev]:[],
+   // only reads are retried: a retried draft could create a duplicate draft
+   retryable:capability==="read",
+   run:async ctx=>{
+    if(!(await acquire(env,t.module,t.id))){lockBusy.set(t.id,ctx.attempt);const e=new Error("module lock busy");e.retryable=false;throw e;}
+    try{
+     // A real claim: only the run that moves the row (queued → running) executes it; the token marks rows THIS run owns.
+     const token=claims.get(t.id)||now();
+     const claimed=ctx.attempt===1
+      ?await env.DB.prepare("UPDATE autonomy_tasks SET status='running',started_at=?,attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'").bind(token,now(),t.id).run()
+      :await env.DB.prepare("UPDATE autonomy_tasks SET attempts=attempts+1,updated_at=? WHERE id=? AND status='running' AND started_at=?").bind(now(),t.id,token).run();
+     if(Number(claimed.meta?.changes||0)!==1){const e=new Error("task already claimed by another run");e.retryable=false;e.notClaimed=true;throw e;}
+     claims.set(t.id,token);
+     // One-shot: the owner's approval is consumed atomically before the side effect starts; a used/expired one stops it here.
+     const approval=approvedTasks.get(t.id);
+     if(approval&&!(await consumeApproval(env,{approvalId:approval.approvalId,taskId:t.id,dedupKey:approval.dedupKey}))){const e=new Error("Owner approval is no longer valid (used or expired)");e.retryable=false;throw e;}
+     return await executor(env,req,t,{signal:ctx.signal});
+    }finally{await release(env,t.module,t.id)}
+   }});
+ }
+ const {report,outputs}=await runAgentGraph(tasks,{...limits,allowCapabilities:["read","draft"],approvedTaskIds:[...approvedTasks.keys()],runId:`autonomy-${uid()}`});
+ for(const r of report.tasks){
+  const t=(rows.results||[]).find(x=>x.id===r.id),token=claims.get(r.id);
+  if(!token){requeued++;continue;}   // never claimed by this run (lock busy, not started, limits) — left exactly as it is
+  if(r.state==="succeeded"){
+   const u=await env.DB.prepare("UPDATE autonomy_tasks SET status='completed',result_json=?,finished_at=?,updated_at=? WHERE id=? AND status='running' AND started_at=?").bind(JSON.stringify(outputs[r.id]??null).slice(0,50000),now(),now(),r.id,token).run();
+   if(Number(u.meta?.changes||0)===1){executed++;await event(env,"task_completed",t?.module,`Completed: ${t?.action}`,{task_id:r.id});}
+  }else{
+   const msg=r.state==="timed_out"||lockBusy.get(r.id)>1?"Timed out — the underlying request may still finish; not retried":safeErrorText(r.error);
+   const u=await env.DB.prepare("UPDATE autonomy_tasks SET status='failed',error=?,finished_at=?,updated_at=? WHERE id=? AND status='running' AND started_at=?").bind(msg,now(),now(),r.id,token).run();
+   if(Number(u.meta?.changes||0)===1){failed++;await event(env,"task_failed",t?.module,`Failed: ${t?.action}`,{task_id:r.id,error:msg});}
+  }
+ }
+ // One allow-listed, size-capped run summary in the existing events table (no task payloads, outputs or error text).
+ const summary={run_id:report.run_id,orchestrator_version:report.orchestrator_version,duration_ms:report.duration_ms,counts:report.counts,budget:report.budget,
+  alerts:report.alerts.map(a=>({level:a.level,code:a.code})),dead_letters:report.dead_letters.map(d=>({task_id:d.task_id,state:d.state,attempts:d.attempts})),
+  executed,failed,blocked,requeued};
+ let meta=JSON.stringify(summary);if(meta.length>ORCHESTRATOR_EVENT_MAX)meta=JSON.stringify({...summary,dead_letters:summary.dead_letters.slice(0,20),truncated:true}).slice(0,ORCHESTRATOR_EVENT_MAX);
+ try{await env.DB.prepare("INSERT INTO autonomy_events VALUES(?,?,?,?,?,?)").bind(uid(),"orchestrator_run",null,`Orchestrated run: ${executed} completed, ${failed} failed, ${blocked} blocked, ${requeued} left queued`,meta,now()).run()}catch{}
+ // Durable run report, dead letters, heartbeat and alert lifecycle (Stage 2B tables; skipped when they are not migrated).
+ const stored=await recordRun(env,"autonomy",report,{executed,failed,blocked,requeued,blockedForApproval});
+ return {ok:true,executed,failed,blocked,requeued,paused:false,orchestrator:true,run_id:report.run_id,stored:stored.stored};
+}
+
+// Owner actions and dashboard reads for the agent ops store (admin only: handleAutonomy authenticates before routing here).
+// Decisions only change state: nothing is executed inline, nothing is approved automatically.
+const OPS_ID=/^[A-Za-z0-9-]{8,64}$/,OPS_BODY_MAX=4096,NO_STORE={"Cache-Control":"no-store"};
+async function handleAgentOps(env,req,u){
+ const reply=(body,status=200)=>Response.json(body,{status,headers:NO_STORE});
+ try{
+  const p=u.pathname.slice("/api/autonomy/agents/".length);
+  if(p==="overview"){if(req.method!=="GET")return reply({ok:false,error:"Method not allowed"},405);return reply({ok:true,orchestrator_enabled:orchestratorEnabled(env),...await opsOverview(env)});}
+  if(!["approvals/decide","alerts/ack","dead-letters/resolve"].includes(p))return reply({ok:false,error:"Not found"},404);
+  if(req.method!=="POST")return reply({ok:false,error:"Method not allowed"},405);
+  const raw=await req.text();if(raw.length>OPS_BODY_MAX)return reply({ok:false,error:"Request body too large"},413);
+  let b;try{b=JSON.parse(raw||"{}")}catch{return reply({ok:false,error:"Invalid JSON"},400)}
+  if(!b||typeof b!=="object"||Array.isArray(b))return reply({ok:false,error:"Invalid body"},400);
+  const id=String(b.id??"");if(!OPS_ID.test(id))return reply({ok:false,error:"Invalid id"},400);
+  const actor="owner-admin";let r,action;
+  if(p==="approvals/decide"){
+   action=String(b.decision||"");
+   // With the orchestrator off the original sequential loop would run a re-queued side effect without the gate: refuse.
+   if(!orchestratorEnabled(env))r={ok:false,status:409,error:"Approvals are accepted only while the orchestrator is enabled"};
+   else r=await decideApproval(env,{id,decision:action,actor});
+  }else if(p==="alerts/ack"){action="acknowledge";r=await acknowledgeAlert(env,{id,actor});}
+  else{action=String(b.resolution||"");r=await resolveDeadLetter(env,{id,resolution:action,actor});}
+  // Successful transitions are audited inside their own batch; refused and no-op attempts are recorded here (best effort).
+  if(!r.ok||r.idempotent)await event(env,"agent_ops_action",null,`Owner ${p} ${action}: ${r.ok?(r.idempotent?"no change":"done"):"refused"}`,{target:id,route:p,action:action.slice(0,20),ok:!!r.ok,idempotent:!!r.idempotent,error:r.ok?null:redact(r.error,200),orchestrator_enabled:orchestratorEnabled(env)});
+  return reply(r.ok?{ok:true,idempotent:!!r.idempotent,approval:r.approval||undefined}:{ok:false,error:r.error},r.ok?200:(r.status||400));
+ }catch(error){return reply({ok:false,error:"Agent ops request failed"},500);}
+}
+
 export async function runTasks(env,req,limit=20){
+ if(orchestratorEnabled(env))return await runTasksOrchestrated(env,req,limit);
  const c=await controls(env);if(c.master!=="on")return {ok:true,paused:true,executed:0,failed:0,blocked:0};
  await recoverStaleLocks(env);
   const rows=await env.DB.prepare("SELECT t.*,c.plan_json AS parent_plan_json,c.raw_command AS parent_raw_command FROM autonomy_tasks t LEFT JOIN autonomy_commands c ON c.id=t.command_id WHERE t.status='queued' AND (t.scheduled_at IS NULL OR t.scheduled_at<=?) ORDER BY t.priority DESC,t.created_at ASC LIMIT ?").bind(now(),limit).all();
@@ -406,16 +517,40 @@ export async function runTasks(env,req,limit=20){
    await env.DB.prepare("UPDATE autonomy_tasks SET status='completed',result_json=?,finished_at=?,updated_at=? WHERE id=? AND status='running'").bind(JSON.stringify(result).slice(0,50000),now(),now(),t.id).run();
    executed++;await event(env,"task_completed",t.module,`Completed: ${t.action}`,{task_id:t.id});
   }catch(e){
-   failed++;await env.DB.prepare("UPDATE autonomy_tasks SET status='failed',error=?,finished_at=?,updated_at=? WHERE id=?").bind(String(e.message||e).slice(0,2000),now(),now(),t.id).run();
-   await event(env,"task_failed",t.module,`Failed: ${t.action}`,{task_id:t.id,error:String(e.message||e)});
+   failed++;await env.DB.prepare("UPDATE autonomy_tasks SET status='failed',error=?,finished_at=?,updated_at=? WHERE id=?").bind(safeErrorText(e,2000),now(),now(),t.id).run();
+   await event(env,"task_failed",t.module,`Failed: ${t.action}`,{task_id:t.id,error:safeErrorText(e)});
   }finally{await release(env,t.module,t.id)}
  }
  return {ok:true,executed,failed,blocked,paused:false};
 }
+// Bounded failed-auth throttle for the agent admin routes ONLY (/api/autonomy/agents/*); every other route — and customer traffic —
+// is untouched. Per isolate, per CF-Connecting-IP (requests without it are not throttled rather than sharing one bucket): 10 wrong
+// tokens in 5 minutes block that IP for the rest of the window (429 + Retry-After, the token is not even checked); a correct token
+// clears the counter. The map holds at most 1000 IPs and evicts the oldest. A legitimate owner on the same IP as the attacker waits
+// at most 5 minutes; other IPs are never affected. Nothing is written to D1.
+const AGENT_AUTH={windowMs:5*60*1000,max:10,keys:1000,fails:new Map()};
+function agentAuthWait(ip,nowMs){
+ const e=AGENT_AUTH.fails.get(ip);if(!e)return 0;
+ if(nowMs-e.start>=AGENT_AUTH.windowMs){AGENT_AUTH.fails.delete(ip);return 0;}
+ return e.count>=AGENT_AUTH.max?Math.max(1,Math.ceil((e.start+AGENT_AUTH.windowMs-nowMs)/1000)):0;
+}
+function agentAuthFailed(ip,nowMs){
+ let e=AGENT_AUTH.fails.get(ip);
+ if(!e||nowMs-e.start>=AGENT_AUTH.windowMs){
+  AGENT_AUTH.fails.delete(ip);
+  while(AGENT_AUTH.fails.size>=AGENT_AUTH.keys)AGENT_AUTH.fails.delete(AGENT_AUTH.fails.keys().next().value);
+  e={start:nowMs,count:0};AGENT_AUTH.fails.set(ip,e);
+ }
+ e.count++;
+}
 export async function handleAutonomy(env,req){
  if(!["GET","POST"].includes(req.method))return new Response("Method not allowed",{status:405});
- if(!env.ADMIN_TOKEN||req.headers.get("Authorization")!==`Bearer ${env.ADMIN_TOKEN}`)return Response.json({ok:false,error:"Unauthorized"},{status:401});
+ const agentRoute=new URL(req.url).pathname.startsWith("/api/autonomy/agents/"),clientIp=agentRoute?req.headers.get("CF-Connecting-IP"):null;
+ if(clientIp){const wait=agentAuthWait(clientIp,Date.now());if(wait)return Response.json({ok:false,error:"Too many failed attempts; try again later"},{status:429,headers:{"Retry-After":String(wait),"Cache-Control":"no-store"}});}
+ if(!env.ADMIN_TOKEN||!bearerMatches(req.headers.get("Authorization"),env.ADMIN_TOKEN)){if(clientIp)agentAuthFailed(clientIp,Date.now());return Response.json({ok:false,error:"Unauthorized"},{status:401});}
+ if(clientIp)AGENT_AUTH.fails.delete(clientIp);
  const u=new URL(req.url);await ensure(env);
+ if(u.pathname.startsWith("/api/autonomy/agents/"))return await handleAgentOps(env,req,u);
  if(u.pathname==="/api/autonomy/status"){
    const c=await controls(env),counts=await env.DB.prepare("SELECT status,COUNT(*) n FROM autonomy_tasks GROUP BY status").all(),tasks={};
   for(const x of counts.results||[])tasks[x.status]=Number(x.n||0);
@@ -697,7 +832,7 @@ if(
  }catch(e){
   return {
    ok:false,
-   error:String(e.message||e)
+   error:safeErrorText(e)
   };
  }
 }

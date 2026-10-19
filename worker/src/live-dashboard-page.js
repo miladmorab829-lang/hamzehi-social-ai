@@ -817,6 +817,28 @@ async function loadPriceItems(){const d=await api("/api/commercial-price-items")
 async function createPriceVersion(){const body={base_id:priceVersionBaseId||undefined,product_name:$("priceName").value.trim(),product_key:$("priceKey").value.trim(),sku:$("priceSku").value.trim(),currency:$("priceCurrency").value.trim(),unit_price_minor:nullableNumber($("priceUnit").value),moq:nullableNumber($("priceMoq").value),effective_from:$("priceFrom").value.trim()||null,effective_until:$("priceUntil").value.trim()||null};const d=await api("/api/commercial-price-items",{method:"POST",body:JSON.stringify(body)});if(d.ok)priceVersionBaseId="";$("priceStatus").innerHTML=d.ok?"<span class='ok'>✓ Version جدید ثبت شد.</span>":"<span class='bad'>✕ "+esc(d.error)+"</span>";await loadPriceItems()}
 function preparePriceVersion(id){const x=priceItemCache[id];if(!x)return;priceVersionBaseId=id;$("priceName").value=x.product_name||"";$("priceKey").value=x.product_key||"";$("priceSku").value=x.sku||"";$("priceCurrency").value=x.currency||"";$("priceUnit").value="";$("priceMoq").value=x.moq??"";$("priceFrom").value="";$("priceUntil").value="";$("priceStatus").textContent="قیمت جدید را وارد و سپس ADD را بزنید؛ رکورد قبلی تغییر نمی‌کند."}
 async function togglePrice(id,active){const d=await api("/api/commercial-price-items/activation",{method:"PATCH",body:JSON.stringify({id,active})});$("priceStatus").innerHTML=d.ok?"<span class='ok'>✓ وضعیت ثبت شد.</span>":"<span class='bad'>✕ "+esc(d.error)+"</span>";await loadPriceItems()}
+// Agent health (Stage 2B): read-only overview + owner actions that only change state (approve/reject, acknowledge, dismiss/requeue).
+async function loadAgentOps(){
+ const st=$("agentOpsStatus");st.textContent="در حال دریافت…";
+ const d=await api(A+"/agents/overview");
+ if(!d||!d.ok){st.innerHTML="<span class='bad'>✕ "+esc((d&&d.error)||"Unable to read agent health")+"</span>";return}
+ if(!d.available){st.innerHTML="<span class='bad'>"+esc(d.reason||"Agent ops tables are not migrated")+"</span> · Orchestrator: "+(d.orchestrator_enabled?"ON":"OFF");["agentOpsAlerts","agentOpsApprovals","agentOpsDead","agentOpsUsage"].forEach(k=>{$(k).innerHTML=""});return}
+ st.innerHTML="Orchestrator: <b>"+(d.orchestrator_enabled?"ON":"OFF")+"</b> · Heartbeat: "+(d.heartbeat||[]).map(h=>esc(h.scheduler)+" "+esc(h.last_finished_at)+(h.healthy?" ✓":" ✕")).join(" · ");
+ const sev={critical:"bad",warning:"bad",info:""};
+ $("agentOpsAlerts").innerHTML=(d.alerts||[]).map(a=>"<div class='row'><b class='"+(sev[a.level]||"")+"'>"+esc(a.level)+"</b> · "+esc(a.agent)+" · "+esc(a.code)+" · ×"+esc(a.occurrences)+"<br><span class='hint'>"+esc(a.first_seen_at)+" → "+esc(a.last_seen_at)+" · "+esc(a.recovery_state)+(a.acknowledged_at?" · acknowledged "+esc(a.acknowledged_at):"")+"</span><br>"+esc(a.cause_redacted||"")+"<br><span class='hint'>Tasks: "+esc((a.affected_tasks||[]).join(", "))+" · Fallback: "+esc(a.fallback_status||"-")+"</span>"+(a.acknowledged_at?"":" <button class='btn' onclick=\\"agentOpsAct('alerts/ack','"+esc(a.id)+"')\\">ACKNOWLEDGE</button>")+"</div>").join("")||"<div class='hint'>هشدار بازی وجود ندارد.</div>";
+ $("agentOpsApprovals").innerHTML=(d.approvals||[]).map(a=>"<div class='row'><b>"+esc(a.module)+":"+esc(a.action)+"</b> · "+esc(a.status)+" · task "+esc(a.task_id)+"<br><span class='hint'>"+esc(a.requested_at)+(a.expires_at?" · expires "+esc(a.expires_at):"")+"</span>"+(a.status==="pending"?" <button class='btn' onclick=\\"agentOpsAct('approvals/decide','"+esc(a.id)+"','approve')\\">APPROVE</button> <button class='btn' onclick=\\"agentOpsAct('approvals/decide','"+esc(a.id)+"','reject')\\">REJECT</button>":"")+"</div>").join("")||"<div class='hint'>تأیید در انتظاری وجود ندارد.</div>";
+ $("agentOpsDead").innerHTML=(d.dead_letters||[]).map(x=>"<div class='row'><b>"+esc(x.agent)+"</b> · "+esc(x.state)+" · task "+esc(x.task_id)+" · "+esc(x.attempts)+" attempts<br>"+esc(x.error_redacted||"")+"<br><span class='hint'>"+esc(x.created_at)+(x.resolved_at?" · "+esc(x.resolution)+" "+esc(x.resolved_at):"")+"</span>"+(x.resolved_at?"":" <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','retried')\\">REQUEUE</button> <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','dismissed')\\">DISMISS</button>")+"</div>").join("")||"<div class='hint'>صف خطا خالی است.</div>";
+ const u=d.usage||{};
+ $("agentOpsUsage").innerHTML="<div class='row'>Budget used: <b>"+esc(u.budget_used_pct??"-")+"%</b> (last run "+esc(u.last_run_budget_pct??"-")+"%) · Runs over 80%: <b>"+esc(u.runs_over_80pct??0)+"</b> / "+esc(u.runs??0)+"<br>Units per completed task: <b>"+esc(u.units_per_completed_task??"-")+"</b> · Run time median "+esc(u.duration_median_ms??"-")+" ms, slowest "+esc(u.duration_max_ms??"-")+" ms<br><span class='hint'>Outcomes: "+esc(Object.entries(u.outcome||{}).filter(e=>e[1]).map(e=>e[0]+" "+e[1]).join(" · "))+"</span></div>";
+}
+async function agentOpsAct(route,id,choice){
+ const body={id:id};if(route==="approvals/decide")body.decision=choice;if(route==="dead-letters/resolve")body.resolution=choice;
+ if(route==="approvals/decide"&&choice==="approve"&&!confirm("Approve this paid action to run once on the next scheduled run?"))return;
+ if(route==="dead-letters/resolve"&&choice==="retried"&&!confirm("Put this failed task back in the queue? A paid action still needs a new approval."))return;
+ const d=await api(A+"/agents/"+route,{method:"POST",body:JSON.stringify(body)});
+ $("agentOpsStatus").innerHTML=d&&d.ok?"<span class='ok'>✓ "+(d.idempotent?"No change":"Saved")+"</span>":"<span class='bad'>✕ "+esc((d&&d.error)||"Failed")+"</span>";
+ loadAgentOps();
+}
 async function loadDiagnostic(){
  const d=await api(A+"/status");
 const taskData=await api(A+"/tasks");
@@ -1820,7 +1842,7 @@ async function refreshTick(){
  catch(e){$("masterState").textContent="DASHBOARD ERROR";$("masterState").className="pill bad"}
  finally{refreshInProgress=false}
 }
-updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);setInterval(refreshTick,15000);
+updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();setInterval(refreshTick,15000);
 </script></body></html>`;
 
 // ---- Hub-only additions (summary of existing data + navigation; no new metrics, no new API).
@@ -1833,6 +1855,15 @@ DASH_SECTIONS.hubSummary=`<section class="grid4 section">
 <section class="grid2 section">
 <div class="card"><div class="title"><h2>💰 REVENUE SUMMARY</h2><a class="btn" href="/dashboard/revenue">OPEN REVENUE</a></div><div id="revenue" class="rows">—</div></div>
 <div class="card dangerbox"><div class="title"><h2>🚨 RECENT ALERTS</h2><a class="btn" href="/dashboard/system">OPEN SYSTEM</a></div><div id="hubAlerts" class="rows">—</div></div>
+</section>
+`;
+DASH_SECTIONS.agentOps=`<section class="card section" id="agentOpsPanel">
+<div class="title"><div><h2>🤖 AGENT HEALTH</h2><div class="hint">سلامت عامل‌های پس‌زمینه: هشدارها، تأیید اقدام‌های پرهزینه، صف خطا و مصرف منابع. هیچ اقدامی خودکار تأیید یا اجرا نمی‌شود.</div></div><button class="btn" onclick="loadAgentOps()">↻ CHECK</button></div>
+<div id="agentOpsStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<h3>⚠️ هشدارها</h3><div id="agentOpsAlerts" class="rows"></div>
+<h3>✅ تأیید اقدام‌ها</h3><div id="agentOpsApprovals" class="rows"></div>
+<h3>📮 صف خطا (Dead Letter)</h3><div id="agentOpsDead" class="rows"></div>
+<h3>📊 مصرف منابع (۷ روز)</h3><div id="agentOpsUsage" class="rows"></div>
 </section>
 `;
 DASH_SECTIONS.knowledgeApprovalsLink=`<section class="card section">
@@ -1970,6 +2001,7 @@ export const DASHBOARD_PAGES={
  customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["leadsList","negotiation","opportunities"]},
  orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"box",desc:"سفارش‌ها، پرداخت‌ها و درخواست‌های قیمت",sections:["orders","money","quotes"]},
  approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
+ agents:{path:"/dashboard/agents",title:"عامل‌ها و پایش",icon:"alert",desc:"سلامت عامل‌ها، هشدارها، تأییدها، صف خطا، مصرف",sections:["agentOps"]},
  errors:{path:"/dashboard/errors",title:"خطاها",icon:"alert",desc:"خطاهای سیستم و جزئیات",sections:["errorsCenter","errorsCard"]},
  more:{path:"/dashboard/more",title:"بیشتر",icon:"menu",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
  gallery:{path:"/dashboard/gallery",title:"گالری محصولات",icon:"camera",desc:"عکس واقعی، تأیید، جستجو و درخواست‌ها",sections:["galleryFunnel","galleryUpload","galleryReview","galleryLibrary","galleryRequests","galleryBackup"]},
@@ -1992,8 +2024,8 @@ export const DASH_FOLDS={
  system:{channels:{title:"کنترل کانال‌ها",icon:"send",lazy:true},command:{title:"فرمان و آموزش هوش مصنوعی",icon:"spark",lazy:true},taskBrain:{title:"Taskها، مغز کسب‌وکار و فعالیت",icon:"list",lazy:true},diagnostic:{title:"تست اتصال و عیب‌یابی",icon:"activity",lazy:true},safety:{title:"دروازه ایمنی",icon:"shield",lazy:true}}
 };
 const DASH_TABS=["hub","customers","orders","approvals","more"];
-const DASH_MORE_GROUPS=[["محصولات و دانش",["gallery","knowledge"]],["محتوا و رسانه",["content","media"]],["کانال‌ها",["channels"]],["درآمد و گزارش‌ها",["revenue","sales"]],["خطاها",["errors"]],["تنظیمات پیشرفته",["system","all"]]];
-const DASH_ORDER=["customers","orders","approvals","errors","gallery","knowledge","content","media","channels","revenue","system","sales","all"];
+const DASH_MORE_GROUPS=[["محصولات و دانش",["gallery","knowledge"]],["محتوا و رسانه",["content","media"]],["کانال‌ها",["channels"]],["درآمد و گزارش‌ها",["revenue","sales"]],["خطاها",["errors","agents"]],["تنظیمات پیشرفته",["system","all"]]];
+const DASH_ORDER=["customers","orders","approvals","errors","agents","gallery","knowledge","content","media","channels","revenue","system","sales","all"];
 const dashEsc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 DASH_SECTIONS.moreNav=DASH_MORE_GROUPS.map(([g,keys])=>`<section class="mgroup"><h3>${dashEsc(g)}</h3><nav class="mlist">`+keys.map(k=>{const p=DASHBOARD_PAGES[k];return `<a href="${p.path}"><span class="mi">${dashIcon(p.icon)}</span><span class="mt"><b>${dashEsc(p.title)}</b><small>${dashEsc(p.desc)}</small></span>${dashIcon("chev").replace('class="ic"','class="ic chev"')}</a>`;}).join("")+`</nav></section>`).join("\n")+"\n";
 DASH_SECTIONS.hubNav=DASH_SECTIONS.moreNav;
