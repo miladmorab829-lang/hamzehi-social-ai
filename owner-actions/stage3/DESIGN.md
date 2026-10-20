@@ -49,6 +49,18 @@ letter. No schema change.
 Main dashboard: critical agent failures, financial decisions, essential health only (already enforced; no new sections).
 Agent Control Center: health, quotas, publishing, recovery, quality and cost details.
 
+## Phase 02 — implemented locally (2026-10-20, uncommitted, no migration)
+- Watchdog `worker/src/agent-watchdog.js` (own waitUntil on */15): heartbeat_missed / runs_unhealthy (critical), task_stuck,
+  agent_failing, dead_letter_unresolved, version_unhealthy (warning); shared alert lifecycle (`raiseAlerts`/`recoverOpenAlerts`);
+  own heartbeat row `watchdog`.
+- DLQ: one open dead letter per task; never-claimed work (quota/budget refusal, busy lock, claimed elsewhere) is not a dead letter;
+  watchdog re-queues READ-only tasks (explicit allow-list) once per task per UTC day in one transaction; paid/draft never automatic.
+- Versions: `trackAgentVersions` keeps one active + previous rows per agent (`AUTONOMY_ENGINE_VERSION`); rollback = owner deploy.
+- Quality: `qualitySummary` (7 d vs previous 7 d) from task outcomes, run health, routine/held posts, owner acceptance, CRM
+  identity conflicts, recurring failures — no AI calls, computed only for the Control Center.
+- Cost: unit costs per paid action, daily global + per-provider budgets checked inside the atomic claim (`autonomy_controls`
+  key "budgets"); Ads Autopilot gated by an atomic per-run reservation (default 24/day, ≥55 min apart).
+
 ## Next checkpoints
 1. Owner review → commit Block A (separate approval) → deploy (separate approval; flag stays ON).
 2. Phase 02: watchdog (1) + DLQ dedupe/read auto-recovery (2) — code only.

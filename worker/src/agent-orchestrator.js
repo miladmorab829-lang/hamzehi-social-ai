@@ -28,6 +28,18 @@ export const AUTONOMY_ACTION_CAPABILITY=Object.freeze({
 // photo/video also keep their own internal locks (photo 1/day, video 1/ISO week); content matches the default 12-hour interval.
 export const AUTONOMY_DAILY_QUOTAS=Object.freeze({"photo:photo_generate":1,"media:video_generate":1,"content:generate_and_queue":2,"crm:lead_discovery":2});
 export const QUOTA_MAX=50;
+// Daily cost budgets (Stage 3, relative units ≈ one text-model call). Enforced atomically in the task claim together with the quota.
+// Defaults sit well above what the default quotas can spend (about 2× headroom), so they only stop runaway use; the owner can lower them in
+// autonomy_controls key "budgets" ({"daily_units":n,"providers":{"openai":n,...},"ads_runs_per_day":n}). Ads Autopilot has its own
+// run cap (separate reserve) so it can neither starve nor be starved by the paid autonomy tasks.
+export const AUTONOMY_UNIT_COST=Object.freeze({"photo:photo_generate":8,"media:video_generate":40,"content:generate_and_queue":9,"crm:lead_discovery":16});
+export const AUTONOMY_PROVIDER=Object.freeze({"photo:photo_generate":"openai","media:video_generate":"video","content:generate_and_queue":"openai","crm:lead_discovery":"google_places"});
+export const DEFAULT_BUDGETS=Object.freeze({daily_units:240,providers:Object.freeze({openai:120,video:80,google_places:64}),ads_runs_per_day:24});
+export function autonomyBudgets(overrides={}){
+  const n=(v,base,max)=>Number.isInteger(v)&&v>=0?Math.min(v,max):base,o=overrides&&typeof overrides==="object"?overrides:{};
+  const providers={};for(const [p,base] of Object.entries(DEFAULT_BUDGETS.providers))providers[p]=n(o.providers?.[p],base,10000);
+  return {daily_units:n(o.daily_units,DEFAULT_BUDGETS.daily_units,10000),providers,ads_runs_per_day:n(o.ads_runs_per_day,DEFAULT_BUDGETS.ads_runs_per_day,96)};
+}
 export function autonomyDailyQuota(module,action,overrides={}){
   const key=`${module}:${action}`,base=AUTONOMY_DAILY_QUOTAS[key]??0,v=overrides?.[key];
   return Number.isInteger(v)&&v>=0?Math.min(v,QUOTA_MAX):base;

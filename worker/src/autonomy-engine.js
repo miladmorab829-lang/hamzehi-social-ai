@@ -1,6 +1,7 @@
-import { runAgentGraph, autonomyActionCapability, autonomyTaskDedupKey, autonomyDailyQuota, AUTONOMY_DAILY_QUOTAS, redact, safeErrorText } from "./agent-orchestrator.js";
+import { runAgentGraph, autonomyActionCapability, autonomyTaskDedupKey, autonomyDailyQuota, AUTONOMY_DAILY_QUOTAS, AUTONOMY_UNIT_COST, AUTONOMY_PROVIDER, autonomyBudgets, ORCHESTRATOR_VERSION, redact, safeErrorText } from "./agent-orchestrator.js";
 import { recordRun, approvalForTask, requestApproval, consumeApproval, decideApproval, acknowledgeAlert, resolveDeadLetter, opsOverview, cancelObsoleteApprovals } from "./agent-ops-store.js";
 import { bearerMatches } from "./secure-compare.js";
+import { qualitySummary, versionSummary } from "./agent-watchdog.js";
 const now=()=>new Date().toISOString();
 const uid=()=>crypto.randomUUID();
 
@@ -397,6 +398,8 @@ function taskAllowedByParentPlan(task){
 // Background autonomy tasks through the bounded orchestrator (Stage 2A). OFF unless the Worker var AUTONOMY_ORCHESTRATOR is
 // exactly "on"; when OFF, runTasks below runs the original sequential loop unchanged. Customer replies never pass through here
 // (runTasks is reached only from the cron and the admin /api/autonomy/tasks/run route).
+// Version of this engine as recorded per agent in agent_versions (bump on behaviour changes; rollback reference for the owner).
+export const AUTONOMY_ENGINE_VERSION=`autonomy-engine@${ORCHESTRATOR_VERSION}+stage3.2`;
 function orchestratorEnabled(env){return env?.AUTONOMY_ORCHESTRATOR==="on"}
 // Owner autonomy policy (2026-10-19): paid non-financial actions run without approval, but at most their daily quota per UTC day
 // (every started attempt counts, failed ones too). Over quota the task is deferred to the next UTC day, never run and never dropped.
@@ -409,16 +412,42 @@ async function quotaUsed(env,module,action){const r=await env.DB.prepare("SELECT
 // Atomic claim, one D1 statement: queued → running. For a paid action the same statement also reserves one unit of the daily quota —
 // it only matches while the attempts started today stay below the cap. D1 runs each statement atomically on a single writer, so
 // concurrent cron runs, admin runs, retries and re-queued tasks on any Worker instance can never consume the same remaining quota.
-async function claimTask(env,t,token,cap){
- const r=cap==null
-  ?await env.DB.prepare("UPDATE autonomy_tasks SET status='running',started_at=?,attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'").bind(token,now(),t.id).run()
-  :await env.DB.prepare("UPDATE autonomy_tasks SET status='running',started_at=?,attempts=attempts+1,updated_at=? WHERE id=? AND status='queued' AND (SELECT COALESCE(SUM(q.attempts),0) FROM autonomy_tasks q WHERE q.module=? AND q.action=? AND q.started_at>=?)<?").bind(token,now(),t.id,t.module,t.action,utcDayStart(),cap).run();
+async function claimTask(env,t,token,cap,budgets=null){
+ if(cap==null){const r=await env.DB.prepare("UPDATE autonomy_tasks SET status='running',started_at=?,attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'").bind(token,now(),t.id).run();return Number(r.meta?.changes||0)===1;}
+ // Paid: the same statement also checks the daily cost budgets (all paid work today, and this action's provider).
+ const key=`${t.module}:${t.action}`,cost=AUTONOMY_UNIT_COST[key]??50,provider=AUTONOMY_PROVIDER[key]||"other",b=budgets||autonomyBudgets({});
+ const providerCap=b.providers[provider]??0,providerKeys=PAID_KEYS.filter(k=>AUTONOMY_PROVIDER[k]===provider).map(k=>`'${k}'`).join(",")||"''";
+ const r=await env.DB.prepare(`UPDATE autonomy_tasks SET status='running',started_at=?,attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'
+   AND (SELECT COALESCE(SUM(q.attempts),0) FROM autonomy_tasks q WHERE q.module=? AND q.action=? AND q.started_at>=?)<?
+   AND (SELECT COALESCE(SUM(c.attempts*${COST_CASE}),0) FROM autonomy_tasks c WHERE c.started_at>=?)+?<=?
+   AND (SELECT COALESCE(SUM(c.attempts*${COST_CASE}),0) FROM autonomy_tasks c WHERE c.started_at>=? AND c.module||':'||c.action IN (${providerKeys}))+?<=?`)
+  .bind(token,now(),t.id,t.module,t.action,utcDayStart(),cap,utcDayStart(),cost,b.daily_units,utcDayStart(),cost,providerCap).run();
  return Number(r.meta?.changes||0)===1;
+}
+// Cost units per paid module:action (constants only, never request data, so they can be inlined in SQL).
+const PAID_KEYS=Object.keys(AUTONOMY_UNIT_COST);
+const COST_CASE="(CASE c.module||':'||c.action "+PAID_KEYS.map(k=>`WHEN '${k}' THEN ${Number(AUTONOMY_UNIT_COST[k])}`).join(" ")+" ELSE 0 END)";
+async function budgetOverrides(env){try{const v=JSON.parse(await getKV(env,"budgets")||"{}");return v&&typeof v==="object"&&!Array.isArray(v)?v:{}}catch{return {}}}
+// Ads Autopilot daily run budget: one atomic reservation row per run (at most ads_runs_per_day per UTC day, at most one per 55 min).
+export async function reserveAdsAutopilotRun(env,nowMs=Date.now()){
+  const cap=autonomyBudgets(await budgetOverrides(env)).ads_runs_per_day,d=new Date(nowMs);d.setUTCHours(0,0,0,0);
+  const r=await env.DB.prepare("INSERT INTO system_events(id,type,severity,message,details_json,created_at) SELECT ?,'ads_autopilot_reserved','info','Ads Autopilot run reserved (daily budget)',?,? WHERE (SELECT COUNT(*) FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?)<? AND NOT EXISTS(SELECT 1 FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>?)")
+    .bind(uid(),JSON.stringify({cap}),new Date(nowMs).toISOString(),d.toISOString(),cap,new Date(nowMs-55*60*1000).toISOString()).run();
+  return Number(r?.meta?.changes||0)===1;
+}
+// Today's spend in cost units (global and per provider) against the budgets, plus Ads Autopilot runs (Agent Control Center).
+export async function costSummary(env){
+ const b=autonomyBudgets(await budgetOverrides(env)),day=utcDayStart();
+ const rows=(await env.DB.prepare("SELECT module,action,COALESCE(SUM(attempts),0) n FROM autonomy_tasks WHERE started_at>=? GROUP BY module,action").bind(day).all()).results||[];
+ const providers=Object.fromEntries(Object.keys(b.providers).map(p=>[p,{used:0,budget:b.providers[p]}]));let used=0;
+ for(const r of rows){const k=`${r.module}:${r.action}`;if(!(k in AUTONOMY_UNIT_COST))continue;const u=Number(r.n)*AUTONOMY_UNIT_COST[k];used+=u;const p=AUTONOMY_PROVIDER[k];if(providers[p])providers[p].used+=u;}
+ let adsRuns=0;try{adsRuns=Number((await env.DB.prepare("SELECT COUNT(*) n FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?").bind(day).first())?.n||0)}catch{}
+ return {units:{used,budget:b.daily_units},providers,ads_autopilot:{runs_today:adsRuns,runs_per_day:b.ads_runs_per_day}};
 }
 // A claim refused while the row is still queued means the quota was taken by a concurrent run: defer it (no approval, no failure).
 async function stillQueued(env,id){return (await env.DB.prepare("SELECT status FROM autonomy_tasks WHERE id=?").bind(id).first())?.status==="queued"}
-async function deferForQuota(env,t,cap){
- const r=await env.DB.prepare("UPDATE autonomy_tasks SET scheduled_at=?,error=?,updated_at=? WHERE id=? AND status='queued'").bind(nextUtcDay(),`Daily quota reached (${cap}/day); runs again after 00:00 UTC`,now(),t.id).run();
+async function deferForQuota(env,t,cap){ // cap = the daily quota; the same deferral covers a reached cost budget
+ const r=await env.DB.prepare("UPDATE autonomy_tasks SET scheduled_at=?,error=?,updated_at=? WHERE id=? AND status='queued'").bind(nextUtcDay(),`Daily quota or cost budget reached (quota ${cap}/day); runs again after 00:00 UTC`,now(),t.id).run();
  if(Number(r.meta?.changes||0)===1)await event(env,"task_deferred_quota",t.module,`Daily quota reached: ${t.action}`,{task_id:t.id,quota:cap});
 }
 // Channel publishing health for the Agent Control Center (7 days, read-only): failed / manual-required distributions with redacted
@@ -449,7 +478,7 @@ export async function runTasksOrchestrated(env,req,limit=20,{executor=executeTas
  // Open approval requests for actions that no longer need approval are closed (audited) and their tasks re-queued.
  await cancelObsoleteApprovals(env,{needsApproval:(m,a)=>capabilityOf(m,a)==="side_effect"}).catch(()=>null);
  await recoverStaleLocks(env);
- const qo=await quotaOverrides(env),quotaInRun=new Map(),quotaRefused=new Map();
+ const qo=await quotaOverrides(env),budgets=autonomyBudgets(await budgetOverrides(env)),quotaInRun=new Map(),quotaRefused=new Map();
  const rows=await env.DB.prepare("SELECT t.*,c.plan_json AS parent_plan_json,c.raw_command AS parent_raw_command FROM autonomy_tasks t LEFT JOIN autonomy_commands c ON c.id=t.command_id WHERE t.status='queued' AND (t.scheduled_at IS NULL OR t.scheduled_at<=?) ORDER BY t.priority DESC,t.created_at ASC LIMIT ?").bind(now(),limit).all();
  let executed=0,failed=0,blocked=0,requeued=0;
  const tasks=[],lastByModule=new Map(),seen=new Map(),claims=new Map(),lockBusy=new Map(),approvedTasks=new Map(),blockedForApproval=[];
@@ -483,7 +512,7 @@ export async function runTasksOrchestrated(env,req,limit=20,{executor=executeTas
   seen.set(key,t.id);
   // Same-module tasks run one after another (ordering only), so the module lock is never contended inside one run.
   const prev=lastByModule.get(t.module);lastByModule.set(t.module,t.id);
-  tasks.push({id:t.id,agent:`autonomy:${t.module}`,version:"autonomy-engine",capability,after:prev?[prev]:[],cost:capability==="paid"?5:1,
+  tasks.push({id:t.id,agent:`autonomy:${t.module}`,version:AUTONOMY_ENGINE_VERSION,capability,after:prev?[prev]:[],cost:capability==="paid"?5:1,
    // only reads are retried: a retried draft or paid call could duplicate work or spend twice
    retryable:capability==="read",
    run:async ctx=>{
@@ -493,7 +522,7 @@ export async function runTasksOrchestrated(env,req,limit=20,{executor=executeTas
      const token=claims.get(t.id)||now();
      const cap=capability==="paid"?autonomyDailyQuota(t.module,t.action,qo):null;
      const claimed=ctx.attempt===1
-      ?await claimTask(env,t,token,cap)
+      ?await claimTask(env,t,token,cap,budgets)
       :Number((await env.DB.prepare("UPDATE autonomy_tasks SET attempts=attempts+1,updated_at=? WHERE id=? AND status='running' AND started_at=?").bind(now(),t.id,token).run()).meta?.changes||0)===1;
      if(!claimed){
       if(cap!=null&&ctx.attempt===1&&await stillQueued(env,t.id)){quotaRefused.set(t.id,cap);const e=new Error("daily quota reserved by a concurrent run");e.retryable=false;throw e;}
@@ -520,8 +549,9 @@ export async function runTasksOrchestrated(env,req,limit=20,{executor=executeTas
    if(Number(u.meta?.changes||0)===1){failed++;await event(env,"task_failed",t?.module,`Failed: ${t?.action}`,{task_id:r.id,error:msg});}
   }
  }
- // A quota refusal is a deferral, not a failure: keep it out of the dead-letter queue and alerts.
- if(quotaRefused.size)report.dead_letters=report.dead_letters.filter(d=>!quotaRefused.has(d.task_id));
+ // Only work this run actually claimed can be a failure: a quota/budget refusal, a busy module lock or a task another run claimed
+ // was never executed here, so it stays out of the dead-letter queue and its alerts (the row is left queued / deferred).
+ report.dead_letters=report.dead_letters.filter(d=>claims.has(d.task_id));
  // One allow-listed, size-capped run summary in the existing events table (no task payloads, outputs or error text).
  const summary={run_id:report.run_id,orchestrator_version:report.orchestrator_version,duration_ms:report.duration_ms,counts:report.counts,budget:report.budget,
   alerts:report.alerts.map(a=>({level:a.level,code:a.code})),dead_letters:report.dead_letters.map(d=>({task_id:d.task_id,state:d.state,attempts:d.attempts})),
@@ -540,7 +570,7 @@ async function handleAgentOps(env,req,u){
  const reply=(body,status=200)=>Response.json(body,{status,headers:NO_STORE});
  try{
   const p=u.pathname.slice("/api/autonomy/agents/".length);
-  if(p==="overview"){if(req.method!=="GET")return reply({ok:false,error:"Method not allowed"},405);return reply({ok:true,orchestrator_enabled:orchestratorEnabled(env),...await opsOverview(env),quotas:await autonomyQuotaSummary(env).catch(()=>[]),publishing:await publishingSummary(env)});}
+  if(p==="overview"){if(req.method!=="GET")return reply({ok:false,error:"Method not allowed"},405);return reply({ok:true,orchestrator_enabled:orchestratorEnabled(env),...await opsOverview(env),quotas:await autonomyQuotaSummary(env).catch(()=>[]),costs:await costSummary(env).catch(()=>null),quality:await qualitySummary(env).catch(()=>null),versions:await versionSummary(env).catch(()=>[]),publishing:await publishingSummary(env)});}
   if(!["approvals/decide","alerts/ack","dead-letters/resolve"].includes(p))return reply({ok:false,error:"Not found"},404);
   if(req.method!=="POST")return reply({ok:false,error:"Method not allowed"},405);
   const raw=await req.text();if(raw.length>OPS_BODY_MAX)return reply({ok:false,error:"Request body too large"},413);
@@ -580,7 +610,7 @@ export async function runTasks(env,req,limit=20){
   if(cap!=null&&(await quotaUsed(env,t.module,t.action))>=cap){await deferForQuota(env,t,cap);continue;}
   if(!(await acquire(env,t.module,t.id)))continue;
   // The claim is the atomic quota reservation; a refused claim never executes (another run took the row or the last quota unit).
-  if(!(await claimTask(env,t,now(),cap))){await release(env,t.module,t.id);if(cap!=null&&await stillQueued(env,t.id))await deferForQuota(env,t,cap);continue;}
+  if(!(await claimTask(env,t,now(),cap,cap==null?null:autonomyBudgets(await budgetOverrides(env))))){await release(env,t.module,t.id);if(cap!=null&&await stillQueued(env,t.id))await deferForQuota(env,t,cap);continue;}
   try{
    const result=await executeTask(env,req,t);
    await env.DB.prepare("UPDATE autonomy_tasks SET status='completed',error=NULL,result_json=?,finished_at=?,updated_at=? WHERE id=? AND status='running'").bind(JSON.stringify(result).slice(0,50000),now(),now(),t.id).run();

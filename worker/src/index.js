@@ -1,5 +1,5 @@
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
-import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
+import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, reserveAdsAutopilotRun, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { claimFlight, completeFlight, failFlight, salesAiSingleFlight, purgeAiCallFlights } from "./sales-memory.js";
 import { buildMemoryVocabulary, memoryCanonicalize, memoryConceptFromInterpretation, memoryFingerprint, memoryLookup, memoryObserve, memoryReview, memoryList, memoryGalleryRoles, memoryConceptKey, memoryMetrics, memoryConceptAnswer, memoryRenderAnswer, knowledgeVersion } from "./sales-memory.js";
@@ -8,6 +8,7 @@ import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiP
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
 import { bearerMatches } from "./secure-compare.js";
+import { runWatchdog } from "./agent-watchdog.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -12640,6 +12641,8 @@ export default {
     ctx.waitUntil((async()=>{ try { await reconcileAcceptedChatOffers(env,{limit:10}); } catch {} })());
     // MEM-02 retention: per-inbox AI results are cleared after their reuse window, rows after 7 days (bounded; live leases kept).
     ctx.waitUntil((async()=>{ try { await purgeAiCallFlights(env); } catch {} })());
+    // Independent agent watchdog (Stage 3): own waitUntil + try/catch, reads ops tables and raises alerts; never runs or sends anything.
+    ctx.waitUntil((async()=>{ try { await runWatchdog(env); } catch {} })());
     if (!(await autonomyMasterGate(env))) return;
     ctx.waitUntil((async()=>{
         await ensureWebsiteGrowthStore(env);
@@ -12668,6 +12671,9 @@ await pollWeeklyVideoAutopilot(env);
           let cfg={}; try{cfg=JSON.parse(row?.value||"{}")}catch{}
           if(!cfg.enabled) return;
           const input=validateAdsInput(cfg); if(!input.ok) return;
+          // Daily run budget (Stage 3 cost control): one atomic reservation per run, at most ads_runs_per_day per UTC day and at most
+          // one per 55 minutes; a refused reservation skips this tick (nothing is retried or released, so it can never spend twice).
+          if(!(await reserveAdsAutopilotRun(env))) return;
           await runAdAutopilotOnce(env,input,"scheduled");
           // Keep the follow-up queue moving while Autopilot is ON. Actual sending remains authorized-channel/manual.
           const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();

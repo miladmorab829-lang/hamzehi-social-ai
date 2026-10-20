@@ -4,9 +4,9 @@
 // write is skipped, so the orchestrator falls back to its Stage 2A behaviour. All writes are best-effort and never throw into the
 // caller; nothing here sends a message, approves anything by itself, or touches sales/CRM tables (approvals are kept out of
 // owner_decisions on purpose).
-import { redact, safeErrorText } from "./agent-orchestrator.js";
+import { redact, safeErrorText, ORCHESTRATOR_VERSION } from "./agent-orchestrator.js";
 
-export const OPS_TABLES=Object.freeze(["agent_runs","agent_dead_letters","agent_alerts","agent_heartbeat","agent_approvals"]);
+export const OPS_TABLES=Object.freeze(["agent_runs","agent_dead_letters","agent_alerts","agent_heartbeat","agent_approvals","agent_versions"]);
 export const APPROVAL_TTL_MS=24*60*60*1000;
 const iso=ms=>new Date(ms).toISOString();
 const uid=()=>crypto.randomUUID();
@@ -38,8 +38,14 @@ export async function recordRun(env,scheduler,report,extra={}){
     const counts={...report.counts,...Object.fromEntries(Object.entries(extra).filter(([,v])=>typeof v==="number"))};
     await env.DB.prepare("INSERT OR IGNORE INTO agent_runs(run_id,scheduler,orchestrator_version,started_at,finished_at,duration_ms,counts_json,budget_spent,budget_limit,alert_codes_json,healthy) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
       .bind(report.run_id,scheduler,report.orchestrator_version,report.started_at,t,report.duration_ms,JSON.stringify(counts),report.budget?.spent??0,report.budget?.limit??0,JSON.stringify(report.alerts.map(a=>a.code)),healthy).run();
-    for(const d of report.dead_letters)await env.DB.prepare("INSERT INTO agent_dead_letters(id,run_id,task_id,agent,agent_version,state,attempts,error_redacted,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
-      .bind(uid(),report.run_id,d.task_id,d.agent,d.version||null,d.state,d.attempts,safeErrorText(d.error),d.at||t).run();
+    // One open dead letter per task: a repeat failure of a task that is already waiting updates that row instead of adding another.
+    for(const d of report.dead_letters){
+      const upd=await env.DB.prepare("UPDATE agent_dead_letters SET run_id=?,agent_version=?,state=?,attempts=attempts+?,error_redacted=? WHERE task_id=? AND resolved_at IS NULL")
+        .bind(report.run_id,d.version||null,d.state,d.attempts,safeErrorText(d.error),d.task_id).run();
+      if(Number(upd?.meta?.changes||0)===0)await env.DB.prepare("INSERT INTO agent_dead_letters(id,run_id,task_id,agent,agent_version,state,attempts,error_redacted,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+        .bind(uid(),report.run_id,d.task_id,d.agent,d.version||null,d.state,d.attempts,safeErrorText(d.error),d.at||t).run();
+    }
+    await trackAgentVersions(env,report.agents,t);
     await env.DB.prepare("INSERT INTO agent_heartbeat(scheduler,last_run_id,last_finished_at,healthy) VALUES(?,?,?,?) ON CONFLICT(scheduler) DO UPDATE SET last_run_id=excluded.last_run_id,last_finished_at=excluded.last_finished_at,healthy=excluded.healthy")
       .bind(scheduler,report.run_id,t,healthy).run();
     // Alerts: dead letters are raised per agent (with the affected tasks); run-level warnings/criticals under "orchestrator".
@@ -48,28 +54,52 @@ export async function recordRun(env,scheduler,report,extra={}){
     for(const [agent,list] of byAgent)raised.push({code:"dead_letters",agent,level:"warning",cause:list[list.length-1].error,tasks:list.map(d=>d.task_id)});
     for(const a of report.alerts)if(a.code!=="dead_letters"&&a.level!=="info")raised.push({code:a.code,agent:"orchestrator",level:a.level,cause:a.message,tasks:report.tasks.filter(x=>["budget_exhausted","deadline_reached","not_run"].includes(x.state)).map(x=>x.id)});
     for(const a of extra.blockedForApproval||[])raised.push({code:"capability_blocked",agent:a.agent,level:"info",cause:"Waiting for owner approval",tasks:[a.task_id]});
-    const raisedKeys=new Set();
-    for(const a of raised){
-      raisedKeys.add(`${a.code}|${a.agent}`);
-      const open=await env.DB.prepare("SELECT id,affected_tasks_json FROM agent_alerts WHERE scheduler=? AND code=? AND agent=? AND acknowledged_at IS NULL LIMIT 1").bind(scheduler,a.code,a.agent).first();
-      if(open){
-        let tasks=[];try{tasks=JSON.parse(open.affected_tasks_json||"[]")}catch{}
-        tasks=[...new Set([...tasks,...a.tasks])].slice(-50);
-        await env.DB.prepare("UPDATE agent_alerts SET level=?,cause_redacted=?,affected_tasks_json=?,fallback_status=?,recovery_state='open',recovered_at=NULL,last_run_id=?,last_seen_at=?,occurrences=occurrences+1 WHERE id=?")
-          .bind(a.level,safeErrorText(a.cause),JSON.stringify(tasks),FALLBACK[a.code]||null,report.run_id,t,open.id).run();
-      }else{
-        await env.DB.prepare("INSERT INTO agent_alerts(id,scheduler,code,agent,level,cause_redacted,affected_tasks_json,fallback_status,recovery_state,last_run_id,first_seen_at,last_seen_at,occurrences) VALUES(?,?,?,?,?,?,?,?,'open',?,?,?,1)")
-          .bind(uid(),scheduler,a.code,a.agent,a.level,safeErrorText(a.cause),JSON.stringify(a.tasks.slice(-50)),FALLBACK[a.code]||null,report.run_id,t,t).run();
-      }
-    }
+    const raisedKeys=await raiseAlerts(env,scheduler,raised,report.run_id,t);
     // Recovery: an open alert whose cause did not recur in a healthy run is marked recovered; it stays visible until acknowledged.
-    if(healthy){
-      const opens=await env.DB.prepare("SELECT id,code,agent FROM agent_alerts WHERE scheduler=? AND acknowledged_at IS NULL AND recovery_state='open'").bind(scheduler).all();
-      for(const o of opens.results||[])if(!raisedKeys.has(`${o.code}|${o.agent}`))
-        await env.DB.prepare("UPDATE agent_alerts SET recovery_state='recovered',recovered_at=? WHERE id=? AND recovery_state='open'").bind(t,o.id).run();
-    }
+    if(healthy)await recoverOpenAlerts(env,scheduler,raisedKeys,t);
     return {stored:true};
   }catch(error){return {stored:false,reason:"store_error",error:redact(error)};}
+}
+
+// Shared alert lifecycle (orchestrator runs and the watchdog): one OPEN row per (scheduler, code, agent); a repeat bumps occurrences,
+// merges affected tasks and re-opens a recovered alert; history rows are never deleted. Returns the raised "code|agent" keys.
+export async function raiseAlerts(env,scheduler,raised,runId,t){
+  const keys=new Set();
+  for(const a of raised){
+    keys.add(`${a.code}|${a.agent}`);
+    const fallback=a.fallback||FALLBACK[a.code]||null;
+    const open=await env.DB.prepare("SELECT id,affected_tasks_json FROM agent_alerts WHERE scheduler=? AND code=? AND agent=? AND acknowledged_at IS NULL LIMIT 1").bind(scheduler,a.code,a.agent).first();
+    if(open){
+      let tasks=[];try{tasks=JSON.parse(open.affected_tasks_json||"[]")}catch{}
+      tasks=[...new Set([...tasks,...(a.tasks||[])])].slice(-50);
+      await env.DB.prepare("UPDATE agent_alerts SET level=?,cause_redacted=?,affected_tasks_json=?,fallback_status=?,recovery_state='open',recovered_at=NULL,last_run_id=?,last_seen_at=?,occurrences=occurrences+1 WHERE id=?")
+        .bind(a.level,safeErrorText(a.cause),JSON.stringify(tasks),fallback,runId,t,open.id).run();
+    }else{
+      await env.DB.prepare("INSERT INTO agent_alerts(id,scheduler,code,agent,level,cause_redacted,affected_tasks_json,fallback_status,recovery_state,last_run_id,first_seen_at,last_seen_at,occurrences) VALUES(?,?,?,?,?,?,?,?,'open',?,?,?,1)")
+        .bind(uid(),scheduler,a.code,a.agent,a.level,safeErrorText(a.cause),JSON.stringify((a.tasks||[]).slice(-50)),fallback,runId,t,t).run();
+    }
+  }
+  return keys;
+}
+export async function recoverOpenAlerts(env,scheduler,keepKeys,t){
+  const opens=await env.DB.prepare("SELECT id,code,agent FROM agent_alerts WHERE scheduler=? AND acknowledged_at IS NULL AND recovery_state='open'").bind(scheduler).all();
+  for(const o of opens.results||[])if(!keepKeys.has(`${o.code}|${o.agent}`))
+    await env.DB.prepare("UPDATE agent_alerts SET recovery_state='recovered',recovered_at=? WHERE id=? AND recovery_state='open'").bind(t,o.id).run();
+}
+
+// Agent versions (agent_versions): the version each agent ran with becomes its ACTIVE row; the row it replaces becomes 'previous'
+// (rollback reference). Code rollback itself stays an owner-approved Worker deploy; nothing here deploys or switches code.
+export async function trackAgentVersions(env,agents={},t=new Date().toISOString()){
+  for(const [agent,a] of Object.entries(agents||{})){
+    const version=String((a.versions||[]).slice(-1)[0]||"");if(!version)continue;
+    const cur=await env.DB.prepare("SELECT version FROM agent_versions WHERE agent=? AND status='active'").bind(agent).first();
+    if(cur?.version===version)continue;
+    const notes=JSON.stringify({orchestrator_version:ORCHESTRATOR_VERSION,source:"autonomy-engine"});
+    await env.DB.batch([
+      env.DB.prepare("UPDATE agent_versions SET status='previous' WHERE agent=? AND status='active'").bind(agent),
+      env.DB.prepare("INSERT INTO agent_versions(agent,version,status,activated_at,activated_by,notes) VALUES(?,?,'active',?,'autonomy',?) ON CONFLICT(agent,version) DO UPDATE SET status='active',activated_at=excluded.activated_at,notes=excluded.notes").bind(agent,version,t,notes)
+    ]);
+  }
 }
 
 /* ------------------------------------------------------------------------------------------- owner approval queue */
@@ -152,6 +182,21 @@ export async function cancelObsoleteApprovals(env,{needsApproval,nowMs=Date.now(
     }catch{}
   }
   return {cancelled};
+}
+
+// Watchdog recovery of ONE dead-lettered READ task (the caller checks the capability allow-list). One D1 batch (a transaction):
+// the dead letter is resolved as 'retried' by 'watchdog' only if no automatic retry of this task was audited today, the failed task
+// goes back to the queue, and the audit row is written — so overlapping watchdog runs can never requeue a task twice in a day.
+export async function autoRetryReadDeadLetter(env,{id,taskId,agent,dayStart,nowMs=Date.now()}){
+  const t=iso(nowMs),tok=uid(),guard="SELECT 1 FROM agent_dead_letters WHERE id=? AND action_token=?",mark=`%"task_id":${JSON.stringify(String(taskId))}%`;
+  try{
+    const res=await env.DB.batch([
+      env.DB.prepare("UPDATE agent_dead_letters SET resolved_at=?,resolved_by='watchdog',resolution='retried',action_token=? WHERE id=? AND resolved_at IS NULL AND NOT EXISTS(SELECT 1 FROM autonomy_events WHERE type='agent_dead_letter_auto_retried' AND created_at>=? AND meta_json LIKE ?)").bind(t,tok,id,dayStart,mark),
+      env.DB.prepare(`UPDATE autonomy_tasks SET status='queued',error=NULL,updated_at=? WHERE id=? AND status='failed' AND EXISTS(${guard})`).bind(t,taskId,id,tok),
+      auditStmt(env,"agent_dead_letter_auto_retried","Watchdog re-queued a failed read-only task (once per day)",{dead_letter_id:id,task_id:String(taskId),agent,actor:"watchdog"},t,guard,id,tok)
+    ]);
+    return changed(res[0]);
+  }catch{return false;}
 }
 
 /* ------------------------------------------------------------------------------------------- owner actions on alerts / DLQ */
