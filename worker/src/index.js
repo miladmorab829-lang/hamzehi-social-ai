@@ -7477,7 +7477,7 @@ async function captureConversationSalesMemory(env,inboxId,out=null){
   return {captured:true,lead_id:row.lead_id,conversation_id:row.conversation_id,facts:captured.map(x=>x.fact.id),idempotent:captured.every(x=>x.idempotent)};
 }
 
-const LEAD_OUTREACH_STATUSES = new Set(["draft","pending_approval","approved","sending","sent","rejected","send_failed","send_ambiguous"]);
+const LEAD_OUTREACH_STATUSES = new Set(["draft","pending_approval","approved","sending","sent","rejected","send_failed","send_ambiguous","delivered"]);   // delivered: owner-confirmed manual first contact (Phase 04)
 
 function outreachLanguage(meta = {}) {
   const country = String(meta.country || meta.market || "").trim().toLowerCase();
@@ -7609,6 +7609,9 @@ function salesObjection(text){
 
 const NEGOTIATION_INTENTS = new Set(["interested","asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted","rejected","other"]);
 const NEGOTIATION_STAGE_INTENTS = new Set(["asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted"]);
+// Phase 04: recorded evidence that a PRICED offer exists for a lead (correlated on leads.id): a sent/accepted formal quote, a lead
+// order (formal or chat-offer), or the Sales Brain's active chat offer. Keyword intent alone is only preliminary interest.
+const LEAD_PRICED_OFFER_SQL="EXISTS(SELECT 1 FROM lead_quotes q WHERE q.lead_id=leads.id AND q.status IN ('sent','accepted')) OR EXISTS(SELECT 1 FROM lead_orders o WHERE o.lead_id=leads.id AND o.status<>'cancelled') OR EXISTS(SELECT 1 FROM conversation_memory_facts f WHERE f.lead_id=leads.id AND f.memory_key='order_candidate' AND f.status='active' AND instr(f.value_json,'\"offer_hash\"')>0)";
 
 // A shipping question: the shipping words themselves, or «ارسال» / «توصيل» only TOGETHER with a question cue («ارسال دارید؟»,
 // «التوصيل لبغداد شكد؟») — a statement or product text that merely contains them («جعبه ارسال کنید», «التوصيل الى بغداد») is not one.
@@ -9910,7 +9913,10 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
   const nextStage=NEGOTIATION_STAGE_INTENTS.has(intent)?"negotiation":"replied",captureOut={},memoryStarted=Date.now();
   const [,,contact,context]=await Promise.all([
     captureConversationSalesMemory(env,inboxId,captureOut).catch(async error=>{try{await audit(env,"conversation_memory_capture_failed","Linked inbound remained stored after customer-memory capture failure",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}).finally(()=>{timing.memory_ms=Date.now()-memoryStarted;}),
-    env.DB.prepare(`UPDATE leads SET stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified','contacted','replied')`).bind(nextStage,now(),row.lead_id).run(),
+    // Phase 04: a keyword intent alone is preliminary interest («replied»); «negotiation» needs a recorded priced offer for this lead
+    // (a sent/accepted quote, an order, or the sales brain's active chat offer). One statement; if a table is missing, «replied».
+    env.DB.prepare(`UPDATE leads SET stage=CASE WHEN ?=1 AND (${LEAD_PRICED_OFFER_SQL}) THEN 'negotiation' ELSE 'replied' END,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified','contacted','replied')`).bind(nextStage==="negotiation"?1:0,now(),row.lead_id).run()
+      .catch(()=>env.DB.prepare(`UPDATE leads SET stage='replied',updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified','contacted')`).bind(now(),row.lead_id).run()),
     env.DB.prepare("SELECT * FROM lead_contacts WHERE id=? AND lead_id=? LIMIT 1").bind(row.contact_id||"",row.lead_id).first(),
     (async()=>{const s=Date.now(),loaded=await getNegotiationConversationContext(env,row.lead_id,row.conversation_id);timing.history_ms=Date.now()-s;return loaded;})()
   ]);
@@ -11004,6 +11010,199 @@ async function listTelegramPilotCodes(env){
   return {ok:true,items:r.results||[]};
 }
 
+// ================= PHASE 04 — REACHABLE PIPELINE =================
+// (1) Contact backfill: discovery leads keep their phone/email/website inside notes JSON only, so no owner tool could use them.
+// This maps them ADDITIVELY into lead_contacts as UNVERIFIED («possible», source discovery_backfill) and claims free phone/domain/
+// email identities for dedup. Notes and stages are never touched; telegram/instagram/whatsapp are never derived (a phone number
+// is not a Telegram permission). A key already owned by another lead, or shared by two leads in this batch, is not claimed.
+// Dry run by default; the response holds counts and lead ids only — never a phone, email or address.
+const DISCOVERY_BACKFILL_SOURCES=new Set(["customer_discovery","ad_discovery","ad_autopilot"]);
+const DISCOVERY_BACKFILL_TYPES=["phone","email","website"];
+async function discoveryContactBackfill(env,{apply=false}={}){
+  await ensureLeadIdentityStore(env);await ensureLeadContactStore(env);
+  const rows=(await env.DB.prepare("SELECT id,name,contact,stage,notes,created_at FROM leads ORDER BY created_at,id LIMIT 5000").all()).results||[];
+  const existing=new Set(((await env.DB.prepare("SELECT lead_id,contact_type,normalized_value FROM lead_contacts").all()).results||[]).map(c=>`${c.lead_id}|${c.contact_type}|${c.normalized_value}`));
+  const owners=new Map(((await env.DB.prepare("SELECT identity_key,lead_id FROM lead_identities").all()).results||[]).map(r=>[r.identity_key,r.lead_id]));
+  const report={dry_run:!apply,leads_scanned:rows.length,eligible_leads:0,leads_gaining_contacts:0,contacts_new:{phone:0,email:0,website:0},contacts_already_present:0,unnormalizable:{phone:0,email:0,website:0},
+    by_country:{},identities_new:0,identities_already_linked:0,identity_conflicts:0,identity_shared_in_batch:0,conflict_lead_ids:[],applied:{contacts:0,identities:0}};
+  const plans=[],claims=new Map();
+  for(const row of rows){
+    const meta=parseLeadNotes(row);if(!DISCOVERY_BACKFILL_SOURCES.has(String(meta.source||"")))continue;
+    report.eligible_leads++;
+    const fresh=[];
+    for(const c of contactsFromLeadMetadata(meta,"discovery_backfill","possible").filter(c=>DISCOVERY_BACKFILL_TYPES.includes(c.contact_type))){
+      const n=normalizeLeadContact(c.contact_type,c.raw_value,meta.country||"");
+      if(!n){report.unnormalizable[c.contact_type]++;continue;}
+      const k=`${row.id}|${c.contact_type}|${n}`;if(existing.has(k)){report.contacts_already_present++;continue;}
+      existing.add(k);fresh.push(c);report.contacts_new[c.contact_type]++;
+    }
+    if(fresh.length){report.leads_gaining_contacts++;const ctry=String(meta.country||"unknown").slice(0,40);report.by_country[ctry]=(report.by_country[ctry]||0)+1;}
+    const keys=[];
+    for(const i of collectLeadIdentities(leadInputFromExisting(row)).filter(i=>["phone","domain","email"].includes(i.identity_type))){
+      const owner=owners.get(i.identity_key);
+      if(owner===row.id){report.identities_already_linked++;continue;}
+      if(owner){report.identity_conflicts++;if(report.conflict_lead_ids.length<50)report.conflict_lead_ids.push([row.id,owner]);continue;}
+      keys.push(i);const list=claims.get(i.identity_key)||new Set();list.add(row.id);claims.set(i.identity_key,list);
+    }
+    plans.push({row,fresh,keys});
+  }
+  for(const p of plans){p.keys=p.keys.filter(i=>{const shared=claims.get(i.identity_key).size>1;if(shared)report.identity_shared_in_batch++;return !shared;});report.identities_new+=p.keys.length;}
+  if(apply){
+    for(const p of plans){
+      if(p.fresh.length)report.applied.contacts+=(await storeLeadContacts(env,p.row.id,p.fresh)).length;
+      for(const i of p.keys){const t=now();const r=await env.DB.prepare("INSERT INTO lead_identities(identity_key,identity_type,normalized_value,lead_id,source,created_at,updated_at) SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM lead_identities WHERE identity_key=?)").bind(i.identity_key,i.identity_type,i.normalized_value,p.row.id,"discovery_backfill",t,t,i.identity_key).run();report.applied.identities+=Number(r?.meta?.changes||0);}
+    }
+    await audit(env,"discovery_contact_backfill","Owner applied the discovery contact backfill (unverified contacts, no stage or notes change)",{eligible_leads:report.eligible_leads,contacts:report.applied.contacts,identities:report.applied.identities,identity_conflicts:report.identity_conflicts});
+  }
+  return {ok:true,...report};
+}
+
+// (2) Owner-approved FIRST CONTACT (manual delivery). A queue item is a lead_outreach row on the dedicated channel
+// «first_contact_manual»: prepared as a template draft in the lead's VERIFIED market language (Iraq → Iraqi Arabic, Iran → Persian),
+// approved by the owner (an Iraq lead then gets a single-use pilot-code link, returned ONCE and never stored), delivered by the owner
+// through his own channel, and only the owner's delivery confirmation records «contacted». Nothing here can send: the Telegram
+// sender only accepts channel «telegram», and the generic outreach controls refuse this channel.
+const FIRST_CONTACT_CHANNEL="first_contact_manual",FIRST_CONTACT_PILOT_PLACEHOLDER="{{PILOT_LINK}}",FIRST_CONTACT_APPROVAL_DAYS=30;
+const FIRST_CONTACT_DELIVERY_CHANNELS=new Set(["phone","whatsapp","email","instagram","telegram","in_person","other"]);
+function leadIranCountryVerified(meta={}){
+  if(!["ir","iran","ایران"].includes(String(meta.country||"").trim().toLowerCase()))return false;
+  return /ایران|(?<![A-Za-z])iran(?![A-Za-z])/i.test(String(meta.address||""))||/^\+98/.test(normalizeLeadPhone(meta.phone,"ایران")||"");
+}
+function firstContactMarket(meta={}){return leadIraqCountryVerified(meta)?"iraq":leadIranCountryVerified(meta)?"iran":null;}
+function firstContactTemplate(market){
+  if(market==="iraq")return ["هلا بيكم، وياكم HAMZEHI BOX (hamzehibox.com).","نسوي علب وتغليف فاخر للذهب والمجوهرات والساعات والعطور، ونكدر نطبع شعار محلكم على العلب.","إذا محلكم يحتاج تغليف، يسعدنا نرسل لكم النماذج والكتالوج.",`تكدرون تراسلونا مباشرة على تيليجرام: ${FIRST_CONTACT_PILOT_PLACEHOLDER}`].join("\n");
+  return ["سلام و وقت بخیر، از HAMZEHI BOX (hamzehibox.com) مزاحم می‌شوم.","ما جعبه و بسته‌بندی لوکس برای طلا، جواهر، ساعت و عطر تولید می‌کنیم و چاپ لوگوی فروشگاه شما روی جعبه هم امکان‌پذیر است.","اگر فروشگاه شما به بسته‌بندی نیاز دارد، خوشحال می‌شوم نمونه‌ها و کاتالوگ را برایتان بفرستم."].join("\n");
+}
+async function firstContactDeliveryContact(env,leadId){
+  return await env.DB.prepare("SELECT id,contact_type,evidence_status FROM lead_contacts WHERE lead_id=? AND contact_type IN ('whatsapp','phone','email','instagram','telegram') AND evidence_status!='invalid' ORDER BY CASE evidence_status WHEN 'owner_confirmed' THEN 0 WHEN 'provider_supplied' THEN 1 WHEN 'page_extracted' THEN 2 ELSE 3 END,CASE contact_type WHEN 'whatsapp' THEN 0 WHEN 'phone' THEN 1 WHEN 'telegram' THEN 2 WHEN 'instagram' THEN 3 ELSE 4 END,created_at LIMIT 1").bind(leadId).first();
+}
+async function prepareFirstContacts(env,input={}){
+  const ids=[...new Set((Array.isArray(input.lead_ids)?input.lead_ids:[]).map(x=>String(x||"").trim()).filter(Boolean))];
+  if(!ids.length||ids.length>20)throw Error("lead_ids must list 1–20 leads");
+  if(input.confirm_prepare!==true)throw Error("confirm_prepare is required");
+  await ensureLeadOutreachStore(env);
+  const items=[];
+  for(const id of ids){
+    const lead=await env.DB.prepare("SELECT id,stage,notes FROM leads WHERE id=? LIMIT 1").bind(id).first();
+    if(!lead){items.push({lead_id:id,prepared:false,reason:"lead_not_found"});continue;}
+    if(!ADS_DRAFTABLE_STAGES.has(String(lead.stage||""))){items.push({lead_id:id,prepared:false,reason:"lead_stage_not_cold"});continue;}
+    const meta=parseLeadNotes(lead);
+    if(meta.do_not_contact||meta.opted_out){items.push({lead_id:id,prepared:false,reason:"do_not_contact"});continue;}
+    const market=firstContactMarket(meta);
+    if(!market){items.push({lead_id:id,prepared:false,reason:"market_not_verified"});continue;}
+    const contact=await firstContactDeliveryContact(env,id),language=market==="iraq"?"Iraqi Arabic":"Persian",t=now(),oid=uid();
+    // One statement: no open/delivered first contact, no earlier conversation or inbound for this lead — a lost race inserts nothing.
+    const r=await env.DB.prepare(`INSERT INTO lead_outreach(id,lead_id,contact_id,conversation_id,channel,recipient,message,language,status,created_at,updated_at)
+      SELECT ?,?,?,NULL,?,?,?,?,'draft',?,? WHERE NOT EXISTS(SELECT 1 FROM lead_outreach WHERE lead_id=? AND channel=? AND status IN ('draft','approved','delivered'))
+      AND NOT EXISTS(SELECT 1 FROM lead_conversations WHERE lead_id=?) AND NOT EXISTS(SELECT 1 FROM inbox_messages WHERE lead_id=?)`)
+      .bind(oid,id,contact?.id||null,FIRST_CONTACT_CHANNEL,"owner_manual",firstContactTemplate(market),language,t,t,id,FIRST_CONTACT_CHANNEL,id,id).run();
+    if(!Number(r?.meta?.changes||0)){items.push({lead_id:id,prepared:false,reason:"already_queued_or_in_conversation"});continue;}
+    items.push({lead_id:id,prepared:true,outreach_id:oid,market,language,delivery_contact_type:contact?.contact_type||null,pilot_link:market==="iraq"});
+  }
+  await audit(env,"first_contact_prepared","Owner prepared first-contact drafts (manual delivery; nothing sent)",{prepared:items.filter(x=>x.prepared).map(x=>({lead_id:x.lead_id,outreach_id:x.outreach_id,market:x.market})),refused:items.filter(x=>!x.prepared).length});
+  return {ok:true,sending_enabled:false,items};
+}
+async function firstContactRow(env,id){
+  await ensureLeadOutreachStore(env);
+  return await env.DB.prepare("SELECT o.*,l.stage AS lead_stage,l.notes AS lead_notes FROM lead_outreach o JOIN leads l ON l.id=o.lead_id WHERE o.id=? AND o.channel=? LIMIT 1").bind(String(id||"").trim(),FIRST_CONTACT_CHANNEL).first();
+}
+// Approve (owner): the stored text keeps the placeholder; an Iraq lead gets a fresh single-use pilot code (a re-approval revokes the
+// previous one). The deliverable text with the link is returned only in this response. Never sends; never changes the stage.
+async function approveFirstContact(env,input={}){
+  if(input.confirm_approve!==true)throw Error("confirm_approve is required");
+  const row=await firstContactRow(env,input.outreach_id);if(!row)return {ok:false,statusCode:404,error:"First-contact item not found"};
+  if(!["draft","approved"].includes(row.status))return {ok:false,statusCode:409,error:`A ${row.status} first-contact item cannot be approved`};
+  if(row.status==="approved"&&input.confirm_reissue!==true)return {ok:false,statusCode:409,error:"Already approved; pass confirm_reissue to issue a new link (the previous link stops working)"};
+  let message=String(input.message??row.message).trim();
+  if(!message||message.length>2000)return {ok:false,statusCode:400,error:"message must be 1–2000 characters"};
+  const market=firstContactMarket(parseLeadNotes({notes:row.lead_notes}));
+  let link=null,pilot={issued:false,reason:market==="iraq"?null:"not_an_iraq_lead"};
+  if(market==="iraq"){
+    const res=await issueTelegramPilotCodes(env,{lead_ids:[row.lead_id],confirm_issue:true}),issued=res.items[0]||{};
+    if(issued.issued){link=issued.link;pilot={issued:true,code_id:issued.code_id,expires_at:issued.expires_at,bot_username_verified:!!res.bot_username_verified};}else pilot={issued:false,reason:issued.reason||"not_issued"};
+  }
+  if(link&&!message.includes(FIRST_CONTACT_PILOT_PLACEHOLDER))message+=`\n${FIRST_CONTACT_PILOT_PLACEHOLDER}`;
+  const stored=link?message:message.split("\n").filter(line=>!line.includes(FIRST_CONTACT_PILOT_PLACEHOLDER)).join("\n");
+  const t=now(),r=await env.DB.prepare("UPDATE lead_outreach SET message=?,status='approved',approved_at=?,approved_by='owner',updated_at=? WHERE id=? AND channel=? AND status=?").bind(stored,t,t,row.id,FIRST_CONTACT_CHANNEL,row.status).run();
+  if(!Number(r?.meta?.changes||0))return {ok:false,statusCode:409,error:"First-contact item changed concurrently; reload it"};
+  await audit(env,"first_contact_approved","Owner approved a first-contact draft for manual delivery (nothing sent)",{outreach_id:row.id,lead_id:row.lead_id,pilot_code_id:pilot.code_id||null});
+  return {ok:true,outreach_id:row.id,lead_id:row.lead_id,status:"approved",sending_enabled:false,deliverable_message:link?stored.split(FIRST_CONTACT_PILOT_PLACEHOLDER).join(link):stored,pilot,
+    note:"Deliver this text yourself, then confirm delivery. The link is shown only now."};
+}
+async function rejectFirstContact(env,input={}){
+  const row=await firstContactRow(env,input.outreach_id);if(!row)return {ok:false,statusCode:404,error:"First-contact item not found"};
+  if(row.status==="rejected")return {ok:true,outreach_id:row.id,status:"rejected",idempotent:true};
+  if(!["draft","approved"].includes(row.status))return {ok:false,statusCode:409,error:`A ${row.status} first-contact item cannot be rejected`};
+  const r=await env.DB.prepare("UPDATE lead_outreach SET status='rejected',updated_at=? WHERE id=? AND channel=? AND status=?").bind(now(),row.id,FIRST_CONTACT_CHANNEL,row.status).run();
+  if(!Number(r?.meta?.changes||0))return {ok:false,statusCode:409,error:"First-contact item changed concurrently; reload it"};
+  if(row.status==="approved"&&await leadCampaignCodeStoreReady(env))await revokeTelegramPilotCodes(env,{lead_id:row.lead_id});
+  await audit(env,"first_contact_rejected","Owner rejected a first-contact draft",{outreach_id:row.id,lead_id:row.lead_id});
+  return {ok:true,outreach_id:row.id,status:"rejected"};
+}
+// The owner's delivery confirmation is the ONLY event that records «contacted» for a first contact (one-way, idempotent).
+async function confirmFirstContactDelivered(env,input={}){
+  if(input.confirm_delivered!==true)throw Error("confirm_delivered is required");
+  const via=String(input.delivered_via||"").trim().toLowerCase();
+  if(!FIRST_CONTACT_DELIVERY_CHANNELS.has(via))throw Error("delivered_via must be one of: "+[...FIRST_CONTACT_DELIVERY_CHANNELS].join(", "));
+  const row=await firstContactRow(env,input.outreach_id);if(!row)return {ok:false,statusCode:404,error:"First-contact item not found"};
+  if(row.status==="delivered")return {ok:true,outreach_id:row.id,lead_id:row.lead_id,status:"delivered",idempotent:true};
+  if(row.status!=="approved")return {ok:false,statusCode:409,error:"Only an owner-approved first contact can be confirmed as delivered"};
+  if(!(Date.parse(row.approved_at||"")>Date.now()-FIRST_CONTACT_APPROVAL_DAYS*86400000))return {ok:false,statusCode:409,error:"The approval has expired; approve the item again before delivering it"};
+  const t=now(),r=await env.DB.prepare("UPDATE lead_outreach SET status='delivered',recipient=?,sent_at=?,updated_at=? WHERE id=? AND channel=? AND status='approved'").bind("manual:"+via,t,t,row.id,FIRST_CONTACT_CHANNEL).run();
+  if(!Number(r?.meta?.changes||0))return {ok:true,outreach_id:row.id,lead_id:row.lead_id,status:(await firstContactRow(env,row.id))?.status||"unknown",idempotent:true};
+  const staged=await env.DB.prepare("UPDATE leads SET stage='contacted',updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(t,row.lead_id).run();
+  await audit(env,"first_contact_delivered","Owner confirmed manual delivery of a first contact",{outreach_id:row.id,lead_id:row.lead_id,delivered_via:via,stage_changed:Number(staged?.meta?.changes||0)===1});
+  return {ok:true,outreach_id:row.id,lead_id:row.lead_id,status:"delivered",lead_stage_changed:Number(staged?.meta?.changes||0)===1};
+}
+async function listFirstContacts(env){
+  await ensureLeadOutreachStore(env);
+  const r=await env.DB.prepare("SELECT o.id AS outreach_id,o.lead_id,l.name AS lead_name,l.stage AS lead_stage,o.language,o.status,o.message,o.recipient,o.approved_at,o.sent_at,o.created_at,c.contact_type AS delivery_contact_type FROM lead_outreach o JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_contacts c ON c.id=o.contact_id WHERE o.channel=? ORDER BY o.created_at DESC LIMIT 200").bind(FIRST_CONTACT_CHANNEL).all();
+  return {ok:true,sending_enabled:false,items:r.results||[]};
+}
+
+// (3) Event-based funnel: discovered → contacted → replied → negotiated → quoted → ordered → paid, from RECORDED events only
+// (deliveries, inbound messages, quotes, chat offers, orders, payments) — never from leads.stage, a keyword or a draft. «furthest»
+// assigns each lead exactly one bucket, so it always sums to the lead total; «reached» is the cumulative funnel. Read-only.
+const FUNNEL_STEPS=["discovered","contacted","replied","negotiated","quoted","ordered","paid"];
+async function leadFunnelReport(env){
+  const have=new Set(((await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()).results||[]).map(x=>x.name));
+  const q=(table,sql)=>have.has(table)?sql:"0";
+  const intents=[...NEGOTIATION_STAGE_INTENTS].map(x=>`'${x}'`).join(",");
+  const rows=(await env.DB.prepare(`SELECT l.id,l.stage,l.notes,
+    ${q("lead_outreach","EXISTS(SELECT 1 FROM lead_outreach o WHERE o.lead_id=l.id AND o.status IN ('sent','delivered'))")} AS contacted,
+    ${q("inbox_messages","EXISTS(SELECT 1 FROM inbox_messages i WHERE i.lead_id=l.id)")} AS replied,
+    ${q("inbox_messages",`EXISTS(SELECT 1 FROM inbox_messages i WHERE i.lead_id=l.id AND i.category IN (${intents}))`)} AS interest,
+    ${q("lead_quotes","EXISTS(SELECT 1 FROM lead_quotes x WHERE x.lead_id=l.id AND x.status IN ('sent','accepted'))")} AS formal_quote,
+    ${q("lead_orders","EXISTS(SELECT 1 FROM lead_orders x WHERE x.lead_id=l.id AND x.status<>'cancelled' AND x.quote_id LIKE 'chat-offer:%')")} AS chat_offer_order,
+    ${have.has("conversation_memory_facts")&&have.has("lead_outreach")?`EXISTS(SELECT 1 FROM conversation_memory_facts f WHERE f.lead_id=l.id AND f.memory_key='order_candidate' AND f.status='active' AND instr(f.value_json,'"offer_hash"')>0 AND EXISTS(SELECT 1 FROM lead_outreach o WHERE o.lead_id=l.id AND o.conversation_id=f.conversation_id AND o.status='sent' AND o.sent_at>=f.created_at))`:"0"} AS chat_offer_sent,
+    ${q("lead_orders","EXISTS(SELECT 1 FROM lead_orders x WHERE x.lead_id=l.id AND x.status NOT IN ('cancelled','order_candidate'))")} AS ordered,
+    ${q("lead_order_payments","EXISTS(SELECT 1 FROM lead_order_payments p WHERE p.lead_id=l.id)")} AS paid,
+    ${q("lead_identities","(SELECT COUNT(*) FROM lead_identities li WHERE li.lead_id=l.id)")} AS identities
+    FROM leads l`).all()).results||[];
+  const zero=()=>Object.fromEntries(FUNNEL_STEPS.map(s=>[s,0]));
+  const furthest=zero(),reached=zero(),evidence={contacted:0,replied:0,preliminary_interest:0,negotiated:0,quoted:0,ordered:0,paid:0},bySource={},crm={},mismatch={negotiation_without_priced_offer:0,contacted_stage_without_delivery_or_reply:0,customer_without_payment:0};
+  let withIdentity=0;
+  for(const r of rows){
+    const f=k=>Number(r[k]||0)>0,quoted=f("formal_quote")||f("chat_offer_order")||f("chat_offer_sent");
+    const negotiated=f("replied")&&quoted&&(f("interest")||f("chat_offer_order")||f("ordered"));
+    const ev={contacted:f("contacted"),replied:f("replied"),negotiated,quoted,ordered:f("ordered"),paid:f("paid")};
+    for(const k of Object.keys(ev))if(ev[k])evidence[k]++;
+    if(f("interest")&&!negotiated)evidence.preliminary_interest++;
+    let idx=0;FUNNEL_STEPS.forEach((s,i)=>{if(ev[s])idx=i;});
+    furthest[FUNNEL_STEPS[idx]]++;for(let i=0;i<=idx;i++)reached[FUNNEL_STEPS[i]]++;
+    const src=String(parseLeadNotes(r).source||"unknown").slice(0,40);bySource[src]=bySource[src]||zero();bySource[src][FUNNEL_STEPS[idx]]++;
+    crm[r.stage||"new"]=(crm[r.stage||"new"]||0)+1;
+    if(r.stage==="negotiation"&&!quoted)mismatch.negotiation_without_priced_offer++;
+    if(r.stage==="contacted"&&!ev.contacted&&!ev.replied)mismatch.contacted_stage_without_delivery_or_reply++;
+    if(["customer","converted"].includes(r.stage)&&!ev.paid)mismatch.customer_without_payment++;
+    if(Number(r.identities||0)>0)withIdentity++;
+  }
+  const total=rows.length,sum=Object.values(furthest).reduce((a,b)=>a+b,0);
+  return {ok:true,generated_at:now(),total_leads:total,steps:FUNNEL_STEPS,reached,furthest,evidence,by_source:bySource,crm_stage_counts:crm,stage_without_evidence:mismatch,
+    identities:{leads_with_identity:withIdentity,leads_without_identity:total-withIdentity},reconciled:sum===total,
+    definitions:{contacted:"a delivered outbound (Telegram sent or an owner-confirmed manual first contact)",replied:"an inbound message linked to the lead",negotiated:"an inbound reply after a recorded priced offer",preliminary_interest:"price/MOQ/shipping questions without a priced offer",quoted:"a sent/accepted quote, a chat-offer order, or a chat offer followed by a sent reply",ordered:"an owner-confirmed order (not a candidate, not cancelled)",paid:"a recorded payment"}};
+}
+
 // A first inbound private message carries a provider-verified, stable Telegram user id. That id is the dedup identity,
 // so the existing P0-1 upsert path creates at most one lead per sender; an identity conflict stays unlinked (fail-closed).
 // The entry hints (language_code, the public «iq» campaign) are stored for the welcome language and attribution only.
@@ -11105,6 +11304,7 @@ async function sendApprovedTelegramOutreach(env,outreachId){
     FROM lead_outreach o LEFT JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_contacts c ON c.id=o.contact_id
     WHERE o.id=? LIMIT 1`).bind(outreachId).first();
   if(!outreach) return {ok:false,statusCode:404,error:'Outreach not found'};
+  if(outreach.channel===FIRST_CONTACT_CHANNEL)return {ok:false,statusCode:400,error:'A first contact is delivered by the owner, never sent by the system'};
   if(outreach.status!=='approved')return {ok:false,statusCode:409,error:'Outreach is not approved for sending',status:outreach.status};
   // (server-side, for every caller: a stale order draft — e.g. a payment request on superseded terms — is never sent)
   const freshness=await salesOutreachStillCurrent(env,outreach.id);
@@ -11787,19 +11987,65 @@ function validateAdsInput(body){
   if(!allowed.includes(type)) return {ok:false,error:"ÙÙØ¹ ÙØ´ØªØ±Û ÙØ§ÙØ¹ØªØ¨Ø± Ø§Ø³Øª"};
   if(city.length>100) return {ok:false,error:"Ø´ÙØ±/Ø¨Ø§Ø²Ø§Ø± ÙØ¨Ø§ÛØ¯ Ø¨ÛØ´ØªØ± Ø§Ø² 100 Ú©Ø§Ø±Ø§Ú©ØªØ± Ø¨Ø§Ø´Ø¯"};
   if(extra.length>300) return {ok:false,error:"Ø¬Ø²Ø¦ÛØ§Øª ÙØ¨Ø§ÛØ¯ Ø¨ÛØ´ØªØ± Ø§Ø² 300 Ú©Ø§Ø±Ø§Ú©ØªØ± Ø¨Ø§Ø´Ø¯"};
-  return {ok:true,type,city,extra};
+  // Phase 04: every Ads run targets ONE market through a known city of Iran or Iraq; an empty or unknown city runs nothing.
+  const target=adsTargetCity(city);
+  if(!target) return {ok:false,error:"شهر هدف معتبر در ایران یا عراق لازم است (مثلاً تهران، اصفهان، بغداد، اربیل)",reason:"ads_target_city_required"};
+  return {ok:true,type,city,extra,market:target.market};
+}
+
+// ---- Ads targeting (Phase 04) ----
+// Ads looks for BUYERS of luxury packaging (gold/jewellery/watch/perfume shops) in the target city. Price tickers, news, finance
+// and aggregator pages, and pages about another country, are rejected before any lead is stored. Pure functions: no I/O.
+const ADS_TARGET_CITIES={
+  iran:[["تهران","tehran"],["اصفهان","isfahan","esfahan"],["شیراز","shiraz"],["مشهد","mashhad"],["تبریز","tabriz"],["کرج","karaj"],["قم","qom"],["اهواز","ahvaz"],["رشت","rasht"],["کرمان","kerman"],["یزد","yazd"]],
+  iraq:[["بغداد","baghdad"],["أربيل","اربيل","هولير","erbil","arbil"],["البصرة","بصرة","basra","basrah"],["النجف","نجف","najaf"],["كربلاء","كربلا","karbala"],["السليمانية","سليمانية","sulaymaniyah","sulaimani"],["الموصل","موصل","mosul"],["كركوك","kirkuk"],["دهوك","duhok"],["الناصرية","nasiriyah"]]
+};
+function adsNormalizeText(s){return String(s||"").toLowerCase().replace(/[كک]/g,"ک").replace(/[يىی]/g,"ی").replace(/[أإآ]/g,"ا").replace(/ة/g,"ه").replace(/[\u064B-\u0652\u0640]/g,"");}
+function adsTargetCity(value){
+  const v=adsNormalizeText(String(value||"").trim());if(!v)return null;
+  for(const market of ["iran","iraq"])for(const names of ADS_TARGET_CITIES[market])if(names.some(n=>adsNormalizeText(n)===v))return {market,city:names[0],names};
+  return null;
+}
+const ADS_PRICE_NEWS=/سعر\s*(?:ال)?(?:ذهب|غرام|اونصة|أونصة|ليرة)|أسعار|اسعار|عيار\s*\d{2}|بورصة|لحظة\s*بلحظة|تحديث\s*لحظي|أخبار|الأخبار|اخبار|خبرگزاری|قیمت\s*(?:لحظه|روز|طلا|سکه|دلار|ارز|انس|مثقال|گرم)|نرخ\s*(?:طلا|سکه|ارز|دلار)|بورس|تحلیل\s*بازار|بازار\s*(?:طلا|ارز|سکه)|gold\s*(?:price|rate)s?|price\s*(?:today|live)|live\s*(?:rates?|prices?)|spot\s*price|per\s*(?:gram|ounce)|forex|stock\s*market|\bnews\b|exchange\s*rate/i;
+const ADS_AGGREGATOR=/digikala|okala|jetamooz|amazon|torob|snapp|basalam|divar|sheypoor|emalls|olx|opensooq|dubizzle|alibaba|aliexpress|ebay|etsy|wikipedia|youtube|facebook\.com|instagram\.com|linkedin|yellow\s*pages|yellowpages|directory|دایرکتوری|نیازمندی|آگهی|دليل\s*(?:ال)?(?:شركات|محلات)|إعلانات\s*مبوبة|marketplace|فروشگاه اینترنتی|خرید آنلاین/i;
+const ADS_FOREIGN_COUNTRY=/السعودية|سعودي|مصر|المصري|الإمارات|الامارات|دبي|سلطنة\s*عمان|في\s*عمان|الكويت|قطر|البحرين|الأردن|الاردن|تركيا|ترکیه|عربستان|امارات|saudi|egypt|\buae\b|dubai|oman|kuwait|qatar|bahrain|jordan|turkey/i;
+const ADS_FOREIGN_TLD=/\.(?:sa|eg|ae|om|kw|qa|bh|jo|tr)$/i;
+const ADS_BUYER_SIGNAL=/طلافروشی|زرگری|جواهرفروشی|گالری\s*(?:طلا|جواهر|ساعت)|فروشگاه\s*(?:طلا|جواهر|ساعت|عطر)|عطرفروشی|عطر\s*فروشی|ساعت\s*فروشی|بدلیجات|محل\s*(?:ذهب|مجوهرات|عطور|ساعات)|معرض\s*(?:ذهب|مجوهرات|ساعات)|صائغ|صياغة|مجوهرات|jewell?er|jewelry\s*(?:store|shop)|goldsmith|boutique|showroom|perfume\s*(?:shop|store)|watch\s*(?:shop|store)/i;
+const ADS_PRICE_TICKER=/ريال|درهم|جنيه|دينار|تومان|ر\.س|\b(?:EGP|AED|SAR|OMR|KWD|USD|IQD|IRR)\b/gi;
+function adsTargetQualifies({title="",url="",plain="",target=null}={}){
+  if(!target||!ADS_TARGET_CITIES[target.market])return {ok:false,reason:"target_invalid"};
+  let host="",path="";try{const u=new URL(url);host=u.hostname.toLowerCase();path=decodeURIComponent(u.pathname).toLowerCase();}catch{return {ok:false,reason:"invalid_url"};}
+  const head=`${title} ${host} ${path}`,body=String(plain||"").slice(0,6000),all=`${head} ${body}`;
+  if(ADS_PRICE_NEWS.test(head)||/\/(?:news|blog|prices?|rates?|articles?|tag)(?:\/|$)/i.test(path))return {ok:false,reason:"price_or_news"};
+  if(ADS_AGGREGATOR.test(head))return {ok:false,reason:"aggregator"};
+  if(ADS_FOREIGN_COUNTRY.test(head)||ADS_FOREIGN_TLD.test(host))return {ok:false,reason:"foreign_country"};
+  const iraq=target.market==="iraq",localTld=iraq?/\.iq$/i.test(host):/\.ir$/i.test(host);
+  const countryHit=localTld||(iraq?/العراق|عراق|iraq|\+964/i:/ایران|iran|\+98/i).test(all);
+  if(!countryHit)return {ok:false,reason:"target_country_missing"};
+  const normAll=adsNormalizeText(all);
+  if(!target.names.some(n=>normAll.includes(adsNormalizeText(n))))return {ok:false,reason:"target_city_missing"};
+  const buyerHead=ADS_BUYER_SIGNAL.test(head),buyerBody=ADS_BUYER_SIGNAL.test(body);
+  if(!buyerHead&&!buyerBody)return {ok:false,reason:"no_buyer_signal"};
+  if(!buyerHead&&((body.match(ADS_PRICE_TICKER)||[]).length>=8||(body.match(new RegExp(ADS_PRICE_NEWS.source,"gi"))||[]).length>=3))return {ok:false,reason:"price_or_news"};
+  const phoneHit=(iraq?/(?:\+964|00964|\b07\d{9})/:/(?:\+98|0098|\b0\d{10})/).test(body);
+  return {ok:true,score:Math.min(100,40+(buyerHead?20:0)+20+(localTld||phoneHit?10:0)),signals:{buyer_in_title:buyerHead,local_domain:localTld,local_phone:phoneHit,city:target.city,market:target.market}};
 }
 
 // Shared Ads run gate: reserves one unit of the Ads daily run budget, or returns the deferred result every caller passes back as is
 // (HTTP 200, ok:true) — never an approval request and never a failure, so an autonomy task that hits the limit is not dead-lettered.
 // Ads only drafts outreach for early-stage leads; later stages (contacted, negotiation, customer, …) belong to the owner/sales flow.
 const ADS_DRAFTABLE_STAGES=new Set(["new","discovered","qualified"]);
+// Follow-up drafts (OpenAI) are prepared only for leads that were actually reached; a never-contacted lead has nothing to follow up.
+const ADS_FOLLOWUP_STAGES=new Set(["contacted","replied","negotiation"]);
 async function adsRunGate(env,source,opts){
   if(await reserveAdsAutopilotRun(env,Date.now(),source,opts))return null;
   await audit(env,"ads_run_deferred","Ads run deferred by the daily run budget",{source});
   return {ok:true,deferred:true,reason:"ads_daily_limit",message:"Ads run budget reached (daily cap or minimum 55-minute interval); nothing was run",items:[]};
 }
 async function runAdAutopilotOnce(env, input, reason="manual") {
+  // An invalid target (no known city of Iran or Iraq) runs nothing and reserves nothing from the Ads budget.
+  const target=adsTargetCity(input?.city);
+  if(!target)return {ok:true,skipped:true,reason:"ads_target_city_required",message:"A valid target city in Iran or Iraq is required; nothing was run",items:[]};
   const deferred=await adsRunGate(env,"autopilot_"+String(reason).slice(0,20));if(deferred)return deferred;
   const {type,city,extra}=input;
   const sourceSite="https://www.hamzehibox.com";
@@ -11814,10 +12060,10 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   ["watch_ar","ساعات محل ساعات ساعات رجالية ساعات نسائية العراق بغداد اربيل"],
   ["fashion_jewelry_ar","اكسسوارات حلي مجوهرات اكسسوارات نسائية العراق بغداد اربيل"]
 ];
-  const groups=type==="all"
+  const groups=(type==="all"
   ?allGroups
-  :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`);
-  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,provider_checks:[],error_details:[]};
+  :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`)).filter(x=>x[0].endsWith(target.market==="iraq"?"_ar":"_fa"));
+  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,rejected:0,rejected_reasons:{},provider_checks:[],error_details:[]};
   const items=[],seen=new Set(),started=now();
  
   for(const [groupType,term] of groups){
@@ -11865,6 +12111,8 @@ const localDomain=groupType.endsWith("_ar")
   : /\.ir$/i.test(uu.hostname);
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
 if(spamPattern.test(relevanceText)) continue;
+const verdict=adsTargetQualifies({title,url:safeHref,plain,target});
+if(!verdict.ok){summary.rejected++;summary.rejected_reasons[verdict.reason]=(summary.rejected_reasons[verdict.reason]||0)+1;continue;}
 if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.test(relevanceText)) continue;
           const businessSignal=/فروشگاه|فروشنده|فروشی|طلافروشی|زرگری|جواهرفروشی|گالری|عطرفروشی|عطر فروشی|عطر و ادکلن|ساعت فروشی|ساعت مچی|بدلیجات|بدلی فروشی|محل ذهب|محل عطور|محل ساعات|مجوهرات|صياغة|صائغ|عطور|ساعات|اكسسوارات|shop|store|jewelry|jewellery|goldsmith|perfume|parfum|fragrance|watch shop|watch store|accessories/i;
 
@@ -11900,8 +12148,8 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
           }
 
           if(!contactUrl && !adHit && !contactPath) continue; 
-          const score=Math.min(100,70+(city&&plain.includes(city)?10:0)+(contactUrl?10:0));
-          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
+          const score=Math.min(100,verdict.score+(contactUrl?10:0));
+          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,target_market:target.market,qualification:verdict.signals,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
           const saved=await upsertDiscoveredLead(env,{name:title,contact:href,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_autopilot",meta});
           if(saved.conflict){summary.errors++;continue;}
           const id=saved.id;
@@ -11919,15 +12167,16 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
         if(!ADS_DRAFTABLE_STAGES.has(String(lead.stage||"")))continue;   // a lead the owner/sales flow already works with is never re-drafted or re-staged by Ads
         let meta={};try{meta=JSON.parse(lead.notes||"{}")}catch{}
         if(meta.negotiation_draft)continue;
-        const prompt=`Create a concise ${String(item.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B advertising/collaboration outreach draft for HAMZEHI BOX. Source: ${sourceSite}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Advertising contact page: ${meta.contact_url||"available"}. Audience: jewelry shops, watch stores, fashion-jewelry sellers in Iran and Iraq. Do not invent facts. Ask about available ad formats, audience, placement, duration, price and contact person. Draft only, under 700 characters.`;
+        const prompt=`Create a concise ${String(item.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B first-contact draft from HAMZEHI BOX (${sourceSite}), a maker of luxury packaging boxes for gold, jewellery, watch and perfume shops, to this shop. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Offer to send packaging samples and a catalogue; logo printing is available. Do not invent facts, prices or discounts. Draft only, under 700 characters.`;
         const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
         const d=await r.json().catch(()=>({})); if(!r.ok)continue; const draft=responseText(d).trim(); if(!draft)continue;
-        meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="authorized_channel_only";meta.next_followup_at=new Date(Date.now()+48*60*60*1000).toISOString();meta.followup_status="scheduled";
-        await env.DB.prepare("UPDATE leads SET notes=?,stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(JSON.stringify(meta),"negotiation",now(),item.id).run(); item.draft=draft;summary.drafted++;
+        // A draft is a suggestion for the owner only: it never changes the CRM stage and schedules no follow-up (nobody was contacted).
+        meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="authorized_channel_only";
+        await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(JSON.stringify(meta),now(),item.id).run(); item.draft=draft;summary.drafted++;
       }catch{}
     }
   }
-  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,found:summary.found,drafted:summary.drafted,errors:summary.errors,started});
+  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,market:target.market,found:summary.found,rejected:summary.rejected,rejected_reasons:summary.rejected_reasons,drafted:summary.drafted,errors:summary.errors,started});
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
 function extractTelegramContact(text = "") {
@@ -12691,11 +12940,11 @@ await pollWeeklyVideoAutopilot(env);
           let preparedFollowups=0;
           for(const lead of (rows.results||[])){
             if(preparedFollowups>=AD_MAX_DRAFTS_PER_RUN) break;
-            if(lead.stage==="customer"||lead.stage==="converted"||lead.stage==="rejected"||lead.stage==="archived") continue;
+            if(!ADS_FOLLOWUP_STAGES.has(String(lead.stage||""))) continue;
             const meta=parseLeadNotes(lead),at=meta.next_followup_at||meta.followup_at;
             if(!at||!Date.parse(at)||Date.parse(at)>nowMs||meta.followup_draft||!env.OPENAI_API_KEY) continue;
             try{
-             const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;
+             const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review the packaging samples or catalogue offer. Under 500 characters. Draft only.`;
               const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);
               const d=await r.json().catch(()=>({})); if(!r.ok) continue; const draft=responseText(d).trim(); if(!draft) continue;
               meta.followup_draft=draft; meta.followup_prepared_at=now(); meta.next_followup_at=null; meta.followup_at=at; meta.followup_status="prepared";
@@ -12715,10 +12964,10 @@ await pollWeeklyVideoAutopilot(env);
           if(await adsRunGate(env,"daily_followups",{spacing:false})) return;
           const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
           const due=[]; const nowMs=Date.now();
-          for(const lead of (rows.results||[])){const meta=parseLeadNotes(lead);const at=meta.next_followup_at||meta.followup_at;if(at&&Date.parse(at)&&Date.parse(at)<=nowMs&&!meta.followup_draft&&! ["customer","converted","rejected","archived"].includes(lead.stage)) due.push({lead,meta});}
+          for(const lead of (rows.results||[])){const meta=parseLeadNotes(lead);const at=meta.next_followup_at||meta.followup_at;if(at&&Date.parse(at)&&Date.parse(at)<=nowMs&&!meta.followup_draft&&ADS_FOLLOWUP_STAGES.has(String(lead.stage||""))) due.push({lead,meta});}
           for(const {lead,meta} of due.slice(0,AD_MAX_DRAFTS_PER_RUN)){
             if(!env.OPENAI_API_KEY) break;
-            try{const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);const d=await r.json().catch(()=>({}));if(!r.ok)continue;const draft=responseText(d).trim();if(!draft)continue;meta.followup_draft=draft;meta.followup_prepared_at=now();meta.next_followup_at=null;meta.followup_status="prepared";await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id).run();}catch{}}
+            try{const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review the packaging samples or catalogue offer. Under 500 characters. Draft only.`;const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);const d=await r.json().catch(()=>({}));if(!r.ok)continue;const draft=responseText(d).trim();if(!draft)continue;meta.followup_draft=draft;meta.followup_prepared_at=now();meta.next_followup_at=null;meta.followup_status="prepared";await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id).run();}catch{}}
           await audit(env,"ad_followups_scheduled","Daily advertising follow-up sweep completed",{due:due.length});
         } catch {}
       })());
@@ -13727,16 +13976,17 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
             const tx=(await rr.text()).slice(0,180000);
             const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||url).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,160);
             const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
-            const low=plain.toLowerCase();
+            const verdict=adsTargetQualifies({title,url,plain,target:adsTargetCity(city)});
+            if(!verdict.ok)continue;
             const hit=/Ø·ÙØ§|Ø¬ÙØ§ÙØ±|Ø³Ø§Ø¹Øª|Ø¨Ø¯ÙÛ|gold|jewel|watch|accessor/i.test(plain);
             const adHit=/ØªØ¨ÙÛØº|advertis|sponsor|Ø±Ù¾ÙØ±ØªØ§Ú|ØªÙØ§Ø³ Ø¨Ø§ ÙØ§|contact us|media kit|ÙÙÚ©Ø§Ø±Û/i.test(plain);
-            const score=Math.min(100,(hit?55:20)+(adHit?25:0)+(city && plain.includes(city)?10:0));
+            const score=Math.min(100,verdict.score+(adHit?10:0));
             let contactUrl=null;
             const cm=tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
             if(cm){try{contactUrl=new URL(cm[1],url).toString()}catch{}}
             const host=new URL(url).hostname;
             const name=title||host;
-            const notes={source:"ad_discovery",ad_target:true,source_site:sourceSite,type,city,query:q,url,website:url,evidence:plain.slice(0,700),contact_url:contactUrl,discovered_at:t,score};
+            const notes={source:"ad_discovery",ad_target:true,source_site:sourceSite,type,city,target_market:input.market,qualification:verdict.signals,query:q,url,website:url,evidence:plain.slice(0,700),contact_url:contactUrl,discovered_at:t,score};
             const stored=await upsertDiscoveredLead(env,{name,contact:url,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_discovery",meta:notes});
             if(stored.conflict)continue;
             const id=stored.id;
@@ -13766,7 +14016,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const groups=type==="all"?allGroups:allGroups.filter(x=>x[0]===type);
         const all = [], seen = new Set(), t = now();
         for (const [groupType, term] of groups) {
-  const q = [term, "ایران عراق Iran Iraq", city, extra].filter(Boolean).join(" ");
+  const q = [term, input.market==="iraq"?"العراق Iraq":"ایران Iran", city, extra].filter(Boolean).join(" ");
   const discovery = await discoverWebLinks(q, 6);
           const links = discovery.links;
           for (const url of links) {
@@ -13780,13 +14030,14 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
 const countryPattern=/ایران|ایرانی|Iran|Iranian|عراق|عراقي|العراق|Iraq|Iraqi|\+98|\+964/i;
 const localDomain=/(\.ir|\.iq)$/i.test(new URL(url).hostname);
 if(!localDomain&&!countryPattern.test(relevanceText)) continue;
+              const verdict=adsTargetQualifies({title,url,plain,target:adsTargetCity(city)});
+              if(!verdict.ok) continue;
               const hit = /Ø·ÙØ§|Ø¬ÙØ§ÙØ±|Ø³Ø§Ø¹Øª|Ø¨Ø¯ÙÛ|gold|jewel|watch|accessor/i.test(plain);
-              if (!hit) continue;
               const adHit = /ØªØ¨ÙÛØº|advertis|sponsor|Ø±Ù¾ÙØ±ØªØ§Ú|ØªÙØ§Ø³ Ø¨Ø§ ÙØ§|contact us|media kit|ÙÙÚ©Ø§Ø±Û/i.test(plain);
-              const score = Math.min(100, 55 + (adHit ? 25 : 0) + (city && plain.includes(city) ? 10 : 0));
+              const score = Math.min(100, verdict.score + (adHit ? 10 : 0));
               const cm = tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
               let contactUrl = null; if (cm) { try { contactUrl = new URL(cm[1], url).toString(); } catch {} }
-              const notes = { source:"ad_discovery", ad_target:true, source_site:sourceSite, type:groupType, city, query:q, url, evidence:plain.slice(0,900), contact_url:contactUrl, discovered_at:t, score, automation:"auto_campaign_v1" };
+              const notes = { source:"ad_discovery", ad_target:true, source_site:sourceSite, type:groupType, city, query:q, url, evidence:plain.slice(0,900), contact_url:contactUrl, discovered_at:t, score, target_market:input.market, qualification:verdict.signals, automation:"auto_campaign_v1" };
               notes.website=url;
               const stored=await upsertDiscoveredLead(env,{name:title,contact:url,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_discovery",meta:notes});
               if(stored.conflict)continue;
@@ -13805,12 +14056,13 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
               if (!ADS_DRAFTABLE_STAGES.has(String(lead.stage||""))) continue;
               let meta = {}; try { meta = JSON.parse(lead.notes || "{}"); } catch {}
               if (meta.negotiation_draft) continue;
-              const prompt = `Write a concise ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B advertising/collaboration message for this target. Brand source: ${sourceSite}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Product category: jewelry, watches, fashion jewelry. Do not invent facts. Ask about advertising formats, audience, placement, duration, price and contact person. Draft only, under 700 characters.`;
+              const prompt = `Write a concise ${input.market==="iraq"?"Iraqi Arabic":"Persian"} B2B first-contact draft from HAMZEHI BOX (${sourceSite}), a maker of luxury packaging boxes for gold, jewellery, watch and perfume shops, to this shop. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Offer to send packaging samples and a catalogue; logo printing is available. Do not invent facts, prices or discounts. Draft only, under 700 characters.`;
               const r = await fetch("https://api.openai.com/v1/responses", { method:"POST", headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"}, body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}), signal:AbortSignal.timeout(15000) });
               const d = await r.json().catch(() => ({})); if (!r.ok) continue;
               const draft = responseText(d).trim(); if (!draft) continue;
               meta.negotiation_draft=draft; meta.negotiation_drafted_at=now(); meta.send_mode="authorized_channel_only";
-              await env.DB.prepare("UPDATE leads SET notes=?,stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(JSON.stringify(meta),"negotiation",now(),item.id).run();
+              // a draft never changes the CRM stage: nobody has been contacted yet
+              await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(JSON.stringify(meta),now(),item.id).run();
               item.draft = draft; drafted++;
             } catch {}
           }
@@ -13917,7 +14169,8 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
           if(m.next_followup_at || m.followup_at) followups++;
           if(x.stage==="customer"||x.stage==="converted") customers++;
         }
-        return json({ok:true,enabled:!!cfg.enabled,config:{type:cfg.type||"all",city:cfg.city||"",extra:cfg.extra||""},updated_at:cfgRow?.updated_at||null,source_site:"https://www.hamzehibox.com",targets:["gold","watch","fashion_jewelry"],metrics:{found,hot,negotiation,followups,customers,ad_targets:ads},mode:"autopilot",external_send:"authorized_channel_only"});
+        const tgt=adsTargetCity(cfg.city);
+        return json({ok:true,enabled:!!cfg.enabled,target:{valid:!!tgt,market:tgt?.market||null,city:tgt?.city||null,reason:tgt?null:"ads_target_city_required"},config:{type:cfg.type||"all",city:cfg.city||"",extra:cfg.extra||""},updated_at:cfgRow?.updated_at||null,source_site:"https://www.hamzehibox.com",targets:["gold","watch","fashion_jewelry"],metrics:{found,hot,negotiation,followups,customers,ad_targets:ads},mode:"autopilot",external_send:"authorized_channel_only"});
       }
 
       if (u.pathname === "/api/ads/followups" && req.method === "GET") {
@@ -13942,14 +14195,14 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         const due=[]; const nowMs=Date.now();
         for(const lead of (rows.results||[])){
           const meta=parseLeadNotes(lead), at=meta.next_followup_at||meta.followup_at;
-          if(at && Date.parse(at) && Date.parse(at)<=nowMs && !["customer","converted","rejected","archived"].includes(lead.stage)) due.push({lead,meta});
+          if(at && Date.parse(at) && Date.parse(at)<=nowMs && ADS_FOLLOWUP_STAGES.has(String(lead.stage||""))) due.push({lead,meta});
         }
         let prepared=0, skipped=0;
         for(const {lead,meta} of due.slice(0,20)){
           if(meta.followup_draft){skipped++;continue;}
           if(!env.OPENAI_API_KEY){skipped++;continue;}
           try{
-            const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;
+            const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review the packaging samples or catalogue offer. Under 500 characters. Draft only.`;
             const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
             const d=await r.json().catch(()=>({})); if(!r.ok) {skipped++;continue;}
             const draft=responseText(d).trim(); if(!draft){skipped++;continue;}
@@ -14005,8 +14258,10 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
         const d=await r.json().catch(()=>({})); if(!r.ok)return json({ok:false,error:d.error?.message||`OpenAI returned ${r.status}`},502);
         const draft=responseText(d).trim(); if(!draft)return json({ok:false,error:"No negotiation draft returned"},502);
-        meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="manual_approval_only";meta.next_followup_at=new Date(Date.now()+48*60*60*1000).toISOString();meta.followup_status="scheduled";
-        await env.DB.prepare("UPDATE leads SET notes=?,updated_at=?,stage=? WHERE id=?").bind(JSON.stringify(meta),now(),"negotiation",id).run();
+        // Phase 04: a draft is only a suggestion — it never changes the CRM stage (a customer was previously downgraded here) and
+        // schedules no follow-up; "contacted" is recorded only when the owner confirms a delivery.
+        meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="manual_approval_only";
+        await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),id).run();
         await audit(env,"ad_negotiation_draft","Advertising negotiation draft generated",{lead_id:id});
         return json({ok:true,lead_id:id,draft,send_mode:"manual_approval_only"});
       }
@@ -14141,6 +14396,32 @@ Context: ${context}`;
         return json({ ok: true, lead_id: leadId, outreach_id:outreachId, draft: text, mode, channel:selected.channel, recipient:selected.recipient, language, status:"draft", send_mode: "manual_approval_only" });
       }
 
+      // ---- Phase 04: funnel (read-only), contact backfill (dry run by default), owner-approved first contact (manual delivery) ----
+      if (u.pathname === "/api/leads/funnel" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        return json(await leadFunnelReport(env));
+      }
+      if (u.pathname === "/api/leads/first-contact" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        return json(await listFirstContacts(env));
+      }
+      if ((u.pathname === "/api/leads/contacts/backfill" || u.pathname.startsWith("/api/leads/first-contact/")) && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const raw=await req.text().catch(()=>"");if(raw.length>20000)return json({ok:false,error:"Request body is too large"},413);
+        let b={};try{b=raw?JSON.parse(raw):{};}catch{return json({ok:false,error:"Invalid JSON body"},400);}
+        if(!b||typeof b!=="object"||Array.isArray(b))return json({ok:false,error:"Invalid JSON body"},400);
+        try{
+          if(u.pathname==="/api/leads/contacts/backfill"){
+            const apply=b.apply===true;if(apply&&b.confirm_apply!==true)return json({ok:false,error:"confirm_apply is required to write contacts"},400);
+            return json(await discoveryContactBackfill(env,{apply}));
+          }
+          const action=u.pathname.slice("/api/leads/first-contact/".length);
+          const run={prepare:prepareFirstContacts,approve:approveFirstContact,reject:rejectFirstContact,delivered:confirmFirstContactDelivered}[action];
+          if(!run)return json({ok:false,error:"Not found"},404);
+          const out=await run(env,b);return json(out,out.ok===false?(out.statusCode||400):200);
+        }catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+      }
+
       if (u.pathname === "/api/leads/outreach" && req.method === "GET") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         await ensureLeadOutreachStore(env);
@@ -14159,7 +14440,7 @@ Context: ${context}`;
         if(!id||!message)return json({ok:false,error:"id and message are required"},400);
         if(message.length>4000)return json({ok:false,error:"Draft is too long"},400);
         const before=(await env.DB.prepare("SELECT message FROM lead_outreach WHERE id=? LIMIT 1").bind(id).first())?.message??null,t=now();
-        const result=await env.DB.prepare("UPDATE lead_outreach SET message=?,error_code=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_code END,error_detail=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_detail END,updated_at=? WHERE id=? AND status='draft'").bind(message,t,id).run();
+        const result=await env.DB.prepare("UPDATE lead_outreach SET message=?,error_code=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_code END,error_detail=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_detail END,updated_at=? WHERE id=? AND status='draft' AND channel<>?").bind(message,t,id,FIRST_CONTACT_CHANNEL).run();
         if(!result.meta?.changes)return json({ok:false,error:"Only a draft outreach can be edited"},409);
         try{await recordDraftCorrection(env,{outreachId:id,before,after:message,outcome:"edited"});}catch(error){await audit(env,"sales_draft_correction_capture_failed","Owner draft edit remained saved after correction capture failure",{outreach_id:id,error:sanitizeOperationalError(error?.message||error)});}
         await env.DB.prepare("UPDATE inbox_messages SET reply_suggestion=?,updated_at=? WHERE id=(SELECT inbox_message_id FROM lead_outreach WHERE id=?)").bind(message,t,id).run();
@@ -14173,6 +14454,7 @@ Context: ${context}`;
         if(!id||!["submit","approve","reject"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
         const current=await env.DB.prepare("SELECT * FROM lead_outreach WHERE id=?").bind(id).first();
         if(!current)return json({ok:false,error:"Outreach draft not found"},404);
+        if(current.channel===FIRST_CONTACT_CHANNEL)return json({ok:false,error:"First-contact items use the /api/leads/first-contact controls"},409);
         if(action==="submit"&&(current.error_code==="sales_brain_needs_owner"||await hasOpenOwnerEscalation(env,current)))return json({ok:false,error:"Sales Brain requires owner resolution before this draft can enter approval"},409);
         await ensureQuoteStore(env);const quoteLinked=await env.DB.prepare("SELECT id FROM lead_quotes WHERE outreach_id=? LIMIT 1").bind(id).first();
         if(quoteLinked)return json({ok:false,error:"Quote-linked outreach must use the quote approval controls"},409);
@@ -14181,7 +14463,7 @@ Context: ${context}`;
         if(action==="approve"){const freshness=await salesOutreachStillCurrent(env,id);if(!freshness.current)return json({ok:false,error:"Outreach draft is stale and cannot be approved; reject it",reason:freshness.reason},409);}
         const from=action==="submit"?"draft":"pending_approval",to=action==="submit"?"pending_approval":action==="approve"?"approved":"rejected",t=now();
         const result=action==="approve"
-          ?await env.DB.prepare("UPDATE lead_outreach SET status=?,approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status=?").bind(to,t,String(b.approved_by||"admin"),t,id,from).run()
+          ?await env.DB.prepare("UPDATE lead_outreach SET status=?,approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status=?").bind(to,t,(v=>v==="inbound_auto_policy"?"admin":v)(String(b.approved_by||"admin").slice(0,60)),t,id,from).run()
           :await env.DB.prepare("UPDATE lead_outreach SET status=?,updated_at=? WHERE id=? AND status=?").bind(to,t,id,from).run();
         if(!result.meta?.changes)return json({ok:false,error:`Invalid outreach transition from ${current.status}`},409);
         await audit(env,"lead_outreach_status_changed","Lead outreach review status changed",{outreach_id:id,lead_id:current.lead_id,from,to});

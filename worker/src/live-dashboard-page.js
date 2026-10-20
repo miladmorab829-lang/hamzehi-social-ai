@@ -818,8 +818,20 @@ async function createPriceVersion(){const body={base_id:priceVersionBaseId||unde
 function preparePriceVersion(id){const x=priceItemCache[id];if(!x)return;priceVersionBaseId=id;$("priceName").value=x.product_name||"";$("priceKey").value=x.product_key||"";$("priceSku").value=x.sku||"";$("priceCurrency").value=x.currency||"";$("priceUnit").value="";$("priceMoq").value=x.moq??"";$("priceFrom").value="";$("priceUntil").value="";$("priceStatus").textContent="قیمت جدید را وارد و سپس ADD را بزنید؛ رکورد قبلی تغییر نمی‌کند."}
 async function togglePrice(id,active){const d=await api("/api/commercial-price-items/activation",{method:"PATCH",body:JSON.stringify({id,active})});$("priceStatus").innerHTML=d.ok?"<span class='ok'>✓ وضعیت ثبت شد.</span>":"<span class='bad'>✕ "+esc(d.error)+"</span>";await loadPriceItems()}
 // Agent health (Stage 2B): read-only overview + owner actions that only change state (approve/reject, acknowledge, dismiss/requeue).
+// Phase 04: event-based sales funnel (read-only; counts only, no contact details).
+async function loadAgentFunnel(){
+ const box=$("agentOpsFunnel");box.innerHTML="<div class='hint'>در حال دریافت…</div>";
+ const d=await api("/api/leads/funnel");
+ if(!d||!d.ok){box.innerHTML="<div class='hint bad'>✕ "+esc((d&&d.error)||"Funnel unavailable")+"</div>";return}
+ const fa={discovered:"کشف‌شده",contacted:"تماس‌گرفته",replied:"پاسخ‌داده",negotiated:"مذاکره واقعی",quoted:"قیمت‌داده",ordered:"سفارش",paid:"پرداخت"};
+ const m=d.stage_without_evidence||{};
+ box.innerHTML="<div class='row'>"+(d.steps||[]).map(s=>esc(fa[s]||s)+" <b>"+esc(d.reached[s])+"</b>").join(" → ")+"</div>"
+  +"<div class='row hint'>علاقه اولیه (بدون پیشنهاد قیمت): "+esc(d.evidence.preliminary_interest)+" · کل سرنخ‌ها "+esc(d.total_leads)+(d.reconciled?" ✓":" <span class='bad'>✕ ناهماهنگ</span>")
+  +" · مرحله «مذاکره» بدون پیشنهاد قیمت: "+esc(m.negotiation_without_priced_offer||0)+"</div>";
+}
 async function loadAgentOps(){
  const st=$("agentOpsStatus");st.textContent="در حال دریافت…";
+ loadAgentFunnel().catch(()=>{});
  const d=await api(A+"/agents/overview");
  if(!d||!d.ok){st.innerHTML="<span class='bad'>✕ "+esc((d&&d.error)||"Unable to read agent health")+"</span>";return}
  if(!d.available){st.innerHTML="<span class='bad'>"+esc(d.reason||"Agent ops tables are not migrated")+"</span> · Orchestrator: "+(d.orchestrator_enabled?"ON":"OFF");["agentOpsAlerts","agentOpsQuotas","agentOpsPublishing","agentOpsCosts","agentOpsQuality","agentOpsVersions","agentOpsApprovals","agentOpsDead","agentOpsUsage"].forEach(k=>{$(k).innerHTML=""});return}
@@ -1871,6 +1883,7 @@ DASH_SECTIONS.hubSummary=`<section class="grid4 section">
 DASH_SECTIONS.agentOps=`<section class="card section" id="agentOpsPanel">
 <div class="title"><div><h2>🤖 AGENT CONTROL CENTER</h2><div class="hint">کارهای غیرمالی (محتوا، کشف سرنخ، CRM، عکس و ویدیو) خودکار و در سقف روزانه اجرا می‌شوند. فقط اقدام‌های مالی یا ناشناخته تأیید مالک می‌خواهند.</div></div><button class="btn" onclick="loadAgentOps()">↻ CHECK</button></div>
 <div id="agentOpsStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<h3>🧭 قیف فروش (بر اساس رویدادهای ثبت‌شده)</h3><div id="agentOpsFunnel" class="rows"></div>
 <h3>⚠️ هشدارها</h3><div id="agentOpsAlerts" class="rows"></div>
 <h3>📏 سقف روزانه اقدام‌های پرهزینه</h3><div id="agentOpsQuotas" class="rows"></div>
 <h3>📣 انتشار کانال (۷ روز)</h3><div id="agentOpsPublishing" class="rows"></div>

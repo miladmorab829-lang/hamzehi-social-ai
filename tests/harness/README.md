@@ -18,6 +18,7 @@ node vaultsender.mjs
 node quotarace.mjs
 node phase02.mjs
 node adsquota.mjs
+node phase04.mjs
 ```
 Each prints `<suite> → ALL PASS (n)` and exits 0, or lists the failing checks and exits 1. Run whole files (later checks build on
 earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps reset at the UTC day boundary).
@@ -30,6 +31,7 @@ earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps 
 | quotarace | 11 | Atomic daily quota for paid autonomy tasks (concurrency, retries, requeue, UTC reset) |
 | phase02 | 21 | Watchdog, dead-letter recovery, versions, quality, cost budgets |
 | adsquota | 13 | Shared Ads run budget across cron/manual/autonomy, interval, UTC reset, CRM protection |
+| phase04 | 44 | Contact backfill (dry run, idempotent), owner-approved first contact + pilot link, Ads target filter, evidence-based negotiation, funnel |
 
 Test-only values (`tok`, `bot-test`, `sec`, `test-key-not-real`, `test-places-key`, `test-openai-not-real`, `*.example`, `w.test`) are not
 credentials. Never put real keys or customer data in these files.

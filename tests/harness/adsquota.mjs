@@ -15,7 +15,7 @@ let search=0,site=0,openai=0;const inner=globalThis.fetch;
 globalThis.fetch=async(u,o={})=>{const s=String(u?.url||u);
   if(s.startsWith("https://w.test/"))return W.run(new Request(s,o));
   if(/^https:\/\/www\.(google|bing)\.com\/search/.test(s)){search++;return new Response('<html><a href="https://shop.example/">فروشگاه طلا</a><a href="/url?q=https://shop.example/&sa=U">x</a></html>',{status:200,headers:{"Content-Type":"text/html"}});}
-  if(s.startsWith("https://shop.example")){site++;return new Response('<html><title>گالری طلای نمونه</title><body>طلا و جواهر ایران — Iran gold jewelry, advertising: <a href="/contact">contact us</a></body></html>',{status:200,headers:{"Content-Type":"text/html"}});}
+  if(s.startsWith("https://shop.example")){site++;return new Response('<html><title>گالری طلای نمونه</title><body>طلا و جواهر ایران — Iran gold jewelry. آدرس: تهران، خیابان نمونه. <a href="/contact">contact us</a></body></html>',{status:200,headers:{"Content-Type":"text/html"}});}
   if(s==="https://api.openai.com/v1/responses"){openai++;return new Response(JSON.stringify({output_text:"پیش‌نویس آزمایشی",output:[{type:"message",content:[{type:"output_text",text:"پیش‌نویس آزمایشی"}]}]}),{status:200,headers:{"Content-Type":"application/json"}});}
   return inner(u,o);};
 const reservations=()=>q("SELECT COUNT(*) n FROM system_events WHERE type='ads_autopilot_reserved'")[0].n;
