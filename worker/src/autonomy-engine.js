@@ -428,11 +428,14 @@ async function claimTask(env,t,token,cap,budgets=null){
 const PAID_KEYS=Object.keys(AUTONOMY_UNIT_COST);
 const COST_CASE="(CASE c.module||':'||c.action "+PAID_KEYS.map(k=>`WHEN '${k}' THEN ${Number(AUTONOMY_UNIT_COST[k])}`).join(" ")+" ELSE 0 END)";
 async function budgetOverrides(env){try{const v=JSON.parse(await getKV(env,"budgets")||"{}");return v&&typeof v==="object"&&!Array.isArray(v)?v:{}}catch{return {}}}
-// Ads Autopilot daily run budget: one atomic reservation row per run (at most ads_runs_per_day per UTC day, at most one per 55 min).
-export async function reserveAdsAutopilotRun(env,nowMs=Date.now()){
+// Ads daily run budget, shared by EVERY real Ads execution (cron, admin Autopilot run/start, the autonomy ads task, manual discovery,
+// auto-run and follow-up drafting): one atomic reservation row per run — at most ads_runs_per_day per UTC day and at most one per
+// 55 min, across all entry points and Worker instances. Reserved before any external call and never released, so a retry, timeout
+// or concurrent request can never run Ads twice. Read-only Ads routes never reserve.
+export async function reserveAdsAutopilotRun(env,nowMs=Date.now(),source="scheduled",{spacing=true}={}){
   const cap=autonomyBudgets(await budgetOverrides(env)).ads_runs_per_day,d=new Date(nowMs);d.setUTCHours(0,0,0,0);
-  const r=await env.DB.prepare("INSERT INTO system_events(id,type,severity,message,details_json,created_at) SELECT ?,'ads_autopilot_reserved','info','Ads Autopilot run reserved (daily budget)',?,? WHERE (SELECT COUNT(*) FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?)<? AND NOT EXISTS(SELECT 1 FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>?)")
-    .bind(uid(),JSON.stringify({cap}),new Date(nowMs).toISOString(),d.toISOString(),cap,new Date(nowMs-55*60*1000).toISOString()).run();
+  const r=await env.DB.prepare("INSERT INTO system_events(id,type,severity,message,details_json,created_at) SELECT ?,'ads_autopilot_reserved','info','Ads Autopilot run reserved (daily budget)',?,? WHERE (SELECT COUNT(*) FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?)<? "+(spacing?"AND NOT EXISTS(SELECT 1 FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>?)":"AND ?<>''"))
+    .bind(uid(),JSON.stringify({cap,source:String(source).slice(0,40)}),new Date(nowMs).toISOString(),d.toISOString(),cap,new Date(nowMs-55*60*1000).toISOString()).run();
   return Number(r?.meta?.changes||0)===1;
 }
 // Today's spend in cost units (global and per provider) against the budgets, plus Ads Autopilot runs (Agent Control Center).

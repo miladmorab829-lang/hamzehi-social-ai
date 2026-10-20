@@ -11790,7 +11790,17 @@ function validateAdsInput(body){
   return {ok:true,type,city,extra};
 }
 
+// Shared Ads run gate: reserves one unit of the Ads daily run budget, or returns the deferred result every caller passes back as is
+// (HTTP 200, ok:true) — never an approval request and never a failure, so an autonomy task that hits the limit is not dead-lettered.
+// Ads only drafts outreach for early-stage leads; later stages (contacted, negotiation, customer, …) belong to the owner/sales flow.
+const ADS_DRAFTABLE_STAGES=new Set(["new","discovered","qualified"]);
+async function adsRunGate(env,source,opts){
+  if(await reserveAdsAutopilotRun(env,Date.now(),source,opts))return null;
+  await audit(env,"ads_run_deferred","Ads run deferred by the daily run budget",{source});
+  return {ok:true,deferred:true,reason:"ads_daily_limit",message:"Ads run budget reached (daily cap or minimum 55-minute interval); nothing was run",items:[]};
+}
 async function runAdAutopilotOnce(env, input, reason="manual") {
+  const deferred=await adsRunGate(env,"autopilot_"+String(reason).slice(0,20));if(deferred)return deferred;
   const {type,city,extra}=input;
   const sourceSite="https://www.hamzehibox.com";
   const allGroups=[
@@ -11906,13 +11916,14 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
     for(const item of items.slice(0,AD_MAX_DRAFTS_PER_RUN)){
       try{
         const lead=await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(item.id).first(); if(!lead)continue;
+        if(!ADS_DRAFTABLE_STAGES.has(String(lead.stage||"")))continue;   // a lead the owner/sales flow already works with is never re-drafted or re-staged by Ads
         let meta={};try{meta=JSON.parse(lead.notes||"{}")}catch{}
         if(meta.negotiation_draft)continue;
         const prompt=`Create a concise ${String(item.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B advertising/collaboration outreach draft for HAMZEHI BOX. Source: ${sourceSite}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Advertising contact page: ${meta.contact_url||"available"}. Audience: jewelry shops, watch stores, fashion-jewelry sellers in Iran and Iraq. Do not invent facts. Ask about available ad formats, audience, placement, duration, price and contact person. Draft only, under 700 characters.`;
         const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
         const d=await r.json().catch(()=>({})); if(!r.ok)continue; const draft=responseText(d).trim(); if(!draft)continue;
         meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="authorized_channel_only";meta.next_followup_at=new Date(Date.now()+48*60*60*1000).toISOString();meta.followup_status="scheduled";
-        await env.DB.prepare("UPDATE leads SET notes=?,stage=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),"negotiation",now(),item.id).run(); item.draft=draft;summary.drafted++;
+        await env.DB.prepare("UPDATE leads SET notes=?,stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(JSON.stringify(meta),"negotiation",now(),item.id).run(); item.draft=draft;summary.drafted++;
       }catch{}
     }
   }
@@ -12671,10 +12682,9 @@ await pollWeeklyVideoAutopilot(env);
           let cfg={}; try{cfg=JSON.parse(row?.value||"{}")}catch{}
           if(!cfg.enabled) return;
           const input=validateAdsInput(cfg); if(!input.ok) return;
-          // Daily run budget (Stage 3 cost control): one atomic reservation per run, at most ads_runs_per_day per UTC day and at most
-          // one per 55 minutes; a refused reservation skips this tick (nothing is retried or released, so it can never spend twice).
-          if(!(await reserveAdsAutopilotRun(env))) return;
-          await runAdAutopilotOnce(env,input,"scheduled");
+          // runAdAutopilotOnce reserves the shared Ads daily run budget itself; when deferred, this tick does nothing more
+          // (no follow-up drafting either), and nothing is retried or released, so it can never spend twice.
+          const adsRun=await runAdAutopilotOnce(env,input,"scheduled");if(adsRun?.deferred) return;
           // Keep the follow-up queue moving while Autopilot is ON. Actual sending remains authorized-channel/manual.
           const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
           const nowMs=Date.now();
@@ -12689,7 +12699,7 @@ await pollWeeklyVideoAutopilot(env);
               const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);
               const d=await r.json().catch(()=>({})); if(!r.ok) continue; const draft=responseText(d).trim(); if(!draft) continue;
               meta.followup_draft=draft; meta.followup_prepared_at=now(); meta.next_followup_at=null; meta.followup_at=at; meta.followup_status="prepared";
-              await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),lead.id).run();
+              await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id).run();
               preparedFollowups++;
             }catch{}
           }
@@ -12700,12 +12710,15 @@ await pollWeeklyVideoAutopilot(env);
     if (!(await autonomyMasterGate(env))) return;
     ctx.waitUntil((async()=>{
         try {
+          // The daily follow-up drafting sweep (OpenAI) is Ads execution too: it shares the Ads daily run budget.
+          // counts toward the daily cap but is exempt from the 55-minute spacing, so an Autopilot run just before 07:00 cannot skip it
+          if(await adsRunGate(env,"daily_followups",{spacing:false})) return;
           const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
           const due=[]; const nowMs=Date.now();
           for(const lead of (rows.results||[])){const meta=parseLeadNotes(lead);const at=meta.next_followup_at||meta.followup_at;if(at&&Date.parse(at)&&Date.parse(at)<=nowMs&&!meta.followup_draft&&! ["customer","converted","rejected","archived"].includes(lead.stage)) due.push({lead,meta});}
           for(const {lead,meta} of due.slice(0,AD_MAX_DRAFTS_PER_RUN)){
             if(!env.OPENAI_API_KEY) break;
-            try{const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);const d=await r.json().catch(()=>({}));if(!r.ok)continue;const draft=responseText(d).trim();if(!draft)continue;meta.followup_draft=draft;meta.followup_prepared_at=now();meta.next_followup_at=null;meta.followup_status="prepared";await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),lead.id).run();}catch{}}
+            try{const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review and whether advertising/collaboration options are available. Under 500 characters. Draft only.`;const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);const d=await r.json().catch(()=>({}));if(!r.ok)continue;const draft=responseText(d).trim();if(!draft)continue;meta.followup_draft=draft;meta.followup_prepared_at=now();meta.next_followup_at=null;meta.followup_status="prepared";await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id).run();}catch{}}
           await audit(env,"ad_followups_scheduled","Daily advertising follow-up sweep completed",{due:due.length});
         } catch {}
       })());
@@ -13698,6 +13711,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
         const input=validateAdsInput(b);
         if(!input.ok) return json(input,400);
+        const gated=await adsRunGate(env,"manual_discover");if(gated)return json(gated);
         const {type,city,extra}=input;
         const sourceSite = "https://www.hamzehibox.com";
         const terms = { gold:"Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ± Ø²Ø±Ú¯Ø±Û Ú¯Ø§ÙØ±Û Ø·ÙØ§", watch:"Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª Ø³Ø§Ø¹Øª ÙÚÛ Ø³Ø§Ø¹Øª ÙÙÚ©Ø³", fashion_jewelry:"Ø¨Ø¯ÙÛØ¬Ø§Øª Ø¨Ø¯ÙÛ ÙØ±ÙØ´Û Ø²ÛÙØ±Ø¢ÙØ§Øª ÙØ§ÙØªØ²Û Ø§Ú©Ø³Ø³ÙØ±Û", all:"Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ± Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª Ø¨Ø¯ÙÛØ¬Ø§Øª Ø¨Ø¯ÙÛ ÙØ±ÙØ´Û Ø²ÛÙØ±Ø¢ÙØ§Øª ÙØ§ÙØªØ²Û" };
@@ -13741,6 +13755,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
         const input=validateAdsInput(b);
         if(!input.ok) return json(input,400);
+        const gated=await adsRunGate(env,"manual_auto_run");if(gated)return json(gated);
         const {type,city,extra}=input;
         const sourceSite = "https://www.hamzehibox.com";
         const allGroups = [
@@ -13787,6 +13802,7 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
             try {
               const lead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(item.id).first();
               if (!lead) continue;
+              if (!ADS_DRAFTABLE_STAGES.has(String(lead.stage||""))) continue;
               let meta = {}; try { meta = JSON.parse(lead.notes || "{}"); } catch {}
               if (meta.negotiation_draft) continue;
               const prompt = `Write a concise ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B advertising/collaboration message for this target. Brand source: ${sourceSite}. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Product category: jewelry, watches, fashion jewelry. Do not invent facts. Ask about advertising formats, audience, placement, duration, price and contact person. Draft only, under 700 characters.`;
@@ -13794,7 +13810,7 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
               const d = await r.json().catch(() => ({})); if (!r.ok) continue;
               const draft = responseText(d).trim(); if (!draft) continue;
               meta.negotiation_draft=draft; meta.negotiation_drafted_at=now(); meta.send_mode="authorized_channel_only";
-              await env.DB.prepare("UPDATE leads SET notes=?,stage=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),"negotiation",now(),item.id).run();
+              await env.DB.prepare("UPDATE leads SET notes=?,stage=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(JSON.stringify(meta),"negotiation",now(),item.id).run();
               item.draft = draft; drafted++;
             } catch {}
           }
@@ -13921,6 +13937,7 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
 
       if (u.pathname === "/api/ads/followups/run" && req.method === "POST") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const gated=await adsRunGate(env,"manual_followups");if(gated)return json(gated);
         const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
         const due=[]; const nowMs=Date.now();
         for(const lead of (rows.results||[])){
@@ -13937,7 +13954,7 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
             const d=await r.json().catch(()=>({})); if(!r.ok) {skipped++;continue;}
             const draft=responseText(d).trim(); if(!draft){skipped++;continue;}
             meta.followup_draft=draft; meta.followup_prepared_at=now(); meta.followup_at=meta.next_followup_at||meta.followup_at; meta.next_followup_at=null; meta.followup_status="prepared";
-            await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta),now(),lead.id).run(); prepared++;
+            await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id).run(); prepared++;
           }catch{skipped++;}
         }
         await audit(env,"ad_followups_run","Advertising follow-up drafts prepared",{due:due.length,prepared,skipped});
