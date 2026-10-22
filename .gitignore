@@ -1,0 +1,26 @@
+# Local Wrangler / Miniflare state (account cache, local D1, tmp bundles)
+.wrangler/
+**/.wrangler/
+
+# Local credentials and environment files (secrets stay Cloudflare Worker secrets)
+.dev.vars
+**/.dev.vars
+.env
+.env.*
+*.pem
+*.key
+
+# Local Claude Code configuration and worktrees
+.claude/
+
+# Backups (handoff phase backups, D1 exports with customer data)
+**/BACKUPS/
+HANDOFF-2026-10-21/PHASE-0*-BACKUPS/
+owner-actions/**/d1-backup*.sql
+*.sqlite
+*.sqlite3
+*.db
+
+# Temporary local preview / tooling artifacts
+node_modules/
+*.log

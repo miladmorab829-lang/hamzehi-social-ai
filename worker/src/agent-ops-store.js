@@ -233,12 +233,14 @@ export async function opsOverview(env,{nowMs=Date.now()}={}){
   if(!(await opsAvailable(env)))return {available:false,reason:"Agent ops tables are not migrated (owner-actions/agent-orchestrator-stage2b)"};
   const all=async(sql,...b)=>((await env.DB.prepare(sql).bind(...b).all()).results||[]);
   const since7=iso(nowMs-7*86400000);
-  const alerts=(await all("SELECT * FROM agent_alerts WHERE acknowledged_at IS NULL OR last_seen_at>=? ORDER BY acknowledged_at IS NOT NULL, CASE level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, last_seen_at DESC LIMIT 100",since7))
+  // Phase 06: an acknowledged alert that is still unrecovered stays listed until it is recovered (never ages out of the view).
+  const alerts=(await all("SELECT * FROM agent_alerts WHERE acknowledged_at IS NULL OR recovery_state='open' OR last_seen_at>=? ORDER BY acknowledged_at IS NOT NULL, CASE level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, last_seen_at DESC LIMIT 100",since7))
     .map(a=>({...a,affected_tasks:(()=>{try{return JSON.parse(a.affected_tasks_json||"[]")}catch{return []}})()}));
   const heartbeat=await all("SELECT * FROM agent_heartbeat");
   const runs=await all("SELECT * FROM agent_runs WHERE started_at>=? ORDER BY started_at DESC LIMIT 500",since7);
   const approvals=await all("SELECT id,task_id,module,action,capability,status,requested_at,decided_at,decided_by,expires_at,used_at,note FROM agent_approvals WHERE status IN ('pending','approved') OR requested_at>=? ORDER BY status='pending' DESC, requested_at DESC LIMIT 100",since7);
-  const deadLetters=await all("SELECT * FROM agent_dead_letters WHERE resolved_at IS NULL OR created_at>=? ORDER BY resolved_at IS NOT NULL, created_at DESC LIMIT 100",since7);
+  // Phase 06: the failed task's module/action/status (primary-key join) so the Control Center can show retry eligibility.
+  const deadLetters=await all("SELECT d.*,t.module AS task_module,t.action AS task_action,t.status AS task_status FROM agent_dead_letters d LEFT JOIN autonomy_tasks t ON t.id=d.task_id WHERE d.resolved_at IS NULL OR d.created_at>=? ORDER BY d.resolved_at IS NOT NULL, d.created_at DESC LIMIT 100",since7);
   // Resource and cost use (7 days): budget %, runs over 80 % of budget, units per completed task, outcome mix, run durations.
   const parse=r=>{try{return JSON.parse(r.counts_json||"{}")}catch{return {}}};
   const spent=runs.reduce((s,r)=>s+Number(r.budget_spent||0),0),limit=runs.reduce((s,r)=>s+Number(r.budget_limit||0),0);

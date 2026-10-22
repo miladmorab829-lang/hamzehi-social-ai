@@ -99,6 +99,19 @@ details.fold>div>.section:first-child,details.fold>.section:first-of-type{margin
 .gform{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.gform label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);font-weight:700}.gform .full{grid-column:1/-1}
 .glabel{font-size:12.5px;line-height:1.6}.gpreviewlabel{margin-top:8px;padding:8px 10px;border:1px dashed var(--line2);border-radius:10px;font-weight:700;font-size:13px;background:#fff}
 @media(max-width:560px){.gform{grid-template-columns:1fr}}
+/* Phase 05 — Agent Control Center (read-only cards; status ≠ liveness) */
+.acsum{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-top:10px}.acsum .card{padding:10px 12px}.acsum .num{font-size:20px}
+.acgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}
+.accard{display:flex;flex-direction:column;gap:6px;border-inline-start:4px solid var(--line2)}
+.accard.s-ACTIVE{border-inline-start-color:var(--ok)}.accard.s-BLOCKED{border-inline-start-color:var(--bad)}.accard.s-NOT_CONNECTED{border-inline-start-color:#9ca3af}.accard.s-IDLE{border-inline-start-color:var(--warn)}
+.achead{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}.achead h3{margin:0;font-size:14.5px}.achead p{margin:0;font-size:12px;color:var(--muted)}
+.acpills{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.pill.gray{background:var(--soft);color:var(--muted)}
+.ackv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12.5px;margin:0}.ackv dt{color:var(--muted)}.ackv dd{margin:0;overflow-wrap:anywhere}
+.acwhy{font-size:12px;border-radius:9px;padding:6px 9px;background:var(--badbg);color:var(--bad)}.acnote{font-size:11.5px;color:var(--muted);border-top:1px dashed var(--line);padding-top:6px}
+.acfilter{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}.acfilter button{min-height:34px;padding:4px 11px;font-size:12px}.acfilter button[aria-pressed=true]{background:var(--accent);color:#fff;border-color:var(--accent)}
+.alsum{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+@media(max-width:1050px){.acgrid{grid-template-columns:repeat(2,1fr)}.acsum{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:620px){.acgrid{grid-template-columns:1fr}.acsum{grid-template-columns:repeat(2,1fr)}}
 </style></head><body><div class="wrap">
 `;
 const DASH_SECTIONS={
@@ -833,19 +846,24 @@ async function loadAgentOps(){
  const st=$("agentOpsStatus");st.textContent="در حال دریافت…";
  loadAgentFunnel().catch(()=>{});
  const d=await api(A+"/agents/overview");
- if(!d||!d.ok){st.innerHTML="<span class='bad'>✕ "+esc((d&&d.error)||"Unable to read agent health")+"</span>";return}
+ if(!d||!d.ok){st.innerHTML=acErr(d);return}
  if(!d.available){st.innerHTML="<span class='bad'>"+esc(d.reason||"Agent ops tables are not migrated")+"</span> · Orchestrator: "+(d.orchestrator_enabled?"ON":"OFF");["agentOpsAlerts","agentOpsQuotas","agentOpsPublishing","agentOpsCosts","agentOpsQuality","agentOpsVersions","agentOpsApprovals","agentOpsDead","agentOpsUsage"].forEach(k=>{$(k).innerHTML=""});return}
  st.innerHTML="Orchestrator: <b>"+(d.orchestrator_enabled?"ON":"OFF")+"</b> · Heartbeat: "+(d.heartbeat||[]).map(h=>esc(h.scheduler)+" "+esc(h.last_finished_at)+(h.healthy?" ✓":" ✕")).join(" · ");
  const sev={critical:"bad",warning:"bad",info:""};
- $("agentOpsAlerts").innerHTML=(d.alerts||[]).map(a=>"<div class='row'><b class='"+(sev[a.level]||"")+"'>"+esc(a.level)+"</b> · "+esc(a.agent)+" · "+esc(a.code)+" · ×"+esc(a.occurrences)+"<br><span class='hint'>"+esc(a.first_seen_at)+" → "+esc(a.last_seen_at)+" · "+esc(a.recovery_state)+(a.acknowledged_at?" · acknowledged "+esc(a.acknowledged_at):"")+"</span><br>"+esc(a.cause_redacted||"")+"<br><span class='hint'>Tasks: "+esc((a.affected_tasks||[]).join(", "))+" · Fallback: "+esc(a.fallback_status||"-")+"</span>"+(a.acknowledged_at?"":" <button class='btn' onclick=\\"agentOpsAct('alerts/ack','"+esc(a.id)+"')\\">ACKNOWLEDGE</button>")+"</div>").join("")||"<div class='hint'>هشدار بازی وجود ندارد.</div>";
+ $("agentOpsAlerts").innerHTML=acAlertsHtml(d.alerts);
  $("agentOpsApprovals").innerHTML=(d.approvals||[]).map(a=>"<div class='row'><b>"+esc(a.module)+":"+esc(a.action)+"</b> · "+esc(a.status)+" · task "+esc(a.task_id)+"<br><span class='hint'>"+esc(a.requested_at)+(a.expires_at?" · expires "+esc(a.expires_at):"")+"</span>"+(a.status==="pending"?" <button class='btn' onclick=\\"agentOpsAct('approvals/decide','"+esc(a.id)+"','approve')\\">APPROVE</button> <button class='btn' onclick=\\"agentOpsAct('approvals/decide','"+esc(a.id)+"','reject')\\">REJECT</button>":"")+"</div>").join("")||"<div class='hint'>تأیید در انتظاری وجود ندارد.</div>";
- $("agentOpsDead").innerHTML=(d.dead_letters||[]).map(x=>"<div class='row'><b>"+esc(x.agent)+"</b> · "+esc(x.state)+" · task "+esc(x.task_id)+" · "+esc(x.attempts)+" attempts<br>"+esc(x.error_redacted||"")+"<br><span class='hint'>"+esc(x.created_at)+(x.resolved_at?" · "+esc(x.resolution)+" "+esc(x.resolved_at):"")+"</span>"+(x.resolved_at?"":" <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','retried')\\">REQUEUE</button> <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','dismissed')\\">DISMISS</button>")+"</div>").join("")||"<div class='hint'>صف خطا خالی است.</div>";
+ // Phase 06: open-DLQ summary per agent + retry eligibility (auto = read-only Watchdog retry; REQUEUE only while the task is failed)
+ const dls=d.dead_letter_summary||{},dlk=Object.keys(dls);
+ $("agentOpsDead").innerHTML=(dlk.length?"<div class='alsum'>"+dlk.map(k=>"<span class='pill bad'>"+esc(k)+": "+esc(dls[k].open)+" باز · خودکار "+esc(dls[k].auto_retry)+" · فقط مالک "+esc(dls[k].owner_only)+"</span>").join("")+"</div>":"")
+  +((d.dead_letters||[]).map(x=>{const e=x.eligibility;return "<div class='row'><b>"+esc(x.agent)+"</b> · "+esc(x.state)+" · task "+esc(x.task_id)+(x.task_action?" ("+esc(x.task_module)+":"+esc(x.task_action)+")":"")+" · "+esc(x.attempts)+" attempts<br>"+esc(x.error_redacted||"")+"<br><span class='hint'>"+esc(x.created_at)+(x.resolved_at?" · "+esc(x.resolution)+" "+esc(x.resolved_at):"")+"</span>"
+  +(e?"<br><span class='hint'>نوع: "+esc(e.capability||"نامعلوم")+" · retry خودکار: "+(e.auto_retry?"<span class='ok'>بله</span>":"خیر")+" · "+esc(e.note)+"</span>":"")
+  +(x.resolved_at?"":((!e||e.owner_requeue)?" <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','retried')\\">REQUEUE</button>":"")+" <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','dismissed')\\">DISMISS</button>")+"</div>"}).join("")||"<div class='hint'>صف خطا خالی است.</div>");
  $("agentOpsQuotas").innerHTML=(d.quotas||[]).map(q=>"<div class='row'><b>"+esc(q.action)+"</b> · "+esc(q.used_today)+" / "+esc(q.daily_quota)+(q.used_today>=q.daily_quota?" <span class='bad'>(سقف امروز پر شد)</span>":"")+"</div>").join("")||"<div class='hint'>—</div>";
  const cs=d.costs,ql=d.quality;
  $("agentOpsCosts").innerHTML=!cs?"<div class='hint'>—</div>":"<div class='row'>Units: <b>"+esc(cs.units.used)+"</b> / "+esc(cs.units.budget)+" · "+Object.entries(cs.providers||{}).map(([p,v])=>esc(p)+" "+esc(v.used)+"/"+esc(v.budget)).join(" · ")+" · Ads Autopilot runs "+esc(cs.ads_autopilot.runs_today)+"/"+esc(cs.ads_autopilot.runs_per_day)+"</div>";
  const qv=(k,suf)=>ql&&ql.current[k]!=null?esc(ql.current[k])+suf+(ql.trend[k]!=null?" ("+(ql.trend[k]>=0?"+":"")+esc(ql.trend[k])+")":""):"—";
  $("agentOpsQuality").innerHTML=!ql?"<div class='hint'>—</div>":"<div class='row'>Task reliability "+qv("reliability","%")+" · run health "+qv("run_health","%")+" · routine posts "+qv("content_routine_rate","%")+" · owner acceptance "+qv("owner_acceptance","%")+" · CRM identity conflicts "+qv("crm_identity_conflicts","")+"</div>"+(ql.recurring_problems||[]).map(r=>"<div class='row'><b>"+esc(r.action)+"</b> ×"+esc(r.count)+" · "+esc(r.error||"")+"</div>").join("");
- $("agentOpsVersions").innerHTML=(d.versions||[]).map(v=>"<div class='row'><b>"+esc(v.agent)+"</b> · "+esc(v.version)+" · "+esc(v.status)+"<span class='hint'> "+esc(v.activated_at||"")+"</span></div>").join("")||"<div class='hint'>—</div>";
+ $("agentOpsVersions").innerHTML=acVersionsHtml(d.versions,d.alerts);
  const pb=d.publishing||{};
  $("agentOpsPublishing").innerHTML=(!pb.available?"<div class='hint'>—</div>":"<div class='row'>"+((pb.counts||[]).map(c=>esc(c.target)+" "+esc(c.status)+": <b>"+esc(c.n)+"</b>").join(" · ")||"—")+"</div>")+(pb.vault?"<div class='row'>Vault senders: <b class='"+(pb.vault.sender_allow_list==="configured"?"":"bad")+"'>"+esc(pb.vault.sender_allow_list)+"</b>"+(pb.vault.senders?" ("+esc(pb.vault.senders)+")":"")+" · rejected media (7d): <b>"+esc(pb.vault.rejected_7d)+"</b></div>":"")+(pb.problems||[]).map(p=>"<div class='row'><b class='bad'>"+esc(p.target)+" · "+esc(p.status)+"</b> · content "+esc(p.content_id)+"<br>"+esc(p.error||"")+"<br><span class='hint'>"+esc(p.updated_at)+"</span></div>").join("");
  const u=d.usage||{};
@@ -858,6 +876,121 @@ async function agentOpsAct(route,id,choice){
  const d=await api(A+"/agents/"+route,{method:"POST",body:JSON.stringify(body)});
  $("agentOpsStatus").innerHTML=d&&d.ok?"<span class='ok'>✓ "+(d.idempotent?"No change":"Saved")+"</span>":"<span class='bad'>✕ "+esc((d&&d.error)||"Failed")+"</span>";
  loadAgentOps();
+}
+// Phase 05 — Agent Control Center cards (GET /api/autonomy/agents/activity). Status = real work; health = the scheduler reached it.
+// Loaded when the page opens and on «بازخوانی» only (not part of the 15 s poll). Unknown values are shown as نامعلوم, never guessed.
+const AC_META={
+ telegram:["تلگرام","پیام ورودی مشتری، پیش‌نویس پاسخ، رسانه ورودی","Webhook تلگرام · CRM و Sales Brain به ورودی آن وابسته‌اند"],
+ whatsapp:["واتس‌اپ","پیام ورودی مشتری از واتس‌اپ","اتصال و credential واتس‌اپ"],
+ instagram:["اینستاگرام","پیام و سرنخ از اینستاگرام","اتصال و credential اینستاگرام"],
+ website:["وب‌سایت","پایش رشد وب‌سایت","فقط با فرمان مالک (growth_scan)"],
+ crm:["CRM","هوش سرنخ، کشف مشتری، ثبت سرنخ ورودی","ورودی تلگرام، Ads، کشف پولی Google Places"],
+ ads:["تبلیغات و کشف مشتری","Ads Autopilot: کشف، ارزیابی، پیش‌نویس مذاکره","شهر هدف معتبر، سقف مشترک ۲۴ اجرا در روز، OpenAI برای پیگیری"],
+ content:["محتوا","تولید محتوا و صف انتشار کانال","OpenAI · انتشار فقط بعد از تأیید مالک یا سیاست محتوای روتین"],
+ media:["ویدیو","ویدیوی هفتگی از عکس‌های هفته","عکس‌های هفته، Kling/Shotstack، رزرو هفتگی"],
+ photo:["عکس","ویرایش و تولید عکس روزانه","Telegram media vault، OpenAI، سقف روزانه"],
+ learning:["یادگیری","تحلیل عملکرد و به‌روزرسانی پروفایل بهینه‌سازی","داده عملکرد محتوا و کانال"],
+ revenue:["درآمد","تصویر قیف و درآمد در هر دور","سرنخ‌ها، سفارش‌ها، پرداخت‌ها"]
+};
+const AC_STATUS={ACTIVE:["فعال","ok"],IDLE:["بیکار","warn"],BLOCKED:["مسدود","bad"],NOT_CONNECTED:["وصل نیست","gray"],UNKNOWN:["نامعلوم","gray"]};
+const AC_HEALTH={HEALTHY:["سالم","ok"],STALE:["قدیمی","warn"],FAILING:["خطا","bad"],UNKNOWN:["نامعلوم","gray"]};
+const AC_IDLE={BY_DESIGN:["بیکار طبق طراحی","gray"],UNEXPECTED:["کار مورد انتظار انجام نشده","warn"],INFRASTRUCTURE:["مشکل زیرساخت","bad"]};
+const AC_CAP={read:"خودکار (فقط خواندن)",draft:"پیش‌نویس؛ منتظر تأیید مالک",paid:"خودکار در سقف روزانه و بودجه",side_effect:"تأیید یک‌باره مالک"};
+let acData=null,acFilter="ALL";
+function acAgo(v){const t=Date.parse(v||"");if(!isFinite(t))return "نامعلوم";const s=Math.max(0,Math.round((Date.now()-t)/1000));return (s<90?s+" ثانیه":s<5400?Math.round(s/60)+" دقیقه":s<172800?Math.round(s/3600)+" ساعت":Math.round(s/86400)+" روز")+" پیش"}
+function acTime(v){return v?"<span title='"+esc(v)+"'>"+esc(acAgo(v))+"</span>":"<span class='muted'>نامعلوم</span>"}
+function acPill(map,k){const x=map[k]||map.UNKNOWN;return "<span class='pill "+x[1]+"'>"+esc(x[0])+"</span>"}
+function acCounts(agents){const n={ACTIVE:0,IDLE:0,BLOCKED:0,NOT_CONNECTED:0,UNKNOWN:0,HEALTHY:0};for(const a of agents){n[a.status]=(n[a.status]||0)+1;if((a.technical||a.health)==="HEALTHY")n.HEALTHY++}return n}
+// Phase 07: four separate dimensions (technical / connection / activity / execution); reasons and next action come as codes and are
+// shown in Persian, the exact codes stay in «جزئیات فنی». Nothing here executes an action.
+const AC_TECH={HEALTHY:["سالم","ok"],DEGRADED:["افت کیفیت","warn"],FAILED:["خطا","bad"],UNKNOWN:["نامعلوم","gray"]};
+const AC_CONN={CONNECTED:["وصل","ok"],NOT_CONNECTED:["وصل نیست","gray"],PAUSED:["متوقف توسط مالک","gray"],UNKNOWN:["نامعلوم","gray"],NOT_APPLICABLE:["داخلی (بدون کانال)","gray"]};
+const AC_EXEC={SUCCESS:["موفق","ok"],FAILED:["ناموفق","bad"],RUNNING:["در صف / در حال اجرا","warn"],NOT_SCHEDULED:["برنامه‌ریزی نشده","gray"],UNKNOWN:["نامعلوم","gray"]};
+const AC_REASON={MASTER_OFF:"کلید اصلی (Master) خاموش است",MODULE_DISABLED:"این عامل در تنظیمات خاموش است",ACTION_DISABLED:"یک یا چند اقدام این عامل خاموش است",ADS_CITY_EMPTY:"شهر هدف تبلیغات تعیین نشده است",MEDIA_PROVIDER_BLOCKED:"سرویس ویدیو درخواست را رد کرد یا رزرو این هفته استفاده شده است",DLQ_OPEN:"کار ناموفق در صف خطا منتظر بررسی است",CRITICAL_ALERT:"هشدار بحرانی باز است",SCHEDULER_STALE:"زمان‌بند مدتی است به این عامل نرسیده",LAST_TASK_FAILED:"آخرین کار این عامل ناموفق بود",CHANNEL_NOT_CONNECTED:"این کانال هنوز وصل نشده است (خطای فنی نیست)",EXPECTED_WORK_OVERDUE:"کار زمان‌بندی‌شده از موعدش عقب افتاده است",OWNER_REVIEW_PENDING:"مواردی منتظر تأیید مالک است"};
+const AC_NEXT={MASTER_OFF:"در صورت تمایل Master را روشن کنید (تصمیم مالک).",MODULE_DISABLED:"اگر خاموشی عمدی است اقدامی لازم نیست؛ وگرنه ماژول را روشن کنید.",ACTION_DISABLED:"اگر عمدی است اقدامی لازم نیست؛ وگرنه اقدام را روشن کنید.",CRITICAL_ALERT:"هشدار بحرانی را در بخش «هشدارها» بررسی کنید.",SCHEDULER_STALE:"اجرای cron و heartbeat زمان‌بند را بررسی کنید.",ADS_CITY_EMPTY:"یک شهر معتبر ایران یا عراق برای Ads تعیین کنید (نیاز به تأیید مالک).",MEDIA_PROVIDER_BLOCKED:"خطای سرویس ویدیو را در «جزئیات فنی» ببینید؛ تلاش بعدی در هفته بعد است.",DLQ_OPEN:"صف خطا را بررسی کنید و REQUEUE یا DISMISS را انتخاب کنید.",LAST_TASK_FAILED:"علت آخرین خطا را در «جزئیات فنی» ببینید.",OWNER_REVIEW_PENDING:"موارد منتظر را در صفحه «تأییدیه‌ها» بررسی کنید.",CHANNEL_NOT_CONNECTED:"وصل کردن این کانال تصمیم مالک است.",EXPECTED_WORK_OVERDUE:"ورودی‌ها، سهمیه و خطاهای اخیر این عامل را بررسی کنید.",NO_DATA:"هنوز داده‌ای برای این عامل ثبت نشده است.",NONE:"اقدامی لازم نیست."};
+const AC_MISSING={NO_FINISHED_TASKS:"هنوز کاری در ۷ روز گذشته تمام نشده",BELOW_MIN_SAMPLES:"کمتر از حداقل نمونه"};
+function acDim(label,map,k){const x=map[k]||map.UNKNOWN;return "<span class='pill "+x[1]+"' title='"+esc(label+": "+(k||"UNKNOWN"))+"'>"+esc(label)+": "+esc(x[0])+"</span>"}
+function acCard(a){
+ const m=AC_META[a.agent]||[a.agent,"",""],c7=a.counts_7d,qd=a.queue,d=a.detail||{};
+ const rows=[["آخرین اجرا",acTime(a.last_run_at)+(a.latest_task_action?" · "+esc(a.latest_task_action):"")],
+  ["آخرین اجرای موفق",a.last_success_at?acTime(a.last_success_at):"<span class='muted'>ثبت نشده</span>"],
+  ["آخرین کار واقعی",a.last_real_at?acTime(a.last_real_at)+" · "+esc(a.last_real_source):"<span class='muted'>در ۶۰ روز گذشته ثبت نشده</span>"],
+  ["۷ روز",c7?"<span class='ok'>✓ "+esc(c7.completed)+"</span> · <span class='"+(c7.failed?"bad":"muted")+"'>✕ "+esc(c7.failed)+"</span>"+(c7.blocked?" · مسدود "+esc(c7.blocked):""):"نامعلوم"],
+  ["صف و صف خطا",qd?"در صف "+esc(qd.queued)+" · در حال اجرا "+esc(qd.running)+(qd.locked_since?" · قفل از "+acTime(qd.locked_since):"")+" · صف خطا "+(a.dead_letters_open==null?"نامعلوم":a.dead_letters_open?"<span class='bad'>"+esc(a.dead_letters_open)+" باز</span>":"0"):"نامعلوم"]];
+ if(a.inbound)rows.push(["پیام ورودی",esc(a.inbound.messages)+(a.inbound.last_at?" · آخرین "+acTime(a.inbound.last_at):"")]);
+ if(a.agent==="ads"){rows.push(["Autopilot",esc(d.autopilot||"نامعلوم")+" · شهر: "+(d.target_city?esc(d.target_city):"<span class='bad'>خالی</span>")]);if(d.last_run_found!=null)rows.push(["آخرین اجرای Ads","یافته "+esc(d.last_run_found)+" · پیش‌نویس "+esc(d.last_run_drafted)+" · خطا "+esc(d.last_run_errors)])}
+ if(a.agent==="content")rows.push(["منتظر تأیید مالک",d.pending_review!=null?"<b>"+esc(d.pending_review)+"</b>":"نامعلوم"]);
+ if(a.alerts_open&&a.alerts_open.length)rows.push(["هشدار باز",a.alerts_open.map(x=>esc(x.level)+" "+esc(x.code)).join(" · ")]);
+ const qr=(x,l)=>esc(l)+" "+(x.success_pct==null?"<span class='muted'>"+esc(AC_MISSING[x.missing]||"داده کافی نیست")+" ("+esc(x.samples)+")</span>":"<b>"+esc(x.success_pct)+"%</b> ("+esc(x.samples)+")");
+ if(a.quality_7d)rows.push(["کیفیت ۷ روز",qr(a.quality_7d.real,"کار واقعی")+" · "+qr(a.quality_7d.status_checks,"بررسی وضعیت")]);
+ if(a.cost&&a.cost.paid_actions&&a.cost.paid_actions.length)rows.push(["سهمیه و هزینه",a.cost.paid_actions.map(p=>esc(p.action)+": امروز "+(p.used_today==null?"نامعلوم":esc(p.used_today)+" / "+esc(p.daily_quota))+" · "+esc(p.unit_cost)+" واحد ("+esc(p.provider||"—")+")").join("<br>")]);
+ if(a.version)rows.push(["نسخه",a.version.active?esc(a.version.active)+" · "+(a.version.rollback_ready?"<span class='ok'>Rollback آماده: "+esc(a.version.previous)+"</span>":"<span class='muted'>نسخه قبلی ثبت نشده</span>"):"<span class='muted'>نامعلوم</span>"]);
+ const codes=a.reason_codes||[];
+ const why=codes.length?"<div class='acwhy'>"+codes.map(c=>esc(AC_REASON[c]||c)).join("<br>")+"</div>":"";
+ const next="<div class='row' style='padding:6px 9px'><b>اقدام پیشنهادی:</b> "+esc(AC_NEXT[a.next_action]||AC_NEXT.NONE)+"</div>";
+ const appr=(a.approvals||[]).filter(x=>x.action!=="status").map(x=>esc(x.action)+": "+esc(AC_CAP[x.capability]||x.capability)).join(" · ");
+ const tech="<details><summary class='hint'>جزئیات فنی</summary><pre>"+esc(JSON.stringify({status:a.status,health:a.health,technical:a.technical,connection:a.connection,activity:a.activity,execution:a.execution,idle_kind:a.idle_kind||null,reason_codes:a.reason_codes,next_action:a.next_action,latest_task:{action:a.latest_task_action,status:a.latest_task_status},last_failure:a.last_failure,reasons:a.reasons},null,1))+"</pre></details>";
+ return "<article class='card accard s-"+esc(a.status)+"'><div class='achead'><div><h3>"+esc(m[0])+" <span class='muted' style='font-weight:400;font-size:11.5px'>"+esc(a.agent)+"</span></h3><p>"+esc(m[1])+"</p></div></div>"
+  +"<div class='acpills' style='justify-content:flex-start'>"+acDim("فنی",AC_TECH,a.technical)+acDim("اتصال",AC_CONN,a.connection)+acDim("فعالیت",AC_STATUS,a.activity)+acDim("اجرا",AC_EXEC,a.execution)+(a.idle_kind?"<span class='pill "+(AC_IDLE[a.idle_kind]||AC_IDLE.BY_DESIGN)[1]+"'>"+esc((AC_IDLE[a.idle_kind]||AC_IDLE.BY_DESIGN)[0])+"</span>":"")+"</div>"
+  +"<dl class='ackv'>"+rows.map(r=>"<dt>"+esc(r[0])+"</dt><dd>"+r[1]+"</dd>").join("")+"</dl>"+why+next
+  +"<div class='acnote'>وابستگی: "+esc(m[2])+(appr?"<br>تأیید: "+appr:"")+"</div>"+tech+"</article>";
+}
+// Persian message for an API failure; the raw error stays available as a technical detail.
+function acErr(d){const s=d&&d.status,raw=String((d&&d.error)||"");
+ const msg=s===401?"برای دیدن این بخش ابتدا با توکن مدیر وارد شوید.":s===429?"تلاش ناموفق زیاد بود؛ چند دقیقه بعد دوباره امتحان کنید.":s>=500?"خطای سرور؛ کمی بعد دوباره امتحان کنید.":/timed out/i.test(raw)?"پاسخ سرور بیش از حد طول کشید؛ دوباره امتحان کنید.":"دریافت اطلاعات ممکن نشد.";
+ return "<span class='bad'>✕ "+esc(msg)+"</span> <details style='display:inline-block'><summary class='hint'>جزئیات فنی</summary><code>"+esc((s?"HTTP "+s+" · ":"")+raw)+"</code></details>"}
+function acRender(){
+ const g=$("agentCenterGrid");if(!acData){g.innerHTML="";return}
+ g.innerHTML=acData.agents.filter(a=>acFilter==="ALL"||a.status===acFilter).map(acCard).join("")||"<div class='hint'>هیچ عاملی با این وضعیت نیست.</div>";
+ $("agentCenterFilter").querySelectorAll("button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.f===acFilter)));
+}
+async function loadAgentCenter(){
+ const st=$("agentCenterStatus");st.textContent="در حال دریافت…";
+ const d=await api(A+"/agents/activity");
+ if(!d||!d.ok||!Array.isArray(d.agents)){st.innerHTML=acErr(d);$("agentCenterGrid").innerHTML="";$("agentCenterSummary").innerHTML="";return}
+ acData=d;const n=acCounts(d.agents);
+ const fr=d.freshness||{};st.innerHTML="<span class='pill "+(fr.state==="FRESH"?"ok":fr.state==="STALE"?"warn":"gray")+"'>داده "+(fr.state==="FRESH"?"تازه":fr.state==="STALE"?"کهنه":"نامعلوم")+(fr.age_minutes!=null?" · آخرین اجرای ثبت‌شده "+esc(fr.age_minutes)+" دقیقه پیش":"")+"</span> به‌روز: "+acTime(d.generated_at)+" · پنجره فعالیت "+esc(d.activity_window_hours)+" ساعت · «قدیمی» بعد از "+esc(d.stale_after_minutes)+" دقیقه"+(d.unavailable_sources&&d.unavailable_sources.length?" · <span class='bad'>منبع در دسترس نیست: "+d.unavailable_sources.map(esc).join("، ")+"</span>":"");
+ const tiles=[["HEALTHY","سالم (فنی)","ok"],["ACTIVE","فعال","ok"],["IDLE","بیکار","warn"],["BLOCKED","مسدود","bad"],["NOT_CONNECTED","وصل نیست",""],["UNKNOWN","نامعلوم",""]];
+ $("agentCenterSummary").innerHTML=tiles.map(t=>"<div class='card'><div class='k'>"+esc(t[1])+"</div><div class='num "+t[2]+"'>"+esc(n[t[0]]||0)+"<span class='muted' style='font-size:12px'> / "+esc(d.agents.length)+"</span></div></div>").join("");
+ $("agentCenterFilter").innerHTML=[["ALL","همه"],["ACTIVE","فعال"],["IDLE","بیکار"],["BLOCKED","مسدود"],["NOT_CONNECTED","وصل نیست"],["UNKNOWN","نامعلوم"]].map(f=>"<button class='btn' type='button' data-f='"+f[0]+"' aria-pressed='false'>"+esc(f[1])+(f[0]==="ALL"?"":" "+esc(n[f[0]]||0))+"</button>").join("");
+ acRender();
+}
+async function loadHubAgents(){
+ const box=$("hubAgents"),d=await api(A+"/agents/activity");
+ if(!d||!d.ok||!Array.isArray(d.agents)){box.innerHTML="<div class='hint'>"+acErr(d)+"</div>";return}
+ const n=acCounts(d.agents),attn=d.agents.filter(a=>a.status==="BLOCKED"||a.status==="NOT_CONNECTED"||a.technical==="FAILED"||a.technical==="DEGRADED"||a.idle_kind==="UNEXPECTED"||a.idle_kind==="INFRASTRUCTURE");
+ box.innerHTML="<div class='row'>"+["ACTIVE","IDLE","BLOCKED","NOT_CONNECTED","UNKNOWN"].map(k=>acPill(AC_STATUS,k)+" <b>"+esc(n[k]||0)+"</b>").join(" · ")+" · "+"<span class='pill ok'>سالم (فنی)</span> <b>"+esc(n.HEALTHY)+"</b> / "+esc(d.agents.length)+"</div>"
+  +(attn.map(a=>"<div class='row'><b>"+esc((AC_META[a.agent]||[a.agent])[0])+"</b> "+acPill(AC_STATUS,a.status)+acDim("فنی",AC_TECH,a.technical)+acDim("اتصال",AC_CONN,a.connection)+"<br><span class='hint'>"+esc((a.reasons||[])[0]||(a.idle_kind?(AC_IDLE[a.idle_kind]||[""])[0]:""))+"</span></div>").join("")||"<div class='hint'>عامل مسدود یا ناسالمی وجود ندارد.</div>");
+}
+// Phase 06: version + rollback readiness per agent (read-only; a rollback is an owner-approved Worker deploy, never run from here).
+function acVersionsHtml(versions,alerts){
+ const by={};for(const v of versions||[]){const g=by[v.agent]||(by[v.agent]={});if(v.status==="active"&&!g.active)g.active=v;if(v.status==="previous"&&!g.previous)g.previous=v}
+ const bad=new Set((alerts||[]).filter(a=>a.code==="version_unhealthy"&&a.recovery_state==="open").map(a=>a.agent));
+ const keys=Object.keys(by).sort();if(!keys.length)return "<div class='hint'>اطلاعات نسخه ثبت نشده است (نامعلوم).</div>";
+ const ready=keys.filter(k=>by[k].previous).length;
+ return "<div class='alsum'><span class='pill'>عامل‌های دارای نسخه: "+esc(keys.length)+"</span><span class='pill "+(ready?"ok":"gray")+"'>آماده Rollback: "+esc(ready)+"</span><span class='pill "+(bad.size?"bad":"ok")+"'>نسخه ناسالم: "+esc(bad.size)+"</span></div>"
+  +keys.map(k=>{const g=by[k];return "<div class='row'><b>"+esc(k)+"</b> · "+(g.active?esc(g.active.version)+"<span class='hint'> از "+esc(g.active.activated_at||"")+"</span>":"<span class='muted'>نسخه فعال نامعلوم</span>")+(bad.has(k)?" <span class='pill bad'>version_unhealthy</span>":"")
+   +"<br><span class='hint'>Rollback: "+(g.previous?"<span class='ok'>مرجع "+esc(g.previous.version)+"</span> · فقط با deploy تأییدشده مالک":"نسخه قبلی ثبت نشده؛ Rollback آماده نیست")+"</span></div>"}).join("")
+  +"<div class='hint'>این بخش فقط اطلاع‌رسانی است و هیچ Rollbackی از اینجا اجرا نمی‌شود.</div>";
+}
+// Watchdog alerts: one row per agent+code (history folded into it), unresolved first and never hidden; history is collapsible.
+function acAlertsHtml(alerts){
+ const groups=new Map();
+ for(const a of alerts||[]){const k=a.agent+"|"+a.code,g=groups.get(k);if(!g)groups.set(k,{cur:a,hist:[]});else if(!a.acknowledged_at&&g.cur.acknowledged_at){g.hist.push(g.cur);g.cur=a}else g.hist.push(a)}
+ const list=[...groups.values()],isOpen=a=>!a.acknowledged_at||a.recovery_state==="open",open=list.filter(g=>isOpen(g.cur)),hist=list.filter(g=>!isOpen(g.cur));
+ const rank={critical:0,warning:1,info:2};open.sort((x,y)=>(rank[x.cur.level]??3)-(rank[y.cur.level]??3)||String(y.cur.last_seen_at).localeCompare(String(x.cur.last_seen_at)));
+ const lv={critical:0,warning:0,info:0};for(const g of open)lv[g.cur.level]=(lv[g.cur.level]||0)+1;
+ const agents=new Set(open.map(g=>g.cur.agent));
+ const sev={critical:"bad",warning:"warn",info:"gray"};
+ const row=g=>{const a=g.cur,occ=[a,...g.hist].reduce((s,x)=>s+Number(x.occurrences||0),0);
+  return "<div class='row'><span class='pill "+(sev[a.level]||"gray")+"'>"+esc(a.level)+"</span> <b>"+esc(a.agent)+"</b> · "+esc(a.code)+" · ×"+esc(occ)+(g.hist.length?" <span class='hint'>(+"+esc(g.hist.length)+" سابقه)</span>":"")
+  +"<br><span class='hint'>اولین: "+esc(a.first_seen_at)+" · آخرین: "+esc(a.last_seen_at)+"</span>"
+  +"<br>علت: "+esc(a.cause_redacted||"نامعلوم")
+  +"<br><span class='hint'>اثر: "+esc((a.affected_tasks||[]).length)+" task · Fallback: "+esc(a.fallback_status||"نامعلوم")+" · بازیابی: "+(a.recovery_state==="recovered"?"<span class='ok'>بازیابی شد "+esc(a.recovered_at||"")+"</span>":"<span class='bad'>باز</span>")+" · مالک: "+(a.acknowledged_at?"<span class='ok'>دیده شد "+esc(a.acknowledged_at)+"</span>":"<span class='bad'>دیده نشده</span>")+"</span>"
+  +(a.acknowledged_at?"":" <button class='btn' onclick=\\"agentOpsAct('alerts/ack','"+esc(a.id)+"')\\">ACKNOWLEDGE</button>")+"</div>"};
+ return "<div class='alsum'><span class='pill "+(open.length?"bad":"ok")+"'>باز/دیده‌نشده: "+esc(open.length)+"</span><span class='pill'>عامل‌های درگیر: "+esc(agents.size)+"</span><span class='pill bad'>critical "+esc(lv.critical)+"</span><span class='pill warn'>warning "+esc(lv.warning)+"</span><span class='pill gray'>info "+esc(lv.info)+"</span></div>"
+  +(open.map(row).join("")||"<div class='hint'>هشدار بازی وجود ندارد.</div>")
+  +(hist.length?"<details class='fold'><summary>سابقه ۷ روز (حل‌شده و دیده‌شده) <b class='cnt'>"+esc(hist.length)+"</b></summary><div class='rows'>"+hist.map(row).join("")+"</div></details>":"");
 }
 async function loadDiagnostic(){
  const d=await api(A+"/status");
@@ -1865,7 +1998,7 @@ async function refreshTick(){
  catch(e){$("masterState").textContent="DASHBOARD ERROR";$("masterState").className="pill bad"}
  finally{refreshInProgress=false}
 }
-updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();setInterval(refreshTick,15000);
+updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();if(has("agentCenterGrid")){loadAgentCenter();$("agentCenterRefresh").addEventListener("click",loadAgentCenter);$("agentCenterFilter").addEventListener("click",e=>{const b=e.target.closest("button[data-f]");if(b){acFilter=b.dataset.f;acRender()}})}on("hubAgents",loadHubAgents);setInterval(refreshTick,15000);
 </script></body></html>`;
 
 // ---- Hub-only additions (summary of existing data + navigation; no new metrics, no new API).
@@ -1893,6 +2026,20 @@ DASH_SECTIONS.agentOps=`<section class="card section" id="agentOpsPanel">
 <h3>✅ تأیید اقدام‌های مالی یا ناشناخته</h3><div id="agentOpsApprovals" class="rows"></div>
 <h3>📮 صف خطا (Dead Letter)</h3><div id="agentOpsDead" class="rows"></div>
 <h3>📊 مصرف منابع (۷ روز)</h3><div id="agentOpsUsage" class="rows"></div>
+</section>
+`;
+// Phase 05: one card per runtime agent from GET /api/autonomy/agents/activity (read-only; loaded on open/refresh, never polled).
+DASH_SECTIONS.agentCenter=`<section class="card section" id="agentCenterPanel">
+<div class="title"><div><h2>🛰️ وضعیت ۱۱ عامل</h2><div class="hint">«سالم» یعنی زمان‌بند به عامل رسیده است؛ «فعال» فقط وقتی است که کار واقعی (غیر از بررسی وضعیت) در ۴۸ ساعت گذشته ثبت شده باشد. داده‌ای که موجود نیست «نامعلوم» نمایش داده می‌شود.</div></div><button class="btn" id="agentCenterRefresh" type="button">بازخوانی</button></div>
+<div id="agentCenterStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="agentCenterSummary" class="acsum"></div>
+<div id="agentCenterFilter" class="acfilter" role="group" aria-label="فیلتر وضعیت"></div>
+<div id="agentCenterGrid" class="acgrid"></div>
+</section>
+`;
+DASH_SECTIONS.hubAgents=`<section class="card section" id="hubAgentsPanel">
+<div class="title"><h2>🛰️ وضعیت عامل‌ها</h2><a class="btn" href="/dashboard/agents">مرکز کنترل عامل‌ها</a></div>
+<div id="hubAgents" class="rows"><div class="hint">در حال دریافت…</div></div>
 </section>
 `;
 DASH_SECTIONS.knowledgeApprovalsLink=`<section class="card section">
@@ -2026,11 +2173,11 @@ DASH_SECTIONS.errorsCenter=`<section class="section" id="errorsCenter">
 // Where every section lives (each page is its own document). Earlier paths are unchanged. FOLDS: sections shown collapsed on that
 // page — the lazy ones load their data only when opened (or when a link points into them).
 export const DASHBOARD_PAGES={
- hub:{path:"/dashboard",title:"خانه",icon:"home",desc:"خلاصه مدیریتی",sections:["home","authFold"]},
+ hub:{path:"/dashboard",title:"خانه",icon:"home",desc:"خلاصه مدیریتی",sections:["home","hubAgents","authFold"]},
  customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["leadsList","negotiation","opportunities"]},
  orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"box",desc:"سفارش‌ها، پرداخت‌ها و درخواست‌های قیمت",sections:["orders","money","quotes"]},
  approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
- agents:{path:"/dashboard/agents",title:"عامل‌ها و پایش",icon:"alert",desc:"سلامت عامل‌ها، هشدارها، تأییدها، صف خطا، مصرف",sections:["agentOps"]},
+ agents:{path:"/dashboard/agents",title:"عامل‌ها و پایش",icon:"alert",desc:"سلامت عامل‌ها، هشدارها، تأییدها، صف خطا، مصرف",sections:["agentCenter","agentOps"]},
  errors:{path:"/dashboard/errors",title:"خطاها",icon:"alert",desc:"خطاهای سیستم و جزئیات",sections:["errorsCenter","errorsCard"]},
  more:{path:"/dashboard/more",title:"بیشتر",icon:"menu",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
  gallery:{path:"/dashboard/gallery",title:"گالری محصولات",icon:"camera",desc:"عکس واقعی، تأیید، جستجو و درخواست‌ها",sections:["galleryFunnel","galleryUpload","galleryReview","galleryLibrary","galleryRequests","galleryBackup"]},

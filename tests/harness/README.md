@@ -19,6 +19,10 @@ node quotarace.mjs
 node phase02.mjs
 node adsquota.mjs
 node phase04.mjs
+node phase05.mjs
+node phase06.mjs
+node phase07.mjs
+node phase08.mjs
 ```
 Each prints `<suite> → ALL PASS (n)` and exits 0, or lists the failing checks and exits 1. Run whole files (later checks build on
 earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps reset at the UTC day boundary).
@@ -32,6 +36,14 @@ earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps 
 | phase02 | 21 | Watchdog, dead-letter recovery, versions, quality, cost budgets |
 | adsquota | 13 | Shared Ads run budget across cron/manual/autonomy, interval, UTC reset, CRM protection |
 | phase04 | 44 | Contact backfill (dry run, idempotent), owner-approved first contact + pilot link, Ads target filter, evidence-based negotiation, funnel |
+| phase05 | 30 | Agent Control Center: read-only per-agent activity endpoint, status vs liveness, NOT CONNECTED/BLOCKED rules, no polling, Watchdog alert de-duplication |
+| phase06 | 27 | Watchdog unexpected inactivity (infrastructure vs idle by design), alert retention, dead-letter retry eligibility, version/rollback readiness, deterministic per-agent quality, quota/cost exposure |
+| phase07 | 26 | Health model (technical/connection/activity/execution), rowid-floor time-bounded reads (Watchdog + Control Center), demo labelling, Persian errors/next action, security / Approval Gate, API compatibility |
+| phase08 | 21 | Watchdog monitoring coverage (per-expectation coverage, SQL aggregation, visible monitoring_coverage_gap), fail-closed activity reads, Phase 05–07 API compatibility, release safety (auth, test-token isolation, no secrets) |
 
 Test-only values (`tok`, `bot-test`, `sec`, `test-key-not-real`, `test-places-key`, `test-openai-not-real`, `*.example`, `w.test`) are not
 credentials. Never put real keys or customer data in these files.
+
+## Local dashboard preview (DEMO data)
+`node preview-server.mjs [port]` serves the real Worker on this harness at `http://127.0.0.1:8799/dashboard/agents` (admin token `tok`).
+Demo data only, 127.0.0.1 only, every outbound request refused, no cron; each page carries a DEMO DATA banner and an `X-Data-Source: demo` header.
