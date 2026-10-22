@@ -380,12 +380,39 @@ async function auditWeeklyVideoObservationOnce(env, type, msg, details = {}) {
   }
 }
 
+// Phase 12.1: an approval is bound to the exact content revision it approved: the text fields plus the media that would be sent
+// (the same «latest ready media» every sender uses). The revision hash is stored per approval row; a send is allowed only while the
+// LATEST approval row is 'approved' AND its hash equals the revision about to be sent. A legacy approval (no stored hash) or content
+// changed since approval needs a new owner approval. Additive table; approval history is never rewritten.
+async function ensureContentApprovalStore(env){
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS content_approval_revisions (approval_id TEXT PRIMARY KEY, content_id TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL)").run();
+}
+async function contentRevision(env, contentId){
+  const c=await env.DB.prepare("SELECT hook,body,caption,cta,hashtags FROM contents WHERE id=?").bind(String(contentId)).first();
+  if(!c)return null;
+  let media=null;try{media=await env.DB.prepare("SELECT source_id,media_type FROM content_media WHERE content_id=? AND status='ready' ORDER BY created_at DESC LIMIT 1").bind(String(contentId)).first();}catch{}
+  const canonical=JSON.stringify({v:1,hook:c.hook??null,body:c.body??null,caption:c.caption??null,cta:c.cta??null,hashtags:c.hashtags??null,media:media?{source_id:String(media.source_id),media_type:String(media.media_type)}:null});
+  const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(canonical));
+  return {content:c,media:media||null,hash:Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,"0")).join("")};
+}
+async function contentApprovalGate(env, contentId, hash){
+  await ensureContentApprovalStore(env);
+  const a=await env.DB.prepare("SELECT a.id,a.status,r.content_hash FROM approval_queue a LEFT JOIN content_approval_revisions r ON r.approval_id=a.id WHERE a.content_id=? ORDER BY a.updated_at DESC,a.rowid DESC LIMIT 1").bind(String(contentId)).first();
+  if(a?.status!=="approved")return {ok:false,reason:"approval_not_active"};
+  if(!a.content_hash)return {ok:false,reason:"approval_revision_missing"};
+  if(a.content_hash!==hash)return {ok:false,reason:"content_changed_since_approval"};
+  return {ok:true,approval_id:a.id};
+}
+// Phase 12.3: the final boundary re-reads the CURRENT content: it must still hash to the revision being sent (an edit made while a
+// send is in progress blocks it) and the latest approval must still bind that hash.
+async function finalContentGate(env, contentId, hash){
+  const cur=await contentRevision(env,contentId);
+  if(!cur||cur.hash!==hash)return {ok:false,reason:"content_changed_since_approval"};
+  return contentApprovalGate(env,contentId,hash);
+}
 async function approved(env, id) {
-  const q = await env.DB.prepare(
-    "SELECT status FROM approval_queue WHERE content_id=? " +
-    "ORDER BY updated_at DESC LIMIT 1"
-  ).bind(id).first();
-  return q?.status === "approved";
+  const rev=await contentRevision(env,id);
+  return !!rev&&(await contentApprovalGate(env,id,rev.hash)).ok;
 }
 
 const CONNECTION_DIAGNOSTIC_TIMEOUT_MS = 10000;
@@ -1200,15 +1227,19 @@ async function sendWhatsAppText(env, text){
     return {status:"manual_required",error:"WhatsApp Cloud API secrets are not configured (WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_TO)"};
   const version=String(env.WHATSAPP_GRAPH_API_VERSION||"v23.0").replace(/^v?/i,"v");
   const url=`https://graph.facebook.com/${version}/${encodeURIComponent(env.WHATSAPP_PHONE_NUMBER_ID)}/messages`;
-  const r=await fetchWithRetry(url,{method:"POST",headers:{Authorization:`Bearer ${env.WHATSAPP_ACCESS_TOKEN}`,"Content-Type":"application/json"},body:JSON.stringify({messaging_product:"whatsapp",to:String(env.WHATSAPP_TO),type:"text",text:{preview_url:false,body:String(text).slice(0,4096)}})},2,12000);
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok || d.error) throw Error(d.error?.message||`WhatsApp Cloud API HTTP ${r.status}`);
-  return {status:"published",external_id:String(d.messages?.[0]?.id||"")};
+  // Phase 12.1: a send is not idempotent, so ONE attempt (bounded); a network error or timeout means the outcome is unknown.
+  let r;try{r=await fetchWithRetry(url,{method:"POST",headers:{Authorization:`Bearer ${env.WHATSAPP_ACCESS_TOKEN}`,"Content-Type":"application/json"},body:JSON.stringify({messaging_product:"whatsapp",to:String(env.WHATSAPP_TO),type:"text",text:{preview_url:false,body:String(text).slice(0,4096)}})},1,DISTRIBUTION_SEND_TIMEOUT_MS);}
+  catch(e){throw new DistributionOutcomeUnknown("WhatsApp request outcome unknown; provider request may have been accepted");}
+  const o=await readProviderOutcome(r,x=>!x.error&&!!x.messages?.[0]?.id,"WhatsApp Cloud API");
+  if(!o.sent){if(o.definite)throw Error(o.error);throw new DistributionOutcomeUnknown(o.error);}
+  return {status:"published",external_id:String(o.data.messages[0].id)};
 }
 
 async function reconcileStaleContentDistributions(env){
   await ensureDistributionStore(env);
   const cutoff=new Date(Date.now()-15*60*1000).toISOString();
+  // Phase 12.1: if the shared publish run for this content/target was started, the send may have happened: never re-queue it.
+  await env.DB.prepare("UPDATE content_distribution SET status='manual_required',error='OUTCOME_UNKNOWN: worker stopped during send; outcome unknown (owner reconciliation)',updated_at=? WHERE status='processing' AND updated_at<? AND EXISTS(SELECT 1 FROM production_runs r WHERE r.id='publish:'||content_distribution.content_id||':'||content_distribution.target AND r.status IN ('started','stopped'))").bind(now(),cutoff).run();
   await env.DB.prepare("UPDATE content_distribution SET status='queued',error='Recovered stale processing claim',updated_at=? WHERE status='processing' AND updated_at<?").bind(now(),cutoff).run();
 }
 
@@ -1239,7 +1270,7 @@ async function sendTelegramMediaToReady(env, contentId, media, text){
   const payload={chat_id:ready,caption:text.slice(0,1024)};
   payload[media.media_type==='video'?'video':'photo']=fileId;
   const base=`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
-  let r; try{r=await fetch(`${base}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});}catch(e){throw Error('Telegram Ready request outcome unknown; provider request may have been accepted')}
+  let r; try{r=await fetch(`${base}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(DISTRIBUTION_SEND_TIMEOUT_MS)});}catch(e){throw Error('Telegram Ready request outcome unknown; provider request may have been accepted')}
   const d=await r.json().catch(()=>({})); if(!r.ok||!d.ok) throw Error(d.description||'Telegram Ready publish failed');
   const messageId=String(d.result?.message_id||''); const t=now();
   await env.DB.prepare("INSERT OR REPLACE INTO telegram_media_outputs(id,content_id,media_id,ready_chat_id,ready_message_id,status,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
@@ -1286,21 +1317,101 @@ function vaultSenderVerdict(env,m,isChannelPost){
   return list.ids.has(id)?{ok:true,via:"allow_list"}:{ok:false,reason:"sender_not_allowed"};
 }
 async function telegramFileIdFor(env,sourceId){const r=await env.DB.prepare("SELECT file_id FROM telegram_media_sources WHERE id=? LIMIT 1").bind(String(sourceId)).first();return String(r?.file_id||sourceId);}
-async function sendTelegramDistribution(env, contentId){
+// Phase 12.1: sends exactly the revision that was hashed (rev), and calls finalGate() immediately before the public post (no await
+// between the gate and the request). A network error / timeout on the public post means the outcome is unknown.
+async function sendTelegramDistribution(env, contentId, rev, finalGate){
   if(!env.TELEGRAM_BOT_TOKEN||!mainTelegramChatId(env)) throw Error('Telegram credentials missing');
-  const c=await env.DB.prepare("SELECT hook,body,caption,cta FROM contents WHERE id=?").bind(contentId).first();
+  const c=rev?.content;
   if(!c) throw Error('Content not found');
   const text=[c.hook,c.body,c.caption,c.cta].filter(Boolean).join('\n\n').trim();
   await ensureContentMediaStore(env); await ensureMediaVaultStore(env);
-  const media=await env.DB.prepare("SELECT * FROM content_media WHERE content_id=? AND status='ready' ORDER BY created_at DESC LIMIT 1").bind(contentId).first();
+  const media=rev.media;
   const base=`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
   let endpoint='sendMessage', payload={chat_id:mainTelegramChatId(env),text};
   if(media?.media_type==='photo'){endpoint='sendPhoto';payload={chat_id:mainTelegramChatId(env),photo:String((await env.DB.prepare("SELECT file_id FROM telegram_media_sources WHERE id=? LIMIT 1").bind(String(media.source_id)).first())?.file_id||media.source_id),caption:text.slice(0,1024)};}
   else if(media?.media_type==='video'){endpoint='sendVideo';payload={chat_id:mainTelegramChatId(env),video:String((await env.DB.prepare("SELECT file_id FROM telegram_media_sources WHERE id=? LIMIT 1").bind(String(media.source_id)).first())?.file_id||media.source_id),caption:text.slice(0,1024)};}
-  if(media){await sendTelegramMediaToReady(env,contentId,media,text);}
-  let r; try{r=await fetch(`${base}/${endpoint}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});}catch(e){throw Error('Telegram request outcome unknown; provider request may have been accepted');}
-  const d=await r.json().catch(()=>({})); if(!r.ok||!d.ok) throw Error(d.description||'Telegram publish failed');
-  return {status:'published',external_id:String(d.result?.message_id||'')};
+  // Phase 12.3: the private Ready copy is gated too (an unapproved revision never leaves the system); the gate runs again right
+  // before the public post.
+  if(media){if(finalGate)await finalGate();await sendTelegramMediaToReady(env,contentId,media,text);}
+  if(finalGate)await finalGate();
+  let r; try{r=await fetch(`${base}/${endpoint}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(DISTRIBUTION_SEND_TIMEOUT_MS)});}catch(e){throw new DistributionOutcomeUnknown('Telegram request outcome unknown; provider request may have been accepted');}
+  const o=await readProviderOutcome(r,x=>x.ok===true,'Telegram');
+  if(!o.sent){if(o.definite)throw Error(o.error);throw new DistributionOutcomeUnknown(o.error);}
+  return {status:'published',external_id:String(o.data.result?.message_id||'')};
+}
+
+// Phase 12.1 — the ONLY path that sends a claimed content_distribution row (queue and retry share it):
+// 1. the shared one-post-per-content claim (production_runs 'publish:<content>:<target>', the same key publish() uses) — atomic
+//    INSERT OR IGNORE, so concurrent workers, retries and the direct publish path can never post the same content twice;
+// 2. the revision-bound approval gate, re-checked immediately before the external request;
+// 3. a definite provider rejection → 'failed' (retryable); an UNKNOWN outcome (network error, timeout, HTTP 5xx, unreadable response,
+//    or a send whose result could not be recorded) → 'manual_required' with an "OUTCOME_UNKNOWN:" reason and the run 'stopped' for
+//    owner reconciliation (/api/production/reconcile) — never retried blindly; a missing destination → 'manual_required' too.
+// Returns {status, retryable?, error?}. fromRetry: a definite failure is thrown so the retry loop counts the attempt.
+class DistributionOutcomeUnknown extends Error{constructor(message){super(message);this.name="DistributionOutcomeUnknown";}}
+class DistributionGateBlocked extends Error{constructor(reason){super(`Approval required: ${reason}`);this.name="DistributionGateBlocked";this.reason=reason;}}
+const DISTRIBUTION_SEND_TIMEOUT_MS=15000;
+// Phase 12.3: the calendar publish path throws this for an unknown outcome (it was referenced but never defined, so a network error
+// surfaced as a ReferenceError and was treated as a definite, retryable failure).
+class PublishOutcomeUnknown extends Error{constructor(message){super(message);this.name="PublishOutcomeUnknown";}}
+const OUTCOME_UNKNOWN_PREFIX="OUTCOME_UNKNOWN: ";
+// Phase 12.3: classifies a provider response AFTER the request was dispatched. Only an explicit rejection (HTTP 4xx with a readable
+// body) is definite. A 5xx, a body that cannot be read (incl. a timeout while reading it) or any other non-success may hide an
+// accepted post, so it is an unknown outcome.
+async function readProviderOutcome(r,isSuccess,label){
+  let d=null;try{d=await r.json();}catch{d=null;}
+  if(d&&r.ok&&isSuccess(d))return {sent:true,data:d};
+  if(d&&r.status>=400&&r.status<500)return {sent:false,definite:true,data:d,error:String(d.description||d.error?.message||`${label} rejected the request (HTTP ${r.status})`).slice(0,300)};
+  return {sent:false,definite:false,error:`${label} outcome unknown (HTTP ${r.status}${d?"":", unreadable response"})`};
+}
+async function deliverClaimedDistribution(env,d,{fromRetry=false}={}){
+  const settle=async(status,error,extra={})=>{await env.DB.prepare("UPDATE content_distribution SET status=?,external_id=COALESCE(?,external_id),error=?,updated_at=? WHERE id=? AND status='processing'").bind(status,extra.external_id??null,error??null,now(),d.id).run();return {status,error:error??null,...extra};};
+  if(!["telegram","whatsapp"].includes(d.target))return await settle("failed","Unsupported distribution target: "+d.target);
+  const rev=await contentRevision(env,d.content_id);
+  if(!rev)return await settle("failed","Content not found");
+  if(d.target==="telegram"&&(!env.TELEGRAM_BOT_TOKEN||!mainTelegramChatId(env))){
+    await audit(env,"content_distribution_manual_required","Telegram destination is not configured; nothing was sent",{content_id:d.content_id,target:d.target});
+    return await settle("manual_required","Telegram destination not configured (TELEGRAM_CHAT_ID): an owner-verified destination is required");
+  }
+  if(d.target==="whatsapp"&&(!env.WHATSAPP_ACCESS_TOKEN||!env.WHATSAPP_PHONE_NUMBER_ID||!env.WHATSAPP_TO))
+    return await settle("manual_required","WhatsApp Cloud API secrets are not configured (WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_TO)");
+  const runId=`publish:${d.content_id}:${d.target}`,t0=now();
+  const ins=await env.DB.prepare("INSERT OR IGNORE INTO production_runs(id,run_type,status,summary_json,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(runId,`publish:${d.target}`,"started",null,null,t0,t0).run();
+  if(!ins.meta?.changes){
+    const run=await env.DB.prepare("SELECT status,summary_json FROM production_runs WHERE id=?").bind(runId).first();
+    if(run?.status==="completed"){let z={};try{z=JSON.parse(run.summary_json||"{}")}catch{}return await settle("published",null,{external_id:String(z.external_id||"")||null});}
+    const reclaimed=run?.status==="failed"?await env.DB.prepare("UPDATE production_runs SET status='started',error=NULL,updated_at=? WHERE id=? AND status='failed'").bind(now(),runId).run():null;
+    if(!reclaimed?.meta?.changes)return await settle("manual_required",OUTCOME_UNKNOWN_PREFIX+"a publish of this content is in progress or its outcome is unknown; not re-sent (owner review)");
+  }
+  const gate=async()=>{const g=await finalContentGate(env,d.content_id,rev.hash);if(!g.ok)throw new DistributionGateBlocked(g.reason);};
+  try{
+    await gate();
+    let result;
+    if(d.target==="telegram")result=await sendTelegramDistribution(env,d.content_id,rev,gate);
+    else{const text=[rev.content.caption||rev.content.body||"",rev.content.cta||""].filter(Boolean).join("\n\n").trim();await gate();result=await sendWhatsAppText(env,text);}
+    // Phase 12.3: the post went out; if its result cannot be recorded the run must never become 'failed' (a retry would post again).
+    try{await env.DB.prepare("UPDATE production_runs SET status='completed',summary_json=?,error=NULL,updated_at=? WHERE id=?").bind(JSON.stringify({content_id:d.content_id,platform:d.target,external_id:result.external_id||"",via:"distribution"}),now(),runId).run();}
+    catch(pe){throw new DistributionOutcomeUnknown(`sent (external id ${result.external_id||"n/a"}) but the result could not be recorded: ${sanitizeOperationalError(pe?.message||pe)}`);}
+    try{await audit(env,`${d.target}_content_published`,`Approved content published through the ${d.target} distribution queue`,{content_id:d.content_id,external_id:result.external_id||null,retry:fromRetry});}catch{}
+    return await settle("published",null,{external_id:result.external_id||null});
+  }catch(e){
+    if(e?.name==="DistributionGateBlocked"){
+      await env.DB.prepare("UPDATE production_runs SET status='failed',error=?,updated_at=? WHERE id=? AND status='started'").bind(e.message,now(),runId).run();
+      await audit(env,"content_distribution_approval_blocked","Distribution held: the approved revision no longer matches or approval is not active",{content_id:d.content_id,target:d.target,reason:e.reason});
+      return await settle("awaiting_approval",e.message);
+    }
+    if(e?.name==="DistributionOutcomeUnknown"){
+      await env.DB.prepare("UPDATE production_runs SET status='stopped',error=?,updated_at=? WHERE id=? AND status='started'").bind("UNKNOWN: "+e.message,now(),runId).run();
+      await audit(env,"content_distribution_outcome_unknown","Distribution outcome unknown; marked manual_required and not retried (owner reconciliation)",{content_id:d.content_id,target:d.target,reason:"outcome_unknown",production_run_id:runId,error:e.message});
+      return await settle("manual_required",OUTCOME_UNKNOWN_PREFIX+e.message);
+    }
+    await env.DB.prepare("UPDATE production_runs SET status='failed',error=?,updated_at=? WHERE id=? AND status='started'").bind(e.message,now(),runId).run();
+    if(fromRetry)throw e;
+    await settle("failed",e.message);
+    await env.DB.prepare("INSERT INTO retry_queue VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),'content_distribution',JSON.stringify({distribution_id:d.id,content_id:d.content_id,target:d.target}),0,3,'queued',null,e.message,now(),now()).run();
+    await audit(env,'content_distribution_failed','Content distribution failed (definite provider error) and was queued for retry',{content_id:d.content_id,target:d.target,error:e.message});
+    return {status:"failed",retryable:true,error:e.message};
+  }
 }
 
 async function processContentDistribution(env){
@@ -1311,41 +1422,9 @@ async function processContentDistribution(env){
     const claimed=await env.DB.prepare("UPDATE content_distribution SET status='processing',updated_at=? WHERE id=? AND status='queued'").bind(now(),candidate.id).run();
     if(!claimed.meta?.changes) continue;
     const d={...candidate,status:'processing'};
-    try{
-      if(!await approved(env,d.content_id)){
-        await env.DB.prepare("UPDATE content_distribution SET status='awaiting_approval',error='Approval is no longer active',updated_at=? WHERE id=? AND status='processing'").bind(now(),d.id).run();
-        continue;
-      }
-      if(d.target==='telegram'){
-        // One post per content: if the calendar/direct publish() path already sent it (or its outcome is unknown), never send again.
-        let run=null;try{run=await env.DB.prepare("SELECT status FROM production_runs WHERE id=?").bind(`publish:${d.content_id}:telegram`).first();}catch{}
-        if(run&&run.status!=='failed'){
-          const done=run.status==='completed';
-          await env.DB.prepare("UPDATE content_distribution SET status=?,error=?,updated_at=? WHERE id=? AND status='processing'").bind(done?'published':'failed',done?null:'Direct publish is in progress or its outcome is unknown; not re-sent (reconcile in the calendar)',now(),d.id).run();
-          continue;
-        }
-        const result=await sendTelegramDistribution(env,d.content_id);
-        await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(result.external_id||null,now(),d.id).run();
-        await audit(env,'telegram_content_published','Approved content published through Telegram distribution queue',{content_id:d.content_id,external_id:result.external_id||null});
-        continue;
-      }
-      if(d.target==='whatsapp'){
-        const text=[d.caption||d.body||'',d.cta||''].filter(Boolean).join('\n\n').trim();
-        const result=await sendWhatsAppText(env,text);
-        if(result.status==='manual_required'){
-          await env.DB.prepare("UPDATE content_distribution SET status='manual_required',error=?,updated_at=? WHERE id=? AND status='processing'").bind(result.error,now(),d.id).run();
-          continue;
-        }
-        await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=? AND status='processing'").bind(result.external_id||null,now(),d.id).run();
-        await audit(env,'whatsapp_content_published','Approved content sent through WhatsApp Cloud API',{content_id:d.content_id,external_id:result.external_id||null});
-        continue;
-      }
-      throw Error('Unsupported distribution target: '+d.target);
-    }catch(e){
-      await env.DB.prepare("UPDATE content_distribution SET status='failed',error=?,updated_at=? WHERE id=? AND status='processing'").bind(e.message,now(),d.id).run();
-      await env.DB.prepare("INSERT INTO retry_queue VALUES(?,?,?,?,?,?,?,?,?,?)").bind(uid(),'content_distribution',JSON.stringify({distribution_id:d.id,content_id:d.content_id,target:d.target}),0,3,'queued',null,e.message,now(),now()).run();
-      await audit(env,'content_distribution_failed','Content distribution failed and was queued for retry',{content_id:d.content_id,target:d.target,error:e.message});
-    }
+    // one row's failure never stops the rest of the queue
+    try{await deliverClaimedDistribution(env,d);}
+    catch(e){await env.DB.prepare("UPDATE content_distribution SET status='failed',error=?,updated_at=? WHERE id=? AND status='processing'").bind(String(e?.message||e),now(),d.id).run();}
   }
 }
 
@@ -1520,11 +1599,18 @@ async function setApproval(env, id, status, reason = "") {
   ).bind(id).first();
   if (!c) throw Error("Content not found");
 
-  const t = now();
+  const t = now(), approvalId = uid();
 
   await env.DB.prepare(
     "INSERT INTO approval_queue VALUES(?,?,?,?,?,?)"
-  ).bind(uid(), id, status, reason, t, t).run();
+  ).bind(approvalId, id, status, reason, t, t).run();
+
+  // Phase 12.1: bind this approval to the exact revision the owner approved (text + media); any later change needs a new approval.
+  if(status === "approved"){
+    await ensureContentApprovalStore(env);
+    const rev=await contentRevision(env,id);
+    if(rev)await env.DB.prepare("INSERT OR REPLACE INTO content_approval_revisions(approval_id,content_id,content_hash,created_at) VALUES(?,?,?,?)").bind(approvalId,id,rev.hash,t).run();
+  }
 
   await env.DB.prepare(
     "UPDATE contents SET status=?, updated_at=? WHERE id=?"
@@ -1552,8 +1638,13 @@ function resolvePublishPlatforms(requestedPlatform){
 
 async function publish(env,b){
   if(!b?.content_id)throw Error("content_id is required");
-  if(!await approved(env,b.content_id))throw Error("Approval required");
-  const c=await env.DB.prepare("SELECT * FROM contents WHERE id=?").bind(b.content_id).first();if(!c)throw Error("Content not found");
+  // Phase 12.3: the revision checked here is exactly the one sent (text and Telegram media come from it), and the revision-bound gate
+  // runs again right before every provider request: content edited or approval revoked in between is never published.
+  const rev=await contentRevision(env,b.content_id);if(!rev)throw Error("Content not found");
+  const gate=async()=>{const g=await finalContentGate(env,b.content_id,rev.hash);if(!g.ok)throw Error(`Approval required: ${g.reason}`);};
+  await gate();
+  const row=await env.DB.prepare("SELECT * FROM contents WHERE id=?").bind(b.content_id).first();if(!row)throw Error("Content not found");
+  const c={...row,...rev.content};
   const requestedPlatform=String(b.platform||'');
   const platforms=resolvePublishPlatforms(requestedPlatform);
   if(!platforms.every(x=>['telegram','instagram'].includes(x)))throw Error("Invalid platform");
@@ -1573,31 +1664,36 @@ async function publish(env,b){
         if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID)throw Error('Telegram credentials missing');
         const text=[c.hook,c.body,c.caption,c.cta].filter(Boolean).join('\n\n');
         await ensureContentMediaStore(env);
-        const media=await env.DB.prepare("SELECT * FROM content_media WHERE content_id=? AND status='ready' ORDER BY created_at DESC LIMIT 1").bind(c.id).first();
+        const media=rev.media;
+        await gate();
         let r;
         try {
           if(media?.media_type==='photo'){
-            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,photo:await telegramFileIdFor(env,media.source_id),caption:text.slice(0,1024)})});
+            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,{method:'POST',signal:AbortSignal.timeout(DISTRIBUTION_SEND_TIMEOUT_MS),headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,photo:await telegramFileIdFor(env,media.source_id),caption:text.slice(0,1024)})});
           } else if(media?.media_type==='video'){
-            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,video:await telegramFileIdFor(env,media.source_id),caption:text.slice(0,1024)})});
+            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVideo`,{method:'POST',signal:AbortSignal.timeout(DISTRIBUTION_SEND_TIMEOUT_MS),headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,video:await telegramFileIdFor(env,media.source_id),caption:text.slice(0,1024)})});
           } else {
-            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text})});
+            r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:'POST',signal:AbortSignal.timeout(DISTRIBUTION_SEND_TIMEOUT_MS),headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:env.TELEGRAM_CHAT_ID,text})});
           }
         } catch(e){throw new PublishOutcomeUnknown('Telegram request outcome unknown; provider request may have been accepted')}
-        const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error('Telegram publish failed');externalId=String(d.result?.message_id||'')
+        const o=await readProviderOutcome(r,x=>x.ok===true,'Telegram');if(!o.sent){if(o.definite)throw Error(o.error);throw new PublishOutcomeUnknown(o.error)}externalId=String(o.data.result?.message_id||'')
       } else {
         if(!env.INSTAGRAM_ACCESS_TOKEN||!env.INSTAGRAM_ACCOUNT_ID)throw Error('Instagram credentials missing');
         if(c.content_type && String(c.content_type) !== 'post') throw Error(`Instagram publish currently supports content_type=post only; received ${c.content_type}`);
         let mediaUrl; try { mediaUrl=new URL(String(b.media_url||'')); } catch { throw Error('Public media_url required for Instagram'); }
         if(!/^https?:$/.test(mediaUrl.protocol)) throw Error('Public media_url must use http or https');
+        await gate();
         const q1=new URLSearchParams({image_url:mediaUrl.toString(),caption:[c.caption,c.cta,c.hashtags].filter(Boolean).join('\n\n'),access_token:env.INSTAGRAM_ACCESS_TOKEN});
-        let a;try{a=await fetch(`${instagramGraphBase(env)}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}/media`,{method:'POST',body:q1})}catch(e){throw new PublishOutcomeUnknown('Instagram container request outcome unknown')}
+        let a;try{a=await fetch(`${instagramGraphBase(env)}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}/media`,{method:'POST',body:q1,signal:AbortSignal.timeout(DISTRIBUTION_SEND_TIMEOUT_MS)})}catch(e){throw new PublishOutcomeUnknown('Instagram container request outcome unknown')}
         const ad=await a.json().catch(()=>({}));if(!a.ok||ad.error)throw Error('Instagram container failed');
         const q2=new URLSearchParams({creation_id:ad.id,access_token:env.INSTAGRAM_ACCESS_TOKEN});
-        let x;try{x=await fetch(`${instagramGraphBase(env)}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}/media_publish`,{method:'POST',body:q2})}catch(e){throw new PublishOutcomeUnknown('Instagram publish request outcome unknown')}
-        const xd=await x.json().catch(()=>({}));if(!x.ok||xd.error)throw Error('Instagram publish failed');externalId=String(xd.id||ad.id||'')
+        await gate();
+        let x;try{x=await fetch(`${instagramGraphBase(env)}/${encodeURIComponent(env.INSTAGRAM_ACCOUNT_ID)}/media_publish`,{method:'POST',body:q2,signal:AbortSignal.timeout(DISTRIBUTION_SEND_TIMEOUT_MS)})}catch(e){throw new PublishOutcomeUnknown('Instagram publish request outcome unknown')}
+        const xo=await readProviderOutcome(x,v=>!v.error&&!!v.id,'Instagram');if(!xo.sent){if(xo.definite)throw Error(xo.error);throw new PublishOutcomeUnknown(xo.error)}externalId=String(xo.data.id||ad.id||'')
       }
-      await env.DB.prepare("UPDATE production_runs SET status='completed',summary_json=?,error=NULL,updated_at=? WHERE id=?").bind(JSON.stringify({content_id:c.id,platform,external_id:externalId}),now(),runId).run();out.push({platform,external_id:externalId,idempotent:false});
+      try{await env.DB.prepare("UPDATE production_runs SET status='completed',summary_json=?,error=NULL,updated_at=? WHERE id=?").bind(JSON.stringify({content_id:c.id,platform,external_id:externalId}),now(),runId).run();}
+      catch(pe){throw new PublishOutcomeUnknown(`published (${platform} ${externalId||"n/a"}) but the result could not be recorded`);}
+      out.push({platform,external_id:externalId,idempotent:false});
     }catch(e){
       const unknown=e?.name==='PublishOutcomeUnknown';
       await env.DB.prepare("UPDATE production_runs SET status=?,error=?,updated_at=? WHERE id=?").bind(unknown?'stopped':'failed',e.message,now(),runId).run();
@@ -6035,12 +6131,14 @@ async function verifyInstagramSignature(env,req,raw){if(env.INSTAGRAM_APP_SECRET
 
 async function handleInstagramWebhook(env,req){if(req.method==='GET'){const u=new URL(req.url);if(u.searchParams.get('hub.mode')==='subscribe'&&u.searchParams.get('hub.verify_token')&&env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN&&u.searchParams.get('hub.verify_token')===env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN)return new Response(u.searchParams.get('hub.challenge'),{status:200,headers:{'Content-Type':'text/plain'}});return json({ok:false,error:'Webhook verification failed'},403)}if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN||(!env.INSTAGRAM_APP_SECRET&&!env.INSTAGRAM_WEBHOOK_SECRET_TOKEN))return json({ok:false,error:'Instagram webhook secrets not configured'},503);const raw=await req.text();if(!(await verifyInstagramSignature(env,req,raw)))return json({ok:false,error:'Unauthorized webhook'},401);let body;try{body=JSON.parse(raw)}catch{return json({ok:false,error:'Invalid JSON'},400)}await ensureLeadOutreachStore(env);for(const entry of body.entry||[])for(const change of entry.changes||[]){const value=change.value||{},externalId=String(value.mid||value.message_id||`${entry.id||uid()}:${change.field||'change'}:${value.timestamp||Date.now()}`),ex=await env.DB.prepare("SELECT id FROM inbox_messages WHERE platform='instagram' AND external_id=? LIMIT 1").bind(externalId).first();if(ex)continue;const text=String(value.text||value.message||'').trim();if(!text)continue;const providerSenderId=String(value.from?.id||''),providerUsername=String(value.from?.username||''),providerConversationId=String(value.conversation_id||value.thread_id||''),replyTo=String(value.reply_to?.mid||value.reply_to_message_id||'');const linked=await matchInboundLead(env,{platform:'instagram',providerConversationId,providerSenderId,providerUsername,replyToProviderMessageId:replyTo});const t=now();await env.DB.prepare("INSERT INTO inbox_messages(id,platform,external_id,sender,message,category,priority,reply_suggestion,status,lead_id,conversation_id,provider_sender_id,provider_conversation_id,reply_to_provider_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(uid(),'instagram',externalId,providerUsername||providerSenderId||String(entry.id||'unknown'),text,'unclassified','normal',null,'new',linked.leadId,linked.conversationId,providerSenderId||null,providerConversationId||null,replyTo||null,t,t).run()}return json({ok:true})}
 
-async function deferUnapprovedDistributionRetry(env,retryId,distribution){
-  if(!["telegram","whatsapp"].includes(distribution.target)||await approved(env,distribution.content_id))return false;
-  const message="Approval is no longer active";
-  await env.DB.prepare("UPDATE content_distribution SET status='awaiting_approval',error=?,updated_at=? WHERE id=? AND status='failed'").bind(message,now(),distribution.id).run();
-  await env.DB.prepare("UPDATE retry_queue SET status='completed',last_error=?,next_attempt_at=NULL,updated_at=? WHERE id=? AND status='running'").bind(message,now(),retryId).run();
-  return true;
+// Phase 12.1: a distribution retry re-claims the row atomically ('failed' → 'processing') and sends ONLY through
+// deliverClaimedDistribution (shared run claim + revision-bound approval gate + unknown-outcome handling). A row that is no longer
+// 'failed' (published, awaiting approval, send_unknown, manual_required, or claimed by another worker) is not sent again.
+async function retryDistribution(env,retryId,distribution){
+  const claimed=await env.DB.prepare("UPDATE content_distribution SET status='processing',updated_at=? WHERE id=? AND status='failed'").bind(now(),distribution.id).run();
+  if(!claimed.meta?.changes){await env.DB.prepare("UPDATE retry_queue SET status='completed',last_error=?,next_attempt_at=NULL,updated_at=? WHERE id=? AND status='running'").bind("Distribution no longer retryable",now(),retryId).run();return;}
+  const r=await deliverClaimedDistribution(env,{...distribution,status:'processing'},{fromRetry:true});
+  await env.DB.prepare("UPDATE retry_queue SET status='completed',last_error=?,next_attempt_at=NULL,updated_at=? WHERE id=? AND status='running'").bind(r.status==='published'?null:`${r.status}: ${r.error||''}`.slice(0,500),now(),retryId).run();
 }
 
 async function recovery(env){await reconcileStalePublishes(env);await reconcileStaleContentDistributions(env);await publishScheduled(env);await processContentDistribution(env);const r=await env.DB.prepare("SELECT * FROM retry_queue WHERE status='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=?) LIMIT 10").bind(now()).all();for(const x of r.results||[])try{const claim=await env.DB.prepare("UPDATE retry_queue SET status='running',attempts=attempts+1,updated_at=? WHERE id=? AND status='queued'").bind(now(),x.id).run();if(!claim.meta?.changes)continue;const p=JSON.parse(x.payload_json);if(x.operation==='publish')await publish(env,p);else if(x.operation==='content_distribution'){
@@ -6051,25 +6149,8 @@ async function recovery(env){await reconcileStalePublishes(env);await reconcileS
           await env.DB.prepare("UPDATE content_distribution SET status='completed',error=NULL,updated_at=? WHERE id=?").bind(now(),d.id).run();
           await env.DB.prepare("UPDATE retry_queue SET status='completed',last_error=NULL,updated_at=? WHERE id=?").bind(now(),x.id).run();
           continue;
-        } else if(d.target==='whatsapp'){
-          const c=await env.DB.prepare("SELECT caption,body,cta FROM contents WHERE id=?").bind(d.content_id).first();
-          if(!c)throw Error('Content not found');
-          const text=[c.caption||c.body||'',c.cta||''].filter(Boolean).join("\n\n").trim();
-          if(await deferUnapprovedDistributionRetry(env,x.id,d))continue;
-          const result=await sendWhatsAppText(env,text);
-          if(result.status==='manual_required'){
-            await env.DB.prepare("UPDATE content_distribution SET status='manual_required',error=?,updated_at=? WHERE id=? AND status!='published'").bind(result.error,now(),d.id).run();
-            await audit(env,'whatsapp_content_manual_required','WhatsApp distribution requires configured Cloud API credentials',{content_id:d.content_id});
-            await env.DB.prepare("UPDATE retry_queue SET status='completed',last_error=?,updated_at=? WHERE id=?").bind(result.error,now(),x.id).run();
-            continue;
-          }
-          await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=?").bind(result.external_id||null,now(),d.id).run();
-          await audit(env,'whatsapp_content_published_retry','Failed WhatsApp content distribution retried successfully',{content_id:d.content_id,external_id:result.external_id||null});
-        } else if(d.target==='telegram'){
-          if(await deferUnapprovedDistributionRetry(env,x.id,d))continue;
-          const result=await sendTelegramDistribution(env,d.content_id);
-          await env.DB.prepare("UPDATE content_distribution SET status='published',external_id=?,error=NULL,updated_at=? WHERE id=?").bind(result.external_id||null,now(),d.id).run();
-          await audit(env,'telegram_content_published_retry','Failed Telegram content distribution retried successfully',{content_id:d.content_id,external_id:result.external_id||null});
+        } else if(d.target==='whatsapp'||d.target==='telegram'){
+          await retryDistribution(env,x.id,d);continue;
         } else throw Error('Unsupported distribution target');
       }
 else if(x.operation==='video_generation'){
@@ -6132,7 +6213,7 @@ else if(x.operation==='video_generation'){
   }
 }
 else if(x.operation==='calendar_publish'){const cal=await env.DB.prepare("SELECT * FROM calendar WHERE id=?").bind(p.calendar_id).first();if(!cal||cal.status==='published'){await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run();continue}const content=await env.DB.prepare("SELECT platform FROM contents WHERE id=?").bind(p.content_id).first();if(!content)throw Error('Content not found');const media_url=await getCalendarMediaUrl(env,p.calendar_id);if((content.platform==='instagram'||content.platform==='both')&&!media_url)throw Error('Scheduled Instagram publish requires a public media_url');const publishPlatform=resolvePublishPlatforms(content.platform)[0];await publish(env,{content_id:p.content_id,platform:publishPlatform,media_url});await env.DB.prepare("UPDATE calendar SET status='published',updated_at=? WHERE id=?").bind(now(),p.calendar_id).run()}else throw Error('Unsupported retry operation');await env.DB.prepare("UPDATE retry_queue SET status='completed',updated_at=? WHERE id=?").bind(now(),x.id).run()}catch(e){const attempts=Number(x.attempts)+1,status=attempts>=Number(x.max_attempts)?'failed':'queued';if(x.operation==='content_distribution'){
-        try{const p2=JSON.parse(x.payload_json||'{}');if(p2.distribution_id)await env.DB.prepare("UPDATE content_distribution SET status='failed',error=?,updated_at=? WHERE id=? AND status!='published'").bind(e.message,now(),p2.distribution_id).run()}catch{}
+        try{const p2=JSON.parse(x.payload_json||'{}');if(p2.distribution_id)await env.DB.prepare("UPDATE content_distribution SET status='failed',error=?,updated_at=? WHERE id=? AND status='processing'").bind(e.message,now(),p2.distribution_id).run()}catch{}
       }
       await env.DB.prepare("UPDATE retry_queue SET status=?,last_error=?,next_attempt_at=?,updated_at=? WHERE id=?").bind(status,e.message,new Date(Date.now()+Math.min(3600000,2**attempts*60000)).toISOString(),now(),x.id).run()}await collectInstagramMetrics(env)}
 
@@ -10530,10 +10611,81 @@ async function reverseOrderPayment(env,body,actor="authenticated_owner"){
   const reversal=await env.DB.prepare("SELECT * FROM lead_order_payments WHERE id=?").bind(id).first(),updated=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=?").bind(order.id).first();await auditOrderEventOnce(env,`payment-reversal:${original.id}`,"lead_order_payment_reversed","Owner reversed recorded payment",{order_id:order.id,payment_id:original.id,reversal_id:id,reason});return {reversed:true,reversal,order:updated,payment_engine:false};
 }
 // Recovery is owner-invoked and creates only approval-gated drafts or owner decisions.
+// ---- Phase 12.1: stalled revenue detection (owner-approved thresholds) ----
+// Read-only over existing records; every item points at ONE record (quote / order / last order of a lead), so a record is never
+// listed twice. Amounts come only from the record (outstanding = order total − recorded payments); nothing is estimated, converted
+// or summed across currencies. Market and language come from the record (IRAN → Persian / TOMAN, ARAB → Iraqi Arabic / USD);
+// a record without a valid market is listed for the OWNER only (no customer draft). A lead marked as test data (notes.data_class
+// 'test' or notes.is_test true) is reported as such and never drafted; no other heuristic is used.
+const REVENUE_FOLLOWUP_DAYS=Object.freeze({quote_no_reply:3,order_unpaid:2,balance_open:3,reorder:30});
+const REVENUE_MARKET_LANGUAGE=Object.freeze({IRAN:"Persian",ARAB:"Iraqi Arabic"});
+// Phase 12.3: test-lead detection that never parses a malformed notes value (a non-JSON value is "not test", flagged separately).
+const leadTestFlagSql=a=>`COALESCE(CASE WHEN ${a}.notes IS NULL OR TRIM(${a}.notes)='' OR NOT json_valid(${a}.notes) THEN 0 ELSE (json_extract(${a}.notes,'$.data_class')='test' OR json_extract(${a}.notes,'$.is_test') IN (1,'true')) END,0)`;
+const leadNotesInvalidSql=a=>`COALESCE(${a}.notes IS NOT NULL AND TRIM(${a}.notes)<>'' AND NOT json_valid(${a}.notes),0)`;
+// New follow-up drafts consider only records whose anchor date is within this lookback (detection for reports is not limited).
+const REVENUE_FOLLOWUP_LOOKBACK_DAYS=90;
+async function findStalledRevenueItems(env,{nowMs=Date.now(),limit=200,maxAgeDays=null}={}){
+  await ensureOrderStore(env);
+  const days=n=>new Date(nowMs-n*86400000).toISOString(),ageDays=at=>at&&Date.parse(at)?Math.floor((nowMs-Date.parse(at))/86400000):null;
+  const testFlag=leadTestFlagSql("l"),notesInvalid=leadNotesInvalidSql("l"),floor=maxAgeDays?days(maxAgeDays):null;
+  const leadJoin=`LEFT JOIN leads l ON l.id=${"x"}.lead_id`;
+  const rows=async(sql,args)=>((await env.DB.prepare(sql).bind(...args).all()).results)||[];
+  const quotes=await rows(`SELECT x.*,${testFlag} AS test_record,${notesInvalid} AS notes_invalid FROM lead_quotes x ${leadJoin} WHERE x.status='sent' AND x.sent_at IS NOT NULL AND x.sent_at<=? AND (? IS NULL OR x.sent_at>=?)
+    AND NOT EXISTS(SELECT 1 FROM inbox_messages i WHERE i.lead_id=x.lead_id AND i.created_at>x.sent_at)
+    AND NOT EXISTS(SELECT 1 FROM lead_orders o WHERE o.quote_id=x.id) ORDER BY x.sent_at ASC LIMIT ?`,[days(REVENUE_FOLLOWUP_DAYS.quote_no_reply),floor,floor,limit]);
+  const paidSql="COALESCE((SELECT SUM(p.amount_minor) FROM lead_order_payments p WHERE p.order_id=x.id),0)";
+  const unpaid=await rows(`SELECT x.*,${testFlag} AS test_record,${notesInvalid} AS notes_invalid,${paidSql} AS paid_minor FROM lead_orders x ${leadJoin} WHERE x.status='confirmed' AND COALESCE(x.confirmed_at,x.updated_at)<=? AND (? IS NULL OR COALESCE(x.confirmed_at,x.updated_at)>=?)
+    AND ${paidSql}=0 ORDER BY COALESCE(x.confirmed_at,x.updated_at) ASC LIMIT ?`,[days(REVENUE_FOLLOWUP_DAYS.order_unpaid),floor,floor,limit]);
+  const partial=await rows(`SELECT x.*,${testFlag} AS test_record,${notesInvalid} AS notes_invalid,${paidSql} AS paid_minor,(SELECT MAX(p.recorded_at) FROM lead_order_payments p WHERE p.order_id=x.id) AS last_payment_at FROM lead_orders x ${leadJoin}
+    WHERE x.status IN ('confirmed','partially_paid') AND ${paidSql}>0 AND x.total_minor IS NOT NULL AND ${paidSql}<x.total_minor
+    AND (SELECT MAX(p.recorded_at) FROM lead_order_payments p WHERE p.order_id=x.id)<=? AND (? IS NULL OR (SELECT MAX(p.recorded_at) FROM lead_order_payments p WHERE p.order_id=x.id)>=?) ORDER BY last_payment_at ASC LIMIT ?`,[days(REVENUE_FOLLOWUP_DAYS.balance_open),floor,floor,limit]);
+  // repeat-order opportunity: the lead's LATEST completed order (paid / shipped / fulfilled) is 30+ days old and no other open or later order exists
+  const reorder=await rows(`SELECT x.*,${testFlag} AS test_record,${notesInvalid} AS notes_invalid,COALESCE(x.delivered_at,x.shipped_at,x.updated_at) AS completed_at FROM lead_orders x ${leadJoin}
+    WHERE x.status IN ('paid','shipped','fulfilled') AND COALESCE(x.delivered_at,x.shipped_at,x.updated_at)<=? AND (? IS NULL OR COALESCE(x.delivered_at,x.shipped_at,x.updated_at)>=?)
+    AND NOT EXISTS(SELECT 1 FROM lead_orders o WHERE o.lead_id=x.lead_id AND o.id<>x.id AND o.status<>'cancelled' AND (o.created_at>x.created_at OR o.status IN ('order_candidate','confirmed','partially_paid')))
+    ORDER BY completed_at ASC LIMIT ?`,[days(REVENUE_FOLLOWUP_DAYS.reorder),floor,floor,limit]);
+  const item=(kind,r,{at,outstanding=null}={})=>{const market=["IRAN","ARAB"].includes(r.market)?r.market:null,test=Number(r.test_record||0)===1,invalid=Number(r.notes_invalid||0)===1;
+    return {kind,ref_id:r.id,lead_id:r.lead_id,conversation_id:r.conversation_id||null,market:market||"UNKNOWN",language:market?REVENUE_MARKET_LANGUAGE[market]:null,
+      currency:r.currency?canonicalCurrency(r.currency):null,outstanding_minor:outstanding,total_minor:Number.isSafeInteger(Number(r.total_minor))?Number(r.total_minor):null,
+      since:at||null,age_days:ageDays(at),threshold_days:REVENUE_FOLLOWUP_DAYS[kind],test_record:test,data_quality:invalid?"lead_notes_invalid":null,audience:market&&!test&&!invalid&&r.conversation_id?"customer":"owner",record:r};};
+  return [
+    ...quotes.map(r=>item("quote_no_reply",r,{at:r.sent_at})),
+    ...unpaid.map(r=>item("order_unpaid",r,{at:r.confirmed_at||r.updated_at,outstanding:Number.isSafeInteger(Number(r.total_minor))?Number(r.total_minor):null})),
+    ...partial.map(r=>item("balance_open",r,{at:r.last_payment_at,outstanding:Number(r.total_minor)-Number(r.paid_minor)})),
+    ...reorder.map(r=>item("reorder",r,{at:r.completed_at}))
+  ];
+}
+// Number-free follow-up texts (no price, amount or date is ever stated; the owner approves each draft before anything is sent).
+const REVENUE_FOLLOWUP_TEXT=Object.freeze({
+  quote_no_reply:{IRAN:"سلام، وقت بخیر. خواستیم بپرسیم پیش‌فاکتوری که برایتان فرستادیم را بررسی کردید؟ اگر سؤال یا تغییری لازم است، در خدمتیم.",ARAB:"هلا بيكم، حبينا نسأل إذا شفتوا عرض السعر اللي دزيناه إلكم؟ إذا عندكم أي سؤال أو تحتاجون تعديل، إحنا بالخدمة."},
+  reorder:{IRAN:"سلام، وقت بخیر. امیدواریم از سفارش قبلی‌تان راضی بوده باشید. اگر برای سفارش جدید بسته‌بندی برنامه دارید، خوشحال می‌شویم کمک کنیم.",ARAB:"هلا بيكم، نتمنى طلبكم السابق عجبكم. إذا تخططون لطلب تغليف جديد، يسعدنا نساعدكم."}
+});
+// Owner button (/api/revenue/followups/run): turns stalled items into APPROVAL-GATED drafts only (sending_enabled:false). Unpaid
+// confirmed orders (2+ days) use the existing payment-request draft; open balances (3+ days) the existing ARAB balance request;
+// quote follow-ups (3+ days) and repeat-order offers (30+ days) a number-free draft. Each draft key is per record, so running the
+// button again never duplicates a draft. Test records, unknown markets and IRAN balances are listed for the owner only.
 async function prepareOwnerRecordedPaymentRecoveryDrafts(env){
-  await ensureOrderStore(env);const rows=(await env.DB.prepare("SELECT * FROM lead_orders WHERE status IN ('confirmed','partially_paid') ORDER BY updated_at ASC LIMIT 50").all()).results||[];
-  const result={checked:rows.length,drafts_created:0,owner_decisions:0,skipped:0,sending_enabled:false,payment_engine:false};
-  for(const order of rows){const prepared=await preparePaymentRequest(env,order);if(prepared?.created)result.drafts_created++;else if(prepared?.decision)result.owner_decisions++;else result.skipped++;}
+  const items=await findStalledRevenueItems(env,{maxAgeDays:REVENUE_FOLLOWUP_LOOKBACK_DAYS});
+  const result={checked:items.length,lookback_days:REVENUE_FOLLOWUP_LOOKBACK_DAYS,drafts_created:0,owner_decisions:0,already_prepared:0,owner_only:0,test_records:0,data_quality_issues:0,skipped:0,by_kind:{},sending_enabled:false,payment_engine:false};
+  const dq=[];
+  for(const it of items){
+    result.by_kind[it.kind]=(result.by_kind[it.kind]||0)+1;
+    if(it.data_quality){result.data_quality_issues++;if(dq.length<20&&!dq.includes(it.lead_id))dq.push(it.lead_id);}
+    if(it.test_record){result.test_records++;continue;}
+    if(it.audience!=="customer"){result.owner_only++;continue;}
+    let prepared=null;
+    try{
+      if(it.kind==="order_unpaid")prepared=await preparePaymentRequest(env,it.record);
+      else if(it.kind==="balance_open"){if(it.market!=="ARAB"){result.owner_only++;continue;}prepared=await prepareBalanceRequest(env,it.ref_id);}
+      else{const text=REVENUE_FOLLOWUP_TEXT[it.kind]?.[it.market];if(!text){result.owner_only++;continue;}
+        prepared=await approvalGatedSalesDraft(env,{key:`revenue-followup:${it.kind}:${it.ref_id}`,leadId:it.lead_id,conversationId:it.conversation_id,language:it.language,message:text,
+          eventType:"revenue_followup_draft_created",eventMessage:"Revenue follow-up draft created for owner approval",
+          details:{event:it.kind,ref_id:it.ref_id,market:it.market,age_days:it.age_days,threshold_days:it.threshold_days}});}
+    }catch(e){result.skipped++;await audit(env,"revenue_followup_prepare_failed","Revenue follow-up draft could not be prepared",{kind:it.kind,ref_id:it.ref_id,error:sanitizeOperationalError(e?.message||e)});continue;}
+    if(prepared?.created)result.drafts_created++;else if(prepared?.idempotent)result.already_prepared++;else if(prepared?.decision)result.owner_decisions++;else result.skipped++;
+  }
+  // Phase 12.3: one bounded diagnostic per run (at most 20 lead ids); those records were listed for the owner only.
+  if(dq.length)try{await audit(env,"revenue_followup_data_quality","Leads with malformed notes were kept owner-only by the revenue follow-up run",{issue:"lead_notes_invalid",count:result.data_quality_issues,lead_ids:dq});}catch{}
   return result;
 }
 // Owner-recorded cost facts only: no payment, revenue recognition or customer message.
@@ -10586,9 +10738,12 @@ async function exactArabPriceMatch(env,{priceItemId,sku,product}){
   if(priceItemId){const x=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=? AND market='ARAB' LIMIT 1").bind(priceItemId).first();rows=x?[x]:[];}
   else if(String(sku||"").trim()){const r=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE market='ARAB' AND sku=? AND active=1").bind(String(sku).trim()).all();rows=r.results||[];}
   else {const key=normalizeProductKey(product);if(key){const r=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE market='ARAB' AND product_key=? AND active=1").bind(key).all();rows=r.results||[];}}
-  const valid=rows.filter(x=>priceItemEffective(x));
+  const effective=rows.filter(x=>priceItemEffective(x));
+  // Phase 12.1: ARAB prices are USD only; a price row in another currency is never used (owner review, nothing converted).
+  const valid=effective.filter(x=>canonicalCurrency(x.currency)===MARKET_CURRENCY.ARAB);
   if(valid.length===1)return {status:"matched",item:valid[0]};
   if(valid.length>1)return {status:"multiple",item:null};
+  if(effective.length)return {status:"currency_conflict",item:null};
   return {status:"none",item:null};
 }
 // Amounts written in a quote text: Persian/Arabic digits, thousands separators and هزار/میلیون/ألف/مليون are normalised; an amount is
@@ -10634,6 +10789,8 @@ function quoteReadiness(quote){
   if(!String(quote.product||"").trim())missing.push("product");
   let quantity=null;try{quantity=safeCommercialInteger(quote.quantity,{nullable:false,positive:true});}catch{missing.push("quantity");}
   if(!String(quote.currency||"").trim())missing.push("currency");
+  // Phase 12.1: the currency must be the market's (IRAN → TOMAN, ARAB → USD); a mismatch is never sent or converted.
+  else if(MARKET_CURRENCY[quote.market]&&canonicalCurrency(quote.currency)!==MARKET_CURRENCY[quote.market])missing.push("currency_market_mismatch");
   try{safeCommercialInteger(quote.unit_price_minor,{nullable:false});}catch{missing.push("unit_price");}
   for(const f of ["discount_minor","shipping_minor","tax_minor","other_fees_minor"])try{safeCommercialInteger(quote[f],{nullable:false});}catch{missing.push(f);}
   // Sales-intelligence quotes carry their own approval reference (owner-approved price version or resolved owner price decision); it is re-verified against D1 at submit/approve.
@@ -10667,7 +10824,7 @@ async function ensureQuoteFromInbox(env,inboxId,ownerMarket=null){
   if(details.requested_product&&details.quantity){
     if(marketResult.market==="IRAN"){status="waiting_for_owner_price";pricingMode="variable_owner";}
     else if(marketResult.market==="ARAB"){
-      pricingMode="fixed_list";price=await exactArabPriceMatch(env,{product:details.requested_product});status=price.status==="multiple"?"requires_owner_review":price.status==="matched"?"draft":"waiting_for_price_match";
+      pricingMode="fixed_list";price=await exactArabPriceMatch(env,{product:details.requested_product});status=price.status==="multiple"||price.status==="currency_conflict"?"requires_owner_review":price.status==="matched"?"draft":"waiting_for_price_match";
     }else status="requires_owner_review";
   }
   const item=price?.item||null,t=now(),id=uid();
@@ -10748,7 +10905,10 @@ async function updateQuoteByOwner(env,id,body){
   if(body.market){next.market=market.market;next.market_source="owner";}
   if(next.market==="IRAN"){
     next.pricing_mode="variable_owner";next.price_item_id=null;next.price_item_version=null;
-    if(Object.prototype.hasOwnProperty.call(body,"currency"))next.currency=String(body.currency||"").trim().toUpperCase().slice(0,12)||null;
+    // Phase 12.1/12.3: IRAN quotes are TOMAN only; another currency is refused. A change away from a stored other currency is checked
+    // below (explicit currency + re-entered amounts), so a stored USD amount is never relabelled TOMAN.
+    if(Object.prototype.hasOwnProperty.call(body,"currency")){const want=canonicalCurrency(body.currency);if(want&&want!==MARKET_CURRENCY.IRAN)throw Error(`IRAN quotes must be in ${MARKET_CURRENCY.IRAN}`);}
+    next.currency=MARKET_CURRENCY.IRAN;
     if(Object.prototype.hasOwnProperty.call(body,"unit_price_minor"))next.unit_price_minor=safeCommercialInteger(body.unit_price_minor);
     if(Object.prototype.hasOwnProperty.call(body,"moq"))next.moq=safeCommercialInteger(body.moq,{nullable:true,positive:true});
   }else if(next.market==="ARAB"){
@@ -10760,6 +10920,18 @@ async function updateQuoteByOwner(env,id,body){
     next._priceMatch=match.status;
   }else{next.pricing_mode=null;next.price_item_id=null;next.price_item_version=null;next.currency=null;next.unit_price_minor=null;}
   for(const f of ["discount_minor","shipping_minor","tax_minor","other_fees_minor"])if(Object.prototype.hasOwnProperty.call(body,f))next[f]=safeCommercialInteger(body[f]);
+  // Phase 12.3: amounts are never relabelled. When the stored currency differs from the resulting one, the owner must name the new
+  // currency explicitly AND re-enter every amount the quote carries (an ARAB unit price may come from the approved USD price row);
+  // otherwise the edit is refused and audited — nothing is converted or reinterpreted.
+  const fromCur=canonicalCurrency(current.currency),toCur=canonicalCurrency(next.currency);
+  if(fromCur&&toCur&&fromCur!==toCur){
+    const named=Object.prototype.hasOwnProperty.call(body,"currency")&&canonicalCurrency(body.currency)===toCur,fromPriceRow=next.market==="ARAB"&&next._priceMatch==="matched";
+    const stale=["unit_price_minor","discount_minor","shipping_minor","tax_minor","other_fees_minor"].filter(f=>next[f]!==null&&next[f]!==undefined&&!Object.prototype.hasOwnProperty.call(body,f)&&!(fromPriceRow&&f==="unit_price_minor"));
+    if(!named||stale.length){
+      await audit(env,"quote_currency_change_refused","Quote edit refused: currency change without explicit currency and re-entered amounts (owner review)",{quote_id:id,from:fromCur,to:toCur,explicit_currency:named,amounts_not_reentered:stale});
+      throw Error(`Currency change ${fromCur} → ${toCur} needs currency=${toCur} and re-entered amounts${stale.length?" (" + stale.join(", ") + ")":""}; stored amounts are never converted or relabelled`);
+    }
+  }
   }
   // A real commercial edit makes the price the owner's own: the engine's approval references no longer describe it (the previous
   // ones stay in the audit), and the quote is marked owner-priced so the engine never overwrites it.
@@ -10782,7 +10954,7 @@ async function updateQuoteByOwner(env,id,body){
   else if(engineKept)next.status="draft";
   else if(next.market==="requires_owner_review")next.status="requires_owner_review";
   else if(next.market==="IRAN"&&next.unit_price_minor===null)next.status="waiting_for_owner_price";
-  else if(next.market==="ARAB"&&next._priceMatch==="multiple")next.status="requires_owner_review";
+  else if(next.market==="ARAB"&&(next._priceMatch==="multiple"||next._priceMatch==="currency_conflict"))next.status="requires_owner_review";
   else if(next.market==="ARAB"&&!next.price_item_id)next.status="waiting_for_price_match";
   else next.status="draft";
   const t=now();
@@ -10845,7 +11017,9 @@ async function createPriceItemVersion(env,body,actor="admin"){
   // (owner_confirmed_quote); every quote/price lookup keeps filtering market='ARAB'.
   // A new version of an existing row keeps that row's market (the dashboard's NEW VERSION form sends no market).
   const market=(body.market??base?.market)==="IRAN"?"IRAN":"ARAB";if(base&&base.market!==market)throw Error("A new price version must keep its market");
-  if(market==="IRAN"&&currency!=="TOMAN")throw Error("IRAN prices must be in TOMAN");
+  if(market==="IRAN"&&canonicalCurrency(currency)!==MARKET_CURRENCY.IRAN)throw Error("IRAN prices must be in TOMAN");
+  // Phase 12.1: Iraq (ARAB) price versions are USD only.
+  if(market==="ARAB"&&canonicalCurrency(currency)!==MARKET_CURRENCY.ARAB)throw Error("ARAB (Iraq) prices must be in USD");
   const latest=await env.DB.prepare("SELECT MAX(version) AS version FROM commercial_price_items WHERE market=? AND product_key=?").bind(market,productKey).first(),version=Number(latest?.version||0)+1,t=now(),id=uid();
   const effectiveFrom=body.effective_from==null?(base?.effective_from||null):String(body.effective_from||"").trim()||null,effectiveUntil=body.effective_until==null?null:String(body.effective_until||"").trim()||null;
   const statements=[];if(base&&body.deactivate_previous!==false)statements.push(env.DB.prepare("UPDATE commercial_price_items SET active=0,updated_at=? WHERE id=?").bind(t,base.id));
@@ -12964,7 +13138,11 @@ configureSalesIntelligence({
   calculateQuoteValues,quoteReadiness,outreachLanguage,createApprovalGatedDraft:approvalGatedSalesDraft,
   customerPaymentAmountText,orderPaidMinor,resolveLinkedOwnerDecision,recordOrderPayment,
   // The canonical order confirmation (owner gate): APPROVE on an accepted-offer decision confirms through exactly this path.
-  confirmLeadOrder:(env,orderId,actor)=>transitionLeadOrder(env,orderId,"confirm",actor,null,{via:"decision_approve"})
+  confirmLeadOrder:(env,orderId,actor)=>transitionLeadOrder(env,orderId,"confirm",actor,null,{via:"decision_approve"}),
+  // Phase 12.1: stalled revenue items (read-only) for moneyAtStake
+  findStalledRevenueItems:env=>findStalledRevenueItems(env),
+  // Phase 12.3: the same malformed-notes-safe test-lead flag for Sales Intelligence money totals
+  leadTestFlagSql
 });
 
 export default {

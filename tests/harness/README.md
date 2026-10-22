@@ -25,6 +25,7 @@ node phase07.mjs
 node phase08.mjs
 node phase09.mjs
 node phototimeout.mjs
+node phase12.mjs
 ```
 Each prints `<suite> → ALL PASS (n)` and exits 0, or lists the failing checks and exits 1. Run whole files (later checks build on
 earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps reset at the UTC day boundary).
@@ -42,6 +43,7 @@ earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps 
 | phase06 | 27 | Watchdog unexpected inactivity (infrastructure vs idle by design), alert retention, dead-letter retry eligibility, version/rollback readiness, deterministic per-agent quality, quota/cost exposure |
 | phase07 | 26 | Health model (technical/connection/activity/execution), rowid-floor time-bounded reads (Watchdog + Control Center), demo labelling, Persian errors/next action, security / Approval Gate, API compatibility |
 | phototimeout | 10 | Phase 11.2C: per-task orchestrator timeout (photo 55 s, clamp 60 s), bounded Photo Autopilot OpenAI call (45 s) ending in the clean error path (lock released, error audited, no usage/image), no extra retry, file_unique_id dedup intact |
+| phase12 | 64 | Phase 12.1 + 12.3 (calendar-path final gate incl. mid-send edit/revoke, ambiguous 5xx / unreadable / body-timeout / post-send DB failure → manual_required OUTCOME_UNKNOWN without retry, owner reconcile, test records out of real money, malformed lead notes, 90-day draft lookback, no currency relabelling). Phase 12.1: revision-bound content approval (revoked / edited / media-added / legacy held), atomic one-post claim, unknown outcome → send_unknown without retry, definite failure → one guarded retry, missing TELEGRAM_CHAT_ID → manual_required, bounded 15 s transport; revenue follow-ups 3/2/3/30 days as owner-approval drafts (idempotent, test records excluded, per-currency outstanding); IRAN TOMAN / ARAB USD integrity; owner-approved sales autonomy boundaries (approved price + in-rule discount auto-sent, out-of-rule discount held, acceptance → candidate only, payment claim records nothing, confirm owner-only) |
 | phase09 | 55 | Dual-market Ads (Phase 09.4) + CRM follow-up continuity (09.6) + three independent daily quotas ADS_IRAN_DISCOVERY / ADS_IRAQ_DISCOVERY / CRM_FOLLOWUP (09.7): IRAN/ARAB configs disabled by default, owner-approved enabling, per-market city lists and daily limits inside the global cap, legacy row ignored and preserved, CRM attribution (TOMAN/USD), UNKNOWN for historical leads, cross-market protection, per-market follow-ups and reporting, no scheduled Ads task or dead letter while disabled, other agents unaffected |
 | phase08 | 21 | Watchdog monitoring coverage (per-expectation coverage, SQL aggregation, visible monitoring_coverage_gap), fail-closed activity reads, Phase 05–07 API compatibility, release safety (auth, test-token isolation, no secrets) |
 

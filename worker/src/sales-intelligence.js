@@ -1004,15 +1004,21 @@ export async function aiUsageSummary(env){
 export async function moneyAtStake(env){
   await ensureSalesIntelligenceStore(env);
   const decisions=await all(env,"SELECT decision_type,COUNT(*) AS n,MIN(priority) AS top_priority FROM owner_decisions WHERE status='PENDING' GROUP BY decision_type ORDER BY top_priority");
-  const quotes=await all(env,"SELECT id,lead_id,status,currency,total_minor,pricing_mode,margin_json,updated_at FROM lead_quotes WHERE status IN ('quote_ready','pending_approval','approved','waiting_for_owner_price','requires_owner_review','draft') ORDER BY updated_at DESC LIMIT 50");
+  // Phase 12.3: test records (lead notes.data_class 'test' / is_test) never count as real money; they are reported separately.
+  const testSql=D.leadTestFlagSql?D.leadTestFlagSql("l"):"0";
+  const quotesAll=await all(env,`SELECT x.id,x.lead_id,x.status,x.currency,x.total_minor,x.pricing_mode,x.margin_json,x.updated_at,${testSql} AS test_record FROM lead_quotes x LEFT JOIN leads l ON l.id=x.lead_id WHERE x.status IN ('quote_ready','pending_approval','approved','waiting_for_owner_price','requires_owner_review','draft') ORDER BY x.updated_at DESC LIMIT 50`);
+  const quotes=quotesAll.filter(q=>Number(q.test_record||0)!==1).map(({test_record,...q})=>q),testQuotes=quotesAll.filter(q=>Number(q.test_record||0)===1);
   const marginWarnings=quotes.map(q=>({...q,margin:parseJson(q.margin_json,null)})).filter(q=>q.margin&&(q.margin.status==="UNKNOWN"||q.margin.warning==="below_owner_threshold")).map(({margin_json,...q})=>q);
-  const followups=D.findStalledRevenueItems?(await D.findStalledRevenueItems(env)).map(({record,...x})=>x):[];
+  const stalled=D.findStalledRevenueItems?(await D.findStalledRevenueItems(env)).map(({record,...x})=>x):[];
+  const followups=stalled.filter(x=>!x.test_record),testItems=stalled.filter(x=>x.test_record);
   const sum=(items,field)=>{const o={};for(const x of items)if(x.currency&&x[field]!==null&&x[field]!==undefined)o[canonicalCurrency(x.currency)]=(o[canonicalCurrency(x.currency)]||0)+Number(x[field]);return o;};
   return {pending_decisions:decisions,quotes_awaiting_owner:quotes.filter(q=>["quote_ready","pending_approval","waiting_for_owner_price","requires_owner_review"].includes(q.status)).map(({margin_json,...q})=>q),
     quote_value_by_currency:sum(quotes.filter(q=>["quote_ready","pending_approval","approved"].includes(q.status)),"total_minor"),
     orders_awaiting_payment:followups.filter(x=>x.kind==="order_unpaid"),partial_balances:followups.filter(x=>x.kind==="balance_open"),
     outstanding_by_currency:sum(followups.filter(x=>x.kind==="order_unpaid"||x.kind==="balance_open"),"outstanding_minor"),
-    stalled_commercial:followups.filter(x=>x.audience==="owner"),repeat_opportunities:followups.filter(x=>x.kind==="reorder"),margin_warnings:marginWarnings};
+    stalled_commercial:followups.filter(x=>x.audience==="owner"),repeat_opportunities:followups.filter(x=>x.kind==="reorder"),margin_warnings:marginWarnings,
+    test_records:{followups:testItems.length,quotes:testQuotes.length,outstanding_by_currency:sum(testItems.filter(x=>x.kind==="order_unpaid"||x.kind==="balance_open"),"outstanding_minor")},
+    data_quality:{lead_notes_invalid:followups.filter(x=>x.data_quality==="lead_notes_invalid").length}};
 }
 
 /* ------------------------------------------------- brain + routes glue */
