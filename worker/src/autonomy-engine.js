@@ -401,6 +401,10 @@ function taskAllowedByParentPlan(task){
 // (runTasks is reached only from the cron and the admin /api/autonomy/tasks/run route).
 // Version of this engine as recorded per agent in agent_versions (bump on behaviour changes; rollback reference for the owner).
 export const AUTONOMY_ENGINE_VERSION=`autonomy-engine@${ORCHESTRATOR_VERSION}+stage3.2`;
+// Phase 11.2C: per-action task timeouts (ms) above the 30 s default. Photo generation (Telegram download + OpenAI image edit) took
+// 26–28 s on healthy days and timed out at 30 s on 2026-10-22; its OpenAI call is bounded at 45 s inside the Worker so a slow call fails
+// through the photo error path (daily lock released, error audited) before this outer limit. Capped by HARD_LIMITS (60 s).
+export const AUTONOMY_TASK_TIMEOUT_MS=Object.freeze({"photo:photo_generate":55000});
 function orchestratorEnabled(env){return env?.AUTONOMY_ORCHESTRATOR==="on"}
 // Owner autonomy policy (2026-10-19): paid non-financial actions run without approval, but at most their daily quota per UTC day
 // (every started attempt counts, failed ones too). Over quota the task is deferred to the next UTC day, never run and never dropped.
@@ -542,6 +546,7 @@ export async function runTasksOrchestrated(env,req,limit=20,{executor=executeTas
   // Same-module tasks run one after another (ordering only), so the module lock is never contended inside one run.
   const prev=lastByModule.get(t.module);lastByModule.set(t.module,t.id);
   tasks.push({id:t.id,agent:`autonomy:${t.module}`,version:AUTONOMY_ENGINE_VERSION,capability,after:prev?[prev]:[],cost:capability==="paid"?5:1,
+   timeoutMs:AUTONOMY_TASK_TIMEOUT_MS[`${t.module}:${t.action}`],
    // only reads are retried: a retried draft or paid call could duplicate work or spend twice
    retryable:capability==="read",
    run:async ctx=>{

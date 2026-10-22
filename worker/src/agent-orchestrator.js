@@ -133,6 +133,12 @@ export function validateTaskGraph(tasks){
 
 const sleep=(ms,signal)=>new Promise(resolve=>{const t=setTimeout(resolve,ms);signal?.addEventListener?.("abort",()=>{clearTimeout(t);resolve();},{once:true});});
 
+// Phase 11.2C: a task may carry its own timeoutMs (e.g. photo generation, whose healthy runs take 26–28 s against the 30 s default); it
+// is clamped to HARD_LIMITS.timeoutMs and, like the default, never runs past the run deadline.
+export function effectiveTimeoutMs(task,limits){
+  const own=Number(task?.timeoutMs);
+  return Number.isFinite(own)&&own>0?Math.min(Math.floor(own),HARD_LIMITS.timeoutMs):limits.timeoutMs;
+}
 // One attempt with a hard timeout: the task gets an AbortSignal and the attempt settles at timeoutMs whether or not the task honours it.
 async function attempt(task,ctx,timeoutMs){
   const controller=new AbortController();let timer;
@@ -197,7 +203,7 @@ export async function runAgentGraph(tasks,options={}){
         e.attempts=n;
         const remaining=limits.maxRunMs-(now()-started);
         if(remaining<=0){last={deadline:true};break;}
-        const r=await attempt(t,{attempt:n,results:depResults,runId},Math.min(limits.timeoutMs,remaining));
+        const r=await attempt(t,{attempt:n,results:depResults,runId},Math.min(effectiveTimeoutMs(t,limits),remaining));
         if(!r.timedOut&&!("error" in r)){e.state="succeeded";results[e.id]=r.value;last=null;break;}
         last=r;
         const retryable=t.retryable!==false&&(r.timedOut||r.error?.retryable!==false);   // a non-retryable task is never re-run, not even after a timeout
@@ -207,7 +213,7 @@ export async function runAgentGraph(tasks,options={}){
       }
       if(last){
         e.state=last.deadline?"deadline_reached":last.timedOut?"timed_out":"failed";
-        e.error=last.deadline?"run deadline reached before this attempt":last.timedOut?`timed out after ${limits.timeoutMs} ms`:redact(last.error);
+        e.error=last.deadline?"run deadline reached before this attempt":last.timedOut?`timed out after ${effectiveTimeoutMs(t,limits)} ms`:redact(last.error);
         if(e.state!=="deadline_reached")report.dead_letters.push({task_id:e.id,agent:e.agent,version:e.version,state:e.state,attempts:e.attempts,error:e.error,at:new Date(now()).toISOString()});
       }
       e.duration_ms=now()-t0;

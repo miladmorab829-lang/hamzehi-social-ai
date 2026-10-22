@@ -3439,7 +3439,9 @@ function detectSupportedImageMime(bytes){
   if(bytes.length>=12&&bytes[0]===0x52&&bytes[1]===0x49&&bytes[2]===0x46&&bytes[3]===0x46&&bytes[8]===0x57&&bytes[9]===0x45&&bytes[10]===0x42&&bytes[11]===0x50)return 'image/webp';
   return '';
 }
-async function aiEditVaultImageCore(env, sourceId, prompt, meta = {}){
+// opts.timeoutMs (Phase 11.2C, Photo Autopilot only): bounds the OpenAI image call so a slow provider fails here (caller's error path)
+// instead of being cut off by the orchestrator; other callers keep the previous unbounded call.
+async function aiEditVaultImageCore(env, sourceId, prompt, meta = {}, opts = {}){
   await ensureMediaVaultStore(env);
   if(!env.OPENAI_API_KEY) throw Error('OPENAI_API_KEY missing');
   const normalizedSourceId=String(sourceId||'').trim();
@@ -3485,7 +3487,10 @@ form.append('image',blob,filename);
     String(meta.photo_lock_date||''),
     String(meta.photo_lock_created_at||'')
   );
-  const r=await fetch('https://api.openai.com/v1/images/edits',{method:'POST',headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`},body:form});
+  const editTimeoutMs=Number(opts?.timeoutMs)>0?Math.floor(Number(opts.timeoutMs)):0;
+  let r;
+  try{r=await fetch('https://api.openai.com/v1/images/edits',{method:'POST',headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`},body:form,...(editTimeoutMs?{signal:AbortSignal.timeout(editTimeoutMs)}:{})});}
+  catch(e){if(editTimeoutMs&&(e?.name==='TimeoutError'||e?.name==='AbortError'))throw Error(`OpenAI image edit timed out after ${editTimeoutMs} ms`);throw e;}
   const d=await r.json().catch(()=>({}));
   if(!r.ok) throw Error(d?.error?.message||`OpenAI image edit failed (HTTP ${r.status})`);
   const item=d?.data?.[0];
@@ -5408,6 +5413,9 @@ async function prepareWeeklyVideoAutopilot(env){
   };
 }
 const PHOTO_AUTOPILOT_STALE_LOCK_MS = 60 * 60 * 1000;
+// Phase 11.2C: bound for the Photo Autopilot OpenAI image call; below the orchestrator's photo task timeout (55 s) so a slow provider
+// ends in the normal error path (lock released, photo_autopilot_error audited) rather than an abandoned request with a stuck lock.
+const PHOTO_AUTOPILOT_OPENAI_TIMEOUT_MS = 45 * 1000;
 
 async function getPhotoAutopilotSuccessEvidence(env, date) {
   const usage = await env.DB.prepare(`
@@ -5726,7 +5734,8 @@ try {
   source_caption:String(source.caption||""),
   photo_lock_date:today,
   photo_lock_created_at:reservationCreatedAt
-}
+},
+ {timeoutMs:PHOTO_AUTOPILOT_OPENAI_TIMEOUT_MS}
   );
 } catch(e) {
   await releasePhotoAutopilotReservation(env,today,reservationCreatedAt);
