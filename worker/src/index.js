@@ -6026,6 +6026,58 @@ if(media.media_type==='photo'){
   return {processed:false,reason:'unsupported_media_type'};
 }
 
+// Phase 14: webhook delivery evidence, without payload or identifiers. A rejected delivery leaves at most ONE row per reason per
+// minute (deterministic id + INSERT OR IGNORE), so a flood cannot grow the table; an accepted delivery updates one timestamp. A failure
+// here never blocks or changes the webhook response.
+async function noteTelegramWebhook(env,outcome){
+  try{
+    if(outcome==="accepted"){await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES('telegram_webhook_last_accepted',?,?)").bind(now(),now()).run();return;}
+    await env.DB.prepare("INSERT OR IGNORE INTO system_events VALUES(?,?,?,?,?,?)").bind(`tg-webhook-reject:${outcome}:${now().slice(0,16)}`,"telegram_webhook_rejected","warning","Telegram webhook delivery rejected",JSON.stringify({reason:outcome}),now()).run();
+  }catch{}
+}
+// Phase 14: owner-only, read-only Telegram inbound / outbound readiness. Default: D1 evidence only (no external call). With live=true
+// it ALSO reads getWebhookInfo (read-only; never setWebhook) and returns only non-secret fields — never the token or the full URL.
+// status: READY (live check clean, recent traffic) · NO_TRAFFIC (live check clean, nothing received for 7+ days) · NOT_VERIFIED
+// (no live check, no recent delivery) · MISCONFIGURED (token missing / webhook URL empty or not this Worker) · FAILED (deliveries
+// rejected in the last 24 h, or Telegram reports a recent delivery error).
+async function telegramInboundHealth(env,{live=false}={}){
+  const one=async(sql,...b)=>{try{return await env.DB.prepare(sql).bind(...b).first();}catch{return null;}};
+  const day=new Date(Date.now()-86400000).toISOString(),week=new Date(Date.now()-7*86400000).toISOString();
+  const lastAccepted=(await one("SELECT value FROM system_kv WHERE key='telegram_webhook_last_accepted'"))?.value||null;
+  const lastInbound=(await one("SELECT MAX(created_at) AS at FROM inbox_messages WHERE platform='telegram'"))?.at||null;
+  const lastCustomer=(await one("SELECT MAX(created_at) AS at FROM inbox_messages WHERE platform='telegram' AND lead_id IS NOT NULL"))?.at||null;
+  // rejection rows have deterministic ids → read through the primary-key range (no scan of system_events, which has no type index)
+  const rej=(await one("SELECT COUNT(*) AS n,MAX(created_at) AS last FROM system_events WHERE id>='tg-webhook-reject:' AND id<'tg-webhook-reject;' AND created_at>=?",day))||{n:0,last:null};
+  // the registration record (a full scan of system_events) is read only for the explicit live check, where the URL is compared
+  const reg=live?await one("SELECT details_json,created_at FROM system_events WHERE type='telegram_webhook_configured' ORDER BY created_at DESC LIMIT 1"):null;
+  let registeredUrl=null;try{registeredUrl=JSON.parse(reg?.details_json||"{}").url||null;}catch{}
+  const secretSource=env.TELEGRAM_WEBHOOK_SECRET_TOKEN?"env":(await one("SELECT 1 AS ok FROM system_kv WHERE key='telegram_webhook_secret'"))?.ok?"kv":"missing";
+  const configured={bot_token:!!env.TELEGRAM_BOT_TOKEN,webhook_secret:secretSource,public_channel:!!String(env.TELEGRAM_CHAT_ID||"").trim(),media_vault:!!String(env.TELEGRAM_VAULT_CHAT_ID||"").trim()};
+  const lastSeen=[lastAccepted,lastInbound].filter(Boolean).sort().pop()||null;
+  let webhook=null;
+  if(live&&env.TELEGRAM_BOT_TOKEN){
+    try{const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getWebhookInfo`,{signal:AbortSignal.timeout(5000)});const d=await r.json().catch(()=>({}));const w=d.result||{};
+      let host=null,path=null;try{const u=new URL(w.url);host=u.host;path=u.pathname;}catch{}
+      let regHost=null;try{regHost=new URL(registeredUrl).host;}catch{}
+      const errAt=w.last_error_date?new Date(w.last_error_date*1000).toISOString():null;
+      webhook={ok:!!d.ok,url_set:!!w.url,url_host:host,url_path:path,matches_this_worker:!!w.url&&path==="/webhooks/telegram"&&(!regHost||host===regHost),
+        pending_update_count:Number(w.pending_update_count)||0,last_error_at:errAt,last_error_message:w.last_error_message?String(w.last_error_message).slice(0,120):null};}
+    catch{webhook={ok:false,error:"getWebhookInfo unavailable"};}}
+  let status,reasons=[];
+  // rejected requests followed by a valid delivery came from elsewhere (not Telegram): reported, not a delivery failure
+  if(Number(rej.n)>0&&lastAccepted&&rej.last&&String(lastAccepted)>String(rej.last))reasons.push("unauthenticated requests were rejected (a valid Telegram delivery arrived after them)");
+  if(!configured.bot_token){status="MISCONFIGURED";reasons.push("TELEGRAM_BOT_TOKEN is not configured");}
+  else if(Number(rej.n)>0&&!(lastAccepted&&rej.last&&String(lastAccepted)>String(rej.last))){status="FAILED";reasons.push("webhook deliveries were rejected in the last 24 h and no valid delivery arrived since");}
+  else if(webhook&&webhook.ok&&!webhook.url_set){status="MISCONFIGURED";reasons.push("no webhook URL is registered at Telegram");}
+  else if(webhook&&webhook.ok&&!webhook.matches_this_worker){status="MISCONFIGURED";reasons.push("the webhook points somewhere other than this Worker");}
+  else if(webhook&&webhook.ok&&webhook.last_error_at&&webhook.last_error_at>=day){status="FAILED";reasons.push("Telegram reports a delivery error in the last 24 h");}
+  else if(webhook&&webhook.ok)status=lastSeen&&lastSeen>=week?"READY":"NO_TRAFFIC";
+  else if(lastSeen&&lastSeen>=week)status="READY";
+  else{status="NOT_VERIFIED";reasons.push(webhook?"live webhook check failed":"no delivery in 7 days and no live webhook check");}
+  return {ok:true,status,reasons,live_checked:!!(webhook&&webhook.ok),configured,
+    evidence:{last_accepted_delivery_at:lastAccepted,last_inbound_message_at:lastInbound,last_customer_message_at:lastCustomer,rejections_24h:Number(rej.n)||0,last_rejection_at:rej.last||null,webhook_registered_at:reg?reg.created_at||null:undefined},
+    webhook,outbound:{public_channel:configured.public_channel?"CONFIGURED":"NOT_CONFIGURED"}};
+}
 async function telegramWebhookSecret(env){
   if(env.TELEGRAM_WEBHOOK_SECRET_TOKEN)return String(env.TELEGRAM_WEBHOOK_SECRET_TOKEN);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
@@ -6050,8 +6102,8 @@ async function proxyTelegramMedia(env,req){
 
 async function handleTelegramWebhook(env,req){
   const webhookStarted=Date.now();
-  if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(provided!==expected)return json({ok:false,error:'Unauthorized webhook'},401);
-  const body=await req.json().catch(()=>null);if(!body)return json({ok:false,error:'Invalid JSON'},400);await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
+  if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(provided!==expected){await noteTelegramWebhook(env,'secret_mismatch');return json({ok:false,error:'Unauthorized webhook'},401);}
+  const body=await req.json().catch(()=>null);if(!body){await noteTelegramWebhook(env,'invalid_json');return json({ok:false,error:'Invalid JSON'},400);}await noteTelegramWebhook(env,'accepted');await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
   const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const vaultVerdict=(isImageVault||isVideoVault)?vaultSenderVerdict(env,m,!!(body.channel_post||body.edited_channel_post)):null; const isVault=!!vaultVerdict?.ok; /* channel identity, or an allow-listed member of a group vault; never a private chat */
   const isReady=!!readyChatId(env)&& (chatId===readyChatId(env)||username===readyChatId(env).replace(/^@/,'').toLowerCase());
   // Only a private chat with a human sender is a customer identity. A group/channel id, username or title is a shared
@@ -7144,7 +7196,7 @@ async function ensureLeadOutreachStoreNow(env){
 }
 
 // order_candidate: the ONE structured deal state of the conversation (written by the Sales Brain, versioned by supersession).
-const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference","order_candidate","customer_name","selected_colors","color_parts","conversation_summary","printing_type"]);
+const CONVERSATION_MEMORY_FACT_TYPES=new Set(["customer_country","customer_message","product_interest","requested_quantity","requested_size","exterior_color","interior_color","printing","branding","objection","customer_question","unresolved_question","destination","customer_image_reference","order_candidate","customer_name","selected_colors","color_parts","conversation_summary","printing_type"]);
 // Details that belong to ONE deal (a new deal never inherits them); the customer's name, city and market are durable.
 const SALES_DEAL_SCOPED_KEYS=["requested_quantity","requested_size","selected_colors","color_parts","exterior_color","interior_color","printing","branding","printing_type"];
 const CONVERSATION_SALES_STAGES=new Set(["new_reply","interested","asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted","rejected","other"]);
@@ -7441,14 +7493,21 @@ function extractUnitQuantity(text){
 // A named product TYPE ("جعبه ساعت", "علبة مجوهرات", "watch box") answers "which product"; a bare "این جعبه" does not.
 const CUSTOMER_PRODUCT_TYPE=/(?:جعبه|باکس)\s*(?:[یي]\s*)?(?:ساعت|جواهرات|جواهر|انگشتر|گردنبند|دستبند|گوشواره|طلا|سکه|عطر|ادکلن|هدیه|کادو|شکلات|آجیل|خرما|شیرینی|زعفران|عسل|چای|قهوه|کراوات|عینک|خودکار|لوازم\s*آرایش|آرایشی|موبایل|کفش|لباس)(?:[یي])?(?![\p{L}])|علب(?:ة|ه)\s+(?:ساعات|ساعة|ساعه|مجوهرات|خاتم|ذهب|عطور|عطر|هدايا|هدية|شوكولاتة|شوكولاته|تمور|تمر|حلويات|نظارات)(?![\p{L}])|\b(?:watch|jewelry|jewellery|ring|necklace|perfume|gift|chocolate|dates|sweets|cosmetics?|glasses|pen)\s+box(?:es)?\b/iu;
 const CUSTOMER_DIMENSIONS=/(?<![0-9۰-۹٠-٩])([0-9۰-۹٠-٩]{1,4}(?:[.٫][0-9۰-۹٠-٩]+)?)\s*(?:در|x|×|\*|by|في)\s*([0-9۰-۹٠-٩]{1,4}(?:[.٫][0-9۰-۹٠-٩]+)?)(?:\s*(?:در|x|×|\*|by|في)\s*([0-9۰-۹٠-٩]{1,4}(?:[.٫][0-9۰-۹٠-٩]+)?))?(?![0-9۰-۹٠-٩])\s*(cm|mm|سانتی‌?متر|سانتیمتر|سانت|میلی‌?متر|سم|ملم)?/iu;
-const CUSTOMER_DESTINATION_CITY=/(?<![\p{L}])(تهران|مشهد|اصفهان|شیراز|تبریز|کرج|قم|اهواز|کرمانشاه|رشت|یزد|کرمان|همدان|اراک|ارومیه|زاهدان|ساری|بندرعباس|قزوین|کیش|بغداد|البصرة|البصره|بصرة|أربيل|اربيل|النجف|نجف|كربلاء|كربلا|الموصل|موصل|السليمانية|دهوك|كركوك|الحلة|الناصرية|العمارة|الديوانية|الكوت|tehran|baghdad|basra|erbil|najaf|karbala|mashhad|isfahan|shiraz)(?![\p{L}])/iu;
+const CUSTOMER_DESTINATION_CITY=/(?<![\p{L}])(تهران|مشهد|اصفهان|شیراز|تبریز|کرج|قم|اهواز|کرمانشاه|رشت|یزد|کرمان|همدان|اراک|ارومیه|زاهدان|ساری|بندرعباس|قزوین|کیش|بغداد|البصرة|البصره|بصرة|أربيل|اربيل|النجف|نجف|كربلاء|كربلا|الموصل|موصل|السليمانية|دهوك|كركوك|الحلة|الناصرية|العمارة|الديوانية|الكوت|الرمادي|رمادي|الفلوجة|الفلوجه|فلوجة|السماوة|سماوة|ذي\s*قار|ميسان|الأنبار|الانبار|ديالى|ديالي|زاخو|تكريت|السليمانيه|سليمانية|ramadi|fallujah|sulaymaniyah|sulaimani|slemani|duhok|dohuk|kirkuk|mosul|nasiriyah|طهران|أصفهان|تبريز|كرج|الأهواز|الاهواز|ahvaz|tabriz|karaj|rasht|yazd|kerman|hamadan|urmia|qazvin|zahedan|tehran|baghdad|basra|erbil|najaf|karbala|mashhad|isfahan|shiraz)(?![\p{L}])/iu;
 // Iraqi «to <city>» written as one word: «لبغداد» → بغداد, «للبصرة» → البصرة («ل» + «ال»-city contracts to «لل»). Only these
 // exact city names, as whole words; the stored destination is the city's own form.
-const CUSTOMER_IRAQI_CITY_TO=/(?<![\p{L}])(?:ل(بغداد|أربيل|اربيل|كربلاء|كربلا|كركوك|دهوك)|لل(بصرة|بصره|نجف|موصل|سليمانية|حلة|ناصرية|عمارة|ديوانية|كوت))(?![\p{L}])/u;
+const CUSTOMER_IRAQI_CITY_TO=/(?<![\p{L}])(?:ل(بغداد|أربيل|اربيل|كربلاء|كربلا|كركوك|دهوك|زاخو|تكريت|ديالى|ميسان)|لل(بصرة|بصره|نجف|موصل|سليمانية|حلة|ناصرية|عمارة|ديوانية|كوت|رمادي|فلوجة|فلوجه|سماوة|انبار|أنبار|سليمانيه))(?![\p{L}])/u;
 function customerIraqiCityTo(text){const m=String(text||"").match(CUSTOMER_IRAQI_CITY_TO);return m?(m[1]||"ال"+m[2]):null;}
 // Iraqi «in <city>» written as one word: «ببغداد» → بغداد, «بالبصرة» → البصرة («ب» + «ال»-city keeps its article). The preposition
 // marks a place, never part of a name («متجر ببغداد» = a shop IN Baghdad, unlike «متجر بغداد»). Same city list as «ل»/«لل».
-const CUSTOMER_IRAQI_CITY_IN=/(?<![\p{L}])(?:ب(بغداد|أربيل|اربيل|كربلاء|كربلا|كركوك|دهوك)|بال(بصرة|بصره|نجف|موصل|سليمانية|حلة|ناصرية|عمارة|ديوانية|كوت))(?![\p{L}])/u;
+const CUSTOMER_IRAQI_CITY_IN=/(?<![\p{L}])(?:ب(بغداد|أربيل|اربيل|كربلاء|كربلا|كركوك|دهوك|زاخو|تكريت|ديالى|ميسان)|بال(بصرة|بصره|نجف|موصل|سليمانية|حلة|ناصرية|عمارة|ديوانية|كوت|رمادي|فلوجة|فلوجه|سماوة|انبار|أنبار|سليمانيه))(?![\p{L}])/u;
+// Phase 14.1 (owner rule): an explicit country name — «العراق», «عراق», «للعراق», «بالعراق», «والعراق», «iraq», «ایران», «ايران»,
+// «به ایران» — is evidence of the MARKET (IRAN / ARAB), never a delivery city: it is remembered as customer_country while the
+// destination stays unknown (the city is still asked when an order needs it). Naming both countries is ambiguous → nothing.
+// Adjectives («عراقي», «ایرانی») are not country names and do not count.
+const CUSTOMER_COUNTRY_IRAQ=/(?<![\p{L}])(?:[وف]?(?:لل|بال|ل|ب)?(?:ال)?عراق|iraq)(?![\p{L}])/iu;
+const CUSTOMER_COUNTRY_IRAN=/(?<![\p{L}])(?:[وف]?(?:لل|بال|ل|ب)?(?:ال)?(?:ایران|ايران|إيران)|iran)(?![\p{L}])/iu;
+function customerCountry(text){const t=String(text||"").normalize("NFKC"),iq=CUSTOMER_COUNTRY_IRAQ.test(t),ir=CUSTOMER_COUNTRY_IRAN.test(t);return iq&&!ir?"العراق":ir&&!iq?"ایران":null;}
 function customerIraqiCityIn(text){const m=String(text||"").match(CUSTOMER_IRAQI_CITY_IN);return m?(m[1]||"ال"+m[2]):null;}
 // A city inside a business / person name («متجر بغداد للذهب», «محلات البصرة», «شرکت تهران») is part of the name, not where the order goes.
 const CUSTOMER_BUSINESS_NOUN=/^(?:متجر|المتجر|محل|المحل|محلات|شركة|شركه|الشركة|معرض|مؤسسة|مؤسسه|مكتب|مصنع|معمل|صاغة|مجوهرات|فروشگاه|مغازه|شرکت|گالری|طلافروشی|جواهری|store|shop|company|gallery)$/iu;
@@ -7501,6 +7560,7 @@ function extractConversationMemoryFacts(message,intent,inboxId,{lastAction=null}
   if(product)add("product_interest",product);
   else{const productType=text.match(CUSTOMER_PRODUCT_TYPE)?.[0];if(productType)add("product_interest",productType.replace(/\s+/g," ").trim());}
   // (a weak, bare city mention is marked: it fills an unknown destination but never replaces a known one — see the capture below)
+  const country=customerCountry(text);if(country)add("customer_country",country);   // Phase 14.1: market evidence only
   const destination=customerDestination(text);
   if(destination){const n=facts.length;add("destination",destination.value);if(facts.length>n&&!destination.explicit)facts[n].weak=true;}
   // Dimensions are recognised in natural form ("۵ در ۵", "5x5", "20×30×10 سانت") as well as after a size keyword.
@@ -7511,7 +7571,9 @@ function extractConversationMemoryFacts(message,intent,inboxId,{lastAction=null}
   const interior=text.match(/(?:interior\s+color|رنگ\s*داخلی|لون\s*داخلي)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(interior)add("interior_color",interior);
   const arabicQuestion=/[؟?]|(?<![\p{L}])(?:شنو|شكد|بيش|بكم|هل|لو|ليش|شلون|اكو|يصير|تكدرون)(?![\p{L}])/u.test(text);
-  const printing=text.match(/(?:printing|print|چاپ|فویل)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1]||(arabicQuestion?null:text.match(/(?<![\p{L}])طباعة(?![\p{L}])\s*[:：=-]?\s*([^\n،,؛;؟?]{1,180})/u)?.[1])||text.match(/(طلاکوب|نقره[‌\s]?کوب|gold\s*foil|silver\s*foil|تذهيب|طباعة\s*ذهبية)/iu)?.[1];
+  const noPrinting=SALES_NO_PRINTING.test(text);   // Phase 14
+  if(noPrinting)add("printing","none");
+  const printing=noPrinting?null:text.match(/(?:printing|print|چاپ|فویل)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1]||(arabicQuestion?null:text.match(/(?<![\p{L}])طباعة(?![\p{L}])\s*[:：=-]?\s*([^\n،,؛;؟?]{1,180})/u)?.[1])||text.match(/(طلاکوب|نقره[‌\s]?کوب|gold\s*foil|silver\s*foil|تذهيب|طباعة\s*ذهبية)/iu)?.[1];
   if(printing)add("printing",printing);
   const branding=text.match(/(?:branding|logo|برندینگ|لوگو|شعار)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(branding)add("branding",branding);
@@ -7714,11 +7776,14 @@ const SHIPPING_QUESTION={test:text=>SHIPPING_STRONG.test(text)||(SHIPPING_WEAK.t
 // no such attribute word is in the message (an explicit price word always is one).
 const PRICE_WORDS=/(?:\bprice\b|\bcost\b|قیمت|هزینه|سعر|بكم|كم\s*السعر)/iu,PRICE_ATTRIBUTE_WORDS=/(?:سایز|اندازه|ابعاد|رنگ|جنس|مقاس|قياس|القياس|لون|ارتفاع|عرض|طول|size|colou?r|material)/iu;
 const PRICE_QUESTION={test:text=>PRICE_WORDS.test(text)||((/چنده/u.test(text)||/(?:^|\s)چند\s*(?:میشه|می‌شه|درمیاد|در\s*میاد|تومنه|تومانه|میفته)?\s*[؟?!]*\s*$/u.test(String(text||"").trim()))&&!PRICE_ATTRIBUTE_WORDS.test(text))};
+// Phase 14: declining PRINTING ("چاپ نمی‌خواهم", "نمیخوام چاپ", "بدون چاپ", "ما نريد طباعة", "بدون طباعة") is a product preference,
+// not a deal rejection — the phrase is removed before intent rules run; any other "نمی‌خوام …" (e.g. «نمی‌خوام بخرم») still rejects.
+const SALES_NO_PRINTING=/(?:(?:نمی\s*‌?\s*خوا(?:م|هم|یم)|نمیخوا(?:م|یم)|بدون|لازم\s*نیست)\s*(?:\S+\s+)?(?:چاپ|فویل|طلاکوب|کوب)|(?:چاپ|فویل)\s*(?:رو\s*|را\s*)?(?:نمی\s*‌?\s*خوا(?:م|هم|یم)|نمیخوا(?:م|یم)|لازم\s*نیست|نداشته\s*باشه)|(?<![\p{L}])(?:ما|لا)\s*(?:نريد|اريد|أريد|نحتاج|احتاج|أحتاج)\s*(?:ال)?(?:طباعة|طباعه)|بدون\s*(?:ال)?(?:طباعة|طباعه))/u;
 function classifyNegotiationIntent(value) {
-  const text=String(value||"").trim().toLowerCase();
+  const text=String(value||"").trim().toLowerCase().replace(new RegExp(SALES_NO_PRINTING.source,"gu")," ").trim();
   if(!text)return "other";
   const rules=[
-    ["rejected",/(?:not interested|no thanks|نه\s*(?:ممنون|متشکرم)|علاقه\s*ندار|نمی\s*خوا|لا\s*(?:شكرا|أرغب)|غير\s*مهتم)/iu],
+    ["rejected",/(?:not interested|no thanks|نه\s*(?:ممنون|متشکرم)|علاقه\s*ندار|نمی\s*‌?\s*خوا|منصرف\s*شدم|لا\s*(?:شكرا|أرغب)|غير\s*مهتم)/iu],
     ["accepted",/(?:i accept|agreed|deal\b|قبول(?:ه|\s*دارم)?|موافقم|تأیید|تاييد|اوکی|نعم\s*موافق|اتفقنا|موافق)/iu],
     ["quote_requested",/(?:quotation|proforma|quote\b|پیش[‌\s-]*فاکتور|عرض\s*سعر)/iu],
     ["objection_price",/(?:too expensive|price\s+(?:is\s+)?too high|گران(?:ه|\s*است)?|گرون|قیمت\s*(?:زیاد|بالا)|غالي|السعر\s*(?:غالي|مرتفع))/iu],
@@ -7782,7 +7847,9 @@ const SALES_BRAIN_STAGES=new Set(["lead","contacted","customer_replied","needs_d
 // Letters decide first (Persian-only / Arabic-only letters). A message with neither («هلا», «شكو ماكو») is Iraqi Arabic only when it
 // uses an unmistakably Iraqi word; otherwise it carries no language evidence.
 const SALES_IRAQI_WORDS=new Set(["هلا","شلون","شلونك","شلونكم","شكو","ماكو","اكو","احنا","مرحبا","هواية","شنو","شگد"]);
-function salesBrainScriptLanguage(value){const text=String(value||"");if(/[پچژگکی]/u.test(text))return "Persian";if(/[ةىأإؤئيك]/u.test(text))return "Iraqi Arabic";if(text.normalize("NFKC").split(/[^\p{L}]+/u).some(w=>SALES_IRAQI_WORDS.has(w)))return "Iraqi Arabic";return null;}
+// Phase 14: decided by letters that belong to ONE script (Persian پ ژ ک ی vs Arabic ة ى أ إ ؤ ئ ي ك); چ and گ also occur in Iraqi
+// Arabic (شگد، چان) and never decide alone. A tie or no exclusive letter falls back to Iraqi words, then null (market policy decides).
+function salesBrainScriptLanguage(value){const text=String(value||"");const fa=(text.match(/[پژکی]/gu)||[]).length,ar=(text.match(/[ةىأإؤئيك]/gu)||[]).length;if(fa>ar)return "Persian";if(ar>fa)return "Iraqi Arabic";if(text.normalize("NFKC").split(/[^\p{L}]+/u).some(w=>SALES_IRAQI_WORDS.has(w)))return "Iraqi Arabic";return null;}
 // LANGUAGE POLICY (market first; language ≠ market): an IRAN conversation is answered in Persian and an ARAB one in Iraqi Arabic.
 // The customer's own language overrides the market only when it is the ACTIVE conversation language: this message and their previous
 // one are both in it, or we already switched to it and this message is script-neutral or in it. One stray message never flips it.
@@ -8234,7 +8301,7 @@ function salesBrainCustomerGoal(intent,known){
 // a pending proposal; whatever the approved data does not cover becomes ONE question or a price-only owner escalation.
 
 // A destination city is explicit market evidence (exactly one country; a mixed answer stays undecided).
-const SALES_DESTINATION_COUNTRIES=[["iran",/(?<![\p{L}])(?:ایران|ايران|iran|تهران|مشهد|اصفهان|شیراز|شيراز|تبریز|تبريز|کرج|كرج|قم|اهواز|کرمانشاه|رشت|یزد|کرمان|همدان|اراک|ارومیه|زاهدان|ساری|بندرعباس|قزوین|کیش|tehran|mashhad|isfahan|shiraz)(?![\p{L}])/iu],["iraq",/(?<![\p{L}])(?:عراق|العراق|iraq|بغداد|البصرة|البصره|بصرة|بصره|أربيل|اربيل|النجف|نجف|كربلاء|كربلا|کربلا|الموصل|موصل|السليمانية|دهوك|كركوك|الحلة|الناصرية|العمارة|الديوانية|الكوت|baghdad|basra|erbil|najaf|karbala)(?![\p{L}])/iu]];
+const SALES_DESTINATION_COUNTRIES=[["iran",/(?<![\p{L}])(?:ایران|ايران|iran|تهران|مشهد|اصفهان|شیراز|شيراز|تبریز|تبريز|کرج|كرج|قم|اهواز|کرمانشاه|رشت|یزد|کرمان|همدان|اراک|ارومیه|زاهدان|ساری|بندرعباس|قزوین|کیش|طهران|أصفهان|تبريز|كرج|الأهواز|الاهواز|ahvaz|tabriz|karaj|rasht|yazd|kerman|hamadan|urmia|qazvin|zahedan|tehran|mashhad|isfahan|shiraz)(?![\p{L}])/iu],["iraq",/(?<![\p{L}])(?:عراق|العراق|iraqi?|بغداد|البصرة|البصره|بصرة|بصره|أربيل|اربيل|النجف|نجف|كربلاء|كربلا|کربلا|الموصل|موصل|السليمانية|دهوك|كركوك|الحلة|الناصرية|العمارة|الديوانية|الكوت|الرمادي|رمادي|الفلوجة|الفلوجه|فلوجة|السماوة|سماوة|ذي\s*قار|ميسان|الأنبار|الانبار|ديالى|ديالي|زاخو|تكريت|السليمانيه|سليمانية|ramadi|fallujah|sulaymaniyah|sulaimani|slemani|duhok|dohuk|kirkuk|mosul|nasiriyah|baghdad|basra|erbil|najaf|karbala)(?![\p{L}])/iu]];
 function salesDestinationCountry(destination){const text=String(destination||""),hits=SALES_DESTINATION_COUNTRIES.filter(([,pattern])=>pattern.test(text)).map(([country])=>country);return hits.length===1?hits[0]:null;}
 
 function salesEditDistanceAtMostOne(a,b){
@@ -9103,7 +9170,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // The market comes from the same explicit evidence as quotes (owner-set lead market, lead country, stated destination — a named
   // city counts); when it cannot be established, only GLOBAL facts are used (fail-closed).
   let leadMeta={};try{leadMeta=parseLeadNotes({notes:row.lead_notes})||{};}catch{}
-  const marketDecision=determineQuoteMarket({ownerMarket:leadMeta.market,leadCountry:leadMeta.country,destination:salesDestinationCountry(memory.destination)||memory.destination});
+  const marketDecision=determineQuoteMarket({ownerMarket:leadMeta.market,leadCountry:leadMeta.country||memory.customer_country,destination:salesDestinationCountry(memory.destination)||memory.destination});
   const conversationMarket=["IRAN","ARAB"].includes(marketDecision.market)?marketDecision.market:null,knowledgeMarkets=conversationMarket?[conversationMarket,"GLOBAL"]:["GLOBAL"];
   // LANGUAGE follows the market first (see salesBrainLanguage); the customer's consistent own language is the only exception.
   const earlierInbound=context.filter(x=>x.direction==="inbound"&&x.id!==row.id).reverse().map(x=>x.message);
@@ -9508,7 +9575,13 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   else if(objectionKind&&pricedNow&&(negotiation=salesNegotiationReply(objectionKind,pricing,language))&&!recentReplies.some(r=>salesBrainClaimText(r)===salesBrainClaimText(negotiation.parts.join(" ")))){action=negotiation.action;}
   else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price")escalate("commercial_owner","commercial_owner_review_required");
   else if(intent==="asks_moq"){const moqFact=knowledge.filter(x=>x.domain==="quantity"&&x.attribute==="moq").sort((a,b)=>Number(b.market===conversationMarket)-Number(a.market===conversationMarket))[0];let moqValue=null;try{moqValue=JSON.parse(moqFact?.value_json||"null");}catch{}if(!(Number.isSafeInteger(moqValue)&&moqValue>0)&&pricedNow&&Number.isSafeInteger(pricing.moq))moqValue=pricing.moq;if(Number.isSafeInteger(moqValue)&&moqValue>0){action="answer_moq";answerNumbers.push(moqValue);}else escalate("moq_owner","approved_moq_missing");}
-  else if(intent==="quote_requested"){action="quote";needsOwner=!known.product_or_model||!quantityValid;needsOwnerReason=needsOwner?"quote_requirements_incomplete":null;}
+  // Phase 14.1 (owner rule): «عرض سعر» / «پیش‌فاکتور» within approved authority is answered like a price question — approved,
+  // versioned price (and approved discount) only; missing details are gathered; exceptional pricing escalates inside priceHandled.
+  // Phase 14.1 (owner rule): a price / quote request with NO product known yet first collects the product (at most twice, the same
+  // bound as other questions) instead of escalating at once; with a product named, the approved-price path below decides.
+  else if((intent==="quote_requested"||intent==="asks_price")&&!known.product_or_model&&!pricedNow&&timesAsked("product_or_model")<2){action="ask_product";askedField="product_or_model";}
+  else if(intent==="quote_requested"&&priceHandled()){}
+  else if(intent==="quote_requested"&&known.product_or_model&&quantityValid){action="quote";needsOwner=false;needsOwnerReason=null;}
   else if(intent==="accepted"&&!acceptedAgain){action="accepted";}
   else if(intent==="asks_price"&&priceHandled()){}
   // An open owner decision blocks only ITS issue. A bare follow-up about it ("any news?") waits on it; any other message — a safe
@@ -13149,23 +13222,27 @@ configureSalesIntelligence({
 
 export default {
   async scheduled(event, env, ctx) {
+    // Phase 14: a scheduled failure is recorded (sanitized, at most one system_events row per step per hour via a deterministic id)
+    // instead of being swallowed. Independent steps stay independent; the autopilot chain keeps its original stop-at-first-failure
+    // semantics, so the paid weekly-video steps never run after a sibling step failed. Order and set of steps are unchanged.
+    const stepFailed=async(step,e)=>{try{await env.DB.prepare("INSERT OR IGNORE INTO system_events VALUES(?,?,?,?,?,?)").bind(`sched-fail:${step}:${now().slice(0,13)}`,"scheduled_step_failed","error","Scheduled step failed",JSON.stringify({step,error:sanitizeOperationalError(e?.message||e)}),now()).run();}catch{}};
+    const isolate=async(step,fn)=>{try{await fn();}catch(e){await stepFailed(step,e);}};
+    const gateOpen=async()=>{try{return !!(await autonomyMasterGate(env));}catch(e){await stepFailed("master_gate",e);return false;}};   // fail closed
     if (event?.cron === "*/15 * * * *") {
     // Bounded stale customer-image recovery (max 3 rows per tick, attempt-capped, fail-closed); never drafts or sends.
-    ctx.waitUntil((async()=>{ try { await recoverStaleCustomerMedia(env,{limit:3}); } catch {} })());
+    ctx.waitUntil(isolate("recover_stale_customer_media",()=>recoverStaleCustomerMedia(env,{limit:3})));
     // Bounded order-candidate consistency pass (accepted chat offers without an order candidate); never sends anything.
-    ctx.waitUntil((async()=>{ try { await reconcileAcceptedChatOffers(env,{limit:10}); } catch {} })());
+    ctx.waitUntil(isolate("reconcile_accepted_chat_offers",()=>reconcileAcceptedChatOffers(env,{limit:10})));
     // MEM-02 retention: per-inbox AI results are cleared after their reuse window, rows after 7 days (bounded; live leases kept).
-    ctx.waitUntil((async()=>{ try { await purgeAiCallFlights(env); } catch {} })());
+    ctx.waitUntil(isolate("purge_ai_call_flights",()=>purgeAiCallFlights(env)));
     // Independent agent watchdog (Stage 3): own waitUntil + try/catch, reads ops tables and raises alerts; never runs or sends anything.
-    ctx.waitUntil((async()=>{ try { await runWatchdog(env); } catch {} })());
-    if (!(await autonomyMasterGate(env))) return;
+    ctx.waitUntil(isolate("watchdog",()=>runWatchdog(env)));
+    if (!(await gateOpen())) return;
     ctx.waitUntil((async()=>{
-        await ensureWebsiteGrowthStore(env);
-        await runAutoPilotCycle(env,"scheduled");
-        await runAnalyzeOptimizeCycle(env,"scheduled");
-        await recovery(env);
-   await prepareWeeklyVideoAutopilot(env);
-await pollWeeklyVideoAutopilot(env);
+        const chain=[["website_growth_store",()=>ensureWebsiteGrowthStore(env)],["auto_pilot_cycle",()=>runAutoPilotCycle(env,"scheduled")],
+          ["analyze_optimize_cycle",()=>runAnalyzeOptimizeCycle(env,"scheduled")],["recovery",()=>recovery(env)],
+          ["weekly_video_prepare",()=>prepareWeeklyVideoAutopilot(env)],["weekly_video_poll",()=>pollWeeklyVideoAutopilot(env)]];
+        for(const [step,fn] of chain){try{await fn();}catch(e){await stepFailed(step,e);break;}}
     })());
       ctx.waitUntil((async()=>{ 
   try { 
@@ -13177,7 +13254,7 @@ await pollWeeklyVideoAutopilot(env);
         body:"{}"
       })
     ); 
-  } catch(e) {} 
+  } catch(e) { await stepFailed("autonomy_tasks",e); } 
 })());
       ctx.waitUntil((async()=>{
         try {
@@ -13194,11 +13271,11 @@ await pollWeeklyVideoAutopilot(env);
           if(!dailyWindow&&env.OPENAI_API_KEY&&(await adsDueFollowups(env)).length&&await reserveCrmFollowupRun(env,Date.now(),"scheduled_followups"))
             await prepareAdsFollowups(env,{limit:AD_MAX_DRAFTS_PER_RUN,retry:true});
           // Actual sending remains authorized-channel/manual.
-        } catch(e) { await audit(env,"ad_autopilot_scheduled_error","Scheduled advertising Autopilot cycle failed",{error:e.message}); }
+        } catch(e) { try{ await audit(env,"ad_autopilot_scheduled_error","Scheduled advertising Autopilot cycle failed",{error:sanitizeOperationalError(e?.message||e)}); }catch{} }
       })());
     }
     if (event?.cron === "0 7 * * *") {
-    if (!(await autonomyMasterGate(env))) return;
+    if (!(await gateOpen())) return;
     ctx.waitUntil((async()=>{
         try {
           // The daily follow-up drafting sweep (OpenAI) is Ads execution too: it shares the Ads daily run budget.
@@ -13207,7 +13284,7 @@ await pollWeeklyVideoAutopilot(env);
           if(await crmFollowupGate(env,"daily_followups",{spacing:false})) return;
           const r=await prepareAdsFollowups(env,{limit:AD_MAX_DRAFTS_PER_RUN,retry:true});
           await audit(env,"ad_followups_scheduled","Daily advertising follow-up sweep completed",{due:r.due,prepared:r.prepared,languages:r.languages});
-        } catch {}
+        } catch(e) { await stepFailed("daily_followups",e); }
       })());
     }
   },
@@ -14056,6 +14133,12 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
 
       // Phase 13.1: Owner Action Center — one read-only, prioritized queue of everything waiting on the owner. It only reads existing
       // records (no write, no send, no approval, no state change); acting stays in the existing owner-only views it links to.
+      // Phase 14: Telegram inbound/outbound readiness (owner-only, read-only; ?live=1 adds a read-only getWebhookInfo).
+      if (u.pathname === "/api/telegram/inbound-health" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        try{return json(await telegramInboundHealth(env,{live:u.searchParams.get("live")==="1"}));}
+        catch(e){return json({ok:false,error:"Telegram health is unavailable"},500);}
+      }
       if (u.pathname === "/api/owner/action-center" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         const q=Object.fromEntries(["priority","category","market","status","limit","offset"].map(k=>[k,String(u.searchParams.get(k)||"").trim().slice(0,40)]));

@@ -948,23 +948,28 @@ async function proposeFromCorrections(env,{product_key,market,request_class,chan
 /* ------------------------------------------------- revenue intelligence */
 const ATTRIBUTION_DIMENSIONS=new Set(["market","lead_source","product_key","config_key","request_class","pricing_mode","order_status","repeat_index","quantity"]);
 // Idempotent rebuild from stored orders/payments; currencies are kept separate and never converted.
+// Phase 14: test leads (same malformed-notes-safe predicate as moneyAtStake) and cancelled orders are not revenue; their rows are
+// removed from this derived snapshot (source orders and payments are never touched).
 export async function rebuildRevenueAttribution(env){
   await ensureSalesIntelligenceStore(env);
+  const notRevenue=`${D.leadTestFlagSql?D.leadTestFlagSql("l"):"0"}=1 OR COALESCE(o.status,'')='cancelled'`;
   const rows=await all(env,`SELECT o.*,q.request_id,q.price_version_id,q.discount_minor AS quote_discount,q.config_key AS quote_config,l.notes AS lead_notes,
       (SELECT COALESCE(SUM(p.amount_minor),0) FROM lead_order_payments p WHERE p.order_id=o.id) AS paid,
       (SELECT COUNT(*) FROM lead_orders e WHERE e.lead_id=o.lead_id AND e.created_at<o.created_at AND e.status NOT IN ('order_candidate','cancelled')) AS prior_orders
-    FROM lead_orders o LEFT JOIN lead_quotes q ON q.id=o.quote_id LEFT JOIN leads l ON l.id=o.lead_id`);
+    FROM lead_orders o LEFT JOIN lead_quotes q ON q.id=o.quote_id LEFT JOIN leads l ON l.id=o.lead_id WHERE NOT (${notRevenue})`);
   const t=now();let n=0;
   for(const o of rows){
     const req=o.request_id?await first(env,"SELECT request_class,product_key FROM sales_requests WHERE id=?",o.request_id):null,meta=parseJson(o.lead_notes,{});
     const costsKnown=o.unit_cost_minor!==null&&o.unit_cost_minor!==undefined&&o.shipping_cost_minor!==null&&o.shipping_cost_minor!==undefined&&o.other_cost_minor!==null&&o.other_cost_minor!==undefined;
     // Profit = owner-recorded paid revenue − tax − recorded costs; only for fully paid orders with ALL costs recorded (never estimated).
-    const profit=costsKnown&&["paid","shipped","fulfilled"].includes(o.status)?Number(o.paid||0)-Number(o.tax_minor||0)-(o.unit_cost_minor*o.quantity+o.shipping_cost_minor+o.other_cost_minor):null;
+    // Phase 14: "fully paid" is checked on the payments, not only the status (a shipped order with an open balance has no profit yet).
+    const profit=costsKnown&&["paid","shipped","fulfilled"].includes(o.status)&&o.total_minor!==null&&Number(o.paid||0)>=Number(o.total_minor)?Number(o.paid||0)-Number(o.tax_minor||0)-(o.unit_cost_minor*o.quantity+o.shipping_cost_minor+o.other_cost_minor):null;
     await env.DB.prepare(`INSERT OR REPLACE INTO revenue_attribution(order_id,lead_id,market,currency,lead_source,request_class,product_key,config_key,quantity,quote_id,price_version_id,pricing_mode,discount_minor,total_minor,paid_minor,profit_minor,order_status,repeat_index,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(o.id,o.lead_id,o.market,canonicalCurrency(o.currency),String(meta.source||meta.lead_source||meta.discovery_source||meta.platform||"unknown").slice(0,80),
       req?.request_class||"legacy",req?.product_key||normKey(o.product),o.quote_config||null,o.quantity,o.quote_id,o.price_version_id||null,o.pricing_mode,o.quote_discount??o.discount_minor??0,o.total_minor,Number(o.paid||0),profit,o.status,Number(o.prior_orders||0),o.created_at,t).run();n++;
   }
-  return {rebuilt:n};
+  const removed=await env.DB.prepare(`DELETE FROM revenue_attribution WHERE order_id IN (SELECT o.id FROM lead_orders o LEFT JOIN leads l ON l.id=o.lead_id WHERE ${notRevenue})`).run();
+  return {rebuilt:n,excluded_removed:Number(removed?.meta?.changes)||0};
 }
 export async function revenueBreakdown(env,dimension){
   if(!ATTRIBUTION_DIMENSIONS.has(dimension))throw Error("Unsupported dimension");

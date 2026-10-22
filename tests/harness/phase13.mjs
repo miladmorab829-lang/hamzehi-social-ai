@@ -102,7 +102,8 @@ ok("B2 page size is capped (limit 1000 → 100)",(await AC(B,"limit=1000")).body
 const UI=await import(pathToFileURL(path.join(SRC,"live-dashboard-page.js")).href);
 const page=UI.liveDashboardHtml("actions"),appr=UI.liveDashboardHtml("approvals"),js=page.slice(page.lastIndexOf("<script>")+8,page.lastIndexOf("</script>"));
 let parses=true;try{new Function(js);}catch{parses=false;}
-const oacJs=js.slice(js.indexOf("// ---- Phase 13.1 Owner Action Center"),js.indexOf("// ---- customers"));
+// the Owner Action Center block ends at the NEXT section marker (Phase 14 placed the Telegram loader after it)
+const oacStart=js.indexOf("// ---- Phase 13.1 Owner Action Center"),oacJs=js.slice(oacStart,js.indexOf("// ---- ",oacStart+10));
 ok("U1 the Owner Action Center has its own page (/dashboard/actions) and leads the approvals page; the page script parses",UI.dashboardRoute("/dashboard/actions")==="actions"&&page.includes('id="oacItems"')&&appr.indexOf('id="oacItems"')>-1&&appr.indexOf('id="oacItems"')<appr.indexOf('id="approvalsOverview"')&&parses,"");
 ok("U2 the UI only READS: its code calls GET /api/owner/action-center and nothing else (no POST / PATCH, no other endpoint), and it is not in the polling groups",
   /api\("\/api\/owner\/action-center\?"/.test(oacJs)&&!/method\s*:/.test(oacJs)&&(oacJs.match(/api\(/g)||[]).length===1&&!/loadOwnerActions/.test(js.slice(js.indexOf("const DASHBOARD_POLL_GROUPS"),js.indexOf("async function refreshTick"))),"");

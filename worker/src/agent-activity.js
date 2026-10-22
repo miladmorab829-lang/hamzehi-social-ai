@@ -113,7 +113,7 @@ export async function agentActivitySummary(env,{modules,actions,controls,quotas=
     q("SELECT module,locked_at FROM autonomy_locks LIMIT 50"),
     q("SELECT platform,COUNT(*) n,MAX(created_at) last FROM inbox_messages GROUP BY platform LIMIT 20"),
     eventFloor==null?null:q(`SELECT type,COUNT(*) n,MAX(created_at) last,substr(details_json,1,800) d FROM system_events WHERE rowid>=? AND created_at>=? AND type IN (${ALL_TYPES.map(()=>"?").join(",")}) GROUP BY type LIMIT 60`,eventFloor,sinceSig,...ALL_TYPES),
-    q("SELECT agent,level,code,last_seen_at FROM agent_alerts WHERE acknowledged_at IS NULL LIMIT 100"),
+    q("SELECT agent,level,code,last_seen_at,occurrences,recovery_state,fallback_status FROM agent_alerts WHERE acknowledged_at IS NULL LIMIT 100"),
     q("SELECT agent,COUNT(*) n FROM agent_dead_letters WHERE resolved_at IS NULL GROUP BY agent LIMIT 50"),
     q("SELECT module,action FROM autonomy_action_controls WHERE enabled=0 LIMIT 100"),
     q("SELECT key,value FROM system_kv WHERE key IN ('ads_autopilot_config','auto_pilot_config','ads_market:IRAN','ads_market:ARAB') LIMIT 5")

@@ -914,13 +914,15 @@ function acCard(a){
  const m=AC_META[a.agent]||[a.agent,"",""],c7=a.counts_7d,qd=a.queue,d=a.detail||{};
  const rows=[["آخرین اجرا",acTime(a.last_run_at)+(a.latest_task_action?" · "+esc(a.latest_task_action):"")],
   ["آخرین اجرای موفق",a.last_success_at?acTime(a.last_success_at):"<span class='muted'>ثبت نشده</span>"],
+  ["Heartbeat","<span class='muted'>فقط heartbeat سراسری زمان‌بند ثبت می‌شود؛ heartbeat جداگانهٔ هر عامل پیاده‌سازی نشده (آخرین اجرا را ببینید)</span>"],
+  ["آخرین خطا",a.last_failure?acTime(a.last_failure.at)+" · <span class='bad'>"+esc(String(a.last_failure.error||"").slice(0,160))+"</span>":"<span class='muted'>ثبت نشده</span>"],
   ["آخرین کار واقعی",a.last_real_at?acTime(a.last_real_at)+" · "+esc(a.last_real_source):"<span class='muted'>در ۶۰ روز گذشته ثبت نشده</span>"],
   ["۷ روز",c7?"<span class='ok'>✓ "+esc(c7.completed)+"</span> · <span class='"+(c7.failed?"bad":"muted")+"'>✕ "+esc(c7.failed)+"</span>"+(c7.blocked?" · مسدود "+esc(c7.blocked):""):"نامعلوم"],
   ["صف و صف خطا",qd?"در صف "+esc(qd.queued)+" · در حال اجرا "+esc(qd.running)+(qd.locked_since?" · قفل از "+acTime(qd.locked_since):"")+" · صف خطا "+(a.dead_letters_open==null?"نامعلوم":a.dead_letters_open?"<span class='bad'>"+esc(a.dead_letters_open)+" باز</span>":"0"):"نامعلوم"]];
  if(a.inbound)rows.push(["پیام ورودی",esc(a.inbound.messages)+(a.inbound.last_at?" · آخرین "+acTime(a.inbound.last_at):"")]);
  if(a.agent==="ads"){if(d.markets)for(const mk of ["IRAN","ARAB"]){const x=d.markets[mk]||{};rows.push(["Ads "+(mk==="IRAN"?"ایران":"عراق"),(x.enabled?"روشن":"خاموش")+" · شهر: "+(x.city?esc(x.city):"<span class='bad'>خالی</span>")+" · سقف روزانه: "+(x.runs_per_day!=null?esc(x.runs_per_day):"تعیین نشده")])}else rows.push(["Autopilot",esc(d.autopilot||"نامعلوم")+" · شهر: "+(d.target_city?esc(d.target_city):"<span class='bad'>خالی</span>")]);if(d.last_run_found!=null)rows.push(["آخرین اجرای Ads","یافته "+esc(d.last_run_found)+" · پیش‌نویس "+esc(d.last_run_drafted)+" · خطا "+esc(d.last_run_errors)])}
  if(a.agent==="content")rows.push(["منتظر تأیید مالک",d.pending_review!=null?"<b>"+esc(d.pending_review)+"</b>":"نامعلوم"]);
- if(a.alerts_open&&a.alerts_open.length)rows.push(["هشدار باز",a.alerts_open.map(x=>esc(x.level)+" "+esc(x.code)).join(" · ")]);
+ if(a.alerts_open&&a.alerts_open.length)rows.push(["هشدار باز",a.alerts_open.map(x=>"<span class='"+(x.level==="critical"?"bad":x.level==="warning"?"warn":"muted")+"'>"+esc(x.level)+"</span> "+esc(x.code)+(x.occurrences>1?" ×"+esc(x.occurrences):"")+" · "+(x.recovery_state==="recovered"?"<span class='ok'>بازیابی شده</span>":"<span class='bad'>باز</span>")+(x.fallback_status?" · جایگزین: "+esc(x.fallback_status):"")+" · <span class='muted'>منتظر تأیید مالک</span>").join("<br>")]);
  const qr=(x,l)=>esc(l)+" "+(x.success_pct==null?"<span class='muted'>"+esc(AC_MISSING[x.missing]||"داده کافی نیست")+" ("+esc(x.samples)+")</span>":"<b>"+esc(x.success_pct)+"%</b> ("+esc(x.samples)+")");
  if(a.quality_7d)rows.push(["کیفیت ۷ روز",qr(a.quality_7d.real,"کار واقعی")+" · "+qr(a.quality_7d.status_checks,"بررسی وضعیت")]);
  if(a.cost&&a.cost.paid_actions&&a.cost.paid_actions.length)rows.push(["سهمیه و هزینه",a.cost.paid_actions.map(p=>esc(p.action)+": امروز "+(p.used_today==null?"نامعلوم":esc(p.used_today)+" / "+esc(p.daily_quota))+" · "+esc(p.unit_cost)+" واحد ("+esc(p.provider||"—")+")").join("<br>")]);
@@ -1771,6 +1773,21 @@ function oacRow(x){
   +((x.flags||[]).indexOf("customer_waiting")>=0?"<span class='tag'>مشتری منتظر پاسخ</span> ":"")
   +esc(age)+amt+" · <bdi dir='ltr'>"+esc(ref)+"</bdi>"+(x.count?" · "+uxN(x.count)+" مورد":"")+(x.link?" · <a href='"+esc(x.link)+"'>مشاهده</a>":"")+"</small></div>";
 }
+// ---- Phase 14 Telegram readiness (read-only; on page open and on demand — not in the polling groups)
+const TG_STATUS={READY:["آماده","ok"],NO_TRAFFIC:["آماده، بدون ترافیک","warn"],NOT_VERIFIED:["تأییدنشده","warn"],MISCONFIGURED:["پیکربندی ناقص","bad"],FAILED:["خطا در دریافت","bad"]};
+async function loadTelegramHealth(live){
+ $("tgHealthStatus").textContent=live?"در حال بررسی زنده…":"در حال دریافت…";
+ const d=await api("/api/telegram/inbound-health"+(live?"?live=1":""),{timeoutMs:12000});
+ if(!d.ok){$("tgHealthStatus").textContent=uxAuthHint(d);$("tgHealthBody").innerHTML="";return}
+ const st=TG_STATUS[d.status]||[d.status,"gray"],e=d.evidence||{},c=d.configured||{},w=d.webhook;
+ $("tgHealthStatus").innerHTML="<span class='pill "+st[1]+"'>"+esc(st[0])+"</span> "+(d.reasons||[]).map(esc).join(" · ")+(d.live_checked?"":" <span class='muted'>(بررسی زنده انجام نشده)</span>");
+ const yes=v=>v?"<span class='ok'>بله</span>":"<span class='bad'>خیر</span>";
+ const rows=[["توکن bot",yes(c.bot_token)],["secret webhook",c.webhook_secret==="missing"?"<span class='bad'>ندارد</span>":esc(c.webhook_secret)],["کانال عمومی (TELEGRAM_CHAT_ID)",c.public_channel?"<span class='ok'>تنظیم شده</span>":"<span class='warn'>تنظیم نشده — انتشار خودکار ممکن نیست</span>"],
+  ["آخرین دریافت پذیرفته‌شده",e.last_accepted_delivery_at?uxWhen(e.last_accepted_delivery_at):"<span class='muted'>ثبت نشده</span>"],["آخرین پیام ورودی",e.last_inbound_message_at?uxWhen(e.last_inbound_message_at):"<span class='muted'>ندارد</span>"],
+  ["آخرین پیام مشتری",e.last_customer_message_at?uxWhen(e.last_customer_message_at):"<span class='muted'>ندارد</span>"],["رد شده (۲۴ ساعت)",e.rejections_24h?"<span class='bad'>"+uxN(e.rejections_24h)+"</span>":"0"],["ثبت webhook",e.webhook_registered_at?uxWhen(e.webhook_registered_at):"<span class='muted'>ثبت نشده</span>"]];
+ if(w)rows.push(["webhook (زنده)",w.ok?(w.url_set?(w.matches_this_worker?"<span class='ok'>به همین Worker</span>":"<span class='bad'>جای دیگر: "+esc(w.url_host||"?")+"</span>"):"<span class='bad'>تنظیم نشده</span>")+" · در صف "+uxN(w.pending_update_count)+(w.last_error_at?" · آخرین خطا "+uxWhen(w.last_error_at)+": "+esc(w.last_error_message||""):""):"<span class='bad'>بررسی ناموفق</span>"]);
+ $("tgHealthBody").innerHTML="<dl class='ackv'>"+rows.map(function(r){return "<dt>"+esc(r[0])+"</dt><dd>"+r[1]+"</dd>"}).join("")+"</dl>";
+}
 // ---- customers
 let uxLeads=[];
 async function loadLeadsList(){const d=await api("/api/leads");if(!Array.isArray(d.items)){$("leadsListStatus").textContent=uxAuthHint(d);$("leadsListItems").innerHTML="";return}uxLeads=d.items;
@@ -2023,7 +2040,7 @@ function dashSectionLoads(){
  return [on("tasks",loadTasks),on("brain",loadBrain),on("revenue",loadRevenue),on("opportunities",loadOpp),on("errors",loadErrors),on("safety",loadSafety),
   on("approvalItems",loadApprovals),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox),on("quoteItems",loadQuotes),
   on("orderItems",loadOrders),on("priceItems",loadPriceItems),on("knowledgeFacts",loadSalesKnowledge),(has("ownerEscalationsItems")||has("siMoney"))?loadOwnerEscalations():null,
-  on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter),on("oacItems",loadOwnerActions),on("galProduct",loadGalleryOptions),on("galReviewItems",loadGallery),on("galRequestItems",loadGalleryRequests),on("galFunnel",loadGalleryFunnel),on("mpOut",function(){return mpLoaded?null:mpLoad(false)})];
+  on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter),on("oacItems",loadOwnerActions),on("tgHealthBody",function(){return loadTelegramHealth(false)}),on("galProduct",loadGalleryOptions),on("galReviewItems",loadGallery),on("galRequestItems",loadGalleryRequests),on("galFunnel",loadGalleryFunnel),on("mpOut",function(){return mpLoaded?null:mpLoad(false)})];
 }
 // Hub summary: counts from the same existing endpoints the section pages use (nothing estimated or invented).
 async function loadHubSummary(){
@@ -2268,22 +2285,28 @@ DASH_SECTIONS.ownerActions=`<section class="section" id="ownerActions">
 </div>
 </section>
 `;
+// Phase 14 — Telegram readiness: delivery evidence + optional live webhook check (read-only). Status values come from the server.
+DASH_SECTIONS.telegramHealth=`<section class="card section" id="telegramHealth">
+<div class="title"><div><h2>${dashIcon("send")}وضعیت اتصال تلگرام</h2><div class="hint">فقط خواندنی؛ بررسی زنده فقط وضعیت webhook را از تلگرام می‌خواند و چیزی را تغییر نمی‌دهد.</div></div><div class="tools"><button class="btn" onclick="loadTelegramHealth(false)" aria-label="به‌روزرسانی">↻</button><button class="btn" onclick="loadTelegramHealth(true)">بررسی زنده webhook</button></div></div>
+<div id="tgHealthStatus" class="hint" style="margin-top:6px">در حال دریافت…</div><div id="tgHealthBody" class="rows"></div>
+</section>
+`;
 // Where every section lives (each page is its own document). Earlier paths are unchanged. FOLDS: sections shown collapsed on that
 // page — the lazy ones load their data only when opened (or when a link points into them).
 export const DASHBOARD_PAGES={
- hub:{path:"/dashboard",title:"خانه",icon:"home",desc:"خلاصه مدیریتی",sections:["home","hubAgents","authFold"]},
+ hub:{path:"/dashboard",title:"خانه",icon:"home",desc:"خلاصه مدیریتی",sections:["home","ownerActions","hubAgents","authFold"]},
  customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["leadsList","negotiation","opportunities"]},
  orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"box",desc:"سفارش‌ها، پرداخت‌ها و درخواست‌های قیمت",sections:["orders","money","quotes"]},
  actions:{path:"/dashboard/actions",title:"مرکز اقدام مالک",icon:"check",desc:"همهٔ کارهای منتظر مالک، اولویت‌بندی‌شده (فقط نمایش)",sections:["ownerActions"]},
  approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["ownerActions","approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
- agents:{path:"/dashboard/agents",title:"عامل‌ها و پایش",icon:"alert",desc:"سلامت عامل‌ها، هشدارها، تأییدها، صف خطا، مصرف",sections:["agentCenter","adsMarkets","agentOps"]},
+ agents:{path:"/dashboard/agents",title:"عامل‌ها و پایش",icon:"alert",desc:"سلامت عامل‌ها، هشدارها، تأییدها، صف خطا، مصرف",sections:["agentCenter","telegramHealth","adsMarkets","agentOps"]},
  errors:{path:"/dashboard/errors",title:"خطاها",icon:"alert",desc:"خطاهای سیستم و جزئیات",sections:["errorsCenter","errorsCard"]},
  more:{path:"/dashboard/more",title:"بیشتر",icon:"menu",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
  gallery:{path:"/dashboard/gallery",title:"گالری محصولات",icon:"camera",desc:"عکس واقعی، تأیید، جستجو و درخواست‌ها",sections:["galleryFunnel","galleryUpload","galleryReview","galleryLibrary","galleryRequests","galleryBackup"]},
  knowledge:{path:"/dashboard/knowledge",title:"محصولات و دانش",icon:"book",desc:"قیمت‌ها، کاتالوگ و دانش فروش",sections:["command","knowledge","memoryPreview","priceList","catalog"]},
  content:{path:"/dashboard/content",title:"محتوا",icon:"file",desc:"صف و پیش‌نویس محتوا",sections:["contentApproval","channels"]},
  media:{path:"/dashboard/media",title:"رسانه",icon:"image",desc:"اتوپایلوت عکس و ویدیو",sections:["photo","video"]},
- channels:{path:"/dashboard/channels",title:"کانال‌ها",icon:"send",desc:"تلگرام و اینستاگرام",sections:["channels"]},
+ channels:{path:"/dashboard/channels",title:"کانال‌ها",icon:"send",desc:"تلگرام و اینستاگرام",sections:["telegramHealth","channels"]},
  revenue:{path:"/dashboard/revenue",title:"درآمد و گزارش‌ها",icon:"chart",desc:"درآمد و پول در جریان",sections:["revenueCard","money","orders"]},
  sales:{path:"/dashboard/sales",title:"فروش (همه بخش‌ها)",icon:"chat",desc:"لیدها، گفتگو، پیام، قیمت، سفارش",sections:["opportunities","negotiation","outreach","quotes","orders"]},
  system:{path:"/dashboard/system",title:"تنظیمات پیشرفته",icon:"sliders",desc:"کنترل مرکزی، Taskها، عیب‌یابی، توکن",sections:["auth","kpis","master","channels","command","taskBrain","diagnostic","safety"]},
@@ -2291,6 +2314,7 @@ export const DASHBOARD_PAGES={
  all:{path:"/dashboard/all",title:"نمای کامل",icon:"grid",desc:"همه بخش‌ها در یک صفحه",sections:["kpis","command","knowledge","memoryPreview","escalations","auth","contentApproval","outreach","negotiation","quotes","orders","money","priceList","catalog","master","channels","photo","video","taskBrain","diagnostic","revenueCard","opportunities","errorsCard","safety"]}
 };
 export const DASH_FOLDS={
+ hub:{ownerActions:{title:"مرکز اقدام مالک",icon:"check",lazy:true}},
  customers:{opportunities:{title:"فرصت‌ها و لیدهای کشف‌شده",icon:"target",lazy:true}},
  orders:{money:{title:"پول در جریان و پیگیری وصول",icon:"wallet",lazy:true},quotes:{title:"درخواست‌های قیمت",icon:"receipt",lazy:true}},
  approvals:{quotes:{title:"درخواست‌های قیمت",icon:"receipt",lazy:true,cnt:"quotes"},outreach:{title:"تأیید ارسال پیام",icon:"mail",lazy:true,cnt:"outreach"},contentApproval:{title:"تأیید محتوا",icon:"file",lazy:true,cnt:"contentApproval"}},
@@ -2299,7 +2323,7 @@ export const DASH_FOLDS={
  system:{channels:{title:"کنترل کانال‌ها",icon:"send",lazy:true},command:{title:"فرمان و آموزش هوش مصنوعی",icon:"spark",lazy:true},taskBrain:{title:"Taskها، مغز کسب‌وکار و فعالیت",icon:"list",lazy:true},diagnostic:{title:"تست اتصال و عیب‌یابی",icon:"activity",lazy:true},safety:{title:"دروازه ایمنی",icon:"shield",lazy:true}}
 };
 const DASH_TABS=["hub","customers","orders","approvals","more"];
-const DASH_MORE_GROUPS=[["محصولات و دانش",["gallery","knowledge"]],["محتوا و رسانه",["content","media"]],["کانال‌ها",["channels"]],["درآمد و گزارش‌ها",["revenue","sales"]],["خطاها",["errors","agents"]],["تنظیمات پیشرفته",["system","all"]]];
+const DASH_MORE_GROUPS=[["اقدام‌های مالک",["actions"]],["محصولات و دانش",["gallery","knowledge"]],["محتوا و رسانه",["content","media"]],["کانال‌ها",["channels"]],["درآمد و گزارش‌ها",["revenue","sales"]],["خطاها",["errors","agents"]],["تنظیمات پیشرفته",["system","all"]]];
 const DASH_ORDER=["actions","customers","orders","approvals","errors","agents","gallery","knowledge","content","media","channels","revenue","system","sales","all"];
 const dashEsc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 DASH_SECTIONS.moreNav=DASH_MORE_GROUPS.map(([g,keys])=>`<section class="mgroup"><h3>${dashEsc(g)}</h3><nav class="mlist">`+keys.map(k=>{const p=DASHBOARD_PAGES[k];return `<a href="${p.path}"><span class="mi">${dashIcon(p.icon)}</span><span class="mt"><b>${dashEsc(p.title)}</b><small>${dashEsc(p.desc)}</small></span>${dashIcon("chev").replace('class="ic"','class="ic chev"')}</a>`;}).join("")+`</nav></section>`).join("\n")+"\n";
