@@ -860,7 +860,7 @@ async function loadAgentOps(){
   +(x.resolved_at?"":((!e||e.owner_requeue)?" <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','retried')\\">REQUEUE</button>":"")+" <button class='btn' onclick=\\"agentOpsAct('dead-letters/resolve','"+esc(x.id)+"','dismissed')\\">DISMISS</button>")+"</div>"}).join("")||"<div class='hint'>صف خطا خالی است.</div>");
  $("agentOpsQuotas").innerHTML=(d.quotas||[]).map(q=>"<div class='row'><b>"+esc(q.action)+"</b> · "+esc(q.used_today)+" / "+esc(q.daily_quota)+(q.used_today>=q.daily_quota?" <span class='bad'>(سقف امروز پر شد)</span>":"")+"</div>").join("")||"<div class='hint'>—</div>";
  const cs=d.costs,ql=d.quality;
- $("agentOpsCosts").innerHTML=!cs?"<div class='hint'>—</div>":"<div class='row'>Units: <b>"+esc(cs.units.used)+"</b> / "+esc(cs.units.budget)+" · "+Object.entries(cs.providers||{}).map(([p,v])=>esc(p)+" "+esc(v.used)+"/"+esc(v.budget)).join(" · ")+" · Ads Autopilot runs "+esc(cs.ads_autopilot.runs_today)+"/"+esc(cs.ads_autopilot.runs_per_day)+"</div>";
+ $("agentOpsCosts").innerHTML=!cs?"<div class='hint'>—</div>":"<div class='row'>Units: <b>"+esc(cs.units.used)+"</b> / "+esc(cs.units.budget)+" · "+Object.entries(cs.providers||{}).map(([p,v])=>esc(p)+" "+esc(v.used)+"/"+esc(v.budget)).join(" · ")+" · کشف Ads ایران "+esc((cs.ads_autopilot.by_market||{}).IRAN||0)+" · کشف Ads عراق "+esc((cs.ads_autopilot.by_market||{}).ARAB||0)+(cs.crm_followups?" · پیگیری CRM "+esc(cs.crm_followups.runs_today)+"/"+esc(cs.crm_followups.runs_per_day):"")+"</div>";
  const qv=(k,suf)=>ql&&ql.current[k]!=null?esc(ql.current[k])+suf+(ql.trend[k]!=null?" ("+(ql.trend[k]>=0?"+":"")+esc(ql.trend[k])+")":""):"—";
  $("agentOpsQuality").innerHTML=!ql?"<div class='hint'>—</div>":"<div class='row'>Task reliability "+qv("reliability","%")+" · run health "+qv("run_health","%")+" · routine posts "+qv("content_routine_rate","%")+" · owner acceptance "+qv("owner_acceptance","%")+" · CRM identity conflicts "+qv("crm_identity_conflicts","")+"</div>"+(ql.recurring_problems||[]).map(r=>"<div class='row'><b>"+esc(r.action)+"</b> ×"+esc(r.count)+" · "+esc(r.error||"")+"</div>").join("");
  $("agentOpsVersions").innerHTML=acVersionsHtml(d.versions,d.alerts);
@@ -906,8 +906,8 @@ function acCounts(agents){const n={ACTIVE:0,IDLE:0,BLOCKED:0,NOT_CONNECTED:0,UNK
 const AC_TECH={HEALTHY:["سالم","ok"],DEGRADED:["افت کیفیت","warn"],FAILED:["خطا","bad"],UNKNOWN:["نامعلوم","gray"]};
 const AC_CONN={CONNECTED:["وصل","ok"],NOT_CONNECTED:["وصل نیست","gray"],PAUSED:["متوقف توسط مالک","gray"],UNKNOWN:["نامعلوم","gray"],NOT_APPLICABLE:["داخلی (بدون کانال)","gray"]};
 const AC_EXEC={SUCCESS:["موفق","ok"],FAILED:["ناموفق","bad"],RUNNING:["در صف / در حال اجرا","warn"],NOT_SCHEDULED:["برنامه‌ریزی نشده","gray"],UNKNOWN:["نامعلوم","gray"]};
-const AC_REASON={MASTER_OFF:"کلید اصلی (Master) خاموش است",MODULE_DISABLED:"این عامل در تنظیمات خاموش است",ACTION_DISABLED:"یک یا چند اقدام این عامل خاموش است",ADS_CITY_EMPTY:"شهر هدف تبلیغات تعیین نشده است",MEDIA_PROVIDER_BLOCKED:"سرویس ویدیو درخواست را رد کرد یا رزرو این هفته استفاده شده است",DLQ_OPEN:"کار ناموفق در صف خطا منتظر بررسی است",CRITICAL_ALERT:"هشدار بحرانی باز است",SCHEDULER_STALE:"زمان‌بند مدتی است به این عامل نرسیده",LAST_TASK_FAILED:"آخرین کار این عامل ناموفق بود",CHANNEL_NOT_CONNECTED:"این کانال هنوز وصل نشده است (خطای فنی نیست)",EXPECTED_WORK_OVERDUE:"کار زمان‌بندی‌شده از موعدش عقب افتاده است",OWNER_REVIEW_PENDING:"مواردی منتظر تأیید مالک است"};
-const AC_NEXT={MASTER_OFF:"در صورت تمایل Master را روشن کنید (تصمیم مالک).",MODULE_DISABLED:"اگر خاموشی عمدی است اقدامی لازم نیست؛ وگرنه ماژول را روشن کنید.",ACTION_DISABLED:"اگر عمدی است اقدامی لازم نیست؛ وگرنه اقدام را روشن کنید.",CRITICAL_ALERT:"هشدار بحرانی را در بخش «هشدارها» بررسی کنید.",SCHEDULER_STALE:"اجرای cron و heartbeat زمان‌بند را بررسی کنید.",ADS_CITY_EMPTY:"یک شهر معتبر ایران یا عراق برای Ads تعیین کنید (نیاز به تأیید مالک).",MEDIA_PROVIDER_BLOCKED:"خطای سرویس ویدیو را در «جزئیات فنی» ببینید؛ تلاش بعدی در هفته بعد است.",DLQ_OPEN:"صف خطا را بررسی کنید و REQUEUE یا DISMISS را انتخاب کنید.",LAST_TASK_FAILED:"علت آخرین خطا را در «جزئیات فنی» ببینید.",OWNER_REVIEW_PENDING:"موارد منتظر را در صفحه «تأییدیه‌ها» بررسی کنید.",CHANNEL_NOT_CONNECTED:"وصل کردن این کانال تصمیم مالک است.",EXPECTED_WORK_OVERDUE:"ورودی‌ها، سهمیه و خطاهای اخیر این عامل را بررسی کنید.",NO_DATA:"هنوز داده‌ای برای این عامل ثبت نشده است.",NONE:"اقدامی لازم نیست."};
+const AC_REASON={MASTER_OFF:"کلید اصلی (Master) خاموش است",MODULE_DISABLED:"این عامل در تنظیمات خاموش است",ACTION_DISABLED:"یک یا چند اقدام این عامل خاموش است",ADS_CITY_EMPTY:"شهر هدف تبلیغات تعیین نشده است",ADS_MARKET_INCOMPLETE:"یک بازار Ads روشن است ولی شهر یا سقف اجرای آن کامل نیست",MEDIA_PROVIDER_BLOCKED:"سرویس ویدیو درخواست را رد کرد یا رزرو این هفته استفاده شده است",DLQ_OPEN:"کار ناموفق در صف خطا منتظر بررسی است",CRITICAL_ALERT:"هشدار بحرانی باز است",SCHEDULER_STALE:"زمان‌بند مدتی است به این عامل نرسیده",LAST_TASK_FAILED:"آخرین کار این عامل ناموفق بود",CHANNEL_NOT_CONNECTED:"این کانال هنوز وصل نشده است (خطای فنی نیست)",EXPECTED_WORK_OVERDUE:"کار زمان‌بندی‌شده از موعدش عقب افتاده است",OWNER_REVIEW_PENDING:"مواردی منتظر تأیید مالک است"};
+const AC_NEXT={MASTER_OFF:"در صورت تمایل Master را روشن کنید (تصمیم مالک).",MODULE_DISABLED:"اگر خاموشی عمدی است اقدامی لازم نیست؛ وگرنه ماژول را روشن کنید.",ACTION_DISABLED:"اگر عمدی است اقدامی لازم نیست؛ وگرنه اقدام را روشن کنید.",CRITICAL_ALERT:"هشدار بحرانی را در بخش «هشدارها» بررسی کنید.",SCHEDULER_STALE:"اجرای cron و heartbeat زمان‌بند را بررسی کنید.",ADS_CITY_EMPTY:"یک شهر معتبر ایران یا عراق برای Ads تعیین کنید (نیاز به تأیید مالک).",ADS_MARKET_INCOMPLETE:"شهر و سقف اجرای همان بازار را در بخش «بازارهای Ads» کامل کنید (نیاز به تأیید مالک).",MEDIA_PROVIDER_BLOCKED:"خطای سرویس ویدیو را در «جزئیات فنی» ببینید؛ تلاش بعدی در هفته بعد است.",DLQ_OPEN:"صف خطا را بررسی کنید و REQUEUE یا DISMISS را انتخاب کنید.",LAST_TASK_FAILED:"علت آخرین خطا را در «جزئیات فنی» ببینید.",OWNER_REVIEW_PENDING:"موارد منتظر را در صفحه «تأییدیه‌ها» بررسی کنید.",CHANNEL_NOT_CONNECTED:"وصل کردن این کانال تصمیم مالک است.",EXPECTED_WORK_OVERDUE:"ورودی‌ها، سهمیه و خطاهای اخیر این عامل را بررسی کنید.",NO_DATA:"هنوز داده‌ای برای این عامل ثبت نشده است.",NONE:"اقدامی لازم نیست."};
 const AC_MISSING={NO_FINISHED_TASKS:"هنوز کاری در ۷ روز گذشته تمام نشده",BELOW_MIN_SAMPLES:"کمتر از حداقل نمونه"};
 function acDim(label,map,k){const x=map[k]||map.UNKNOWN;return "<span class='pill "+x[1]+"' title='"+esc(label+": "+(k||"UNKNOWN"))+"'>"+esc(label)+": "+esc(x[0])+"</span>"}
 function acCard(a){
@@ -918,7 +918,7 @@ function acCard(a){
   ["۷ روز",c7?"<span class='ok'>✓ "+esc(c7.completed)+"</span> · <span class='"+(c7.failed?"bad":"muted")+"'>✕ "+esc(c7.failed)+"</span>"+(c7.blocked?" · مسدود "+esc(c7.blocked):""):"نامعلوم"],
   ["صف و صف خطا",qd?"در صف "+esc(qd.queued)+" · در حال اجرا "+esc(qd.running)+(qd.locked_since?" · قفل از "+acTime(qd.locked_since):"")+" · صف خطا "+(a.dead_letters_open==null?"نامعلوم":a.dead_letters_open?"<span class='bad'>"+esc(a.dead_letters_open)+" باز</span>":"0"):"نامعلوم"]];
  if(a.inbound)rows.push(["پیام ورودی",esc(a.inbound.messages)+(a.inbound.last_at?" · آخرین "+acTime(a.inbound.last_at):"")]);
- if(a.agent==="ads"){rows.push(["Autopilot",esc(d.autopilot||"نامعلوم")+" · شهر: "+(d.target_city?esc(d.target_city):"<span class='bad'>خالی</span>")]);if(d.last_run_found!=null)rows.push(["آخرین اجرای Ads","یافته "+esc(d.last_run_found)+" · پیش‌نویس "+esc(d.last_run_drafted)+" · خطا "+esc(d.last_run_errors)])}
+ if(a.agent==="ads"){if(d.markets)for(const mk of ["IRAN","ARAB"]){const x=d.markets[mk]||{};rows.push(["Ads "+(mk==="IRAN"?"ایران":"عراق"),(x.enabled?"روشن":"خاموش")+" · شهر: "+(x.city?esc(x.city):"<span class='bad'>خالی</span>")+" · سقف روزانه: "+(x.runs_per_day!=null?esc(x.runs_per_day):"تعیین نشده")])}else rows.push(["Autopilot",esc(d.autopilot||"نامعلوم")+" · شهر: "+(d.target_city?esc(d.target_city):"<span class='bad'>خالی</span>")]);if(d.last_run_found!=null)rows.push(["آخرین اجرای Ads","یافته "+esc(d.last_run_found)+" · پیش‌نویس "+esc(d.last_run_drafted)+" · خطا "+esc(d.last_run_errors)])}
  if(a.agent==="content")rows.push(["منتظر تأیید مالک",d.pending_review!=null?"<b>"+esc(d.pending_review)+"</b>":"نامعلوم"]);
  if(a.alerts_open&&a.alerts_open.length)rows.push(["هشدار باز",a.alerts_open.map(x=>esc(x.level)+" "+esc(x.code)).join(" · ")]);
  const qr=(x,l)=>esc(l)+" "+(x.success_pct==null?"<span class='muted'>"+esc(AC_MISSING[x.missing]||"داده کافی نیست")+" ("+esc(x.samples)+")</span>":"<b>"+esc(x.success_pct)+"%</b> ("+esc(x.samples)+")");
@@ -954,6 +954,46 @@ async function loadAgentCenter(){
  $("agentCenterSummary").innerHTML=tiles.map(t=>"<div class='card'><div class='k'>"+esc(t[1])+"</div><div class='num "+t[2]+"'>"+esc(n[t[0]]||0)+"<span class='muted' style='font-size:12px'> / "+esc(d.agents.length)+"</span></div></div>").join("");
  $("agentCenterFilter").innerHTML=[["ALL","همه"],["ACTIVE","فعال"],["IDLE","بیکار"],["BLOCKED","مسدود"],["NOT_CONNECTED","وصل نیست"],["UNKNOWN","نامعلوم"]].map(f=>"<button class='btn' type='button' data-f='"+f[0]+"' aria-pressed='false'>"+esc(f[1])+(f[0]==="ALL"?"":" "+esc(n[f[0]]||0))+"</button>").join("");
  acRender();
+}
+// Phase 09.4: Ads markets (GET /api/ads/markets, POST /api/ads/markets/config). Enabling asks the owner to confirm first; disabling never does.
+const ADS_CODE_FA={ADS_MARKET_DISABLED:"خاموش است",ADS_CITY_EMPTY:"شهر هدف تعیین نشده",ADS_CITY_INVALID:"شهر متعلق به این بازار نیست",ADS_LIMIT_MISSING:"سقف اجرای روزانه تعیین نشده",ADS_LIMIT_ABOVE_GLOBAL:"سقف بیشتر از سقف کلی Ads است"};
+let adsMk=null;
+function adsMarketCard(m,x,cap){
+ const opts=["<option value=''>— انتخاب شهر —</option>"].concat((x.city_options||[]).map(c=>"<option"+(c===x.city?" selected":"")+">"+esc(c)+"</option>")).join("");
+ const types=[["all","همه"],["gold","طلا و جواهر"],["watch","ساعت"],["perfume","عطر"],["fashion_jewelry","بدلیجات"]].map(t=>"<option value='"+t[0]+"'"+(t[0]===x.type?" selected":"")+">"+t[1]+"</option>").join("");
+ const codes=(x.codes||[]).filter(c=>c!=="ADS_MARKET_DISABLED").map(c=>"<span class='pill warn'>"+esc(ADS_CODE_FA[c]||c)+"</span>").join(" ");
+ return "<div class='card' data-market='"+esc(m)+"'><div class='row'><b>"+esc(x.label_fa||m)+"</b> <span class='pill "+(x.enabled?(x.ready?"ok":"bad"):"gray")+"'>"+(x.enabled?(x.ready?"روشن":"روشن ولی ناقص"):"خاموش")+"</span> <span class='muted'>"+esc(m)+" · "+esc(x.language||"")+" · "+esc(x.currency||"")+"</span></div>"
+  +"<div class='row'>شهر: "+(x.city?esc(x.city):"<span class='bad'>خالی</span>")+" · سهمیهٔ کشف امروز: "+esc(x.runs_today||0)+" / "+(x.runs_per_day!=null?esc(x.runs_per_day):"—")+(x.exhausted?" <span class='pill warn'>سهمیهٔ امروز تمام شد</span>":"")+" <span class='muted'>(حداکثر مجاز هر بازار "+esc(cap)+")</span></div>"
+  +"<div class='row'>تأیید مالک: "+(x.approved_at?esc(x.approved_by||"owner")+" · "+esc(x.approved_at):"ندارد")+(codes?"<br>"+codes:"")+"</div>"
+  +"<div class='row'><label>شهر <select data-f='city'>"+opts+"</select></label> <label>نوع <select data-f='type'>"+types+"</select></label> <label>سقف روزانه <input data-f='runs' type='number' min='1' max='"+esc(cap)+"' value='"+(x.runs_per_day!=null?esc(x.runs_per_day):"")+"' style='width:70px'></label></div>"
+  +"<div class='row'><button class='btn' type='button' data-act='enable'>"+(x.enabled?"ذخیرهٔ تغییر (تأیید مالک)":"روشن کردن (تأیید مالک)")+"</button> "+(x.enabled?"<button class='btn' type='button' data-act='disable'>خاموش کردن</button>":"")+" <span class='hint' data-f='msg'></span></div></div>";
+}
+async function loadAdsMarkets(){
+ const st=$("adsMarketsStatus");st.textContent="در حال دریافت…";
+ const d=await api("/api/ads/markets");
+ if(!d||!d.ok||!d.markets){st.innerHTML=acErr(d);$("adsMarketsGrid").innerHTML="";return}
+ adsMk=d;const demo=/^.DEMO./.test(document.title);
+ st.innerHTML="<span class='pill "+(demo?"warn":"ok")+"'>"+(demo?"داده نمایشی (DEMO) — پیش‌نمایش محلی":"داده واقعی")+"</span> سه سهمیهٔ روزانهٔ مستقل: کشف Ads ایران، کشف Ads عراق، پیگیری CRM (هر کدام شمارنده و ریست UTC جدا).";
+ const c=d.crm_followups||{};
+ $("adsMarketsGrid").innerHTML=["IRAN","ARAB"].map(m=>adsMarketCard(m,d.markets[m]||{},d.global_runs_per_day)).join("")
+  +"<div class='card'><div class='row'><b>پیگیری CRM</b> <span class='pill "+(c.exhausted?"warn":"ok")+"'>"+(c.exhausted?"سهمیهٔ امروز تمام شد":"فعال")+"</span> <span class='muted'>CRM_FOLLOWUP · مستقل از Ads</span></div>"
+  +"<div class='row'>اجرای امروز: "+esc(c.runs_today||0)+" / "+esc(c.runs_per_day!=null?c.runs_per_day:"—")+"</div>"
+  +"<div class='row hint'>پیش‌نویس پیگیری برای leadهای موعددار (از هر منبع)، فقط برای بررسی مالک؛ هیچ پیامی ارسال نمی‌شود. خاموش بودن بازارهای Ads روی آن اثری ندارد.</div></div>";
+}
+async function adsMarketClick(e){
+ const b=e.target.closest("button[data-act]");if(!b)return;const card=b.closest("[data-market]"),m=card.dataset.market,msg=card.querySelector("[data-f=msg]"),x=(adsMk&&adsMk.markets[m])||{};
+ let body;
+ if(b.dataset.act==="disable")body={market:m,enabled:false};
+ else{
+  const city=card.querySelector("[data-f=city]").value,runs=Number(card.querySelector("[data-f=runs]").value),type=card.querySelector("[data-f=type]").value;
+  if(!city||!runs){msg.innerHTML="<span class='bad'>شهر و سقف اجرای روزانه را تعیین کنید.</span>";return}
+  if(!window.confirm("روشن کردن Ads برای "+(x.label_fa||m)+" با شهر «"+city+"» و حداکثر "+runs+" اجرا در روز. هر اجرا جست‌وجوی وب و پیش‌نویس OpenAI (هزینه‌دار) دارد؛ هیچ پیامی ارسال نمی‌شود. تأیید می‌کنید؟"))return;
+  body={market:m,enabled:true,city:city,runs_per_day:runs,type:type,owner_approved:true};
+ }
+ b.disabled=true;msg.textContent="در حال ذخیره…";
+ const r=await api("/api/ads/markets/config",{method:"POST",body:JSON.stringify(body)});b.disabled=false;
+ if(!r||!r.ok){msg.innerHTML="<span class='bad'>"+esc((r&&r.error)||"ذخیره نشد")+"</span>";return}
+ loadAdsMarkets();
 }
 async function loadHubAgents(){
  const box=$("hubAgents"),d=await api(A+"/agents/activity");
@@ -1998,7 +2038,7 @@ async function refreshTick(){
  catch(e){$("masterState").textContent="DASHBOARD ERROR";$("masterState").className="pill bad"}
  finally{refreshInProgress=false}
 }
-updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();if(has("agentCenterGrid")){loadAgentCenter();$("agentCenterRefresh").addEventListener("click",loadAgentCenter);$("agentCenterFilter").addEventListener("click",e=>{const b=e.target.closest("button[data-f]");if(b){acFilter=b.dataset.f;acRender()}})}on("hubAgents",loadHubAgents);setInterval(refreshTick,15000);
+updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();if(has("adsMarketsGrid")){loadAdsMarkets();$("adsMarketsRefresh").addEventListener("click",loadAdsMarkets);$("adsMarketsGrid").addEventListener("click",adsMarketClick)}if(has("agentCenterGrid")){loadAgentCenter();$("agentCenterRefresh").addEventListener("click",loadAgentCenter);$("agentCenterFilter").addEventListener("click",e=>{const b=e.target.closest("button[data-f]");if(b){acFilter=b.dataset.f;acRender()}})}on("hubAgents",loadHubAgents);setInterval(refreshTick,15000);
 </script></body></html>`;
 
 // ---- Hub-only additions (summary of existing data + navigation; no new metrics, no new API).
@@ -2037,6 +2077,7 @@ DASH_SECTIONS.agentCenter=`<section class="card section" id="agentCenterPanel">
 <div id="agentCenterGrid" class="acgrid"></div>
 </section>
 `;
+DASH_SECTIONS.adsMarkets='<section class="card section" id="adsMarketsPanel"><div class="title"><div><h2>📣 بازارهای Ads (ایران / عراق)</h2><div class="hint">هر بازار جداگانه روشن می‌شود. روشن کردن یا تغییر بازار روشن، تأیید صریح مالک لازم دارد. Ads فقط پیش‌نویس می‌سازد و هیچ پیامی ارسال یا هزینهٔ تبلیغاتی خرج نمی‌کند.</div></div><button class="btn" type="button" id="adsMarketsRefresh">بروزرسانی</button></div><div id="adsMarketsStatus" class="hint">در انتظار دریافت…</div><div id="adsMarketsGrid" class="acgrid"></div></section>';
 DASH_SECTIONS.hubAgents=`<section class="card section" id="hubAgentsPanel">
 <div class="title"><h2>🛰️ وضعیت عامل‌ها</h2><a class="btn" href="/dashboard/agents">مرکز کنترل عامل‌ها</a></div>
 <div id="hubAgents" class="rows"><div class="hint">در حال دریافت…</div></div>
@@ -2177,7 +2218,7 @@ export const DASHBOARD_PAGES={
  customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["leadsList","negotiation","opportunities"]},
  orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"box",desc:"سفارش‌ها، پرداخت‌ها و درخواست‌های قیمت",sections:["orders","money","quotes"]},
  approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
- agents:{path:"/dashboard/agents",title:"عامل‌ها و پایش",icon:"alert",desc:"سلامت عامل‌ها، هشدارها، تأییدها، صف خطا، مصرف",sections:["agentCenter","agentOps"]},
+ agents:{path:"/dashboard/agents",title:"عامل‌ها و پایش",icon:"alert",desc:"سلامت عامل‌ها، هشدارها، تأییدها، صف خطا، مصرف",sections:["agentCenter","adsMarkets","agentOps"]},
  errors:{path:"/dashboard/errors",title:"خطاها",icon:"alert",desc:"خطاهای سیستم و جزئیات",sections:["errorsCenter","errorsCard"]},
  more:{path:"/dashboard/more",title:"بیشتر",icon:"menu",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
  gallery:{path:"/dashboard/gallery",title:"گالری محصولات",icon:"camera",desc:"عکس واقعی، تأیید، جستجو و درخواست‌ها",sections:["galleryFunnel","galleryUpload","galleryReview","galleryLibrary","galleryRequests","galleryBackup"]},

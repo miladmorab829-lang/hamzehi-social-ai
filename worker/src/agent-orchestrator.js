@@ -30,7 +30,7 @@ export const AUTONOMY_DAILY_QUOTAS=Object.freeze({"photo:photo_generate":1,"medi
 export const QUOTA_MAX=50;
 // Daily cost budgets (Stage 3, relative units ≈ one text-model call). Enforced atomically in the task claim together with the quota.
 // Defaults sit well above what the default quotas can spend (about 2× headroom), so they only stop runaway use; the owner can lower them in
-// autonomy_controls key "budgets" ({"daily_units":n,"providers":{"openai":n,...},"ads_runs_per_day":n}). Ads Autopilot has its own
+// autonomy_controls key "budgets" ({"daily_units":n,"providers":{"openai":n,...},"ads_runs_per_day":n,"crm_followups_per_day":n}). Ads Autopilot has its own
 // run cap (separate reserve) so it can neither starve nor be starved by the paid autonomy tasks.
 export const AUTONOMY_UNIT_COST=Object.freeze({"photo:photo_generate":8,"media:video_generate":40,"content:generate_and_queue":9,"crm:lead_discovery":16});
 export const AUTONOMY_PROVIDER=Object.freeze({"photo:photo_generate":"openai","media:video_generate":"video","content:generate_and_queue":"openai","crm:lead_discovery":"google_places"});
@@ -38,7 +38,10 @@ export const DEFAULT_BUDGETS=Object.freeze({daily_units:240,providers:Object.fre
 export function autonomyBudgets(overrides={}){
   const n=(v,base,max)=>Number.isInteger(v)&&v>=0?Math.min(v,max):base,o=overrides&&typeof overrides==="object"?overrides:{};
   const providers={};for(const [p,base] of Object.entries(DEFAULT_BUDGETS.providers))providers[p]=n(o.providers?.[p],base,10000);
-  return {daily_units:n(o.daily_units,DEFAULT_BUDGETS.daily_units,10000),providers,ads_runs_per_day:n(o.ads_runs_per_day,DEFAULT_BUDGETS.ads_runs_per_day,96)};
+  const ads=n(o.ads_runs_per_day,DEFAULT_BUDGETS.ads_runs_per_day,96);
+  // Phase 09.7: CRM follow-up drafting has its own daily run quota. Without an owner value it inherits the Ads run cap that governed it
+  // until now (same capacity, nothing invented); "crm_followups_per_day" in the same "budgets" key overrides it.
+  return {daily_units:n(o.daily_units,DEFAULT_BUDGETS.daily_units,10000),providers,ads_runs_per_day:ads,crm_followups_per_day:n(o.crm_followups_per_day,ads,96)};
 }
 export function autonomyDailyQuota(module,action,overrides={}){
   const key=`${module}:${action}`,base=AUTONOMY_DAILY_QUOTAS[key]??0,v=overrides?.[key];

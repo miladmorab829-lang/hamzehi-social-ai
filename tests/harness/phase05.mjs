@@ -40,7 +40,8 @@ evt("auto_content_generated",ago(300),{});evt("auto_pilot_cycle",ago(7),{pending
 evt("media_ai_video_generated",ago(25*1440),{});evt("weekly_video_autopilot_kling_rejected",ago(3*1440),{error:"multiPrompt[0].prompt: size must be between 0 and 512"});
 dbrun("INSERT INTO inbox_messages(id,platform,sender,message,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",["M1","telegram","s","hello","new",ago(13*1440),ago(13*1440)]);
 W.d1.db.exec("CREATE TABLE IF NOT EXISTS system_kv(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)");
-dbrun("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)",["ads_autopilot_config",JSON.stringify({enabled:true,type:"gold",city:""}),ago(1)]);
+// Phase 09.4: an enabled market without a city (hand-written row; the API never stores one) must still surface as BLOCKED
+dbrun("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)",["ads_market:ARAB",JSON.stringify({enabled:true,type:"gold",city:"",runs_per_day:4}),ago(1)]);
 const counts=()=>J(["autonomy_tasks","system_events","inbox_messages","system_kv","agent_alerts","agent_dead_letters","autonomy_commands"].map(t=>q(`SELECT COUNT(*) n FROM ${t}`)[0].n));
 const before=counts();
 const r=await call("/api/autonomy/agents/activity",null,"GET");const A=r.body||{},by=Object.fromEntries((A.agents||[]).map(a=>[a.agent,a]));

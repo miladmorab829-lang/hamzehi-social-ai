@@ -115,10 +115,12 @@ const resetAds=()=>{dbrun("DELETE FROM system_events WHERE type IN ('ads_autopil
  const stat=await call("/api/ads/autopilot/status",null,"GET");
  ok("A2 the cron with an empty-city config reserves no Ads budget and calls no search; status reports the invalid target",search===0&&q("SELECT COUNT(*) n FROM system_events WHERE type='ads_autopilot_reserved'")[0].n===0&&stat.body.target?.valid===false,[search,stat.body.target]);
  dbrun("DELETE FROM system_kv WHERE key='ads_autopilot_config'");
+ // Phase 09.4: the Baghdad checks below need the ARAB (Iraq) market enabled by the owner
+ await call("/api/ads/markets/config",{market:"ARAB",enabled:true,city:"بغداد",runs_per_day:24,owner_approved:true});
  links=[...PRICE_TITLES.map((_,i)=>`https://price-${i}.example/`),"https://alrafidain-gold.example/"];
  const l0=count("leads"),d=await call("/api/ads/discover",{type:"gold",city:"بغداد"});
  const created=q("SELECT name,notes FROM leads WHERE json_extract(notes,'$.source')='ad_discovery'");
- ok("A3 all seven known price/news pages are rejected; the real Baghdad jeweller is kept (manual discovery)",d.status===200&&count("leads")===l0+1&&created.length===1&&/الرافدين/.test(created[0].name)&&JSON.parse(created[0].notes).target_market==="iraq",[d.status,created.map(x=>x.name)]);
+ ok("A3 all seven known price/news pages are rejected; the real Baghdad jeweller is kept (manual discovery)",d.status===200&&count("leads")===l0+1&&created.length===1&&/الرافدين/.test(created[0].name)&&JSON.parse(created[0].notes).target_market==="ARAB",[d.status,created.map(x=>x.name)]);
  resetAds();links=[`https://price-0.example/`,`https://price-1.example/`,`https://price-4.example/`,`https://price-5.example/`,`https://price-6.example/`,"https://alrafidain-gold.example/"];
  dbrun("DELETE FROM leads WHERE json_extract(notes,'$.source')='ad_discovery'");dbrun("DELETE FROM lead_identities WHERE lead_id NOT IN (SELECT id FROM leads)");
  const o0=openai,a=await call("/api/ads/autopilot",{type:"gold",city:"بغداد"});
@@ -130,8 +132,11 @@ const resetAds=()=>{dbrun("DELETE FROM system_events WHERE type IN ('ads_autopil
  ok("A6 the owner's manual Ads draft button never re-stages a lead (a customer stays customer)",nd.status===200&&q("SELECT stage FROM leads WHERE id=?",[cust])[0]?.stage==="customer",[nd.status,q("SELECT stage FROM leads WHERE id=?",[cust])[0]?.stage]);
  // follow-up drafting (paid) only for leads that were actually reached
  dbrun("UPDATE leads SET notes=json_set(notes,'$.next_followup_at','2026-01-01T00:00:00.000Z') WHERE id IN ('D-IR-0','L-IQ')");
+ // Phase 09.6: A7 keeps its ORIGINAL fixture — no Ads market enabled — so it checks that CRM follow-ups never depend on the Ads switches
+ await call("/api/ads/markets/config",{market:"ARAB",enabled:false});
  resetAds();const o1=openai,f=await call("/api/ads/followups/run",{});
  ok("A7 follow-up drafts are prepared for a contacted/replied lead only — never for a never-contacted discovery lead",f.status===200&&!JSON.parse(q("SELECT notes FROM leads WHERE id='D-IR-0'")[0].notes).followup_draft&&!!JSON.parse(q("SELECT notes FROM leads WHERE id='L-IQ'")[0].notes).followup_draft&&openai===o1+1,[f.body,openai-o1]);
+ await call("/api/ads/markets/config",{market:"ARAB",enabled:true,city:"بغداد",runs_per_day:24,owner_approved:true});   // A8 is an Ads discovery check again
  resetAds();const r1=await call("/api/ads/autopilot",{type:"gold",city:"بغداد"}),r2=await call("/api/ads/autopilot",{type:"gold",city:"بغداد"});
  ok("A8 the shared Ads budget is unchanged: a second run inside 55 minutes is deferred",!r1.body.deferred&&r2.body.deferred===true&&r2.body.reason==="ads_daily_limit",[r1.body?.deferred,r2.body?.deferred]);}
 

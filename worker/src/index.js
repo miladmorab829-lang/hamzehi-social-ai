@@ -1,5 +1,6 @@
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
-import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, reserveAdsAutopilotRun, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
+import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, reserveAdsAutopilotRun, adsGlobalRunCap, reserveCrmFollowupRun, crmFollowupCap, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
+import { ADS_MARKET_IDS, ADS_MARKETS, ADS_TARGET_CITIES, adsNormalizeText, adsTargetCity, adsMarketKey, adsCityOptions, normalizeAdsMarket, leadMarketOf, readAdsMarketConfigs, adsMarketReadiness, validateAdsMarketUpdate } from "./ads-markets.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { claimFlight, completeFlight, failFlight, salesAiSingleFlight, purgeAiCallFlights } from "./sales-memory.js";
 import { buildMemoryVocabulary, memoryCanonicalize, memoryConceptFromInterpretation, memoryFingerprint, memoryLookup, memoryObserve, memoryReview, memoryList, memoryGalleryRoles, memoryConceptKey, memoryMetrics, memoryConceptAnswer, memoryRenderAnswer, knowledgeVersion } from "./sales-memory.js";
@@ -11180,7 +11181,7 @@ async function leadFunnelReport(env){
     ${q("lead_identities","(SELECT COUNT(*) FROM lead_identities li WHERE li.lead_id=l.id)")} AS identities
     FROM leads l`).all()).results||[];
   const zero=()=>Object.fromEntries(FUNNEL_STEPS.map(s=>[s,0]));
-  const furthest=zero(),reached=zero(),evidence={contacted:0,replied:0,preliminary_interest:0,negotiated:0,quoted:0,ordered:0,paid:0},bySource={},crm={},mismatch={negotiation_without_priced_offer:0,contacted_stage_without_delivery_or_reply:0,customer_without_payment:0};
+  const furthest=zero(),reached=zero(),evidence={contacted:0,replied:0,preliminary_interest:0,negotiated:0,quoted:0,ordered:0,paid:0},bySource={},byMarket={},crm={},mismatch={negotiation_without_priced_offer:0,contacted_stage_without_delivery_or_reply:0,customer_without_payment:0};
   let withIdentity=0;
   for(const r of rows){
     const f=k=>Number(r[k]||0)>0,quoted=f("formal_quote")||f("chat_offer_order")||f("chat_offer_sent");
@@ -11190,7 +11191,8 @@ async function leadFunnelReport(env){
     if(f("interest")&&!negotiated)evidence.preliminary_interest++;
     let idx=0;FUNNEL_STEPS.forEach((s,i)=>{if(ev[s])idx=i;});
     furthest[FUNNEL_STEPS[idx]]++;for(let i=0;i<=idx;i++)reached[FUNNEL_STEPS[i]]++;
-    const src=String(parseLeadNotes(r).source||"unknown").slice(0,40);bySource[src]=bySource[src]||zero();bySource[src][FUNNEL_STEPS[idx]]++;
+    const lm=parseLeadNotes(r),src=String(lm.source||"unknown").slice(0,40);bySource[src]=bySource[src]||zero();bySource[src][FUNNEL_STEPS[idx]]++;
+    const mk=leadMarketOf(lm);byMarket[mk]=byMarket[mk]||zero();byMarket[mk][FUNNEL_STEPS[idx]]++;
     crm[r.stage||"new"]=(crm[r.stage||"new"]||0)+1;
     if(r.stage==="negotiation"&&!quoted)mismatch.negotiation_without_priced_offer++;
     if(r.stage==="contacted"&&!ev.contacted&&!ev.replied)mismatch.contacted_stage_without_delivery_or_reply++;
@@ -11198,7 +11200,7 @@ async function leadFunnelReport(env){
     if(Number(r.identities||0)>0)withIdentity++;
   }
   const total=rows.length,sum=Object.values(furthest).reduce((a,b)=>a+b,0);
-  return {ok:true,generated_at:now(),total_leads:total,steps:FUNNEL_STEPS,reached,furthest,evidence,by_source:bySource,crm_stage_counts:crm,stage_without_evidence:mismatch,
+  return {ok:true,generated_at:now(),total_leads:total,steps:FUNNEL_STEPS,reached,furthest,evidence,by_source:bySource,by_market:byMarket,crm_stage_counts:crm,stage_without_evidence:mismatch,
     identities:{leads_with_identity:withIdentity,leads_without_identity:total-withIdentity},reconciled:sum===total,
     definitions:{contacted:"a delivered outbound (Telegram sent or an owner-confirmed manual first contact)",replied:"an inbound message linked to the lead",negotiated:"an inbound reply after a recorded priced offer",preliminary_interest:"price/MOQ/shipping questions without a priced offer",quoted:"a sent/accepted quote, a chat-offer order, or a chat offer followed by a sent reply",ordered:"an owner-confirmed order (not a candidate, not cancelled)",paid:"a recorded payment"}};
 }
@@ -11990,22 +11992,14 @@ function validateAdsInput(body){
   // Phase 04: every Ads run targets ONE market through a known city of Iran or Iraq; an empty or unknown city runs nothing.
   const target=adsTargetCity(city);
   if(!target) return {ok:false,error:"شهر هدف معتبر در ایران یا عراق لازم است (مثلاً تهران، اصفهان، بغداد، اربیل)",reason:"ads_target_city_required"};
+  // Phase 09.4: an explicit market must match the city (IRAN / ARAB = Iraq); a Baghdad run is never an IRAN run.
+  if(b.market!=null&&b.market!==""&&normalizeAdsMarket(b.market)!==target.market) return {ok:false,error:"شهر انتخاب‌شده متعلق به این بازار نیست",reason:"ads_city_market_mismatch"};
   return {ok:true,type,city,extra,market:target.market};
 }
 
-// ---- Ads targeting (Phase 04) ----
+// ---- Ads targeting (Phase 04; cities and market ids live in ads-markets.js since Phase 09.4) ----
 // Ads looks for BUYERS of luxury packaging (gold/jewellery/watch/perfume shops) in the target city. Price tickers, news, finance
 // and aggregator pages, and pages about another country, are rejected before any lead is stored. Pure functions: no I/O.
-const ADS_TARGET_CITIES={
-  iran:[["تهران","tehran"],["اصفهان","isfahan","esfahan"],["شیراز","shiraz"],["مشهد","mashhad"],["تبریز","tabriz"],["کرج","karaj"],["قم","qom"],["اهواز","ahvaz"],["رشت","rasht"],["کرمان","kerman"],["یزد","yazd"]],
-  iraq:[["بغداد","baghdad"],["أربيل","اربيل","هولير","erbil","arbil"],["البصرة","بصرة","basra","basrah"],["النجف","نجف","najaf"],["كربلاء","كربلا","karbala"],["السليمانية","سليمانية","sulaymaniyah","sulaimani"],["الموصل","موصل","mosul"],["كركوك","kirkuk"],["دهوك","duhok"],["الناصرية","nasiriyah"]]
-};
-function adsNormalizeText(s){return String(s||"").toLowerCase().replace(/[كک]/g,"ک").replace(/[يىی]/g,"ی").replace(/[أإآ]/g,"ا").replace(/ة/g,"ه").replace(/[\u064B-\u0652\u0640]/g,"");}
-function adsTargetCity(value){
-  const v=adsNormalizeText(String(value||"").trim());if(!v)return null;
-  for(const market of ["iran","iraq"])for(const names of ADS_TARGET_CITIES[market])if(names.some(n=>adsNormalizeText(n)===v))return {market,city:names[0],names};
-  return null;
-}
 const ADS_PRICE_NEWS=/سعر\s*(?:ال)?(?:ذهب|غرام|اونصة|أونصة|ليرة)|أسعار|اسعار|عيار\s*\d{2}|بورصة|لحظة\s*بلحظة|تحديث\s*لحظي|أخبار|الأخبار|اخبار|خبرگزاری|قیمت\s*(?:لحظه|روز|طلا|سکه|دلار|ارز|انس|مثقال|گرم)|نرخ\s*(?:طلا|سکه|ارز|دلار)|بورس|تحلیل\s*بازار|بازار\s*(?:طلا|ارز|سکه)|gold\s*(?:price|rate)s?|price\s*(?:today|live)|live\s*(?:rates?|prices?)|spot\s*price|per\s*(?:gram|ounce)|forex|stock\s*market|\bnews\b|exchange\s*rate/i;
 const ADS_AGGREGATOR=/digikala|okala|jetamooz|amazon|torob|snapp|basalam|divar|sheypoor|emalls|olx|opensooq|dubizzle|alibaba|aliexpress|ebay|etsy|wikipedia|youtube|facebook\.com|instagram\.com|linkedin|yellow\s*pages|yellowpages|directory|دایرکتوری|نیازمندی|آگهی|دليل\s*(?:ال)?(?:شركات|محلات)|إعلانات\s*مبوبة|marketplace|فروشگاه اینترنتی|خرید آنلاین/i;
 const ADS_FOREIGN_COUNTRY=/السعودية|سعودي|مصر|المصري|الإمارات|الامارات|دبي|سلطنة\s*عمان|في\s*عمان|الكويت|قطر|البحرين|الأردن|الاردن|تركيا|ترکیه|عربستان|امارات|saudi|egypt|\buae\b|dubai|oman|kuwait|qatar|bahrain|jordan|turkey/i;
@@ -12019,7 +12013,7 @@ function adsTargetQualifies({title="",url="",plain="",target=null}={}){
   if(ADS_PRICE_NEWS.test(head)||/\/(?:news|blog|prices?|rates?|articles?|tag)(?:\/|$)/i.test(path))return {ok:false,reason:"price_or_news"};
   if(ADS_AGGREGATOR.test(head))return {ok:false,reason:"aggregator"};
   if(ADS_FOREIGN_COUNTRY.test(head)||ADS_FOREIGN_TLD.test(host))return {ok:false,reason:"foreign_country"};
-  const iraq=target.market==="iraq",localTld=iraq?/\.iq$/i.test(host):/\.ir$/i.test(host);
+  const iraq=target.market==="ARAB",localTld=iraq?/\.iq$/i.test(host):/\.ir$/i.test(host);
   const countryHit=localTld||(iraq?/العراق|عراق|iraq|\+964/i:/ایران|iran|\+98/i).test(all);
   if(!countryHit)return {ok:false,reason:"target_country_missing"};
   const normAll=adsNormalizeText(all);
@@ -12037,16 +12031,87 @@ function adsTargetQualifies({title="",url="",plain="",target=null}={}){
 const ADS_DRAFTABLE_STAGES=new Set(["new","discovered","qualified"]);
 // Follow-up drafts (OpenAI) are prepared only for leads that were actually reached; a never-contacted lead has nothing to follow up.
 const ADS_FOLLOWUP_STAGES=new Set(["contacted","replied","negotiation"]);
-async function adsRunGate(env,source,opts){
+async function adsRunGate(env,source,opts={}){
   if(await reserveAdsAutopilotRun(env,Date.now(),source,opts))return null;
-  await audit(env,"ads_run_deferred","Ads run deferred by the daily run budget",{source});
-  return {ok:true,deferred:true,reason:"ads_daily_limit",message:"Ads run budget reached (daily cap or minimum 55-minute interval); nothing was run",items:[]};
+  await audit(env,"ads_run_deferred","Ads run deferred by the daily run budget",{source,market:opts.market||null});
+  return {ok:true,deferred:true,reason:"ads_daily_limit",market:opts.market||null,message:"Ads run budget reached (daily cap or minimum 55-minute interval); nothing was run",items:[]};
+}
+// Per-market status for the owner (read-only): config, readiness codes, today's runs vs. limits, language and currency.
+async function adsMarketsStatus(env){
+  const cap=await adsGlobalRunCap(env),cfgs=await readAdsMarketConfigs(env),day=new Date();day.setUTCHours(0,0,0,0);
+  const runs={IRAN:0,ARAB:0};let total=0,crmRuns=0;const crmCap=await crmFollowupCap(env);
+  try{crmRuns=Number((await env.DB.prepare("SELECT COUNT(*) n FROM system_events WHERE type='crm_followup_reserved' AND created_at>=?").bind(day.toISOString()).first())?.n||0);}catch{}
+  try{const a=await env.DB.prepare("SELECT COUNT(*) n,SUM(instr(details_json,'\"market\":\"IRAN\"')>0) ir,SUM(instr(details_json,'\"market\":\"ARAB\"')>0) ar FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?").bind(day.toISOString()).first();total=Number(a?.n||0);runs.IRAN=Number(a?.ir||0);runs.ARAB=Number(a?.ar||0);}catch{}
+  const markets={};
+  for(const m of ADS_MARKET_IDS){const c=cfgs[m],r=adsMarketReadiness(c,cap);markets[m]={...c,ready:r.ready,codes:r.codes,runs_today:runs[m],quota:m==="IRAN"?"ADS_IRAN_DISCOVERY":"ADS_IRAQ_DISCOVERY",exhausted:c.runs_per_day!=null&&runs[m]>=c.runs_per_day,label_fa:ADS_MARKETS[m].label_fa,language:ADS_MARKETS[m].language,currency:ADS_MARKETS[m].currency,city_options:adsCityOptions(m)};}
+  return {markets,crm_followups:{quota:"CRM_FOLLOWUP",runs_today:crmRuns,runs_per_day:crmCap,exhausted:crmRuns>=crmCap,independent_of_ads:true},global_runs_per_day:cap,max_market_runs_per_day:cap,runs_today_total:total,approval:"owner_approved_required_to_enable",external_send:"authorized_channel_only"};
+}
+// Phase 09.7 CRM_FOLLOWUP gate: reserves one CRM follow-up run (own daily quota, never an Ads discovery quota) or returns the deferred
+// result (HTTP 200, ok:true) — never a failure, never an approval request.
+async function crmFollowupGate(env,source,opts={}){
+  if(await reserveCrmFollowupRun(env,Date.now(),source,opts))return null;
+  await audit(env,"crm_followup_deferred","CRM follow-up run deferred by its daily quota",{source});
+  return {ok:true,deferred:true,reason:"crm_followup_daily_limit",message:"CRM follow-up quota reached (daily cap or minimum 55-minute interval); nothing was run",items:[]};
+}
+// Phase 09.4 market gate: Ads executes for a market only when the owner enabled it with a city of THAT market and an owner-set daily run
+// limit. Otherwise the result is skipped (HTTP 200, ok:true): nothing is reserved, searched, drafted or dead-lettered.
+async function adsMarketGate(env,market){
+  const cap=await adsGlobalRunCap(env),cfg=(await readAdsMarketConfigs(env))[market];
+  if(!cfg)return {skip:{ok:true,skipped:true,reason:"ads_market_invalid",market:market||null,message:"Unknown Ads market; nothing was run",items:[]}};
+  const r=adsMarketReadiness(cfg,cap);
+  if(!r.ready)return {skip:{ok:true,skipped:true,reason:r.codes.includes("ADS_MARKET_DISABLED")?"ads_market_disabled":"ads_market_not_ready",codes:r.codes,market,message:`Ads market ${market} is disabled or incomplete; nothing was run`,items:[]}};
+  return {cfg,cap};
+}
+async function adsReadyMarkets(env){
+  const cap=await adsGlobalRunCap(env),cfgs=await readAdsMarketConfigs(env);
+  return ADS_MARKET_IDS.filter(m=>adsMarketReadiness(cfgs[m],cap).ready).map(m=>({market:m,cfg:cfgs[m]}));
+}
+// CRM attribution of an Ads lead: target_market always; the lead country only with strong local evidence (local domain or local phone),
+// so quotes price in that market's currency (IRAN → TOMAN, ARAB → USD). Merged first-write-wins: an existing country is never replaced.
+function adsAttribution(market,signals={}){
+  const strong=!!(signals.local_domain||signals.local_phone);
+  return {target_market:market,market_evidence:signals.local_domain?"local_domain":signals.local_phone?"local_phone":"page_text",...(strong?{country:ADS_MARKETS[market].country}:{})};
+}
+// CRM follow-up drafts (OpenAI) for leads the owner scheduled (next_followup_at): every reached lead (ADS_FOLLOWUP_STAGES) that is due,
+// from ANY source and ANY market — independent of the Ads market switches (Phase 09.6; disabling Ads never stops follow-ups). The language
+// follows the lead's recorded market; a lead without one (UNKNOWN / CONFLICT) keeps the previous rule (Iraqi-Arabic search group → Iraqi
+// Arabic, otherwise Persian) and no market or country is ever written. Drafts are for the owner only: the stage never changes, nothing is
+// sent, and the update applies only while the notes are still the ones read here, so overlapping sweeps never stack a second draft.
+function followupLanguage(meta){const m=leadMarketOf(meta);return ADS_MARKETS[m]?ADS_MARKETS[m].language:(String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian");}
+async function adsDueFollowups(env,{excludeDrafted=true}={}){
+  const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+  const due=[],nowMs=Date.now();
+  for(const lead of (rows.results||[])){
+    if(!ADS_FOLLOWUP_STAGES.has(String(lead.stage||"")))continue;
+    const meta=parseLeadNotes(lead),at=meta.next_followup_at||meta.followup_at;
+    if(at&&Date.parse(at)&&Date.parse(at)<=nowMs&&!(excludeDrafted&&meta.followup_draft))due.push({lead,meta,at});
+  }
+  return due;
+}
+async function prepareAdsFollowups(env,{limit=AD_MAX_DRAFTS_PER_RUN,retry=false,excludeDrafted=true}={}){
+  const due=await adsDueFollowups(env,{excludeDrafted});let prepared=0,skipped=0;const languages={};
+  for(const {lead,meta,at} of due.slice(0,limit)){
+    if(meta.followup_draft||!env.OPENAI_API_KEY){skipped++;continue;}
+    try{
+      const language=followupLanguage(meta);
+      const prompt=`Write a short polite ${language} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review the packaging samples or catalogue offer. Under 500 characters. Draft only.`;
+      const init={method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})};
+      const r=retry?await fetchWithRetry("https://api.openai.com/v1/responses",init,2,15000):await fetch("https://api.openai.com/v1/responses",{...init,signal:AbortSignal.timeout(15000)});
+      const d=await r.json().catch(()=>({}));if(!r.ok){skipped++;continue;}
+      const draft=responseText(d).trim();if(!draft){skipped++;continue;}
+      meta.followup_draft=draft;meta.followup_prepared_at=now();meta.followup_at=at;meta.next_followup_at=null;meta.followup_status="prepared";
+      const w=await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND notes IS ? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id,lead.notes??null).run();
+      if(Number(w?.meta?.changes||0)===1){prepared++;languages[language]=(languages[language]||0)+1;}else skipped++;
+    }catch{skipped++;}
+  }
+  return {due:due.length,prepared,skipped,languages};
 }
 async function runAdAutopilotOnce(env, input, reason="manual") {
   // An invalid target (no known city of Iran or Iraq) runs nothing and reserves nothing from the Ads budget.
   const target=adsTargetCity(input?.city);
   if(!target)return {ok:true,skipped:true,reason:"ads_target_city_required",message:"A valid target city in Iran or Iraq is required; nothing was run",items:[]};
-  const deferred=await adsRunGate(env,"autopilot_"+String(reason).slice(0,20));if(deferred)return deferred;
+  const mg=await adsMarketGate(env,target.market);if(mg.skip)return mg.skip;
+  const deferred=await adsRunGate(env,"autopilot_"+String(reason).slice(0,20),{market:target.market,marketCap:mg.cfg.runs_per_day});if(deferred)return deferred;
   const {type,city,extra}=input;
   const sourceSite="https://www.hamzehibox.com";
   const allGroups=[
@@ -12062,7 +12127,7 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
 ];
   const groups=(type==="all"
   ?allGroups
-  :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`)).filter(x=>x[0].endsWith(target.market==="iraq"?"_ar":"_fa"));
+  :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`)).filter(x=>x[0].endsWith(ADS_MARKETS[target.market].group_suffix));
   const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,rejected:0,rejected_reasons:{},provider_checks:[],error_details:[]};
   const items=[],seen=new Set(),started=now();
  
@@ -12149,7 +12214,7 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
 
           if(!contactUrl && !adHit && !contactPath) continue; 
           const score=Math.min(100,verdict.score+(contactUrl?10:0));
-          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,target_market:target.market,qualification:verdict.signals,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
+          const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,...adsAttribution(target.market,verdict.signals),qualification:verdict.signals,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
           const saved=await upsertDiscoveredLead(env,{name:title,contact:href,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_autopilot",meta});
           if(saved.conflict){summary.errors++;continue;}
           const id=saved.id;
@@ -12167,7 +12232,8 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
         if(!ADS_DRAFTABLE_STAGES.has(String(lead.stage||"")))continue;   // a lead the owner/sales flow already works with is never re-drafted or re-staged by Ads
         let meta={};try{meta=JSON.parse(lead.notes||"{}")}catch{}
         if(meta.negotiation_draft)continue;
-        const prompt=`Create a concise ${String(item.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B first-contact draft from HAMZEHI BOX (${sourceSite}), a maker of luxury packaging boxes for gold, jewellery, watch and perfume shops, to this shop. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Offer to send packaging samples and a catalogue; logo printing is available. Do not invent facts, prices or discounts. Draft only, under 700 characters.`;
+        if(leadMarketOf(meta)!==target.market){summary.cross_market_skipped=(summary.cross_market_skipped||0)+1;continue;}   // an existing lead of the other market is never drafted here
+        const prompt=`Create a concise ${ADS_MARKETS[target.market].language} B2B first-contact draft from HAMZEHI BOX (${sourceSite}), a maker of luxury packaging boxes for gold, jewellery, watch and perfume shops, to this shop. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Offer to send packaging samples and a catalogue; logo printing is available. Do not invent facts, prices or discounts. Draft only, under 700 characters.`;
         const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
         const d=await r.json().catch(()=>({})); if(!r.ok)continue; const draft=responseText(d).trim(); if(!draft)continue;
         // A draft is a suggestion for the owner only: it never changes the CRM stage and schedules no follow-up (nobody was contacted).
@@ -12927,31 +12993,18 @@ await pollWeeklyVideoAutopilot(env);
       ctx.waitUntil((async()=>{
         try {
           await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
-          const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='ads_autopilot_config'").first();
-          let cfg={}; try{cfg=JSON.parse(row?.value||"{}")}catch{}
-          if(!cfg.enabled) return;
-          const input=validateAdsInput(cfg); if(!input.ok) return;
-          // runAdAutopilotOnce reserves the shared Ads daily run budget itself; when deferred, this tick does nothing more
-          // (no follow-up drafting either), and nothing is retried or released, so it can never spend twice.
-          const adsRun=await runAdAutopilotOnce(env,input,"scheduled");if(adsRun?.deferred) return;
-          // Keep the follow-up queue moving while Autopilot is ON. Actual sending remains authorized-channel/manual.
-          const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
-          const nowMs=Date.now();
-          let preparedFollowups=0;
-          for(const lead of (rows.results||[])){
-            if(preparedFollowups>=AD_MAX_DRAFTS_PER_RUN) break;
-            if(!ADS_FOLLOWUP_STAGES.has(String(lead.stage||""))) continue;
-            const meta=parseLeadNotes(lead),at=meta.next_followup_at||meta.followup_at;
-            if(!at||!Date.parse(at)||Date.parse(at)>nowMs||meta.followup_draft||!env.OPENAI_API_KEY) continue;
-            try{
-             const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review the packaging samples or catalogue offer. Under 500 characters. Draft only.`;
-              const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);
-              const d=await r.json().catch(()=>({})); if(!r.ok) continue; const draft=responseText(d).trim(); if(!draft) continue;
-              meta.followup_draft=draft; meta.followup_prepared_at=now(); meta.next_followup_at=null; meta.followup_at=at; meta.followup_status="prepared";
-              await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id).run();
-              preparedFollowups++;
-            }catch{}
+          // Phase 09.4: Ads DISCOVERY runs for each READY market (owner-enabled, city of that market, owner-set limit) on its own; a
+          // disabled market discovers nothing. runAdAutopilotOnce reserves that market's run itself and nothing is retried or released.
+          for(const {market,cfg} of await adsReadyMarkets(env)){
+            await runAdAutopilotOnce(env,{type:cfg.type,city:cfg.city,extra:cfg.extra,market},"scheduled");
           }
+          // Phase 09.6/09.7: CRM follow-ups never depend on the market switches and never use an Ads quota. Only when a due lead still needs a
+          // draft, one CRM_FOLLOWUP reservation is taken (55-minute spacing, own daily cap; no audit row when refused), so an idle tick spends
+          // nothing. The 07:00–07:14 UTC tick leaves follow-ups to the daily sweep that fires at the same minute (no double sweep).
+          const tickAt=new Date(Number(event?.scheduledTime)||Date.now()),dailyWindow=tickAt.getUTCHours()===7&&tickAt.getUTCMinutes()<15;
+          if(!dailyWindow&&env.OPENAI_API_KEY&&(await adsDueFollowups(env)).length&&await reserveCrmFollowupRun(env,Date.now(),"scheduled_followups"))
+            await prepareAdsFollowups(env,{limit:AD_MAX_DRAFTS_PER_RUN,retry:true});
+          // Actual sending remains authorized-channel/manual.
         } catch(e) { await audit(env,"ad_autopilot_scheduled_error","Scheduled advertising Autopilot cycle failed",{error:e.message}); }
       })());
     }
@@ -12961,14 +13014,10 @@ await pollWeeklyVideoAutopilot(env);
         try {
           // The daily follow-up drafting sweep (OpenAI) is Ads execution too: it shares the Ads daily run budget.
           // counts toward the daily cap but is exempt from the 55-minute spacing, so an Autopilot run just before 07:00 cannot skip it
-          if(await adsRunGate(env,"daily_followups",{spacing:false})) return;
-          const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
-          const due=[]; const nowMs=Date.now();
-          for(const lead of (rows.results||[])){const meta=parseLeadNotes(lead);const at=meta.next_followup_at||meta.followup_at;if(at&&Date.parse(at)&&Date.parse(at)<=nowMs&&!meta.followup_draft&&ADS_FOLLOWUP_STAGES.has(String(lead.stage||""))) due.push({lead,meta});}
-          for(const {lead,meta} of due.slice(0,AD_MAX_DRAFTS_PER_RUN)){
-            if(!env.OPENAI_API_KEY) break;
-            try{const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review the packaging samples or catalogue offer. Under 500 characters. Draft only.`;const r=await fetchWithRetry("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt})},2,15000);const d=await r.json().catch(()=>({}));if(!r.ok)continue;const draft=responseText(d).trim();if(!draft)continue;meta.followup_draft=draft;meta.followup_prepared_at=now();meta.next_followup_at=null;meta.followup_status="prepared";await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id).run();}catch{}}
-          await audit(env,"ad_followups_scheduled","Daily advertising follow-up sweep completed",{due:due.length});
+          // Phase 09.6: CRM follow-ups for every due lead, independent of the Ads market switches (one global reservation, as before 09.4).
+          if(await crmFollowupGate(env,"daily_followups",{spacing:false})) return;
+          const r=await prepareAdsFollowups(env,{limit:AD_MAX_DRAFTS_PER_RUN,retry:true});
+          await audit(env,"ad_followups_scheduled","Daily advertising follow-up sweep completed",{due:r.due,prepared:r.prepared,languages:r.languages});
         } catch {}
       })());
     }
@@ -13950,8 +13999,9 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
       if (u.pathname === "/api/ads/targets" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         const r = await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
-        const items = (r.results || []).filter(x => { try { const m = JSON.parse(x.notes || "{}"); return m.source === "ad_discovery" || m.ad_target === true; } catch { return false; } });
-        return json({ ok: true, items });
+        const items = (r.results || []).filter(x => { try { const m = JSON.parse(x.notes || "{}"); return m.source === "ad_discovery" || m.ad_target === true; } catch { return false; } }).map(x => ({ ...x, market: leadMarketOf(parseLeadNotes(x)) }));
+        const by_market = {}; for (const x of items) by_market[x.market] = (by_market[x.market] || 0) + 1;
+        return json({ ok: true, items, by_market });
       }
 
       if (u.pathname === "/api/ads/discover" && req.method === "POST") {
@@ -13960,7 +14010,8 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
         const input=validateAdsInput(b);
         if(!input.ok) return json(input,400);
-        const gated=await adsRunGate(env,"manual_discover");if(gated)return json(gated);
+        const mg=await adsMarketGate(env,input.market);if(mg.skip)return json(mg.skip);
+        const gated=await adsRunGate(env,"manual_discover",{market:input.market,marketCap:mg.cfg.runs_per_day});if(gated)return json(gated);
         const {type,city,extra}=input;
         const sourceSite = "https://www.hamzehibox.com";
         const terms = { gold:"Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ± Ø²Ø±Ú¯Ø±Û Ú¯Ø§ÙØ±Û Ø·ÙØ§", watch:"Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª Ø³Ø§Ø¹Øª ÙÚÛ Ø³Ø§Ø¹Øª ÙÙÚ©Ø³", fashion_jewelry:"Ø¨Ø¯ÙÛØ¬Ø§Øª Ø¨Ø¯ÙÛ ÙØ±ÙØ´Û Ø²ÛÙØ±Ø¢ÙØ§Øª ÙØ§ÙØªØ²Û Ø§Ú©Ø³Ø³ÙØ±Û", all:"Ø·ÙØ§ÙØ±ÙØ´Û Ø·ÙØ§ Ø¬ÙØ§ÙØ± Ø³Ø§Ø¹Øª ÙØ±ÙØ´Û ÙØ±ÙØ´Ú¯Ø§Ù Ø³Ø§Ø¹Øª Ø¨Ø¯ÙÛØ¬Ø§Øª Ø¨Ø¯ÙÛ ÙØ±ÙØ´Û Ø²ÛÙØ±Ø¢ÙØ§Øª ÙØ§ÙØªØ²Û" };
@@ -13986,7 +14037,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
             if(cm){try{contactUrl=new URL(cm[1],url).toString()}catch{}}
             const host=new URL(url).hostname;
             const name=title||host;
-            const notes={source:"ad_discovery",ad_target:true,source_site:sourceSite,type,city,target_market:input.market,qualification:verdict.signals,query:q,url,website:url,evidence:plain.slice(0,700),contact_url:contactUrl,discovered_at:t,score};
+            const notes={source:"ad_discovery",ad_target:true,source_site:sourceSite,type,city,...adsAttribution(input.market,verdict.signals),qualification:verdict.signals,query:q,url,website:url,evidence:plain.slice(0,700),contact_url:contactUrl,discovered_at:t,score};
             const stored=await upsertDiscoveredLead(env,{name,contact:url,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_discovery",meta:notes});
             if(stored.conflict)continue;
             const id=stored.id;
@@ -14005,7 +14056,8 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
         const input=validateAdsInput(b);
         if(!input.ok) return json(input,400);
-        const gated=await adsRunGate(env,"manual_auto_run");if(gated)return json(gated);
+        const mg=await adsMarketGate(env,input.market);if(mg.skip)return json(mg.skip);
+        const gated=await adsRunGate(env,"manual_auto_run",{market:input.market,marketCap:mg.cfg.runs_per_day});if(gated)return json(gated);
         const {type,city,extra}=input;
         const sourceSite = "https://www.hamzehibox.com";
         const allGroups = [
@@ -14016,7 +14068,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const groups=type==="all"?allGroups:allGroups.filter(x=>x[0]===type);
         const all = [], seen = new Set(), t = now();
         for (const [groupType, term] of groups) {
-  const q = [term, input.market==="iraq"?"العراق Iraq":"ایران Iran", city, extra].filter(Boolean).join(" ");
+  const q = [term, input.market==="ARAB"?"العراق Iraq":"ایران Iran", city, extra].filter(Boolean).join(" ");
   const discovery = await discoverWebLinks(q, 6);
           const links = discovery.links;
           for (const url of links) {
@@ -14037,7 +14089,7 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
               const score = Math.min(100, verdict.score + (adHit ? 10 : 0));
               const cm = tx.match(/href=["']([^"']+)["'][^>]*>[^<]*(?:ØªÙØ§Ø³|contact|advertis|ØªØ¨ÙÛØº)[^<]*</i);
               let contactUrl = null; if (cm) { try { contactUrl = new URL(cm[1], url).toString(); } catch {} }
-              const notes = { source:"ad_discovery", ad_target:true, source_site:sourceSite, type:groupType, city, query:q, url, evidence:plain.slice(0,900), contact_url:contactUrl, discovered_at:t, score, target_market:input.market, qualification:verdict.signals, automation:"auto_campaign_v1" };
+              const notes = { source:"ad_discovery", ad_target:true, source_site:sourceSite, type:groupType, city, query:q, url, evidence:plain.slice(0,900), contact_url:contactUrl, discovered_at:t, score, ...adsAttribution(input.market,verdict.signals), qualification:verdict.signals, automation:"auto_campaign_v1" };
               notes.website=url;
               const stored=await upsertDiscoveredLead(env,{name:title,contact:url,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_discovery",meta:notes});
               if(stored.conflict)continue;
@@ -14056,7 +14108,8 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
               if (!ADS_DRAFTABLE_STAGES.has(String(lead.stage||""))) continue;
               let meta = {}; try { meta = JSON.parse(lead.notes || "{}"); } catch {}
               if (meta.negotiation_draft) continue;
-              const prompt = `Write a concise ${input.market==="iraq"?"Iraqi Arabic":"Persian"} B2B first-contact draft from HAMZEHI BOX (${sourceSite}), a maker of luxury packaging boxes for gold, jewellery, watch and perfume shops, to this shop. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Offer to send packaging samples and a catalogue; logo printing is available. Do not invent facts, prices or discounts. Draft only, under 700 characters.`;
+              if (leadMarketOf(meta)!==input.market) continue;   // an existing lead of the other market is never drafted here
+              const prompt = `Write a concise ${ADS_MARKETS[input.market].language} B2B first-contact draft from HAMZEHI BOX (${sourceSite}), a maker of luxury packaging boxes for gold, jewellery, watch and perfume shops, to this shop. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Offer to send packaging samples and a catalogue; logo printing is available. Do not invent facts, prices or discounts. Draft only, under 700 characters.`;
               const r = await fetch("https://api.openai.com/v1/responses", { method:"POST", headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"}, body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}), signal:AbortSignal.timeout(15000) });
               const d = await r.json().catch(() => ({})); if (!r.ok) continue;
               const draft = responseText(d).trim(); if (!draft) continue;
@@ -14117,29 +14170,32 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
         const b=await req.json().catch(()=>null);
         if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
-        const input=validateAdsInput(b);
-        if(!input.ok) return json(input,400);
-        const d=await runAdAutopilotOnce(env,input,"manual");
-        return json(d);
+        // Phase 09.4: with a city field → that city's market (empty/unknown city → 400; an explicit market must match); with only a market
+        // → that market's owner-set city; with neither (e.g. an owner command «تبلیغ») → every READY market. A disabled market is skipped
+        // (HTTP 200), never a failure, so the autonomy ads task is not dead-lettered.
+        if("city" in b){
+          const input=validateAdsInput(b);
+          if(!input.ok) return json(input,400);
+          return json(await runAdAutopilotOnce(env,input,"manual"));
+        }
+        if(b.market!=null&&b.market!==""){
+          const market=normalizeAdsMarket(b.market);if(!market) return json({ok:false,reason:"ads_market_invalid",error:"بازار نامعتبر است (IRAN یا ARAB)"},400);
+          const mg=await adsMarketGate(env,market);if(mg.skip) return json(mg.skip);
+          return json(await runAdAutopilotOnce(env,{type:mg.cfg.type,city:mg.cfg.city,extra:mg.cfg.extra,market},"manual"));
+        }
+        const ready=await adsReadyMarkets(env);
+        if(!ready.length) return json({ok:true,skipped:true,reason:"ads_market_disabled",message:"No Ads market is enabled; nothing was run",items:[]});
+        const markets={};for(const {market,cfg} of ready)markets[market]=await runAdAutopilotOnce(env,{type:cfg.type,city:cfg.city,extra:cfg.extra,market},"manual");
+        const all=Object.values(markets);
+        return json({ok:true,markets,deferred:all.every(x=>x.deferred===true)||undefined,reason:all.every(x=>x.deferred===true)?"ads_daily_limit":undefined});
       }
 
       if (u.pathname === "/api/ads/autopilot/start" && req.method === "POST") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         const b=await req.json().catch(()=>null);
         if(!b || typeof b!=="object") return json({ok:false,error:"Invalid JSON body"},400);
-        const input=validateAdsInput(b);
-        if(!input.ok) return json(input,400);
-        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
-        await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind("ads_autopilot_config",JSON.stringify({enabled:true,...input}),now()).run();
-        await audit(env,"ad_autopilot_started","Advertising Autopilot started by admin",{type:input.type,city:input.city});
-        let result={ok:true,enabled:true,config:input};
-        try {
-          result.first_run=await runAdAutopilotOnce(env,input,"start");
-        } catch(e) {
-          await audit(env,"ad_autopilot_start_error","Autopilot start cycle failed",{error:e.message});
-          result.first_run={ok:false,error:e.message};
-        }
-        return json(result);
+        // Phase 09.4: the single-market start is retired; nothing is written or run. Use POST /api/ads/markets/config per market.
+        return json({ok:false,reason:"use_market_controls",error:"Ads اکنون برای ایران و عراق جداگانه روشن می‌شود؛ از کنترل بازارها در صفحهٔ عامل‌ها استفاده کنید (نیاز به تأیید مالک)",endpoint:"/api/ads/markets/config"},409);
       }
 
       if (u.pathname === "/api/ads/autopilot/stop" && req.method === "POST") {
@@ -14149,8 +14205,30 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         let cfg={}; try{cfg=JSON.parse(row?.value||"{}")}catch{}
         cfg.enabled=false;
         await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind("ads_autopilot_config",JSON.stringify(cfg),now()).run();
-        await audit(env,"ad_autopilot_stopped","Advertising Autopilot stopped by admin",{});
-        return json({ok:true,enabled:false});
+        const cfgs=await readAdsMarketConfigs(env),t=now();
+        for(const m of ADS_MARKET_IDS)if(cfgs[m].enabled){const {market:_m,...stored}=cfgs[m];await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind(adsMarketKey(m),JSON.stringify({...stored,enabled:false,updated_at:t}),t).run();}
+        await audit(env,"ad_autopilot_stopped","Advertising Autopilot stopped by admin (all markets)",{});
+        return json({ok:true,enabled:false,markets:{IRAN:false,ARAB:false}});
+      }
+
+      // Phase 09.4: independent IRAN / ARAB (Iraq) Ads markets. GET is read-only; POST changes ONE market: disabling is always allowed,
+      // anything that leaves a market enabled needs owner_approved:true, a city of that market and a daily limit within the global cap.
+      if (u.pathname === "/api/ads/markets" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
+        return json({ok:true,...await adsMarketsStatus(env)});
+      }
+      if (u.pathname === "/api/ads/markets/config" && req.method === "POST") {
+        if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
+        const b=await req.json().catch(()=>null);
+        if(!b || typeof b!=="object" || Array.isArray(b)) return json({ok:false,error:"Invalid JSON body"},400);
+        const market=normalizeAdsMarket(b.market);if(!market) return json({ok:false,reason:"ads_market_invalid",error:"بازار نامعتبر است (IRAN یا ARAB)"},400);
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
+        const cap=await adsGlobalRunCap(env),current=(await readAdsMarketConfigs(env))[market],t=now();
+        const v=validateAdsMarketUpdate({...b,market},current,cap,t);
+        if(!v.ok) return json(v,v.reason==="owner_approval_required"?403:400);
+        await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind(adsMarketKey(market),JSON.stringify(v.stored),t).run();
+        await audit(env,v.config.enabled?"ads_market_enabled":"ads_market_updated",`Ads market ${market} ${v.config.enabled?"enabled":"updated"} by the owner`,{market,enabled:v.config.enabled,city:v.config.city,runs_per_day:v.config.runs_per_day,type:v.config.type});
+        return json({ok:true,market,config:v.config,readiness:adsMarketReadiness(v.config,cap)});
       }
 
       if (u.pathname === "/api/ads/autopilot/status" && req.method === "GET") {
@@ -14169,8 +14247,8 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
           if(m.next_followup_at || m.followup_at) followups++;
           if(x.stage==="customer"||x.stage==="converted") customers++;
         }
-        const tgt=adsTargetCity(cfg.city);
-        return json({ok:true,enabled:!!cfg.enabled,target:{valid:!!tgt,market:tgt?.market||null,city:tgt?.city||null,reason:tgt?null:"ads_target_city_required"},config:{type:cfg.type||"all",city:cfg.city||"",extra:cfg.extra||""},updated_at:cfgRow?.updated_at||null,source_site:"https://www.hamzehibox.com",targets:["gold","watch","fashion_jewelry"],metrics:{found,hot,negotiation,followups,customers,ad_targets:ads},mode:"autopilot",external_send:"authorized_channel_only"});
+        const tgt=adsTargetCity(cfg.city),mk=await adsMarketsStatus(env);
+        return json({ok:true,enabled:Object.values(mk.markets).some(x=>x.enabled),markets:mk.markets,global_runs_per_day:mk.global_runs_per_day,legacy_config_active:false,target:{valid:!!tgt,market:tgt?.market||null,city:tgt?.city||null,reason:tgt?null:"ads_target_city_required"},config:{type:cfg.type||"all",city:cfg.city||"",extra:cfg.extra||""},updated_at:cfgRow?.updated_at||null,source_site:"https://www.hamzehibox.com",targets:["gold","watch","fashion_jewelry"],metrics:{found,hot,negotiation,followups,customers,ad_targets:ads},mode:"autopilot",external_send:"authorized_channel_only"});
       }
 
       if (u.pathname === "/api/ads/followups" && req.method === "GET") {
@@ -14190,28 +14268,11 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
 
       if (u.pathname === "/api/ads/followups/run" && req.method === "POST") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
-        const gated=await adsRunGate(env,"manual_followups");if(gated)return json(gated);
-        const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
-        const due=[]; const nowMs=Date.now();
-        for(const lead of (rows.results||[])){
-          const meta=parseLeadNotes(lead), at=meta.next_followup_at||meta.followup_at;
-          if(at && Date.parse(at) && Date.parse(at)<=nowMs && ADS_FOLLOWUP_STAGES.has(String(lead.stage||""))) due.push({lead,meta});
-        }
-        let prepared=0, skipped=0;
-        for(const {lead,meta} of due.slice(0,20)){
-          if(meta.followup_draft){skipped++;continue;}
-          if(!env.OPENAI_API_KEY){skipped++;continue;}
-          try{
-            const prompt=`Write a short polite ${String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian"} B2B follow-up for HAMZEHI BOX. Target: ${lead.name}. Website: ${lead.contact}. Previous outreach: ${meta.negotiation_draft||meta.outreach_draft||""}. Do not pressure, invent facts, or claim agreement. Ask if they had a chance to review the packaging samples or catalogue offer. Under 500 characters. Draft only.`;
-            const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
-            const d=await r.json().catch(()=>({})); if(!r.ok) {skipped++;continue;}
-            const draft=responseText(d).trim(); if(!draft){skipped++;continue;}
-            meta.followup_draft=draft; meta.followup_prepared_at=now(); meta.followup_at=meta.next_followup_at||meta.followup_at; meta.next_followup_at=null; meta.followup_status="prepared";
-            await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage NOT IN ('customer','converted','rejected','archived')").bind(JSON.stringify(meta),now(),lead.id).run(); prepared++;
-          }catch{skipped++;}
-        }
-        await audit(env,"ad_followups_run","Advertising follow-up drafts prepared",{due:due.length,prepared,skipped});
-        return json({ok:true,due:due.length,prepared,skipped,mode:"draft_and_queue"});
+        // Phase 09.6/09.7: the owner's follow-up button works for every due lead whatever the Ads market switches (CRM_FOLLOWUP quota).
+        const gated=await crmFollowupGate(env,"manual_followups");if(gated)return json(gated);
+        const r=await prepareAdsFollowups(env,{limit:20,excludeDrafted:false});
+        await audit(env,"ad_followups_run","Advertising follow-up drafts prepared",{due:r.due,prepared:r.prepared,skipped:r.skipped,languages:r.languages});
+        return json({ok:true,due:r.due,prepared:r.prepared,skipped:r.skipped,languages:r.languages,mode:"draft_and_queue"});
       }
 
       if (u.pathname === "/api/ads/preflight" && req.method === "GET") {
@@ -14231,19 +14292,19 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
         const today=new Date().toISOString().slice(0,10); let foundToday=0, hot=0, negotiation=0, due=0, customers=0, adTargets=0, opportunities=0;
-        const items=[];
+        const items=[],byMarket={};
         for(const lead of (rows.results||[])){
           const m=parseLeadNotes(lead); const updated=String(lead.updated_at||"");
           if(updated.startsWith(today)) foundToday++;
           if(Number(m.score||0)>=70 || lead.priority==="high") hot++;
           if(lead.stage==="negotiation") negotiation++;
           if(lead.stage==="customer"||lead.stage==="converted") customers++;
-          if(m.ad_target) adTargets++;
+          if(m.ad_target){adTargets++;const mk=leadMarketOf(m);byMarket[mk]=byMarket[mk]||{ad_targets:0,customers:0};byMarket[mk].ad_targets++;if(lead.stage==="customer"||lead.stage==="converted")byMarket[mk].customers++;}
           if(m.ad_opportunity || m.contact_url) opportunities++;
           const at=m.next_followup_at||m.followup_at; if(at && Date.parse(at)<=Date.now() && !["customer","converted","rejected","archived"].includes(lead.stage)) due++;
-          if(items.length<12 && m.ad_target) items.push({id:lead.id,name:lead.name,stage:lead.stage,score:Number(m.score||0),type:m.type||null,url:m.url||lead.contact,contact_url:m.contact_url||null,ad_opportunity:!!(m.ad_opportunity||m.contact_url),followup_draft:m.followup_draft||null});
+          if(items.length<12 && m.ad_target) items.push({id:lead.id,name:lead.name,stage:lead.stage,market:leadMarketOf(m),score:Number(m.score||0),type:m.type||null,url:m.url||lead.contact,contact_url:m.contact_url||null,ad_opportunity:!!(m.ad_opportunity||m.contact_url),followup_draft:m.followup_draft||null});
         }
-        return json({ok:true,source_site:"https://www.hamzehibox.com",metrics:{found_today:foundToday,hot,negotiation,due_followups:due,customers,ad_targets:adTargets,ad_opportunities:opportunities},items});
+        return json({ok:true,source_site:"https://www.hamzehibox.com",metrics:{found_today:foundToday,hot,negotiation,due_followups:due,customers,ad_targets:adTargets,ad_opportunities:opportunities},by_market:byMarket,items});
       }
 
       if (u.pathname === "/api/ads/negotiation-draft" && req.method === "POST") {

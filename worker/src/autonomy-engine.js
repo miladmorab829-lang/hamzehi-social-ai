@@ -433,10 +433,34 @@ async function budgetOverrides(env){try{const v=JSON.parse(await getKV(env,"budg
 // auto-run and follow-up drafting): one atomic reservation row per run — at most ads_runs_per_day per UTC day and at most one per
 // 55 min, across all entry points and Worker instances. Reserved before any external call and never released, so a retry, timeout
 // or concurrent request can never run Ads twice. Read-only Ads routes never reserve.
-export async function reserveAdsAutopilotRun(env,nowMs=Date.now(),source="scheduled",{spacing=true}={}){
+// The Ads daily run cap (owner budget override or default). Since Phase 09.7 it is the MAXIMUM an owner may set as one market's daily
+// discovery limit; it is no longer a counter shared between IRAN, ARAB and CRM follow-ups.
+export async function adsGlobalRunCap(env){return autonomyBudgets(await budgetOverrides(env)).ads_runs_per_day;}
+// Phase 09.7: three independent daily quotas, each with its own counter, 55-minute spacing and UTC-day reset:
+//   ADS_IRAN_DISCOVERY / ADS_IRAQ_DISCOVERY — {market, marketCap}: rows 'ads_autopilot_reserved' tagged with that market only;
+//   CRM_FOLLOWUP — reserveCrmFollowupRun(): rows 'crm_followup_reserved'.
+// None of them counts or blocks the others. The market is matched with instr() on the JSON written here (no JSON parsing of other rows).
+export async function reserveAdsAutopilotRun(env,nowMs=Date.now(),source="scheduled",{spacing=true,market=null,marketCap=null}={}){
   const cap=autonomyBudgets(await budgetOverrides(env)).ads_runs_per_day,d=new Date(nowMs);d.setUTCHours(0,0,0,0);
+  if(market){
+    if(!["IRAN","ARAB"].includes(market)||!Number.isInteger(marketCap)||marketCap<1)return false;
+    const tag=`"market":"${market}"`,since=new Date(nowMs-55*60*1000).toISOString();
+    const r=await env.DB.prepare("INSERT INTO system_events(id,type,severity,message,details_json,created_at) SELECT ?,'ads_autopilot_reserved','info','Ads run reserved (daily budget)',?,? WHERE (SELECT COUNT(*) FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=? AND instr(details_json,?)>0)<? "+(spacing?"AND NOT EXISTS(SELECT 1 FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>? AND instr(details_json,?)>0)":"AND ?<>'' AND ?<>''"))
+      .bind(uid(),JSON.stringify({quota:market==="IRAN"?"ADS_IRAN_DISCOVERY":"ADS_IRAQ_DISCOVERY",market,market_cap:marketCap,source:String(source).slice(0,40)}),new Date(nowMs).toISOString(),d.toISOString(),tag,marketCap,since,tag).run();
+    return Number(r?.meta?.changes||0)===1;
+  }
   const r=await env.DB.prepare("INSERT INTO system_events(id,type,severity,message,details_json,created_at) SELECT ?,'ads_autopilot_reserved','info','Ads Autopilot run reserved (daily budget)',?,? WHERE (SELECT COUNT(*) FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?)<? "+(spacing?"AND NOT EXISTS(SELECT 1 FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>?)":"AND ?<>''"))
     .bind(uid(),JSON.stringify({cap,source:String(source).slice(0,40)}),new Date(nowMs).toISOString(),d.toISOString(),cap,new Date(nowMs-55*60*1000).toISOString()).run();
+  return Number(r?.meta?.changes||0)===1;
+}
+// CRM_FOLLOWUP quota (Phase 09.7): one reservation per follow-up drafting run (15-minute path, 07:00 sweep, owner button); at most
+// crm_followups_per_day per UTC day and — unless spacing is off (07:00 sweep) — one per 55 minutes. Ads discovery rows never count here.
+export async function crmFollowupCap(env){return autonomyBudgets(await budgetOverrides(env)).crm_followups_per_day;}
+export async function reserveCrmFollowupRun(env,nowMs=Date.now(),source="scheduled",{spacing=true}={}){
+  const cap=autonomyBudgets(await budgetOverrides(env)).crm_followups_per_day,d=new Date(nowMs);d.setUTCHours(0,0,0,0);
+  if(!Number.isInteger(cap)||cap<1)return false;
+  const r=await env.DB.prepare("INSERT INTO system_events(id,type,severity,message,details_json,created_at) SELECT ?,'crm_followup_reserved','info','CRM follow-up run reserved (daily quota)',?,? WHERE (SELECT COUNT(*) FROM system_events WHERE type='crm_followup_reserved' AND created_at>=?)<? "+(spacing?"AND NOT EXISTS(SELECT 1 FROM system_events WHERE type='crm_followup_reserved' AND created_at>?)":"AND ?<>''"))
+    .bind(uid(),JSON.stringify({quota:"CRM_FOLLOWUP",cap,source:String(source).slice(0,40)}),new Date(nowMs).toISOString(),d.toISOString(),cap,new Date(nowMs-55*60*1000).toISOString()).run();
   return Number(r?.meta?.changes||0)===1;
 }
 // Today's spend in cost units (global and per provider) against the budgets, plus Ads Autopilot runs (Agent Control Center).
@@ -445,8 +469,9 @@ export async function costSummary(env){
  const rows=(await env.DB.prepare("SELECT module,action,COALESCE(SUM(attempts),0) n FROM autonomy_tasks WHERE started_at>=? GROUP BY module,action").bind(day).all()).results||[];
  const providers=Object.fromEntries(Object.keys(b.providers).map(p=>[p,{used:0,budget:b.providers[p]}]));let used=0;
  for(const r of rows){const k=`${r.module}:${r.action}`;if(!(k in AUTONOMY_UNIT_COST))continue;const u=Number(r.n)*AUTONOMY_UNIT_COST[k];used+=u;const p=AUTONOMY_PROVIDER[k];if(providers[p])providers[p].used+=u;}
- let adsRuns=0;try{adsRuns=Number((await env.DB.prepare("SELECT COUNT(*) n FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?").bind(day).first())?.n||0)}catch{}
- return {units:{used,budget:b.daily_units},providers,ads_autopilot:{runs_today:adsRuns,runs_per_day:b.ads_runs_per_day}};
+ let adsRuns=0;const byMarket={IRAN:0,ARAB:0};try{const a=await env.DB.prepare("SELECT COUNT(*) n,SUM(instr(details_json,'\"market\":\"IRAN\"')>0) ir,SUM(instr(details_json,'\"market\":\"ARAB\"')>0) ar FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?").bind(day).first();adsRuns=Number(a?.n||0);byMarket.IRAN=Number(a?.ir||0);byMarket.ARAB=Number(a?.ar||0);}catch{}
+ let crmRuns=0;try{crmRuns=Number((await env.DB.prepare("SELECT COUNT(*) n FROM system_events WHERE type='crm_followup_reserved' AND created_at>=?").bind(day).first())?.n||0)}catch{}
+ return {units:{used,budget:b.daily_units},providers,ads_autopilot:{runs_today:adsRuns,runs_per_day:b.ads_runs_per_day,by_market:byMarket},crm_followups:{runs_today:crmRuns,runs_per_day:b.crm_followups_per_day}};
 }
 // A claim refused while the row is still queued means the quota was taken by a concurrent run: defer it (no approval, no failure).
 async function stillQueued(env,id){return (await env.DB.prepare("SELECT status FROM autonomy_tasks WHERE id=?").bind(id).first())?.status==="queued"}

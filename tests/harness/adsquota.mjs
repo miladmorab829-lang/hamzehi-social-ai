@@ -25,6 +25,8 @@ const tick=async()=>{const p=[];await WK.scheduled({cron:"*/15 * * * *"},W.env,{
 const input={type:"gold",city:"تهران",extra:""};
 
 await call("/api/ads/autopilot/status",null,"GET");   // creates system_kv like the dashboard does
+// Phase 09.4: Ads runs only for an owner-enabled market; these checks use IRAN (Tehran) with a limit equal to the global cap
+await call("/api/ads/markets/config",{market:"IRAN",enabled:true,city:"تهران",runs_per_day:24,owner_approved:true});
 // A1 manual first, then the cron tick inside 55 minutes → the cron is deferred (one shared reservation)
 clear();dbrun("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES('ads_autopilot_config',?,?)",[JSON.stringify({enabled:true,...input}),new Date().toISOString()]);
 {const m=await call("/api/ads/autopilot",input);const s0=search;await tick();
@@ -49,7 +51,8 @@ dbrun("DELETE FROM system_events WHERE type='ads_autopilot_reserved' AND created
 clear();setBudget({ads_runs_per_day:24});
 {await call("/api/ads/autopilot",input);const n0=reservations(),s0=search,o0=openai;
  const d=await call("/api/ads/discover",{type:"gold",city:"تهران"}),ar=await call("/api/ads/auto-run",input),f=await call("/api/ads/followups/run",{});
- ok("A6 manual discovery, auto-run and follow-up drafting share the same budget: all deferred inside the interval, no search, site or OpenAI call",[d,ar,f].every(r=>r.status===200&&r.body.deferred===true)&&search===s0&&openai===o0&&reservations()===n0,[d.body,ar.body?.deferred,f.body?.deferred]);
+ // Phase 09.7 (owner decision): follow-up drafting no longer shares the Ads budget — it has its own CRM_FOLLOWUP quota, so an Ads run never defers it
+ ok("A6 manual discovery and auto-run share the IRAN discovery budget (both deferred inside the interval, no search, site or OpenAI call); follow-up drafting uses its own CRM quota and is not deferred by the Ads run",[d,ar].every(r=>r.status===200&&r.body.deferred===true)&&f.status===200&&f.body.deferred!==true&&search===s0&&openai===o0&&reservations()===n0&&q("SELECT COUNT(*) n FROM system_events WHERE type='crm_followup_reserved'")[0].n===1,[d.body,ar.body?.deferred,f.body]);
  const ro=[await call("/api/ads/autopilot/status",null,"GET"),await call("/api/ads/preflight",null,"GET"),await call("/api/ads/overview",null,"GET"),await call("/api/ads/targets",null,"GET"),await call("/api/ads/followups",null,"GET")];
  ok("A6b read-only Ads routes (status, preflight, overview, targets, follow-up list) never consume the budget",ro.every(r=>r.status<500)&&reservations()===n0,ro.map(r=>r.status));}
 // A7 the autonomy ads task hitting the limit completes as deferred (no dead letter, no approval, not retried)

@@ -3,6 +3,7 @@
 // task or a work event the Worker already records (Ads/Content/Learning/Video autopilots, inbound messages). Missing data → UNKNOWN.
 import { autonomyActionCapability, redact, AUTONOMY_UNIT_COST, AUTONOMY_PROVIDER } from "./agent-orchestrator.js";
 import { WATCHDOG, EXPECTED_ACTIVITY, rowidFloor } from "./agent-watchdog.js";
+import { ADS_MARKET_IDS, ADS_MARKETS, adsMarketKey, adsMarketConfig, adsMarketReadiness, normalizeAdsMarket } from "./ads-markets.js";
 
 export const ACTIVITY_WINDOW_MS=48*3600*1000;
 const SIGNAL_WINDOW_MS=60*86400000;
@@ -88,7 +89,7 @@ export function healthModel(a,c,nowMs=Date.now()){
   if(c.idle_kind==="UNEXPECTED")codes.push("EXPECTED_WORK_OVERDUE");
   if(Number(a.pending_review||0)>0)codes.push("OWNER_REVIEW_PENDING");
   // first matching code decides the recommended next action (UI translates the code; nothing is executed from here)
-  const order=["MASTER_OFF","MODULE_DISABLED","ACTION_DISABLED","CRITICAL_ALERT","SCHEDULER_STALE","ADS_CITY_EMPTY","MEDIA_PROVIDER_BLOCKED","DLQ_OPEN","LAST_TASK_FAILED","OWNER_REVIEW_PENDING","CHANNEL_NOT_CONNECTED","EXPECTED_WORK_OVERDUE"];
+  const order=["MASTER_OFF","MODULE_DISABLED","ACTION_DISABLED","CRITICAL_ALERT","SCHEDULER_STALE","ADS_CITY_EMPTY","ADS_MARKET_INCOMPLETE","MEDIA_PROVIDER_BLOCKED","DLQ_OPEN","LAST_TASK_FAILED","OWNER_REVIEW_PENDING","CHANNEL_NOT_CONNECTED","EXPECTED_WORK_OVERDUE"];
   const next_action=order.find(x=>codes.includes(x))||(technical==="UNKNOWN"&&activity==="UNKNOWN"?"NO_DATA":"NONE");
   return {technical,connection,activity,execution,reason_codes:codes,next_action};
 }
@@ -115,7 +116,7 @@ export async function agentActivitySummary(env,{modules,actions,controls,quotas=
     q("SELECT agent,level,code,last_seen_at FROM agent_alerts WHERE acknowledged_at IS NULL LIMIT 100"),
     q("SELECT agent,COUNT(*) n FROM agent_dead_letters WHERE resolved_at IS NULL GROUP BY agent LIMIT 50"),
     q("SELECT module,action FROM autonomy_action_controls WHERE enabled=0 LIMIT 100"),
-    q("SELECT key,value FROM system_kv WHERE key IN ('ads_autopilot_config','auto_pilot_config') LIMIT 5")
+    q("SELECT key,value FROM system_kv WHERE key IN ('ads_autopilot_config','auto_pilot_config','ads_market:IRAN','ads_market:ARAB') LIMIT 5")
   ]);
   const ev=Object.fromEntries((events||[]).map(e=>[e.type,e]));
   const kvMap=Object.fromEntries((kv||[]).map(r=>[r.key,json(r.value)]));
@@ -130,12 +131,20 @@ export async function agentActivitySummary(env,{modules,actions,controls,quotas=
     for(const t of sig.ok||[]){const e=ev[t];if(e&&(!lastReal||(ms(e.last)||0)>(ms(lastReal.at)||0)))lastReal={source:`event ${t}`,at:e.last};}
     const blocked=[],blockedCodes=[];
     if(m==="ads"){
-      const run=ev.ad_autopilot_run,d=json(run?.d),cfg=kvMap.ads_autopilot_config;
-      if(run)Object.assign(detail,{last_run_found:Number(d.found||0),last_run_drafted:Number(d.drafted||0),last_run_errors:Number(d.errors||0)});
+      const run=ev.ad_autopilot_run,d=json(run?.d);
+      if(run)Object.assign(detail,{last_run_found:Number(d.found||0),last_run_drafted:Number(d.drafted||0),last_run_errors:Number(d.errors||0),last_run_market:normalizeAdsMarket(d.market)});
       if(ev.ads_run_deferred)detail.last_deferred_at=ev.ads_run_deferred.last;
-      if(!cfg)detail.autopilot="UNKNOWN";
-      else{detail.autopilot=cfg.enabled?"on":"off";detail.target_city=String(cfg.city||"").trim()||null;
-        if(cfg.enabled&&!detail.target_city){blocked.push("Ads target city is empty (Phase 04 requires a valid Iran/Iraq city)");blockedCodes.push("ADS_CITY_EMPTY");}}
+      // Phase 09.4: two independent markets (a missing row = disabled). The legacy single-market row no longer runs anything.
+      const markets={};
+      for(const mk of ADS_MARKET_IDS){
+        const c=adsMarketConfig(mk,kvMap[adsMarketKey(mk)]),r=adsMarketReadiness(c),label=mk==="ARAB"?"IRAQ (ARAB)":mk;
+        markets[mk]={enabled:c.enabled,city:c.city||null,runs_per_day:c.runs_per_day,ready:r.ready,codes:r.codes,language:ADS_MARKETS[mk].language,currency:ADS_MARKETS[mk].currency};
+        if(c.enabled&&!c.city){blocked.push("Ads target city is empty for "+label);if(!blockedCodes.includes("ADS_CITY_EMPTY"))blockedCodes.push("ADS_CITY_EMPTY");}
+        else if(c.enabled&&!r.ready){blocked.push("Ads market "+label+" is enabled but incomplete ("+r.codes.join(", ")+")");if(!blockedCodes.includes("ADS_MARKET_INCOMPLETE"))blockedCodes.push("ADS_MARKET_INCOMPLETE");}
+      }
+      detail.markets=markets;detail.autopilot=Object.values(markets).some(x=>x.enabled)?"on":"off";
+      detail.target_city=Object.values(markets).find(x=>x.enabled&&x.city)?.city||null;
+      const legacy=kvMap.ads_autopilot_config;detail.legacy_config=legacy?{enabled:!!legacy.enabled,city:String(legacy.city||"").trim()||null,active:false}:null;
     }
     if(m==="content"){const c=ev.auto_pilot_cycle,d=json(c?.d);if(c){detail.pending_review=d.pending_review??null;detail.last_cycle_hold=d.hold_reason||null;detail.last_cycle_at=c.last;}
       const cfg=kvMap.auto_pilot_config;detail.autopilot=cfg?(cfg.enabled?"on":"off"):"UNKNOWN";}
