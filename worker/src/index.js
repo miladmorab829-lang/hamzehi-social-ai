@@ -10,6 +10,7 @@ import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEv
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
 import { bearerMatches } from "./secure-compare.js";
 import { runWatchdog } from "./agent-watchdog.js";
+import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -10624,8 +10625,9 @@ const leadTestFlagSql=a=>`COALESCE(CASE WHEN ${a}.notes IS NULL OR TRIM(${a}.not
 const leadNotesInvalidSql=a=>`COALESCE(${a}.notes IS NOT NULL AND TRIM(${a}.notes)<>'' AND NOT json_valid(${a}.notes),0)`;
 // New follow-up drafts consider only records whose anchor date is within this lookback (detection for reports is not limited).
 const REVENUE_FOLLOWUP_LOOKBACK_DAYS=90;
-async function findStalledRevenueItems(env,{nowMs=Date.now(),limit=200,maxAgeDays=null}={}){
-  await ensureOrderStore(env);
+// ensure:false (Owner Action Center, Phase 13.1B): a pure read that never initialises or alters the schema; existing callers keep ensure.
+async function findStalledRevenueItems(env,{nowMs=Date.now(),limit=200,maxAgeDays=null,ensure=true}={}){
+  if(ensure)await ensureOrderStore(env);
   const days=n=>new Date(nowMs-n*86400000).toISOString(),ageDays=at=>at&&Date.parse(at)?Math.floor((nowMs-Date.parse(at))/86400000):null;
   const testFlag=leadTestFlagSql("l"),notesInvalid=leadNotesInvalidSql("l"),floor=maxAgeDays?days(maxAgeDays):null;
   const leadJoin=`LEFT JOIN leads l ON l.id=${"x"}.lead_id`;
@@ -14052,6 +14054,16 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         return json({ok:true,state:state||null});
       }
 
+      // Phase 13.1: Owner Action Center — one read-only, prioritized queue of everything waiting on the owner. It only reads existing
+      // records (no write, no send, no approval, no state change); acting stays in the existing owner-only views it links to.
+      if (u.pathname === "/api/owner/action-center" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        const q=Object.fromEntries(["priority","category","market","status","limit","offset"].map(k=>[k,String(u.searchParams.get(k)||"").trim().slice(0,40)]));
+        if(q.priority&&!["P0","P1","P2","P3"].includes(q.priority))return json({ok:false,error:"Invalid priority"},400);
+        if(q.market&&!["IRAN","ARAB","UNKNOWN"].includes(q.market))return json({ok:false,error:"Invalid market"},400);
+        try{return json(await ownerActionCenter(env,q,{leadTestFlagSql,findStalledRevenueItems,canonicalCurrency,leadMarketOf}));}
+        catch(e){return json({ok:false,error:"Owner action center is unavailable"},500);}
+      }
       if (u.pathname === "/api/owner-escalations" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         await ensureOwnerEscalationStore(env);

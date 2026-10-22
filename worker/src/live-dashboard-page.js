@@ -1731,6 +1731,46 @@ function renderErrorsCenter(){
  if(uxErrorsOk)$("errorsCenterStatus").textContent=uxN(list.length)+" از "+uxN(uxErrors.length)+" مورد";
  $("errorsCenterItems").innerHTML=list.slice(0,100).map(uxErrRow).join("")||(uxErrorsOk?"<div class='hint'>موردی با این فیلتر نیست.</div>":"");
 }
+// ---- Phase 13.1 Owner Action Center (read-only; loads when its page opens and on ↻ — not part of the polling groups)
+const OAC_CAT={payment:"پرداخت",order:"سفارش",pricing:"قیمت",commercial:"شرایط تجاری",knowledge:"دانش محصول",followup:"پیگیری",opportunity:"فرصت"};
+const OAC_CLASS={REAL:"واقعی",TEST:"تست",UNKNOWN:"نامشخص"},OAC_MKT={IRAN:"ایران",ARAB:"عراق",UNKNOWN:"بازار نامشخص"},OAC_PRI={P0:"bad",P1:"warn",P2:"",P3:"gray"};
+const OAC_LIMIT=25;let oacOffset=0,oacTotal=0;
+function oacPage(d){oacOffset=Math.max(0,oacOffset+d*OAC_LIMIT);loadOwnerActions()}
+// 13.1B: counts are exact only when every source was read completely; otherwise they are lower bounds («≥») and a banner says why.
+function oacCnt(n,exact){return (exact?"":"≥")+uxN(n)}
+function oacCoverageHtml(d){const c=d.coverage||{};if(c.status==="COMPLETE")return "";
+ const parts=[];if((c.failed_sources||[]).length)parts.push("منبع در دسترس نیست: "+esc(c.failed_sources.join("، ")));
+ if((c.truncated_sources||[]).length)parts.push("بیش از سقف ۲۰۰ مورد: "+esc(c.truncated_sources.join("، ")));
+ const urgentBad=c.urgent!=="COMPLETE";
+ return "<div class='row' style='margin-top:8px;border-color:"+(urgentBad?"#fecaca":"#fed7aa")+"'><b class='"+(urgentBad?"bad":"warn")+"'>"+(urgentBad?"⚠ پوشش ناقص: ممکن است اقدام فوری (P0/P1) نمایش‌داده‌نشده وجود داشته باشد":"⚠ فهرست کامل نیست؛ اعداد حداقل هستند (≥)")+"</b><small>"+parts.join(" · ")+"</small></div>";}
+function oacEmptyText(d){const complete=(d.coverage||{}).status==="COMPLETE",any=!!(d.summary&&d.summary.total);
+ if(!complete)return "موردی نمایش داده نشد، اما پوشش داده‌ها کامل نیست — این به معنی نبودن اقدام نیست.";
+ return any?"موردی با این فیلتر نیست.":"اقدام بازی منتظر مالک نیست."}
+async function loadOwnerActions(){
+ const p=new URLSearchParams({limit:String(OAC_LIMIT),offset:String(oacOffset)});
+ [["priority","oacPri"],["category","oacCat"],["market","oacMkt"],["status","oacSt"]].forEach(function(x){const v=$(x[1]).value;if(v)p.set(x[0],v)});
+ const d=await api("/api/owner/action-center?"+p.toString());
+ if(!d.ok){$("oacStatus").textContent=uxAuthHint(d);$("oacItems").innerHTML="";$("oacSummary").innerHTML="";$("oacPrev").disabled=$("oacNext").disabled=true;return}
+ const s=d.summary||{},bp=s.by_priority||{},m=s.money_outstanding||{};
+ const ex=!!(d.coverage&&d.coverage.exact);if(oacOffset>0&&oacOffset>=(Number(d.total_filtered)||0)){oacOffset=0;return loadOwnerActions()}
+ $("oacCoverage").innerHTML=oacCoverageHtml(d);
+ $("oacSummary").innerHTML="<div class='sum'><span>کل اقدام‌های باز</span><b>"+oacCnt(s.total,ex)+"</b></div><div class='sum"+(bp.P0?" bad":"")+"'><span>P0 فوری</span><b>"+oacCnt(bp.P0,ex)+"</b></div><div class='sum"+(bp.P1?" warn":"")+"'><span>P1 بالا</span><b>"+oacCnt(bp.P1,ex)+"</b></div><div class='sum"+(s.customer_waiting?" warn":"")+"'><span>مشتری منتظر پاسخ</span><b>"+oacCnt(s.customer_waiting,ex)+"</b></div>"
+  +"<div class='sum'><span>مطالبات تأییدشده (واقعی)</span><b>"+uxMoney(m.verified_by_currency)+"</b></div><div class='sum'><span>مطالبات تأییدنشده (نامشخص)</span><b>"+uxMoney(m.unverified_by_currency)+"</b></div>";
+ const st=$("oacSt"),cur=st.value;st.innerHTML="<option value=''>همه وضعیت‌ها</option>"+Object.keys(s.by_status||{}).sort().map(function(k){return "<option value='"+esc(k)+"'"+(k===cur?" selected":"")+">"+esc(k)+" ("+uxN(s.by_status[k])+")</option>"}).join("");
+ oacTotal=Number(d.total_filtered)||0;
+ $("oacStatus").textContent=oacTotal?uxN(Math.min(oacTotal,oacOffset+1))+"–"+uxN(Math.min(oacTotal,oacOffset+OAC_LIMIT))+" از "+oacCnt(oacTotal,ex):"";
+ $("oacItems").innerHTML=(d.items||[]).map(oacRow).join("")||"<div class='hint'>"+oacEmptyText(d)+"</div>";
+ $("oacPrev").disabled=oacOffset<=0;$("oacNext").disabled=oacOffset+OAC_LIMIT>=oacTotal;
+}
+function oacRow(x){
+ const amt=x.currency&&x.amount_minor!==null&&x.amount_minor!==undefined?" · "+uxAmount(x.amount_minor,x.currency)+(x.classification==="REAL"?"":" <span class='tag'>تأییدنشده</span>"):"";
+ const age=x.age_days===null||x.age_days===undefined?"سن نامشخص":uxN(x.age_days)+" روز";
+ const ref=(x.record&&x.record.type?x.record.type:"")+" "+(x.record&&(x.record.number||x.record.id)?String(x.record.number||x.record.id).slice(0,18):"");
+ return "<div class='row'><span class='pill "+(OAC_PRI[x.priority]||"")+"'>"+esc(x.priority)+"</span> <b>"+esc(x.next_action||"")+"</b>"
+  +"<small><span class='tag'>"+esc(OAC_CAT[x.category]||x.category)+"</span><span class='tag'>"+esc(OAC_MKT[x.market]||x.market)+"</span><span class='tag'>"+esc(OAC_CLASS[x.classification]||x.classification)+"</span><span class='tag'>"+esc(x.status||"")+"</span> "
+  +((x.flags||[]).indexOf("customer_waiting")>=0?"<span class='tag'>مشتری منتظر پاسخ</span> ":"")
+  +esc(age)+amt+" · <bdi dir='ltr'>"+esc(ref)+"</bdi>"+(x.count?" · "+uxN(x.count)+" مورد":"")+(x.link?" · <a href='"+esc(x.link)+"'>مشاهده</a>":"")+"</small></div>";
+}
 // ---- customers
 let uxLeads=[];
 async function loadLeadsList(){const d=await api("/api/leads");if(!Array.isArray(d.items)){$("leadsListStatus").textContent=uxAuthHint(d);$("leadsListItems").innerHTML="";return}uxLeads=d.items;
@@ -1983,7 +2023,7 @@ function dashSectionLoads(){
  return [on("tasks",loadTasks),on("brain",loadBrain),on("revenue",loadRevenue),on("opportunities",loadOpp),on("errors",loadErrors),on("safety",loadSafety),
   on("approvalItems",loadApprovals),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox),on("quoteItems",loadQuotes),
   on("orderItems",loadOrders),on("priceItems",loadPriceItems),on("knowledgeFacts",loadSalesKnowledge),(has("ownerEscalationsItems")||has("siMoney"))?loadOwnerEscalations():null,
-  on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter),on("galProduct",loadGalleryOptions),on("galReviewItems",loadGallery),on("galRequestItems",loadGalleryRequests),on("galFunnel",loadGalleryFunnel),on("mpOut",function(){return mpLoaded?null:mpLoad(false)})];
+  on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter),on("oacItems",loadOwnerActions),on("galProduct",loadGalleryOptions),on("galReviewItems",loadGallery),on("galRequestItems",loadGalleryRequests),on("galFunnel",loadGalleryFunnel),on("mpOut",function(){return mpLoaded?null:mpLoad(false)})];
 }
 // Hub summary: counts from the same existing endpoints the section pages use (nothing estimated or invented).
 async function loadHubSummary(){
@@ -2211,13 +2251,31 @@ DASH_SECTIONS.errorsCenter=`<section class="section" id="errorsCenter">
 <div id="errorsCenterStatus" class="hint" style="margin-top:6px">در حال دریافت…</div><div id="errorsCenterItems" class="rows"></div></div>
 </section>
 `;
+// Phase 13.1 — Owner Action Center: one read-only, prioritized queue of everything waiting on the owner. It never sends, approves or
+// changes anything; each row links to the existing owner-only view where the owner acts.
+DASH_SECTIONS.ownerActions=`<section class="section" id="ownerActions">
+<div id="oacSummary" class="summary"><div class="hint">در حال دریافت…</div></div>
+<div id="oacCoverage" role="status" aria-live="polite"></div>
+<div class="card section"><div class="title"><div><h2>${dashIcon("check")}مرکز اقدام مالک</h2><div class="hint">فقط نمایش و اولویت‌بندی؛ از اینجا هیچ پیام، تأیید، پرداخت یا تغییر وضعیتی انجام نمی‌شود.</div></div><button class="btn" onclick="oacOffset=0;loadOwnerActions()" aria-label="به‌روزرسانی">↻</button></div>
+<div class="filters">
+<select id="oacPri" class="input" aria-label="اولویت" onchange="oacOffset=0;loadOwnerActions()"><option value="">همه اولویت‌ها</option><option value="P0">P0 فوری</option><option value="P1">P1 بالا</option><option value="P2">P2 عادی</option><option value="P3">P3 پایین</option></select>
+<select id="oacCat" class="input" aria-label="دسته" onchange="oacOffset=0;loadOwnerActions()"><option value="">همه دسته‌ها</option><option value="payment">پرداخت</option><option value="order">سفارش</option><option value="pricing">قیمت</option><option value="commercial">شرایط تجاری</option><option value="knowledge">دانش محصول</option><option value="followup">پیگیری</option><option value="opportunity">فرصت</option></select>
+<select id="oacMkt" class="input" aria-label="بازار" onchange="oacOffset=0;loadOwnerActions()"><option value="">همه بازارها</option><option value="IRAN">ایران</option><option value="ARAB">عراق</option><option value="UNKNOWN">نامشخص</option></select>
+<select id="oacSt" class="input" aria-label="وضعیت" onchange="oacOffset=0;loadOwnerActions()"><option value="">همه وضعیت‌ها</option></select>
+</div>
+<div id="oacStatus" class="hint" style="margin-top:6px">در حال دریافت…</div><div id="oacItems" class="rows"></div>
+<div class="tools" style="margin-top:8px"><button class="btn" id="oacPrev" onclick="oacPage(-1)" disabled>قبلی</button><button class="btn" id="oacNext" onclick="oacPage(1)" disabled>بعدی</button></div>
+</div>
+</section>
+`;
 // Where every section lives (each page is its own document). Earlier paths are unchanged. FOLDS: sections shown collapsed on that
 // page — the lazy ones load their data only when opened (or when a link points into them).
 export const DASHBOARD_PAGES={
  hub:{path:"/dashboard",title:"خانه",icon:"home",desc:"خلاصه مدیریتی",sections:["home","hubAgents","authFold"]},
  customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["leadsList","negotiation","opportunities"]},
  orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"box",desc:"سفارش‌ها، پرداخت‌ها و درخواست‌های قیمت",sections:["orders","money","quotes"]},
- approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
+ actions:{path:"/dashboard/actions",title:"مرکز اقدام مالک",icon:"check",desc:"همهٔ کارهای منتظر مالک، اولویت‌بندی‌شده (فقط نمایش)",sections:["ownerActions"]},
+ approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["ownerActions","approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
  agents:{path:"/dashboard/agents",title:"عامل‌ها و پایش",icon:"alert",desc:"سلامت عامل‌ها، هشدارها، تأییدها، صف خطا، مصرف",sections:["agentCenter","adsMarkets","agentOps"]},
  errors:{path:"/dashboard/errors",title:"خطاها",icon:"alert",desc:"خطاهای سیستم و جزئیات",sections:["errorsCenter","errorsCard"]},
  more:{path:"/dashboard/more",title:"بیشتر",icon:"menu",desc:"همه بخش‌های دیگر",sections:["moreNav"]},
@@ -2242,7 +2300,7 @@ export const DASH_FOLDS={
 };
 const DASH_TABS=["hub","customers","orders","approvals","more"];
 const DASH_MORE_GROUPS=[["محصولات و دانش",["gallery","knowledge"]],["محتوا و رسانه",["content","media"]],["کانال‌ها",["channels"]],["درآمد و گزارش‌ها",["revenue","sales"]],["خطاها",["errors","agents"]],["تنظیمات پیشرفته",["system","all"]]];
-const DASH_ORDER=["customers","orders","approvals","errors","agents","gallery","knowledge","content","media","channels","revenue","system","sales","all"];
+const DASH_ORDER=["actions","customers","orders","approvals","errors","agents","gallery","knowledge","content","media","channels","revenue","system","sales","all"];
 const dashEsc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 DASH_SECTIONS.moreNav=DASH_MORE_GROUPS.map(([g,keys])=>`<section class="mgroup"><h3>${dashEsc(g)}</h3><nav class="mlist">`+keys.map(k=>{const p=DASHBOARD_PAGES[k];return `<a href="${p.path}"><span class="mi">${dashIcon(p.icon)}</span><span class="mt"><b>${dashEsc(p.title)}</b><small>${dashEsc(p.desc)}</small></span>${dashIcon("chev").replace('class="ic"','class="ic chev"')}</a>`;}).join("")+`</nav></section>`).join("\n")+"\n";
 DASH_SECTIONS.hubNav=DASH_SECTIONS.moreNav;
