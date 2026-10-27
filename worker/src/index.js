@@ -7517,6 +7517,8 @@ const CUSTOMER_DESTINATION_CITY_ALL=new RegExp(CUSTOMER_DESTINATION_CITY.source,
 // Where the order goes, from ONE message: {value, explicit}. explicit = a labelled destination, «لبغداد», a destination word, a
 // correction, or a reply that is only the city; a bare city elsewhere in a sentence is a weak mention. A city inside a name never counts.
 // A correction («مو بغداد، البصرة») takes the LAST city named.
+// Phase 16.3: an Iranian city written with an Arabic preposition («بطهران», «لمشهد», «وبأصفهان») — detection only, longer names only
+const CUSTOMER_IRAN_CITY_PREFIXED=/(?<![\p{L}])[وف]?[بل](?:طهران|تهران|مشهد|اصفهان|أصفهان|شیراز|شيراز|تبریز|تبريز|کرج|كرج|الأهواز|الاهواز|اهواز|کرمانشاه|همدان|ارومیه|زاهدان|بندرعباس|قزوین)(?![\p{L}])/u;
 function customerDestinationBothMarkets(message){
   const [[,iranPlace],[,iraqPlace]]=SALES_DESTINATION_COUNTRIES;
   // an ORIGIN («من ايران», «از ایران», «from Iran» — the supplier side) is not a destination and never makes a message mixed
@@ -7524,7 +7526,7 @@ function customerDestinationBothMarkets(message){
   // detection only (nothing stored): a word-initial «و»/«ف» conjunction («وطهران», «والبصرة») is also read without it
   const bare=text.replace(/(?<![\p{L}])[وف](?=\p{L})/gu,""),has=(re,f)=>re.test(text)||re.test(bare)||(f&&(!!f(text)||!!f(bare)));
   const iraq=has(iraqPlace)||has(CUSTOMER_COUNTRY_IRAQ)||has({test:()=>false},customerIraqiCityTo)||has({test:()=>false},customerIraqiCityIn);
-  return iraq&&(has(iranPlace)||has(CUSTOMER_COUNTRY_IRAN));
+  return iraq&&(has(iranPlace)||has(CUSTOMER_COUNTRY_IRAN)||has(CUSTOMER_IRAN_CITY_PREFIXED));
 }
 function customerDestination(message){
   const text=String(message||"").normalize("NFKC");
@@ -12255,7 +12257,16 @@ async function updateLeadRecord(env, id, patch) {
   const priority = patch.priority !== undefined ? String(patch.priority).trim() : lead.priority;
   if (!allowedStages.includes(stage)) throw new Error("Invalid lead stage");
   if (!allowedPriority.includes(priority)) throw new Error("Invalid lead priority");
-  if (patch.next_followup_at !== undefined) meta.next_followup_at = patch.next_followup_at || null;
+  if (patch.next_followup_at !== undefined) {
+    const next = patch.next_followup_at || null;
+    // Phase 16.3: the owner scheduling a NEW follow-up date (not the one already drafted) archives the previous draft (last 5 kept),
+    // so the next run drafts again; re-saving the same date changes nothing. Draft only; nothing is sent.
+    if (next && meta.followup_draft && next !== meta.next_followup_at && next !== meta.followup_at) {
+      meta.followup_history = [...(Array.isArray(meta.followup_history) ? meta.followup_history : []), { draft: meta.followup_draft, prepared_at: meta.followup_prepared_at || null, followup_at: meta.followup_at || null }].slice(-5);
+      delete meta.followup_draft; delete meta.followup_prepared_at; delete meta.followup_status;
+    }
+    meta.next_followup_at = next;
+  }
   if (patch.owner !== undefined) meta.owner = String(patch.owner || "").trim() || null;
   if (patch.last_outreach_at !== undefined) meta.last_outreach_at = patch.last_outreach_at || null;
   if (patch.last_reply_at !== undefined) meta.last_reply_at = patch.last_reply_at || null;
