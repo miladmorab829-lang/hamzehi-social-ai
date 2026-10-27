@@ -8264,7 +8264,10 @@ const ORDER_STATUS_FOLLOWUP=/(?:(?:سفارش|بسته|محموله)(?:م|مون
 // «دیگه» alone is a filler («سفارش دیگه کی میرسه؟» = status); «یه سفارش دیگه» is a new order. «اگه الان سفارش بدم» asks about a NEW order.
 const NEW_ORDER_CUE=/(?:(?:سفارش|خرید)\s*(?:ی|ي)?\s*(?:جدید|تازه|دوباره|مجدد)|(?:یه|یک)\s*(?:سفارش|خرید)\s*(?:ی|ي)?\s*(?:دیگه|دیگری|دیگر)|(?:اگه|اگر)\s[^.؟?\n]{0,40}سفارش\s*(?:بدم|بدیم|بدهم|بدهیم|بذارم)|(?:طلب|طلبي|طلبية)\s*(?:ال)?(?:جديد|جديدة|ثاني|ثانية|اخرى|أخرى|ثانيه)|new\s+order|another\s+order|re-?order)/iu;
 const ORDER_SALES_INTENTS=new Set(["asks_price","asks_moq","objection_price","negotiating"]);
-function orderStatusExplicit(text){const t=String(text||"");return !NEW_ORDER_CUE.test(t)&&(ORDER_STATUS_QUESTION.test(t)||ORDER_STATUS_FOLLOWUP.test(t));}
+// Phase 16.2: only the new-order phrase itself is set aside («وين طلبي؟ وأريد طلب جديد» still asks about the order → mixed → held);
+// before, any new-order cue anywhere dropped the status question and the sales reply went out alone.
+const NEW_ORDER_CUE_ALL=new RegExp(NEW_ORDER_CUE.source,"giu");
+function orderStatusExplicit(text){const t=String(text||"").replace(NEW_ORDER_CUE_ALL," ");return ORDER_STATUS_QUESTION.test(t)||ORDER_STATUS_FOLLOWUP.test(t);}
 function orderSalesSignal(text,intent){const t=String(text||"");return ORDER_SALES_INTENTS.has(intent)||NEW_ORDER_CUE.test(t)||PRICE_QUESTION.test(t)||CUSTOMER_PRODUCT_TYPE.test(t);}
 async function findPostSaleOrder(env,leadId,conversationId){
   return await env.DB.prepare(`SELECT * FROM lead_orders WHERE lead_id=? AND conversation_id=? AND status IN (${ORDER_POST_SALE_STATUSES.map(()=>"?").join(",")}) ORDER BY updated_at DESC LIMIT 1`).bind(leadId,conversationId,...ORDER_POST_SALE_STATUSES).first();
@@ -10667,6 +10670,7 @@ async function prepareBalanceRequest(env,orderId){
   const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(String(orderId||"").trim()).first();
   if(!order)throw Error("Order not found");
   if(order.market!=="ARAB")throw Error("A balance request is available for ARAB orders only");
+  if(canonicalCurrency(order.currency)!==MARKET_CURRENCY.ARAB)throw Error("A balance request needs the ARAB market currency (USD) on the order");
   if(!["confirmed","partially_paid"].includes(order.status))throw Error("A balance request needs a confirmed order with an open balance");
   const ledger=await orderPaymentLedger(env,order);
   if(ledger.paid<=0)throw Error("No payment is recorded yet: use the order's payment request instead");
@@ -10764,9 +10768,11 @@ async function findStalledRevenueItems(env,{nowMs=Date.now(),limit=200,maxAgeDay
     AND NOT EXISTS(SELECT 1 FROM lead_orders o WHERE o.lead_id=x.lead_id AND o.id<>x.id AND o.status<>'cancelled' AND (o.created_at>x.created_at OR o.status IN ('order_candidate','confirmed','partially_paid')))
     ORDER BY completed_at ASC LIMIT ?`,[days(REVENUE_FOLLOWUP_DAYS.reorder),floor,floor,limit]);
   const item=(kind,r,{at,outstanding=null}={})=>{const market=["IRAN","ARAB"].includes(r.market)?r.market:null,test=Number(r.test_record||0)===1,invalid=Number(r.notes_invalid||0)===1;
+    // Phase 16.2: a record whose currency is not its market's (IRAN → TOMAN, ARAB → USD) is listed for the owner only, never drafted
+    const currency=r.currency?canonicalCurrency(r.currency):null,currencyMismatch=!!(market&&currency&&currency!==MARKET_CURRENCY[market]);
     return {kind,ref_id:r.id,lead_id:r.lead_id,conversation_id:r.conversation_id||null,market:market||"UNKNOWN",language:market?REVENUE_MARKET_LANGUAGE[market]:null,
-      currency:r.currency?canonicalCurrency(r.currency):null,outstanding_minor:outstanding,total_minor:Number.isSafeInteger(Number(r.total_minor))?Number(r.total_minor):null,
-      since:at||null,age_days:ageDays(at),threshold_days:REVENUE_FOLLOWUP_DAYS[kind],test_record:test,data_quality:invalid?"lead_notes_invalid":null,audience:market&&!test&&!invalid&&r.conversation_id?"customer":"owner",record:r};};
+      currency,outstanding_minor:outstanding,total_minor:Number.isSafeInteger(Number(r.total_minor))?Number(r.total_minor):null,
+      since:at||null,age_days:ageDays(at),threshold_days:REVENUE_FOLLOWUP_DAYS[kind],test_record:test,data_quality:invalid?"lead_notes_invalid":currencyMismatch?"currency_market_mismatch":null,audience:market&&!test&&!invalid&&!currencyMismatch&&r.conversation_id?"customer":"owner",record:r};};
   return [
     ...quotes.map(r=>item("quote_no_reply",r,{at:r.sent_at})),
     ...unpaid.map(r=>item("order_unpaid",r,{at:r.confirmed_at||r.updated_at,outstanding:Number.isSafeInteger(Number(r.total_minor))?Number(r.total_minor):null})),
@@ -12380,8 +12386,12 @@ function adsAttribution(market,signals={}){
 // Arabic, otherwise Persian) and no market or country is ever written. Drafts are for the owner only: the stage never changes, nothing is
 // sent, and the update applies only while the notes are still the ones read here, so overlapping sweeps never stack a second draft.
 function followupLanguage(meta){const m=leadMarketOf(meta);return ADS_MARKETS[m]?ADS_MARKETS[m].language:(String(meta.type||"").endsWith("_ar")?"Iraqi Arabic":"Persian");}
+// Phase 16.2 (H3): only leads in a follow-up stage whose notes carry a follow-up date are read, so a due lead is never missed just
+// because 500 more recently updated leads exist; the exact due check below is unchanged.
+const LEAD_HAS_FOLLOWUP_SQL="instr(COALESCE(notes,''),'followup_at')>0";
 async function adsDueFollowups(env,{excludeDrafted=true}={}){
-  const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+  const stages=[...ADS_FOLLOWUP_STAGES];
+  const rows=await env.DB.prepare(`SELECT * FROM leads WHERE stage IN (${stages.map(()=>"?").join(",")}) AND ${LEAD_HAS_FOLLOWUP_SQL} ORDER BY updated_at DESC LIMIT 500`).bind(...stages).all();
   const due=[],nowMs=Date.now();
   for(const lead of (rows.results||[])){
     if(!ADS_FOLLOWUP_STAGES.has(String(lead.stage||"")))continue;
@@ -14579,7 +14589,7 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
 
       if (u.pathname === "/api/ads/followups" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" },401);
-        const rows = await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+        const rows = await env.DB.prepare(`SELECT * FROM leads WHERE stage NOT IN ('customer','converted','rejected','archived') AND ${LEAD_HAS_FOLLOWUP_SQL} ORDER BY updated_at DESC LIMIT 500`).all();
         const nowMs = Date.now(), items=[];
         for (const lead of (rows.results||[])) {
           const meta=parseLeadNotes(lead);
