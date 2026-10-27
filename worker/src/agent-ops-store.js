@@ -26,8 +26,18 @@ const FALLBACK={
   deadline_reached:"Remaining tasks stay queued for the next run",
   capability_blocked:"Financial or unknown actions wait in the owner approval queue; nothing is run without approval",
   invalid_task_graph:"No task was started in this run",
-  orchestrator_error:"No task was started in this run"
+  orchestrator_error:"No task was started in this run",
+  watchdog_missed:"Agents and customer replies continue; stuck-task, dead-letter and inactivity checks are paused until the Watchdog runs again"
 };
+// Phase 16.4: same staleness rule as the Watchdog's own heartbeat check (kept local: agent-watchdog.js imports this module).
+const WATCHDOG_STALE_MS=35*60*1000;
+// transient = seen once or briefly; sustained = still open after 3+ detections or 45+ min; recovered/acknowledged otherwise.
+const SUSTAINED_MIN_OCCURRENCES=3,SUSTAINED_MIN_MS=45*60*1000;
+export function incidentState(a){
+  if(a?.recovery_state!=="open")return a?.recovery_state||"recovered";
+  const span=Date.parse(a.last_seen_at)-Date.parse(a.first_seen_at);
+  return Number(a.occurrences||0)>=SUSTAINED_MIN_OCCURRENCES||span>=SUSTAINED_MIN_MS?"sustained":"transient";
+}
 
 // Persist one orchestrator report: the run row, its dead letters, the heartbeat, and the alert lifecycle (open → recovered →
 // acknowledged). Returns {stored:boolean}.
@@ -54,6 +64,10 @@ export async function recordRun(env,scheduler,report,extra={}){
     for(const [agent,list] of byAgent)raised.push({code:"dead_letters",agent,level:"warning",cause:list[list.length-1].error,tasks:list.map(d=>d.task_id)});
     for(const a of report.alerts)if(a.code!=="dead_letters"&&a.level!=="info")raised.push({code:a.code,agent:"orchestrator",level:a.level,cause:a.message,tasks:report.tasks.filter(x=>["budget_exhausted","deadline_reached","not_run"].includes(x.state)).map(x=>x.id)});
     for(const a of extra.blockedForApproval||[])raised.push({code:"capability_blocked",agent:a.agent,level:"info",cause:"Waiting for owner approval",tasks:[a.task_id]});
+    // Phase 16.4: the orchestrator also watches the Watchdog (monitoring never depends on one component). Only a heartbeat that exists
+    // and is stale counts (a fresh install without a Watchdog run is not an incident). Read-only; recovered by the normal lifecycle.
+    try{const wd=await env.DB.prepare("SELECT last_finished_at FROM agent_heartbeat WHERE scheduler='watchdog'").first(),age=wd?Date.parse(t)-Date.parse(wd.last_finished_at):0;
+      if(wd&&!(age<WATCHDOG_STALE_MS))raised.push({code:"watchdog_missed",agent:"watchdog",level:"critical",cause:`No Watchdog run finished for ${Number.isFinite(age)?Math.round(age/60000)+" min":"an unknown time"}`});}catch{}
     const raisedKeys=await raiseAlerts(env,scheduler,raised,report.run_id,t);
     // Recovery: an open alert whose cause did not recur in a healthy run is marked recovered; it stays visible until acknowledged.
     if(healthy)await recoverOpenAlerts(env,scheduler,raisedKeys,t);
@@ -68,15 +82,22 @@ export async function raiseAlerts(env,scheduler,raised,runId,t){
   for(const a of raised){
     keys.add(`${a.code}|${a.agent}`);
     const fallback=a.fallback||FALLBACK[a.code]||null;
-    const open=await env.DB.prepare("SELECT id,affected_tasks_json FROM agent_alerts WHERE scheduler=? AND code=? AND agent=? AND acknowledged_at IS NULL LIMIT 1").bind(scheduler,a.code,a.agent).first();
-    if(open){
+    const findOpen=()=>env.DB.prepare("SELECT id,affected_tasks_json FROM agent_alerts WHERE scheduler=? AND code=? AND agent=? AND acknowledged_at IS NULL LIMIT 1").bind(scheduler,a.code,a.agent).first();
+    const bump=async open=>{
       let tasks=[];try{tasks=JSON.parse(open.affected_tasks_json||"[]")}catch{}
       tasks=[...new Set([...tasks,...(a.tasks||[])])].slice(-50);
       await env.DB.prepare("UPDATE agent_alerts SET level=?,cause_redacted=?,affected_tasks_json=?,fallback_status=?,recovery_state='open',recovered_at=NULL,last_run_id=?,last_seen_at=?,occurrences=occurrences+1 WHERE id=?")
         .bind(a.level,safeErrorText(a.cause),JSON.stringify(tasks),fallback,runId,t,open.id).run();
-    }else{
-      await env.DB.prepare("INSERT INTO agent_alerts(id,scheduler,code,agent,level,cause_redacted,affected_tasks_json,fallback_status,recovery_state,last_run_id,first_seen_at,last_seen_at,occurrences) VALUES(?,?,?,?,?,?,?,?,'open',?,?,?,1)")
+    };
+    const open=await findOpen();
+    if(open)await bump(open);
+    else{
+      // Phase 16.4: two overlapping runs (watchdog + orchestrator, or two ticks) can both find no open row; the open-alert unique index
+      // then rejects the second INSERT. INSERT OR IGNORE + bump keeps one row and never throws (a throw used to abort the whole run,
+      // including its heartbeat).
+      const ins=await env.DB.prepare("INSERT OR IGNORE INTO agent_alerts(id,scheduler,code,agent,level,cause_redacted,affected_tasks_json,fallback_status,recovery_state,last_run_id,first_seen_at,last_seen_at,occurrences) VALUES(?,?,?,?,?,?,?,?,'open',?,?,?,1)")
         .bind(uid(),scheduler,a.code,a.agent,a.level,safeErrorText(a.cause),JSON.stringify((a.tasks||[]).slice(-50)),fallback,runId,t,t).run();
+      if(!changed(ins)){const winner=await findOpen();if(winner)await bump(winner);}
     }
   }
   return keys;
@@ -235,7 +256,7 @@ export async function opsOverview(env,{nowMs=Date.now()}={}){
   const since7=iso(nowMs-7*86400000);
   // Phase 06: an acknowledged alert that is still unrecovered stays listed until it is recovered (never ages out of the view).
   const alerts=(await all("SELECT * FROM agent_alerts WHERE acknowledged_at IS NULL OR recovery_state='open' OR last_seen_at>=? ORDER BY acknowledged_at IS NOT NULL, CASE level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, last_seen_at DESC LIMIT 100",since7))
-    .map(a=>({...a,affected_tasks:(()=>{try{return JSON.parse(a.affected_tasks_json||"[]")}catch{return []}})()}));
+    .map(a=>({...a,affected_tasks:(()=>{try{return JSON.parse(a.affected_tasks_json||"[]")}catch{return []}})(),incident_state:incidentState(a)}));
   const heartbeat=await all("SELECT * FROM agent_heartbeat");
   const runs=await all("SELECT * FROM agent_runs WHERE started_at>=? ORDER BY started_at DESC LIMIT 500",since7);
   const approvals=await all("SELECT id,task_id,module,action,capability,status,requested_at,decided_at,decided_by,expires_at,used_at,note FROM agent_approvals WHERE status IN ('pending','approved') OR requested_at>=? ORDER BY status='pending' DESC, requested_at DESC LIMIT 100",since7);

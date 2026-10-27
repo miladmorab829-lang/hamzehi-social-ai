@@ -111,17 +111,34 @@ export function buildSalesAiInput(ctx){
 // The customer waits for this call: a slow model is abandoned after SALES_AI_TIMEOUT_MS (default 8 s, bounded 1–15 s) and the
 // deterministic reply is sent instead. No retry (a retried call could double provider cost and reply twice).
 export function salesAiTimeoutMs(env){const v=Number(env?.SALES_AI_TIMEOUT_MS);return Number.isFinite(v)?Math.min(15000,Math.max(1000,Math.round(v))):8000;}
-export async function callSalesAi(env,{instructions,input,timeoutMs=salesAiTimeoutMs(env)}){
-  const provider=salesAiProvider(env);
+// Phase 16.4 cost protection. (1) Cooldown: after the provider answers 429 (rate/quota) or 401/403 (key/permission), the next calls in
+// this isolate skip the provider for a short time and return provider_cooldown — the SAME fail-closed path as any failed call
+// (deterministic logic / owner hold), never another provider, model or retry. SALES_AI_PROVIDER_COOLDOWN=off disables it.
+// (2) Optional output-token cap: SALES_AI_MAX_OUTPUT_TOKENS (256–16000) — absent → requests are unchanged (inactive until set).
+export const SALES_AI_COOLDOWN_MS=Object.freeze({429:30000,401:120000,403:120000});
+const PROVIDER_COOLDOWN=new Map();
+export function resetSalesAiCooldown(){PROVIDER_COOLDOWN.clear();}
+export function salesAiCooldownUntil(provider){return PROVIDER_COOLDOWN.get(provider)||0;}
+export function salesAiMaxOutputTokens(env){const v=Number(env?.SALES_AI_MAX_OUTPUT_TOKENS);return Number.isFinite(v)&&v>0?Math.min(16000,Math.max(256,Math.round(v))):null;}
+export async function callSalesAi(env,{instructions,input,timeoutMs=salesAiTimeoutMs(env),nowMs=Date.now()}){
+  const provider=salesAiProvider(env),cooldownOn=String(env?.SALES_AI_PROVIDER_COOLDOWN||"on").toLowerCase()!=="off";
+  if(cooldownOn&&salesAiCooldownUntil(provider)>nowMs)return {ok:false,model:salesAiModel(env),ms:0,error:"provider_cooldown"};
+  const res=await callSalesAiProvider(env,{provider,instructions,input,timeoutMs});
+  const status=Number(/^provider_http_(\d+)$/.exec(String(res?.error||""))?.[1]);
+  if(cooldownOn&&SALES_AI_COOLDOWN_MS[status])PROVIDER_COOLDOWN.set(provider,Date.now()+SALES_AI_COOLDOWN_MS[status]);
+  return res;
+}
+async function callSalesAiProvider(env,{provider,instructions,input,timeoutMs}){
   if(provider==="anthropic")return callSalesAiAnthropic(env,{instructions,input,timeoutMs});
   if(provider!=="openai")return {ok:false,model:salesAiModel(env),ms:0,error:"provider_misconfigured"};
   const started=Date.now(),model=salesAiModel(env);
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
   try{
     const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",signal:controller.signal,headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},
-      body:JSON.stringify({model,instructions,input,text:{format:{type:"json_schema",name:"sales_decision",strict:true,schema:SALES_AI_DECISION_SCHEMA}}})});
+      body:JSON.stringify({model,instructions,input,...(salesAiMaxOutputTokens(env)?{max_output_tokens:salesAiMaxOutputTokens(env)}:{}),text:{format:{type:"json_schema",name:"sales_decision",strict:true,schema:SALES_AI_DECISION_SCHEMA}}})});
     if(!r.ok)return {ok:false,model,ms:Date.now()-started,error:"provider_http_"+r.status};
     const data=await r.json();
+    if(data?.status==="incomplete")return {ok:false,model,ms:Date.now()-started,usage:salesAiUsage(data),returned_model:salesAiReturnedModel(data),error:"provider_truncated"};
     let text=typeof data?.output_text==="string"?data.output_text:"";
     if(!text)for(const item of data?.output||[])for(const part of item?.content||[])if(typeof part?.text==="string")text+=part.text;
     const json=salesAiParseJson(text);
@@ -150,7 +167,7 @@ async function callSalesAiAnthropic(env,{instructions,input,timeoutMs}){
   try{
     const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",signal:controller.signal,
       headers:{"x-api-key":env.ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","content-type":"application/json"},
-      body:JSON.stringify({model,max_tokens:8000,system:instructions,messages:[{role:"user",content:input}],
+      body:JSON.stringify({model,max_tokens:Math.min(8000,salesAiMaxOutputTokens(env)||8000),system:instructions,messages:[{role:"user",content:input}],
         output_config:{effort:String(env?.SALES_AI_EFFORT||"low"),format:{type:"json_schema",schema:SALES_AI_DECISION_SCHEMA_ANTHROPIC}}})});
     if(!r.ok)return {ok:false,model,ms:Date.now()-started,error:"provider_http_"+r.status};
     const data=await r.json();

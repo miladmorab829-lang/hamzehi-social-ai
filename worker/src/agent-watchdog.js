@@ -166,6 +166,26 @@ export async function qualitySummary(env,{nowMs=Date.now()}={}){
   return {window_days:7,current:cur,previous:prev,trend,recurring_problems:recurring};
 }
 
+// Phase 16.4: explicit rollback eligibility per agent (read-only). The previous version qualifies only with recorded evidence: at
+// least versionMinTasks finished tasks while it was active and at most half of them failed. Nothing is switched here — a code
+// rollback stays an owner-approved Worker deploy; this is the auditable reference the owner decides on.
+export async function rollbackEligibility(env){
+  const rows=(await env.DB.prepare("SELECT agent,version,status,activated_at FROM agent_versions WHERE status IN ('active','previous') ORDER BY agent,activated_at DESC LIMIT 200").all()).results||[];
+  const out=[];
+  for(const active of rows.filter(r=>r.status==="active")){
+    const prev=rows.find(r=>r.agent===active.agent&&r.status==="previous"&&r.activated_at<=active.activated_at);
+    const base={agent:active.agent,active_version:active.version,previous_version:prev?.version||null,action:"owner_approved_worker_deploy_only"};
+    if(!prev){out.push({...base,eligible:false,reason:"no_previous_version"});continue;}
+    const m=String(active.agent).replace(/^autonomy:/,"");
+    const s=await env.DB.prepare("SELECT SUM(status='failed') f,SUM(status='completed') c FROM autonomy_tasks WHERE module=? AND finished_at>=? AND finished_at<?").bind(m,prev.activated_at,active.activated_at).first();
+    const f=Number(s?.f||0),c=Number(s?.c||0),evidence={finished:f+c,failed:f,window:{from:prev.activated_at,to:active.activated_at}};
+    if(f+c<WATCHDOG.versionMinTasks)out.push({...base,eligible:false,reason:"insufficient_history",evidence});
+    else if(f/(f+c)>0.5)out.push({...base,eligible:false,reason:"previous_version_unhealthy",evidence});
+    else out.push({...base,eligible:true,reason:"previous_version_healthy",evidence});
+  }
+  return out;
+}
+
 // Active and previous version per agent (rollback readiness).
 export async function versionSummary(env){
   try{return ((await env.DB.prepare("SELECT agent,version,status,activated_at FROM agent_versions WHERE status IN ('active','previous') ORDER BY agent,status,activated_at DESC LIMIT 100").all()).results||[]);}catch{return [];}

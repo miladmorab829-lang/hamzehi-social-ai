@@ -1,7 +1,7 @@
 import { runAgentGraph, autonomyActionCapability, autonomyTaskDedupKey, autonomyDailyQuota, AUTONOMY_DAILY_QUOTAS, AUTONOMY_UNIT_COST, AUTONOMY_PROVIDER, autonomyBudgets, ORCHESTRATOR_VERSION, redact, safeErrorText } from "./agent-orchestrator.js";
 import { recordRun, approvalForTask, requestApproval, consumeApproval, decideApproval, acknowledgeAlert, resolveDeadLetter, opsOverview, cancelObsoleteApprovals } from "./agent-ops-store.js";
 import { bearerMatches } from "./secure-compare.js";
-import { qualitySummary, versionSummary, deadLetterEligibility } from "./agent-watchdog.js";
+import { qualitySummary, versionSummary, rollbackEligibility, deadLetterEligibility } from "./agent-watchdog.js";
 import { agentActivitySummary } from "./agent-activity.js";
 const now=()=>new Date().toISOString();
 const uid=()=>crypto.randomUUID();
@@ -608,7 +608,7 @@ async function handleAgentOps(env,req,u){
    // Phase 06 (additive): retry eligibility per dead letter + open-DLQ summary per agent; the existing fields are unchanged.
    if(Array.isArray(ov.dead_letters)){ov.dead_letters=ov.dead_letters.map(x=>({...x,eligibility:deadLetterEligibility({module:x.task_module,action:x.task_action,task_status:x.task_status,resolved_at:x.resolved_at})}));
     const by={};for(const x of ov.dead_letters)if(!x.resolved_at){const s=by[x.agent]||(by[x.agent]={open:0,auto_retry:0,owner_only:0});s.open++;x.eligibility.auto_retry?s.auto_retry++:s.owner_only++;}ov.dead_letter_summary=by;}
-   return reply({ok:true,orchestrator_enabled:orchestratorEnabled(env),...ov,quotas:await autonomyQuotaSummary(env).catch(()=>[]),costs:await costSummary(env).catch(()=>null),quality:await qualitySummary(env).catch(()=>null),versions:await versionSummary(env).catch(()=>[]),publishing:await publishingSummary(env)});}
+   return reply({ok:true,orchestrator_enabled:orchestratorEnabled(env),...ov,quotas:await autonomyQuotaSummary(env).catch(()=>[]),costs:await costSummary(env).catch(()=>null),quality:await qualitySummary(env).catch(()=>null),versions:await versionSummary(env).catch(()=>[]),rollback:await rollbackEligibility(env).catch(()=>[]),publishing:await publishingSummary(env)});}
   // Phase 05: per-agent activity for the Agent Control Center (read-only SELECTs; never runs, retries or approves anything).
   if(p==="activity"){if(req.method!=="GET")return reply({ok:false,error:"Method not allowed"},405);return reply(await agentActivitySummary(env,{modules:MODULES,actions:ACTIONS,controls:await controls(env),quotas:await autonomyQuotaSummary(env).catch(()=>null),versions:await versionSummary(env)}));}
   if(!["approvals/decide","alerts/ack","dead-letters/resolve"].includes(p))return reply({ok:false,error:"Not found"},404);
