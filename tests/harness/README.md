@@ -28,6 +28,12 @@ node phototimeout.mjs
 node phase12.mjs
 node phase13.mjs
 node phase14.mjs
+node phase16.mjs
+node phase16_2.mjs
+node phase16_3.mjs
+node phase16_4.mjs
+node phase16_5.mjs
+node phase16_11.mjs
 ```
 Each prints `<suite> → ALL PASS (n)` and exits 0, or lists the failing checks and exits 1. Run whole files (later checks build on
 earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps reset at the UTC day boundary).
@@ -50,6 +56,10 @@ earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps 
 | phase14 | 50 | Phase 14 + 14.1 operational readiness (14.1: country «العراق» = market evidence not a city, attached-prefix cities, price requests answered from approved prices or gathered, review fixes): Telegram webhook rejection evidence (one row per reason per minute, no payload) and owner-only inbound health (READY / NO_TRAFFIC / NOT_VERIFIED / MISCONFIGURED / FAILED; live getWebhookInfo read-only, never setWebhook, no secrets returned), scheduled-step isolation (audited once per step per hour, later steps still run), revenue attribution without test leads / cancelled orders and profit only when fully paid, Sales Brain ("no printing" ≠ rejection, Iraq / Iran cities, first-message script language), dashboard (Owner Action Center navigation, Telegram readiness card, agent failure visibility) |
 | phase09 | 55 | Dual-market Ads (Phase 09.4) + CRM follow-up continuity (09.6) + three independent daily quotas ADS_IRAN_DISCOVERY / ADS_IRAQ_DISCOVERY / CRM_FOLLOWUP (09.7): IRAN/ARAB configs disabled by default, owner-approved enabling, per-market city lists and daily limits inside the global cap, legacy row ignored and preserved, CRM attribution (TOMAN/USD), UNKNOWN for historical leads, cross-market protection, per-market follow-ups and reporting, no scheduled Ads task or dead letter while disabled, other agents unaffected |
 | phase08 | 21 | Watchdog monitoring coverage (per-expectation coverage, SQL aggregation, visible monitoring_coverage_gap), fail-closed activity reads, Phase 05–07 API compatibility, release safety (auth, test-token isolation, no secrets) |
+| phase16 / 16_2 / 16_3 / 16_4 / 16_5 | 82 / 37 / 32 / 28 / 45 | Phase 16.1–16.5 sales-operations safety, mixed intent, mixed markets, follow-ups, resilience / cooldown, integration / stress / security (see the phase reports) |
+| phase16_11 | 33 | Phase 16.11: auth sweep over every route found in `worker/src` (no 2xx without a token except the public allowlist, no 5xx except the deliberate Instagram fail-closed 503, no data writes, no Telegram / AI), admin-token edge cases incl. unset `ADMIN_TOKEN`, payment-ledger integrity under concurrency (16.11 overpayment fix, idempotent references, reversals), Sales-AI cooldown for 403 and none for 5xx, staging profile with no secrets makes zero outbound calls |
+
+Full local suite on 2026-10-28 (Phase 16.11): **694 / 694 pass** (~135 s).
 
 Test-only values (`tok`, `bot-test`, `sec`, `test-key-not-real`, `test-places-key`, `test-openai-not-real`, `*.example`, `w.test`) are not
 credentials. Never put real keys or customer data in these files.

@@ -1,0 +1,49 @@
+# HAMZEHI SOCIAL AI — ISOLATED STAGING Worker (Phase 16.9 preparation). NOT DEPLOYED. Every command that uses this file needs
+# the owner's approval (see HANDOFF-2026-10-21/PHASE-16/PHASE-16-9-STAGING-PLAN.md).
+# This is a SEPARATE file on purpose: worker/wrangler.toml (Production) stays untouched, and Workers Builds never reads this file.
+# Always pass it explicitly:  npx wrangler <cmd> --config staging/wrangler.staging.toml
+#
+# Isolation rules (do not relax without the owner):
+#  - own Worker name; NO routes, NO custom domain; workers.dev only; preview URLs off
+#  - own D1 database hamzehi-staging (cddc10c5…, created in Phase 16.10); production D1 40b272c5… must never appear here
+#  - NO R2 binding and NO Workers AI binding (both are paid/shared surfaces the test scenarios do not need)
+#  - NO production secret: staging secrets are NEW values (test bot token, new admin token, new webhook secret)
+#  - deterministic Sales Brain (SALES_AI_BRAIN=off), media generation off, no vault/broadcast chat ids
+
+name = "hamzehi-social-ai-staging"
+main = "../worker/src/index.js"
+compatibility_date = "2026-09-11"
+compatibility_flags = ["global_fetch_strictly_public"]
+workers_dev = true
+preview_urls = false
+
+[triggers]
+# All staging schedules DISABLED by owner authorisation (Phase 16.10 final, 2026-10-28). Previously ["*/15 * * * *"] (watchdog
+# + bounded recovery; autonomy master stays 'off'). Re-enabling needs owner approval and a staging-only `wrangler triggers deploy`.
+crons = []
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hamzehi-staging"
+database_id = "cddc10c5-2232-4334-8d99-fedb52fbd12d"   # created 2026-10-28 (Phase 16.10), region WEUR. NEVER 40b272c5… (production)
+
+[vars]
+# Staging-only marker (not read by the code; identifies this deployment in `wrangler versions view` and the dashboard).
+HAMZEHI_ENVIRONMENT = "staging"
+# Deterministic brain only. Real provider testing later needs the owner: SALES_AI_BRAIN=on + an ANTHROPIC_API_KEY staging secret.
+SALES_AI_BRAIN = "off"
+SALES_AI_PROVIDER = "anthropic"
+ANTHROPIC_MODEL = "claude-opus-5-5"
+SALES_AI_TIMEOUT_MS = "15000"
+# Pre-set hard limits for a later, owner-approved real-AI window (inactive while SALES_AI_BRAIN=off).
+SALES_AI_MAX_OUTPUT_TOKENS = "800"
+# Same orchestrator flag as the release candidate, so the watchdog/orchestrator heartbeat logic is the one being tested.
+AUTONOMY_ORCHESTRATOR = "on"
+# Paid media generation (Kling / Shotstack / image) explicitly OFF (the code defaults to ON when unset).
+AUTO_AI_MEDIA_ENABLED = "false"
+SALES_AI_UNDERSTANDING = "off"
+RATE_LIMIT_PER_MINUTE = "30"
+PUBLIC_WORKER_BASE_URL = "https://hamzehi-social-ai-staging.miladmorab829.workers.dev"
+# Intentionally NOT set: TELEGRAM_VAULT_CHAT_ID / TELEGRAM_VIDEO_VAULT_CHAT_ID / TELEGRAM_MEDIA_READY_CHAT_ID (production channel
+# @mhboxgroup), OPENAI_MODEL, INSTAGRAM_*, WHATSAPP_*. TELEGRAM_CHAT_ID (owner alerts) may be added later as the owner's chat id
+# WITH THE TEST BOT, never a production chat.
