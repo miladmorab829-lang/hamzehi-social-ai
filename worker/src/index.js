@@ -9,6 +9,7 @@ import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiP
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
 import { bearerMatches, safeTokenEqual } from "./secure-compare.js";
+import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js";
 import { runWatchdog } from "./agent-watchdog.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
@@ -3962,19 +3963,10 @@ async function createKlingWeeklyVideoTask(env,brief,imageUrls){
   shots.length*2
 );
 
+  // Phase 16.16-P1 (D-P1): each storyboard prompt is built by priority within Kling's 512-character limit (kling-prompt.js).
   const multiPrompt=shots.map((shot,index)=>({
     index:index+1,
-    prompt:[
-      String(shot.direction||''),
-      String(brief.story||''),
-      'Preserve the exact real HAMZEHI BOX product identity from the referenced image.',
-      'Preserve proportions, colors, materials and recognizable product details.',
-      'Premium luxury commercial cinematography.',
-      'Elegant controlled camera movement and refined lighting.',
-      'No voice-over, no dialogue, no subtitles.',
-      'Use instrumental luxury cinematic music only. No vocals, no speech, no narration, no spoken words, no dialogue.',
-      'End-card text is handled separately; do not generate text inside the scene.'
-    ].filter(Boolean).join(' '),
+    prompt:buildKlingShotPrompt(shot,brief),
     duration:String(
   index===shots.length-1
     ? Math.max(1,duration-(shots.length-1)*2)
@@ -3983,6 +3975,15 @@ async function createKlingWeeklyVideoTask(env,brief,imageUrls){
   }));
 
   const externalTaskId=weeklyKlingExternalTaskId(brief.week_id);
+  // Checked before any request: an invalid prompt is a deterministic rejection (no Kling call, no spend, not retried).
+  const promptProblem=multiPrompt.map((p,i)=>{const why=klingShotPromptProblem(p.prompt);return why?`multiPrompt[${i}]: ${why}`:null;}).find(Boolean);
+  if(promptProblem){
+    throw klingSubmissionError(`Weekly video prompt failed local validation: ${promptProblem}`,{
+      outcome:'rejected',
+      response_category:'local_validation',
+      external_task_id:externalTaskId
+    });
+  }
   const payload={
     model_name:'kling-v3-omni',
     multi_shot:true,
