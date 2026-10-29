@@ -34,6 +34,7 @@ node phase16_3.mjs
 node phase16_4.mjs
 node phase16_5.mjs
 node phase16_11.mjs
+node phase16_13.mjs
 ```
 Each prints `<suite> → ALL PASS (n)` and exits 0, or lists the failing checks and exits 1. Run whole files (later checks build on
 earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps reset at the UTC day boundary).
@@ -59,7 +60,9 @@ earlier ones) and avoid starting a run within a minute of 00:00 UTC (daily caps 
 | phase16 / 16_2 / 16_3 / 16_4 / 16_5 | 82 / 37 / 32 / 28 / 45 | Phase 16.1–16.5 sales-operations safety, mixed intent, mixed markets, follow-ups, resilience / cooldown, integration / stress / security (see the phase reports) |
 | phase16_11 | 33 | Phase 16.11: auth sweep over every route found in `worker/src` (no 2xx without a token except the public allowlist, no 5xx except the deliberate Instagram fail-closed 503, no data writes, no Telegram / AI), admin-token edge cases incl. unset `ADMIN_TOKEN`, payment-ledger integrity under concurrency (16.11 overpayment fix, idempotent references, reversals), Sales-AI cooldown for 403 and none for 5xx, staging profile with no secrets makes zero outbound calls |
 
-Full local suite on 2026-10-28 (Phase 16.11): **694 / 694 pass** (~135 s).
+| phase16_13 | 14 | Phase 16.13: order-lifecycle invariants under concurrency (16.13 fix: a payment reversal racing a shipment can no longer leave a shipped order with a reversed ledger; cancel ↔ payment, reversal ↔ new payment, triple confirm, double ship, one order per quote; no customer send), per-message AI call budget (one provider call per message, duplicate / redelivered updates cost none) |
+
+Full local suite on 2026-10-29 (Phase 16.13): **708 / 708 pass** (~141 s).
 
 Test-only values (`tok`, `bot-test`, `sec`, `test-key-not-real`, `test-places-key`, `test-openai-not-real`, `*.example`, `w.test`) are not
 credentials. Never put real keys or customer data in these files.
