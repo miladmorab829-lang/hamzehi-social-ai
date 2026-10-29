@@ -35,13 +35,17 @@ export const QUOTA_MAX=50;
 export const AUTONOMY_UNIT_COST=Object.freeze({"photo:photo_generate":8,"media:video_generate":40,"content:generate_and_queue":9,"crm:lead_discovery":16});
 export const AUTONOMY_PROVIDER=Object.freeze({"photo:photo_generate":"openai","media:video_generate":"video","content:generate_and_queue":"openai","crm:lead_discovery":"google_places"});
 export const DEFAULT_BUDGETS=Object.freeze({daily_units:240,providers:Object.freeze({openai:120,video:80,google_places:64}),ads_runs_per_day:24});
+export const ADS_DRAFTS_PER_DAY_DEFAULT=288;
 export function autonomyBudgets(overrides={}){
   const n=(v,base,max)=>Number.isInteger(v)&&v>=0?Math.min(v,max):base,o=overrides&&typeof overrides==="object"?overrides:{};
   const providers={};for(const [p,base] of Object.entries(DEFAULT_BUDGETS.providers))providers[p]=n(o.providers?.[p],base,10000);
   const ads=n(o.ads_runs_per_day,DEFAULT_BUDGETS.ads_runs_per_day,96);
   // Phase 09.7: CRM follow-up drafting has its own daily run quota. Without an owner value it inherits the Ads run cap that governed it
   // until now (same capacity, nothing invented); "crm_followups_per_day" in the same "budgets" key overrides it.
-  return {daily_units:n(o.daily_units,DEFAULT_BUDGETS.daily_units,10000),providers,ads_runs_per_day:ads,crm_followups_per_day:n(o.crm_followups_per_day,ads,96)};
+  return {daily_units:n(o.daily_units,DEFAULT_BUDGETS.daily_units,10000),providers,ads_runs_per_day:ads,crm_followups_per_day:n(o.crm_followups_per_day,ads,96),
+    // Ads AI first-contact drafts per UTC day across both markets (ads-draft-guard.js). Default = today's structural ceiling
+    // (2 markets × 24 runs × 6 drafts), so nothing is reduced; the owner can lower it with "ads_drafts_per_day" in "budgets".
+    ads_drafts_per_day:n(o.ads_drafts_per_day,ADS_DRAFTS_PER_DAY_DEFAULT,2000)};
 }
 export function autonomyDailyQuota(module,action,overrides={}){
   const key=`${module}:${action}`,base=AUTONOMY_DAILY_QUOTAS[key]??0,v=overrides?.[key];

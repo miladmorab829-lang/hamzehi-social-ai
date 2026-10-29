@@ -460,6 +460,7 @@ export async function reserveAdsAutopilotRun(env,nowMs=Date.now(),source="schedu
 // CRM_FOLLOWUP quota (Phase 09.7): one reservation per follow-up drafting run (15-minute path, 07:00 sweep, owner button); at most
 // crm_followups_per_day per UTC day and — unless spacing is off (07:00 sweep) — one per 55 minutes. Ads discovery rows never count here.
 export async function crmFollowupCap(env){return autonomyBudgets(await budgetOverrides(env)).crm_followups_per_day;}
+export async function adsDraftDailyCap(env){return autonomyBudgets(await budgetOverrides(env)).ads_drafts_per_day;}
 export async function reserveCrmFollowupRun(env,nowMs=Date.now(),source="scheduled",{spacing=true}={}){
   const cap=autonomyBudgets(await budgetOverrides(env)).crm_followups_per_day,d=new Date(nowMs);d.setUTCHours(0,0,0,0);
   if(!Number.isInteger(cap)||cap<1)return false;

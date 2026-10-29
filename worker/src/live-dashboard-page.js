@@ -980,7 +980,10 @@ async function loadAdsMarkets(){
  $("adsMarketsGrid").innerHTML=["IRAN","ARAB"].map(m=>adsMarketCard(m,d.markets[m]||{},d.global_runs_per_day)).join("")
   +"<div class='card'><div class='row'><b>پیگیری CRM</b> <span class='pill "+(c.exhausted?"warn":"ok")+"'>"+(c.exhausted?"سهمیهٔ امروز تمام شد":"فعال")+"</span> <span class='muted'>CRM_FOLLOWUP · مستقل از Ads</span></div>"
   +"<div class='row'>اجرای امروز: "+esc(c.runs_today||0)+" / "+esc(c.runs_per_day!=null?c.runs_per_day:"—")+"</div>"
-  +"<div class='row hint'>پیش‌نویس پیگیری برای leadهای موعددار (از هر منبع)، فقط برای بررسی مالک؛ هیچ پیامی ارسال نمی‌شود. خاموش بودن بازارهای Ads روی آن اثری ندارد.</div></div>";
+  +"<div class='row hint'>پیش‌نویس پیگیری برای leadهای موعددار (از هر منبع)، فقط برای بررسی مالک؛ هیچ پیامی ارسال نمی‌شود. خاموش بودن بازارهای Ads روی آن اثری ندارد.</div></div>"
+  +(d.ai_drafts?"<div class='card'><div class='row'><b>پیش‌نویس AI در Ads</b> <span class='pill "+(d.ai_drafts.exhausted?"warn":"ok")+"'>"+(d.ai_drafts.exhausted?"سقف امروز پر شد (lead ذخیره می‌شود)":"فعال")+"</span></div>"
+   +"<div class='row'>امروز: "+esc(d.ai_drafts.drafts_today)+" / "+esc(d.ai_drafts.drafts_per_day)+" · مدل "+esc(d.ai_drafts.model)+" · سقف خروجی "+esc(d.ai_drafts.max_output_tokens)+" توکن · reasoning "+esc(d.ai_drafts.reasoning_effort)+"</div>"
+   +"<div class='row hint'>سقف دلاری تنظیم نشده است؛ مصرف واقعی توکن در هر اجرای Ads (ai_usage) ثبت می‌شود.</div></div>":"");
 }
 async function adsMarketClick(e){
  const b=e.target.closest("button[data-act]");if(!b)return;const card=b.closest("[data-market]"),m=card.dataset.market,msg=card.querySelector("[data-f=msg]"),x=(adsMk&&adsMk.markets[m])||{};

@@ -1,5 +1,5 @@
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
-import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, reserveAdsAutopilotRun, adsGlobalRunCap, reserveCrmFollowupRun, crmFollowupCap, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
+import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, reserveAdsAutopilotRun, adsGlobalRunCap, reserveCrmFollowupRun, crmFollowupCap, adsDraftDailyCap, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { ADS_MARKET_IDS, ADS_MARKETS, ADS_TARGET_CITIES, adsNormalizeText, adsTargetCity, adsMarketKey, adsCityOptions, normalizeAdsMarket, leadMarketOf, readAdsMarketConfigs, adsMarketReadiness, validateAdsMarketUpdate, adsCityForRun } from "./ads-markets.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { claimFlight, completeFlight, failFlight, salesAiSingleFlight, purgeAiCallFlights } from "./sales-memory.js";
@@ -10,6 +10,7 @@ import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEv
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
 import { bearerMatches, safeTokenEqual } from "./secure-compare.js";
 import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js";
+import { adsDraftSettings, buildAdsDraftPrompt, adsDraftRequestBody, adsDraftUsage, adsDraftOutcome, emptyAdsDraftStats, addAdsDraftUsage, reserveAdsDraft, adsDraftsToday } from "./ads-draft-guard.js";
 import { runWatchdog } from "./agent-watchdog.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
@@ -12407,7 +12408,8 @@ async function adsMarketsStatus(env){
   try{const a=await env.DB.prepare("SELECT COUNT(*) n,SUM(instr(details_json,'\"market\":\"IRAN\"')>0) ir,SUM(instr(details_json,'\"market\":\"ARAB\"')>0) ar FROM system_events WHERE type='ads_autopilot_reserved' AND created_at>=?").bind(day.toISOString()).first();total=Number(a?.n||0);runs.IRAN=Number(a?.ir||0);runs.ARAB=Number(a?.ar||0);}catch{}
   const markets={};
   for(const m of ADS_MARKET_IDS){const c=cfgs[m],r=adsMarketReadiness(c,cap);markets[m]={...c,ready:r.ready,codes:r.codes,runs_today:runs[m],quota:m==="IRAN"?"ADS_IRAN_DISCOVERY":"ADS_IRAQ_DISCOVERY",exhausted:c.runs_per_day!=null&&runs[m]>=c.runs_per_day,label_fa:ADS_MARKETS[m].label_fa,language:ADS_MARKETS[m].language,currency:ADS_MARKETS[m].currency,city_options:adsCityOptions(m)};}
-  return {markets,crm_followups:{quota:"CRM_FOLLOWUP",runs_today:crmRuns,runs_per_day:crmCap,exhausted:crmRuns>=crmCap,independent_of_ads:true},global_runs_per_day:cap,max_market_runs_per_day:cap,runs_today_total:total,approval:"owner_approved_required_to_enable",external_send:"authorized_channel_only"};
+  const draftSettings=adsDraftSettings(env),draftCap=await adsDraftDailyCap(env),draftsToday=await adsDraftsToday(env);
+  return {markets,ai_drafts:{drafts_today:draftsToday,drafts_per_day:draftCap,exhausted:draftsToday>=draftCap,model:draftSettings.model,max_output_tokens:draftSettings.maxOutputTokens,reasoning_effort:draftSettings.reasoningEffort||"off",dollar_cap:null},crm_followups:{quota:"CRM_FOLLOWUP",runs_today:crmRuns,runs_per_day:crmCap,exhausted:crmRuns>=crmCap,independent_of_ads:true},global_runs_per_day:cap,max_market_runs_per_day:cap,runs_today_total:total,approval:"owner_approved_required_to_enable",external_send:"authorized_channel_only"};
 }
 // Phase 09.7 CRM_FOLLOWUP gate: reserves one CRM follow-up run (own daily quota, never an Ads discovery quota) or returns the deferred
 // result (HTTP 200, ok:true) — never a failure, never an approval request.
@@ -12593,6 +12595,9 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
    }catch(e){summary.errors++;if(summary.error_details.length<20)summary.error_details.push({group:groupType,query:q,error:String(e?.message||e).slice(0,300)});}
   }
   if(env.OPENAI_API_KEY){
+    // Cost guard (ads-draft-guard.js): bounded input/output, atomic daily draft cap (also a per-lead-per-day key), provider usage
+    // accounting. Leads are already saved and attributed above; a skipped or failed draft never stops discovery and is not retried here.
+    const ds=adsDraftSettings(env),draftCap=await adsDraftDailyCap(env),ai=summary.ai=emptyAdsDraftStats(ds);
     for(const item of items.slice(0,AD_MAX_DRAFTS_PER_RUN)){
       try{
         const lead=await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(item.id).first(); if(!lead)continue;
@@ -12600,16 +12605,24 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
         let meta={};try{meta=JSON.parse(lead.notes||"{}")}catch{}
         if(meta.negotiation_draft)continue;
         if(leadMarketOf(meta)!==target.market){summary.cross_market_skipped=(summary.cross_market_skipped||0)+1;continue;}   // an existing lead of the other market is never drafted here
-        const prompt=`Create a concise ${ADS_MARKETS[target.market].language} B2B first-contact draft from HAMZEHI BOX (${sourceSite}), a maker of luxury packaging boxes for gold, jewellery, watch and perfume shops, to this shop. Target: ${lead.name}. Website: ${lead.contact}. Evidence: ${meta.evidence||""}. Offer to send packaging samples and a catalogue; logo printing is available. Do not invent facts, prices or discounts. Draft only, under 700 characters.`;
-        const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:env.OPENAI_MODEL||"gpt-5.6-luna",input:prompt}),signal:AbortSignal.timeout(15000)});
-        const d=await r.json().catch(()=>({})); if(!r.ok)continue; const draft=responseText(d).trim(); if(!draft)continue;
+        const slot=await reserveAdsDraft(env,{leadId:item.id,market:target.market,cap:draftCap});
+        if(!slot.reserved){if(slot.reason==="daily_cap"){ai.skipped_daily_cap++;break;}ai.skipped_already_reserved++;continue;}
+        const prompt=buildAdsDraftPrompt({language:ADS_MARKETS[target.market].language,sourceSite,name:lead.name,website:lead.contact,evidence:meta.evidence});
+        ai.calls++;
+        let r;
+        try{r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify(adsDraftRequestBody(ds,prompt)),signal:AbortSignal.timeout(15000)});}
+        catch(e){if(/timeout|abort/i.test(String(e?.name||e?.message||e)))ai.timeouts++;else ai.failed++;continue;}
+        const d=await r.json().catch(()=>({}));addAdsDraftUsage(ai,adsDraftUsage(d));
+        if(!r.ok){ai.failed++;continue;}
+        const draft=responseText(d).trim(),outcome=adsDraftOutcome(d,draft);
+        if(!outcome.ok){if(outcome.reason.startsWith("incomplete_"))ai.incomplete++;else ai.failed++;continue;}
         // A draft is a suggestion for the owner only: it never changes the CRM stage and schedules no follow-up (nobody was contacted).
         meta.negotiation_draft=draft;meta.negotiation_drafted_at=now();meta.send_mode="authorized_channel_only";
         await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=? AND stage IN ('new','discovered','qualified')").bind(JSON.stringify(meta),now(),item.id).run(); item.draft=draft;summary.drafted++;
       }catch{}
     }
   }
-  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,market:target.market,found:summary.found,rejected:summary.rejected,rejected_reasons:summary.rejected_reasons,drafted:summary.drafted,errors:summary.errors,started});
+  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,market:target.market,found:summary.found,rejected:summary.rejected,rejected_reasons:summary.rejected_reasons,drafted:summary.drafted,errors:summary.errors,ai_usage:summary.ai||null,started});
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
 function extractTelegramContact(text = "") {
