@@ -24,6 +24,17 @@ export function adsTargetCity(value){
 // A city counts for a market only when it is on THAT market's list (Baghdad is never an IRAN target and vice versa).
 export function adsTargetCityInMarket(value,market){const t=adsTargetCity(value);return t&&t.market===market?t:null;}
 export const adsCityOptions=market=>(ADS_TARGET_CITIES[market]||[]).map(n=>n[0]);
+// Nationwide coverage (owner policy 2026-10-30): city "ALL" = every supported city of THAT market, one city per discovery run,
+// rotating by UTC hour (runs are ≥55 min apart, so consecutive runs take consecutive cities). Stateless and deterministic; the market's
+// daily run limit, spacing and reservation are unchanged — "ALL" never multiplies runs per city.
+export const ADS_ALL_CITIES="ALL";
+const ALL_CITY_ALIASES=new Set(["all","*","همه","همه شهرها","همهٔ شهرها","كل المدن","جميع المدن"]);
+export const adsIsAllCities=value=>ALL_CITY_ALIASES.has(String(value||"").trim().toLowerCase());
+export function adsCityForRun(cfg,nowMs=Date.now()){
+  if(cfg?.city!==ADS_ALL_CITIES)return String(cfg?.city||"");
+  const list=ADS_TARGET_CITIES[cfg.market]||[];if(!list.length)return "";
+  return list[Math.floor(nowMs/3600000)%list.length][0];
+}
 
 // CRM market id from any spelling used in leads, quotes or requests ("iraq", "iq", "العراق" → ARAB); anything else → null.
 export function normalizeAdsMarket(value){
@@ -62,7 +73,7 @@ export async function readAdsMarketConfigs(env){
 export function adsMarketReadiness(cfg,globalCap){
   const codes=[];
   if(!cfg.enabled)codes.push("ADS_MARKET_DISABLED");
-  if(!cfg.city)codes.push("ADS_CITY_EMPTY");else if(!adsTargetCityInMarket(cfg.city,cfg.market))codes.push("ADS_CITY_INVALID");
+  if(!cfg.city)codes.push("ADS_CITY_EMPTY");else if(cfg.city!==ADS_ALL_CITIES&&!adsTargetCityInMarket(cfg.city,cfg.market))codes.push("ADS_CITY_INVALID");
   if(cfg.runs_per_day==null)codes.push("ADS_LIMIT_MISSING");else if(Number.isFinite(globalCap)&&cfg.runs_per_day>globalCap)codes.push("ADS_LIMIT_ABOVE_GLOBAL");
   return {ready:codes.length===0,codes};
 }
@@ -75,7 +86,8 @@ export function validateAdsMarketUpdate(body,current,globalCap,at){
   if("enabled" in b){if(typeof b.enabled!=="boolean")return {ok:false,reason:"ads_enabled_invalid",error:"enabled باید true یا false باشد"};next.enabled=b.enabled;}
   if("city" in b){
     const raw=String(b.city||"").trim();
-    if(raw){const t=adsTargetCityInMarket(raw,market);if(!t)return {ok:false,reason:"ads_city_not_in_market",error:"این شهر در فهرست شهرهای این بازار نیست"};next.city=t.city;}
+    if(raw&&adsIsAllCities(raw))next.city=ADS_ALL_CITIES;
+    else if(raw){const t=adsTargetCityInMarket(raw,market);if(!t)return {ok:false,reason:"ads_city_not_in_market",error:"این شهر در فهرست شهرهای این بازار نیست"};next.city=t.city;}
     else next.city="";
   }
   if("runs_per_day" in b){

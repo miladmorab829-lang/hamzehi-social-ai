@@ -1,6 +1,6 @@
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, reserveAdsAutopilotRun, adsGlobalRunCap, reserveCrmFollowupRun, crmFollowupCap, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
-import { ADS_MARKET_IDS, ADS_MARKETS, ADS_TARGET_CITIES, adsNormalizeText, adsTargetCity, adsMarketKey, adsCityOptions, normalizeAdsMarket, leadMarketOf, readAdsMarketConfigs, adsMarketReadiness, validateAdsMarketUpdate } from "./ads-markets.js";
+import { ADS_MARKET_IDS, ADS_MARKETS, ADS_TARGET_CITIES, adsNormalizeText, adsTargetCity, adsMarketKey, adsCityOptions, normalizeAdsMarket, leadMarketOf, readAdsMarketConfigs, adsMarketReadiness, validateAdsMarketUpdate, adsCityForRun } from "./ads-markets.js";
 import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, knowledgeText, validateKnowledgeEnvelope, knowledgeSlot, knowledgeIsCommercial, normalizeKnowledgeInput, knowledgeExtractionPrompt, hydrateKnowledgeRecords, resolveKnowledgeEntities, looksLikeKnowledgeStatement, applyRelationalGuards, knowledgeVocabulary, recognizeKnowledgeContext, evaluateKnowledgeRules, checkKnowledgeRelations, matchKnowledgeQuestion, composeKnowledgeAnswers, knowledgeAnswerGroups, composeRelationAnswer, knowledgeEvidenceValue, knowledgeLooksLikeCollection, knowledgeCollections, knowledgeTypedRoleNamed, knowledgeWithoutRoleWords, knowledgeLooksLikeQuestion, KNOWLEDGE_TYPED_CUSTOMER_DOMAINS } from "./knowledge-engine.js";
 import { claimFlight, completeFlight, failFlight, salesAiSingleFlight, purgeAiCallFlights } from "./sales-memory.js";
 import { buildMemoryVocabulary, memoryCanonicalize, memoryConceptFromInterpretation, memoryFingerprint, memoryLookup, memoryObserve, memoryReview, memoryList, memoryGalleryRoles, memoryConceptKey, memoryMetrics, memoryConceptAnswer, memoryRenderAnswer, knowledgeVersion } from "./sales-memory.js";
@@ -13371,7 +13371,7 @@ export default {
           // Phase 09.4: Ads DISCOVERY runs for each READY market (owner-enabled, city of that market, owner-set limit) on its own; a
           // disabled market discovers nothing. runAdAutopilotOnce reserves that market's run itself and nothing is retried or released.
           for(const {market,cfg} of await adsReadyMarkets(env)){
-            await runAdAutopilotOnce(env,{type:cfg.type,city:cfg.city,extra:cfg.extra,market},"scheduled");
+            await runAdAutopilotOnce(env,{type:cfg.type,city:adsCityForRun(cfg),extra:cfg.extra,market},"scheduled");
           }
           // Phase 09.6/09.7: CRM follow-ups never depend on the market switches and never use an Ads quota. Only when a due lead still needs a
           // draft, one CRM_FOLLOWUP reservation is taken (55-minute spacing, own daily cap; no audit row when refused), so an idle tick spends
@@ -14575,11 +14575,11 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         if(b.market!=null&&b.market!==""){
           const market=normalizeAdsMarket(b.market);if(!market) return json({ok:false,reason:"ads_market_invalid",error:"بازار نامعتبر است (IRAN یا ARAB)"},400);
           const mg=await adsMarketGate(env,market);if(mg.skip) return json(mg.skip);
-          return json(await runAdAutopilotOnce(env,{type:mg.cfg.type,city:mg.cfg.city,extra:mg.cfg.extra,market},"manual"));
+          return json(await runAdAutopilotOnce(env,{type:mg.cfg.type,city:adsCityForRun(mg.cfg),extra:mg.cfg.extra,market},"manual"));
         }
         const ready=await adsReadyMarkets(env);
         if(!ready.length) return json({ok:true,skipped:true,reason:"ads_market_disabled",message:"No Ads market is enabled; nothing was run",items:[]});
-        const markets={};for(const {market,cfg} of ready)markets[market]=await runAdAutopilotOnce(env,{type:cfg.type,city:cfg.city,extra:cfg.extra,market},"manual");
+        const markets={};for(const {market,cfg} of ready)markets[market]=await runAdAutopilotOnce(env,{type:cfg.type,city:adsCityForRun(cfg),extra:cfg.extra,market},"manual");
         const all=Object.values(markets);
         return json({ok:true,markets,deferred:all.every(x=>x.deferred===true)||undefined,reason:all.every(x=>x.deferred===true)?"ads_daily_limit":undefined});
       }
