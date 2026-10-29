@@ -60,6 +60,10 @@ export async function runWatchdog(env,{nowMs=Date.now(),orchestratorOn=env?.AUTO
   const t=iso(nowMs),day=dayStartOf(nowMs),raised=[],all=async(sql,...b)=>((await env.DB.prepare(sql).bind(...b).all()).results||[]);
   let coverage={state:"NOT_RUN",reason:"orchestrator_off_or_paused"};
   let master="on";try{master=(await env.DB.prepare("SELECT value FROM autonomy_controls WHERE key='master'").first())?.value||"on";}catch{}
+  // 0. Phase 16.16-N: a version built without AUTONOMY_ORCHESTRATOR=on (e.g. an automatic build) falls back to the legacy task loop
+  // with no heartbeat coverage, and nothing said so. Detection only (warning): nothing is paused, blocked or re-routed.
+  if(!orchestratorOn)raised.push({code:"orchestrator_flag_off",agent:"orchestrator",level:"warning",cause:"AUTONOMY_ORCHESTRATOR is not \"on\" in the running Worker version: background tasks use the legacy loop without heartbeat coverage",
+    fallback:"Tasks still run on the legacy loop; customer replies and owner approval gates are unaffected. Deploy a version with AUTONOMY_ORCHESTRATOR=on"});
   // 1. Missing heartbeat / unhealthy runs (only when the orchestrated scheduler is expected to run).
   if(orchestratorOn&&master==="on"){
     const hb=await env.DB.prepare("SELECT last_finished_at,healthy FROM agent_heartbeat WHERE scheduler='autonomy'").first();

@@ -30,3 +30,7 @@ RATE_LIMIT_PER_MINUTE = "60"
 TELEGRAM_VAULT_CHAT_ID = "@mhboxgroup"
 TELEGRAM_VIDEO_VAULT_CHAT_ID = "@mhboxgroup"
 AUTO_AI_MEDIA_ENABLED = "true"
+# Bounded multi-agent orchestrator (autonomy-engine.js, heartbeat + Watchdog coverage). Approved Production setting since Stage 3;
+# it lives here so every build path (wrangler deploy, versions upload, Workers Builds, GitHub Actions) carries it, not only uploads
+# made with --var. Without it the Worker silently falls back to the legacy sequential task loop.
+AUTONOMY_ORCHESTRATOR = "on"
