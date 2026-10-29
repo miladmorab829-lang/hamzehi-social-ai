@@ -8,7 +8,7 @@ import { salesAiProvider, salesAiModel, salesAiTimeoutMs } from "./sales-ai-brai
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
-import { bearerMatches } from "./secure-compare.js";
+import { bearerMatches, safeTokenEqual } from "./secure-compare.js";
 import { runWatchdog } from "./agent-watchdog.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
@@ -1295,8 +1295,9 @@ async function getReadyMediaStatus(env,req){
 // auto-forwards, bots and messages without a sender are refused. A missing or invalid list fails closed. Refused media is stored
 // as internal 'archive' evidence (never marketing, never a customer).
 const TELEGRAM_USER_ID=/^[1-9]\d{4,14}$/;
-function vaultSenderAllowList(env){
-  const raw=String(env.TELEGRAM_VAULT_SENDER_IDS||"").trim();
+function vaultSenderAllowList(env){return parseTelegramUserIdList(env.TELEGRAM_VAULT_SENDER_IDS);}
+function parseTelegramUserIdList(value){
+  const raw=String(value||"").trim();
   if(!raw)return {ok:false,reason:"allow_list_missing"};
   const ids=raw.split(/[\s,]+/).filter(Boolean);
   // Telegram's service account (777000) and the anonymous-admin bot (1087968824) are never a person: listing them invalidates the list.
@@ -1316,6 +1317,26 @@ function vaultSenderVerdict(env,m,isChannelPost){
   if(from.is_bot===true)return {ok:false,reason:"bot_sender"};
   const id=String(from.id);if(!TELEGRAM_USER_ID.test(id))return {ok:false,reason:"invalid_sender_id"};
   return list.ids.has(id)?{ok:true,via:"allow_list"}:{ok:false,reason:"sender_not_allowed"};
+}
+// Phase 16.16-A: STAGING-only inbound sender allow-list for the isolated test bot. Active only when the Worker var HAMZEHI_ENVIRONMENT
+// is exactly "staging" (never taken from the request). Only a message / edited_message whose verified sender (numeric from.id) is
+// listed in STAGING_TELEGRAM_ALLOWED_USER_IDS passes; usernames, names, chat titles and chat ids never count. A missing or invalid
+// list, an update without a verifiable human sender and every other update type fail closed. Pure (no D1, no network), so a refused
+// update has no side effect at all. Production (var unset) never runs it.
+const isStagingWorker=env=>env?.HAMZEHI_ENVIRONMENT==="staging";
+const STAGING_SENDER_UPDATE_TYPES=new Set(["message","edited_message"]);
+function stagingSenderVerdict(env,body){
+  const list=parseTelegramUserIdList(env.STAGING_TELEGRAM_ALLOWED_USER_IDS);if(!list.ok)return list;
+  const kinds=Object.keys(body||{}).filter(k=>k!=="update_id");
+  if(kinds.length!==1)return {ok:false,reason:"ambiguous_update"};
+  if(!STAGING_SENDER_UPDATE_TYPES.has(kinds[0]))return {ok:false,reason:"unsupported_update_type"};
+  const m=body[kinds[0]];
+  if(!m||typeof m!=="object"||!m.chat)return {ok:false,reason:"missing_message"};
+  if(m.sender_chat)return {ok:false,reason:"anonymous_or_channel_sender"};
+  const from=m.from;if(!from||typeof from!=="object"||from.id==null)return {ok:false,reason:"missing_sender"};
+  if(from.is_bot===true)return {ok:false,reason:"bot_sender"};
+  const id=String(from.id);if(!TELEGRAM_USER_ID.test(id))return {ok:false,reason:"invalid_sender_id"};
+  return list.ids.has(id)?{ok:true}:{ok:false,reason:"sender_not_allowed"};
 }
 async function telegramFileIdFor(env,sourceId){const r=await env.DB.prepare("SELECT file_id FROM telegram_media_sources WHERE id=? LIMIT 1").bind(String(sourceId)).first();return String(r?.file_id||sourceId);}
 // Phase 12.1: sends exactly the revision that was hashed (rev), and calls finalGate() immediately before the public post (no await
@@ -6088,6 +6109,8 @@ async function telegramWebhookSecret(env){
 }
 async function setupTelegramWebhook(env,req){
   if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);if(!env.TELEGRAM_BOT_TOKEN)return json({ok:false,error:'Telegram bot token missing'},503);
+  // Phase 16.16-A: a staging webhook is registered only with its own configured secret and a valid sender allow-list (fail closed).
+  if(isStagingWorker(env)&&(!env.TELEGRAM_WEBHOOK_SECRET_TOKEN||!parseTelegramUserIdList(env.STAGING_TELEGRAM_ALLOWED_USER_IDS).ok))return json({ok:false,error:'Staging webhook needs TELEGRAM_WEBHOOK_SECRET_TOKEN and a valid STAGING_TELEGRAM_ALLOWED_USER_IDS'},503);
   await ensureTelegramMediaTable(env);const secret=await telegramWebhookSecret(env);const url=new URL(req.url);url.pathname='/webhooks/telegram';url.search='';
   const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url.toString(),secret_token:secret,allowed_updates:['channel_post','edited_channel_post','message','edited_message']})});
   const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error(d.description||'Telegram webhook setup failed');await audit(env,'telegram_webhook_configured','Telegram media intake webhook configured',{url:url.toString()});return json({ok:true,url:url.toString(),webhook_configured:true});
@@ -6102,8 +6125,15 @@ async function proxyTelegramMedia(env,req){
 
 async function handleTelegramWebhook(env,req){
   const webhookStarted=Date.now();
-  if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(provided!==expected){await noteTelegramWebhook(env,'secret_mismatch');return json({ok:false,error:'Unauthorized webhook'},401);}
-  const body=await req.json().catch(()=>null);if(!body){await noteTelegramWebhook(env,'invalid_json');return json({ok:false,error:'Invalid JSON'},400);}await noteTelegramWebhook(env,'accepted');await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
+  if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);
+  // Phase 16.16-A: staging authenticates only with its own configured secret (no D1-generated fallback, no write before auth).
+  const staging=isStagingWorker(env);if(staging&&!env.TELEGRAM_WEBHOOK_SECRET_TOKEN)return json({ok:false,error:'Webhook not configured'},503);
+  const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(!safeTokenEqual(provided,expected)){await noteTelegramWebhook(env,'secret_mismatch');return json({ok:false,error:'Unauthorized webhook'},401);}
+  const body=await req.json().catch(()=>null);if(!body){await noteTelegramWebhook(env,'invalid_json');return json({ok:false,error:'Invalid JSON'},400);}
+  // Staging sender allow-list: before ANY D1 write, lead, inbox row, AI call or reply. 200 so Telegram does not redeliver; the log
+  // carries the reason only (no id, name or text).
+  if(staging){const v=stagingSenderVerdict(env,body);if(!v.ok){console.warn(`staging_telegram_sender_rejected:${v.reason}`);return json({ok:true,ignored:true,reason:v.reason});}}
+  await noteTelegramWebhook(env,'accepted');await ensureTelegramMediaTable(env);const m=body.channel_post||body.edited_channel_post||body.message||body.edited_message;if(!m?.chat)return json({ok:true,ignored:true});
   const targets=[String(env.TELEGRAM_CHAT_ID||''),String(env.TELEGRAM_VAULT_CHAT_ID||''),String(env.TELEGRAM_VIDEO_VAULT_CHAT_ID||''),String(env.TELEGRAM_MEDIA_READY_CHAT_ID||'')].map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);const username=String(m.chat.username||'').toLowerCase();const chatId=String(m.chat.id);if(m.chat.type!=='private'&&targets.length&&!targets.some(x=>x===username||x===chatId))return json({ok:true,ignored:true,reason:'chat_mismatch'});const imageVault= vaultChatId(env); const videoVault= videoVaultChatId(env); const isImageVault=!!imageVault && (chatId===imageVault||username===imageVault.replace(/^@/,'').toLowerCase()); const isVideoVault=!!videoVault && (chatId===videoVault||username===videoVault.replace(/^@/,'').toLowerCase()); const vaultVerdict=(isImageVault||isVideoVault)?vaultSenderVerdict(env,m,!!(body.channel_post||body.edited_channel_post)):null; const isVault=!!vaultVerdict?.ok; /* channel identity, or an allow-listed member of a group vault; never a private chat */
   const isReady=!!readyChatId(env)&& (chatId===readyChatId(env)||username===readyChatId(env).replace(/^@/,'').toLowerCase());
   // Only a private chat with a human sender is a customer identity. A group/channel id, username or title is a shared
@@ -13479,10 +13509,13 @@ export default {
       }
 
       if (req.method === "GET" && u.pathname === "/api/health") {
+        // Phase 16.15: derived from the Worker var (staging sets HAMZEHI_ENVIRONMENT="staging"); Production has no such var.
+        const environment = String(env.HAMZEHI_ENVIRONMENT || "production");
         return json({
           ok: true,
           version: "V6.8-control-center",
-          production: true,
+          environment,
+          production: environment === "production",
           approval_required: true,
           auto_publish: true,
           r2: false,

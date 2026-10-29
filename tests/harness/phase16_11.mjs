@@ -129,7 +129,9 @@ const STAGE2B=fs.readFileSync(path.join(REPO,"owner-actions/agent-orchestrator-s
  W.d1.db.exec("CREATE TABLE IF NOT EXISTS autonomy_controls(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);INSERT OR REPLACE INTO autonomy_controls(key,value,updated_at) VALUES('master','off','2026-10-28T00:00:00Z');");
  const upd={update_id:1,message:{message_id:1,date:Math.floor(Date.now()/1000),from:{id:5,is_bot:false,first_name:"x"},chat:{id:5,type:"private"},text:"قیمت؟"}};
  const hooks=[];for(const s of ["","guess","sec"])hooks.push((await W.run(new Request("https://w.test/webhooks/telegram",{method:"POST",headers:{"Content-Type":"application/json",...(s?{"X-Telegram-Bot-Api-Secret-Token":s}:{})},body:JSON.stringify(upd)}))).status);
- ok("G1 staging without a webhook secret refuses every Telegram delivery (none, guessed, harness secret) and stores nothing",hooks.every(s=>s===401)&&W.q("SELECT COUNT(*) n FROM inbox_messages")[0].n===0,hooks);
+ // Phase 16.16-A: a staging Worker without its own secret now answers 503 "not configured" (was 401 via a D1-generated secret)
+ ok("G1 staging without a webhook secret refuses every Telegram delivery (none, guessed, harness secret) and stores nothing",hooks.every(s=>s===503)&&W.q("SELECT COUNT(*) n FROM inbox_messages")[0].n===0&&
+   !W.q("SELECT name FROM sqlite_master WHERE type='table' AND name='system_kv'").concat().some(()=>W.q("SELECT COUNT(*) n FROM system_kv WHERE key='telegram_webhook_secret'")[0].n>0),hooks);
  const mod=await import(pathToFileURL(path.join(SRC,"index.js")).href+"?g="+Math.random());
  for(const cron of ["*/15 * * * *","0 7 * * *"]){const pend=[];await mod.default.scheduled({cron,scheduledTime:Date.now()},W.env,{waitUntil:p=>pend.push(p)});await Promise.allSettled(pend);}
  ok("G2 both cron schedules with master off run no autonomy task and no failed step",W.q("SELECT COUNT(*) n FROM autonomy_tasks")[0].n===0&&W.q("SELECT COUNT(*) n FROM system_events WHERE type='scheduled_step_failed'")[0].n===0);
