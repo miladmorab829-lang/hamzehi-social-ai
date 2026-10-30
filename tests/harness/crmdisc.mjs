@@ -4,8 +4,8 @@ import {makeWorld,reporter} from "./harness.mjs";
 const {ok,J,done}=reporter("crmdisc");
 const W=await makeWorld();const {q,dbrun,call}=W;
 W.env.GOOGLE_PLACES_API_KEY="test-places-key";
-let places=[],placesCalls=0;const base=globalThis.fetch;
-globalThis.fetch=async(u,o)=>{const s=String(u?.url||u);if(s.startsWith("https://places.googleapis.com/")){placesCalls++;return new Response(JSON.stringify({places}),{status:200,headers:{"Content-Type":"application/json"}});}return base(u,o);};
+let places=[],placesCalls=0,masks=[];const base=globalThis.fetch;
+globalThis.fetch=async(u,o)=>{const s=String(u?.url||u);if(s.startsWith("https://places.googleapis.com/")){placesCalls++;masks.push(o?.headers?.["X-Goog-FieldMask"]||"");return new Response(JSON.stringify({places}),{status:200,headers:{"Content-Type":"application/json"}});}return base(u,o);};
 const place=(id,name,site,phone)=>({id,displayName:{text:name},formattedAddress:"تهران، ایران",websiteUri:site,nationalPhoneNumber:phone,internationalPhoneNumber:phone,types:["jewelry_store"]});
 const discover=()=>call("/api/crm/lead-discovery",{type:"gold_fa",city:"تهران"});
 const lead=id=>q("SELECT * FROM leads WHERE id=?",[id])[0];
@@ -31,7 +31,7 @@ dbrun("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated
 dbrun("INSERT INTO lead_identities(identity_key,identity_type,normalized_value,lead_id,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",["place_id:PL-2","place_id","PL-2","L-FREE","test",t0,t0]);
 places=[place("PL-2","گالری ب","https://gold-be.example","+982188880002")];
 await discover();
-ok("D4 a lead whose notes are owner free text keeps the text and its timestamp; discovery only adds missing identity claims",lead("L-FREE").notes==="یادداشت مالک: فقط صبح‌ها تماس"&&lead("L-FREE").updated_at===t0&&q("SELECT COUNT(*) n FROM lead_identities WHERE lead_id='L-FREE'")[0].n>=2,[lead("L-FREE"),q("SELECT identity_key FROM lead_identities WHERE lead_id='L-FREE'")]);
+ok("D4 a lead whose notes are owner free text keeps the text and its timestamp; Phase 17: no Google-derived phone/website identity is added (place ID only)",lead("L-FREE").notes==="یادداشت مالک: فقط صبح‌ها تماس"&&lead("L-FREE").updated_at===t0&&q("SELECT COUNT(*) n FROM lead_identities WHERE lead_id='L-FREE'")[0].n===1,[lead("L-FREE"),q("SELECT identity_key FROM lead_identities WHERE lead_id='L-FREE'")]);
 // D5 an early-stage JSON lead gains only missing keys; existing keys are kept; updated_at moves because data really changed
 dbrun("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",["L-NEW","گالری ج",null,"discovered","normal",JSON.stringify({score:42,city:"شیراز"}),t0,t0]);
 dbrun("INSERT INTO lead_identities(identity_key,identity_type,normalized_value,lead_id,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",["place_id:PL-3","place_id","PL-3","L-NEW","test",t0,t0]);
@@ -45,7 +45,13 @@ dbrun("INSERT INTO lead_identities(identity_key,identity_type,normalized_value,l
 const before=q("SELECT COUNT(*) n FROM leads")[0].n,xNotes=lead("L-X").notes,freeNotes=lead("L-FREE").notes;
 places=[place("PL-4","مختلط","https://gold-be.example","+982188880004")];   // place → L-X, website → L-FREE
 await discover();
-ok("D6 a place whose identities belong to two different leads is a conflict: no new lead, neither lead changed",q("SELECT COUNT(*) n FROM leads")[0].n===before&&lead("L-X").notes===xNotes&&lead("L-FREE").notes===freeNotes,[q("SELECT COUNT(*) n FROM leads")[0].n-before]);
+ok("D6 Phase 17: a Google website no longer links a place to another lead — the place matches only its own place-ID lead (L-X), L-FREE is untouched, no new lead",q("SELECT COUNT(*) n FROM leads")[0].n===before&&lead("L-FREE").notes===freeNotes&&q("SELECT lead_id FROM lead_identities WHERE identity_key='place_id:PL-4'")[0].lead_id==="L-X",[q("SELECT COUNT(*) n FROM leads")[0].n-before]);
+// D8 Phase 17 safety fix: only the place ID + our own data are stored; Google content is used transiently for filtering only
+{places=[place("PL-9","گالری طلای نمونه","https://gold-nine.example","+982188880009")];await discover();const L9=byPlace("PL-9"),row=lead(L9),m=JSON.parse(row.notes||"{}");
+ ok("D8a a new Places lead stores the place ID, a Maps link built from it and our own label — no Google name, address, phone, website, coordinates or types",!!L9&&m.place_id==="PL-9"&&m.maps_url==="https://www.google.com/maps/place/?q=place_id:PL-9"&&!row.name.includes("نمونه")&&row.name.includes("#")&&["name","address","phone","website","lat","lng","types","business_status","telegram_username","telegram_url"].every(k=>!(k in m))&&!JSON.stringify(row).includes("gold-nine")&&!JSON.stringify(row).includes("88880009"),{name:row.name,meta:m});
+ ok("D8b no Google-supplied contact is written to lead_contacts and no phone/domain identity is derived from Google data",!q("SELECT 1 FROM lead_contacts WHERE lead_id=?",[L9]).length&&q("SELECT identity_type FROM lead_identities WHERE lead_id=?",[L9]).every(r=>r.identity_type==="place_id"),q("SELECT identity_type FROM lead_identities WHERE lead_id=?",[L9]));
+ ok("D8c the lead is a provisional discovery (provisional_place, not identity-verified, not contactable)",m.lead_status==="provisional_place"&&m.identity_verified===false&&m.contactable===false);
+ ok("D8d the Places request asks only for id, name, address, types and business status (no phone, website, location or Maps URI) and is budgeted as Text Search Pro",masks.length&&masks.every(x=>!/Phone|websiteUri|location|googleMapsUri/.test(x))&&q("SELECT details_json FROM system_events WHERE type='places_reserved'").map(r=>JSON.parse(r.details_json)).every(d=>d.sku==="pro"),masks.at(-1));}
 // D7 discovery sends nothing to anyone
 ok("D7 discovery sends no Telegram message and calls no network except the (stubbed) Places API",!W.tg.some(x=>/^send/.test(x.method)),W.tg.map(x=>x.method));
 process.exit(done()?1:0);

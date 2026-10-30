@@ -957,6 +957,26 @@ async function loadAgentCenter(){
  $("agentCenterFilter").innerHTML=[["ALL","همه"],["ACTIVE","فعال"],["IDLE","بیکار"],["BLOCKED","مسدود"],["NOT_CONNECTED","وصل نیست"],["UNKNOWN","نامعلوم"]].map(f=>"<button class='btn' type='button' data-f='"+f[0]+"' aria-pressed='false'>"+esc(f[1])+(f[0]==="ALL"?"":" "+esc(n[f[0]]||0))+"</button>").join("");
  acRender();
 }
+// Phase 17: sales intelligence (GET /api/sales/intelligence, read-only). Provisional Google Places IDs are counted apart from verified
+// and qualified prospects; money is shown per market in its own currency only.
+const SI_STATE_FA={PLACE_DISCOVERED:"کشف اولیه (فقط Google)",INDEPENDENT_IDENTITY_FOUND:"سایت مستقل پیدا شد",IDENTITY_VERIFIED:"هویت تأییدشده",CONTACT_CHANNEL_FOUND:"راه تماس پیدا شد",CONTACT_VERIFIED:"تماس تأییدشده",BUSINESS_QUALIFIED:"واجد شرایط",SALES_READY:"آمادهٔ فروش",CONTACTED:"در تماس",OPPORTUNITY:"فرصت",CUSTOMER:"مشتری",REJECTED:"ردشده",DISCOVERED:"کشف‌شده"};
+const SI_ACTION_FA={WAIT_FOR_VERIFICATION:"منتظر تأیید مالک روی Google Maps",FIND_INDEPENDENT_IDENTITY:"یافتن هویت مستقل",VERIFY_OFFICIAL_CONTACT:"تأیید راه تماس رسمی",REASSESS_BUSINESS_FIT:"بازبینی تناسب کسب‌وکار",PREPARE_OUTREACH_DRAFT:"آمادهٔ پیش‌نویس (با درخواست مالک)",AWAIT_OUTREACH_AUTHORIZATION:"منتظر تأیید مالک برای ارسال",FOLLOW_UP_EXISTING_CONVERSATION:"پیگیری گفتگو",ESCALATE_FINANCIAL_DECISION:"تصمیم مالی مالک",ARCHIVE_IRRELEVANT:"بایگانی",NO_ACTION_REQUIRED:"اقدامی لازم نیست"};
+function siMoney(minor,cur){const n=Number(minor||0);return cur==="USD"?"$"+(n/100).toLocaleString("en-US",{maximumFractionDigits:2}):n.toLocaleString("fa-IR")+" تومان";}
+async function loadSalesIntel(){
+ const st=$("salesIntelStatus");st.textContent="در حال دریافت…";
+ const d=await api("/api/sales/intelligence?limit=15");
+ if(!d||!d.ok||!d.markets){st.innerHTML=acErr(d);$("salesIntelGrid").innerHTML="";return}
+ st.innerHTML="<span class='pill ok'>داده واقعی</span> کشف‌های اولیهٔ Google جدا از کسب‌وکارهای تأییدشده شمرده می‌شوند؛ امتیاز فقط از شواهد ثبت‌شده است.";
+ const card=(m,x)=>"<div class='card'><div class='row'><b>"+(m==="IRAN"?"ایران":"عراق")+"</b> <span class='muted'>"+esc(m)+" · "+esc(x.currency)+"</span></div>"
+  +"<div class='row'>کشف اولیه: "+esc(x.provisional_discoveries)+" · هویت تأییدشده: "+esc(x.independently_verified)+" · تماس تأییدشده: "+esc(x.verified_contacts)+"</div>"
+  +"<div class='row'>واجد شرایط: "+esc(x.qualified)+" · آمادهٔ فروش: "+esc(x.sales_ready)+" · در گفتگو: "+esc(x.in_conversation)+" · مشتری: "+esc(x.customers)+" · ردشده: "+esc(x.rejected)+"</div>"
+  +"<div class='row'>پیش‌نویس منتظر مالک: "+esc(x.outreach.awaiting_owner)+" · ارسال‌شده: "+esc(x.outreach.sent)+" · پاسخ: "+esc(x.replies)+" · درخواست قیمت: "+esc(x.quote_requests)+" · سفارش: "+esc(x.orders)+"</div>"
+  +"<div class='row'>ارزش سفارش‌ها: "+esc(siMoney(x.order_value_minor,x.currency))+" · دریافتی: "+esc(siMoney(x.payments_received_minor,x.currency))+" · مانده: "+esc(siMoney(x.outstanding_minor,x.currency))+(x.reply_rate!=null?" · نرخ پاسخ: "+esc(x.reply_rate)+"٪":"")+"</div>"
+  +"<div class='row hint'>اولویت A/B/C/D: "+esc(x.tiers.A)+" / "+esc(x.tiers.B)+" / "+esc(x.tiers.C)+" / "+esc(x.tiers.D)+"</div></div>";
+ const rows=(d.items||[]).map(i=>"<div class='row'><span class='pill "+(i.tier==="A"||i.tier==="B"?"ok":i.tier==="C"?"warn":"gray")+"'>"+esc(i.tier)+" · "+esc(i.priority_score)+"</span> "
+  +esc(i.name||"—")+" <span class='muted'>"+esc(i.market||"?")+" · "+esc(i.city||"")+" · "+esc(SI_STATE_FA[i.state]||i.state)+"</span><br><span class='hint'>قدم بعدی: "+esc(SI_ACTION_FA[i.next_action&&i.next_action.action]||"")+(i.missing&&i.missing.length?" · کمبود: "+esc(i.missing.join("، ")):"")+"</span></div>").join("");
+ $("salesIntelGrid").innerHTML=["IRAN","ARAB"].map(m=>card(m,d.markets[m])).join("")+"<div class='card'><div class='row'><b>اولویت‌دارها (بدون کشف‌های اولیه)</b> <span class='muted'>"+esc(d.total)+" مورد</span></div>"+(rows||"<div class='row hint'>هنوز موردی نیست.</div>")+"</div>";
+}
 // Phase 09.4: Ads markets (GET /api/ads/markets, POST /api/ads/markets/config). Enabling asks the owner to confirm first; disabling never does.
 const ADS_CODE_FA={ADS_MARKET_DISABLED:"خاموش است",ADS_CITY_EMPTY:"شهر هدف تعیین نشده",ADS_CITY_INVALID:"شهر متعلق به این بازار نیست",ADS_LIMIT_MISSING:"سقف اجرای روزانه تعیین نشده",ADS_LIMIT_ABOVE_GLOBAL:"سقف بیشتر از سقف کلی Ads است"};
 let adsMk=null;
@@ -2100,7 +2120,7 @@ async function refreshTick(){
  catch(e){$("masterState").textContent="DASHBOARD ERROR";$("masterState").className="pill bad"}
  finally{refreshInProgress=false}
 }
-updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();if(has("adsMarketsGrid")){loadAdsMarkets();$("adsMarketsRefresh").addEventListener("click",loadAdsMarkets);$("adsMarketsGrid").addEventListener("click",adsMarketClick)}if(has("agentCenterGrid")){loadAgentCenter();$("agentCenterRefresh").addEventListener("click",loadAgentCenter);$("agentCenterFilter").addEventListener("click",e=>{const b=e.target.closest("button[data-f]");if(b){acFilter=b.dataset.f;acRender()}})}on("hubAgents",loadHubAgents);setInterval(refreshTick,15000);
+updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();if(has("salesIntelGrid")){loadSalesIntel();$("salesIntelRefresh").addEventListener("click",loadSalesIntel)}if(has("adsMarketsGrid")){loadAdsMarkets();$("adsMarketsRefresh").addEventListener("click",loadAdsMarkets);$("adsMarketsGrid").addEventListener("click",adsMarketClick)}if(has("agentCenterGrid")){loadAgentCenter();$("agentCenterRefresh").addEventListener("click",loadAgentCenter);$("agentCenterFilter").addEventListener("click",e=>{const b=e.target.closest("button[data-f]");if(b){acFilter=b.dataset.f;acRender()}})}on("hubAgents",loadHubAgents);setInterval(refreshTick,15000);
 </script></body></html>`;
 
 // ---- Hub-only additions (summary of existing data + navigation; no new metrics, no new API).
@@ -2139,6 +2159,7 @@ DASH_SECTIONS.agentCenter=`<section class="card section" id="agentCenterPanel">
 <div id="agentCenterGrid" class="acgrid"></div>
 </section>
 `;
+DASH_SECTIONS.salesIntel='<section class="card section" id="salesIntelPanel"><div class="title"><div><h2>🧭 هوش فروش (ایران / عراق)</h2><div class="hint">کسب‌وکارهای تأییدشده، تماس‌های تأییدشده، آمادهٔ فروش و قدم بعدی هر lead. فقط نمایش؛ هیچ پیامی ارسال نمی‌شود.</div></div><button class="btn" type="button" id="salesIntelRefresh">بروزرسانی</button></div><div id="salesIntelStatus" class="hint">در انتظار دریافت…</div><div id="salesIntelGrid" class="acgrid"></div></section>';
 DASH_SECTIONS.adsMarkets='<section class="card section" id="adsMarketsPanel"><div class="title"><div><h2>📣 بازارهای Ads (ایران / عراق)</h2><div class="hint">هر بازار جداگانه روشن می‌شود. روشن کردن یا تغییر بازار روشن، تأیید صریح مالک لازم دارد. Ads فقط پیش‌نویس می‌سازد و هیچ پیامی ارسال یا هزینهٔ تبلیغاتی خرج نمی‌کند.</div></div><button class="btn" type="button" id="adsMarketsRefresh">بروزرسانی</button></div><div id="adsMarketsStatus" class="hint">در انتظار دریافت…</div><div id="adsMarketsGrid" class="acgrid"></div></section>';
 DASH_SECTIONS.hubAgents=`<section class="card section" id="hubAgentsPanel">
 <div class="title"><h2>🛰️ وضعیت عامل‌ها</h2><a class="btn" href="/dashboard/agents">مرکز کنترل عامل‌ها</a></div>
@@ -2300,7 +2321,7 @@ DASH_SECTIONS.telegramHealth=`<section class="card section" id="telegramHealth">
 // page — the lazy ones load their data only when opened (or when a link points into them).
 export const DASHBOARD_PAGES={
  hub:{path:"/dashboard",title:"خانه",icon:"home",desc:"خلاصه مدیریتی",sections:["home","ownerActions","hubAgents","authFold"]},
- customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["leadsList","negotiation","opportunities"]},
+ customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["salesIntel","leadsList","negotiation","opportunities"]},
  orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"box",desc:"سفارش‌ها، پرداخت‌ها و درخواست‌های قیمت",sections:["orders","money","quotes"]},
  actions:{path:"/dashboard/actions",title:"مرکز اقدام مالک",icon:"check",desc:"همهٔ کارهای منتظر مالک، اولویت‌بندی‌شده (فقط نمایش)",sections:["ownerActions"]},
  approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["ownerActions","approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
