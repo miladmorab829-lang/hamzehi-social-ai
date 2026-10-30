@@ -32,6 +32,15 @@ const NOT_OWN_SITE=/(^|\.)(divar|sheypoor|torob|digikala|basalam|emalls|okala|bl
 // Every Google Places provider variant (google_places, google_places_ids, …) is Google-originated, never independent.
 const GOOGLE_PROVIDER=/^google_places/i;
 const hostOf=v=>{try{return new URL(String(v||"")).hostname.toLowerCase().replace(/^www\./,"");}catch{return "";}};
+// Phase 17.1: a Google-originated lead (provisional flag, a place ID or any Places provider variant). Its stored name, address, phone
+// and website are Google content: they never authorize a first contact or a draft without an independent contact.
+export function googleOriginLead(meta={}){
+  return meta.lead_status==="provisional_place"||!!meta.place_id||GOOGLE_PROVIDER.test(String(meta.provider||""))||GOOGLE_PROVIDER.test(String(meta.source||""));
+}
+// An independent contact row: owner-confirmed, or extracted from a page that is not Google-hosted.
+export function independentContact(c={}){
+  return INDEPENDENT_CONTACT.has(c.evidence_status)&&!(c.evidence_status==="page_extracted"&&GOOGLE_HOST.test(hostOf(c.evidence_url)));
+}
 // Contact host must be the site host or one of its subdomains (never a parent domain).
 const sameSite=(contactHost,site)=>!!contactHost&&!!site&&(contactHost===site||contactHost.endsWith("."+site));
 

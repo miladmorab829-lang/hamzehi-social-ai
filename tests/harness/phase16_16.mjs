@@ -95,8 +95,10 @@ for(const list of ["abc",`${A},abc`,"1234",`${A};x`,"777000",`${A},1087968824`,`
  ok("T12c Production callback_query: unchanged (ignored; no inbox row, AI call or reply)",rc.status===200&&rc.body?.ignored===true&&W.AI.requests.length===ai0&&W.tg.length===tg0&&W.q("SELECT COUNT(*) n FROM inbox_messages")[0].n===n0,rc.body);
  const P=await prod({HAMZEHI_ENVIRONMENT:"production"});const rp=await res(await hook(P,msg(user(STRANGER))));
  ok("T12d HAMZEHI_ENVIRONMENT=production behaves like Production (no allow-list)",rp.status===200&&!rp.body?.ignored&&inbox(P,STRANGER)===1,rp);
+ // Phase 17.1: Production no longer generates a D1 secret; it fails closed (503) when neither the env secret nor a legacy row exists
  const Q=await prod();delete Q.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;const st=(await hook(Q,msg(user(A)),"sec")).status;
- ok("T12e Production without an env secret keeps the existing D1-generated secret (a guessed header is still 401)",st===401&&Q.q("SELECT COUNT(*) n FROM system_kv WHERE key='telegram_webhook_secret'")[0].n===1,st);}
+ const kvRows=()=>{try{return Q.q("SELECT COUNT(*) n FROM system_kv WHERE key='telegram_webhook_secret'")[0].n;}catch{return 0;}};
+ ok("T12e Production without an env secret or legacy D1 row refuses (503) and generates/stores no D1 secret",st===503&&kvRows()===0&&inbox(Q,A)===0,[st,kvRows()]);}
 
 // ---------- T13 update types in staging ----------
 {const W=await stg();await hook(W,msg(user(A)));const before=inbox(W,A);

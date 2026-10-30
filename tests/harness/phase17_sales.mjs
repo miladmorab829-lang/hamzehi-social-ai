@@ -85,6 +85,12 @@ fetched=[];backdate();await tick();
 const mF=leadBy(l=>l.id==="lead-F").meta,mR=leadBy(l=>l.id==="lead-R").meta;
 ok("F3 bounded enrichment re-checked the own sites once (marked with a 14-day re-check stamp); robots.txt 'Disallow: /' site was NOT fetched",!!mF.contact_enrichment_checked_at&&String(mR.contact_enrichment_result||"").startsWith("robots_disallow")&&!fetched.includes("https://blocked-ir.ir/"),[mF.contact_enrichment_result,mR.contact_enrichment_result]);
 ok("F4 the site publishes no contact, so the lead stays uncontactable (nothing invented)",(await intel("lead-F")).contact.status==="NONE");
+// Phase 17.1: the enrichment counter counts only NEW reachable channels, never the re-stored start URL
+ok("F4b a site with no published contact records checked:0 (the website itself is not a new contact)",mF.contact_enrichment_result==="checked:0",mF.contact_enrichment_result);
+SITES["https://newmail-ir.ir/"]=()=>html("زرگری نیومیل "+cityIR,"زرگری در "+cityIR+" <a href=\"mailto:info@newmail-ir.ir\">info@newmail-ir.ir</a>");
+mkLead("lead-N","https://newmail-ir.ir/","زرگری در "+cityIR);backdate();await tick();
+{const mN=leadBy(l=>l.id==="lead-N").meta;
+ ok("F4c a newly published own-site email is counted (checked:1) and stored once",mN.contact_enrichment_result==="checked:1"&&q("SELECT COUNT(*) n FROM lead_contacts WHERE lead_id='lead-N' AND contact_type='email'")[0].n===1,mN.contact_enrichment_result);}
 
 // ---- G: price request → owner financial decision (approved-price rules live in the Sales Brain; see phase16/phase14 suites)
 const g=LQ.leadQualification({stage:"replied"},{source:"telegram_inbound",target_market:"IRAN",city:cityIR},[],{replied:true,quote_requested:true});

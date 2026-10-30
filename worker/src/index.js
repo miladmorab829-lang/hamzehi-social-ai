@@ -12,7 +12,7 @@ import { bearerMatches, safeTokenEqual } from "./secure-compare.js";
 import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js";
 import { adsDraftSettings, buildAdsDraftPrompt, adsDraftRequestBody, adsDraftUsage, adsDraftOutcome, emptyAdsDraftStats, addAdsDraftUsage, reserveAdsDraft, adsDraftsToday } from "./ads-draft-guard.js";
 import { runWatchdog } from "./agent-watchdog.js";
-import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate } from "./lead-qualification.js";
+import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, googleOriginLead, independentContact } from "./lead-qualification.js";
 import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
@@ -6083,7 +6083,7 @@ async function telegramInboundHealth(env,{live=false}={}){
   // the registration record (a full scan of system_events) is read only for the explicit live check, where the URL is compared
   const reg=live?await one("SELECT details_json,created_at FROM system_events WHERE type='telegram_webhook_configured' ORDER BY created_at DESC LIMIT 1"):null;
   let registeredUrl=null;try{registeredUrl=JSON.parse(reg?.details_json||"{}").url||null;}catch{}
-  const secretSource=env.TELEGRAM_WEBHOOK_SECRET_TOKEN?"env":(await one("SELECT 1 AS ok FROM system_kv WHERE key='telegram_webhook_secret'"))?.ok?"kv":"missing";
+  const secretSource=env.TELEGRAM_WEBHOOK_SECRET_TOKEN?"env":(await one("SELECT 1 AS ok FROM system_kv WHERE key='telegram_webhook_secret' AND value<>''"))?.ok?"kv":"missing";
   const configured={bot_token:!!env.TELEGRAM_BOT_TOKEN,webhook_secret:secretSource,public_channel:!!String(env.TELEGRAM_CHAT_ID||"").trim(),media_vault:!!String(env.TELEGRAM_VAULT_CHAT_ID||"").trim()};
   const lastSeen=[lastAccepted,lastInbound].filter(Boolean).sort().pop()||null;
   let webhook=null;
@@ -6110,19 +6110,19 @@ async function telegramInboundHealth(env,{live=false}={}){
     evidence:{last_accepted_delivery_at:lastAccepted,last_inbound_message_at:lastInbound,last_customer_message_at:lastCustomer,rejections_24h:Number(rej.n)||0,last_rejection_at:rej.last||null,webhook_registered_at:reg?reg.created_at||null:undefined},
     webhook,outbound:{public_channel:configured.public_channel?"CONFIGURED":"NOT_CONFIGURED"}};
 }
+// Phase 17.1: the Worker secret TELEGRAM_WEBHOOK_SECRET_TOKEN first; otherwise the legacy D1 row (read-only, so the webhook registered
+// before this release keeps working). A secret is NEVER generated or written to D1 any more: with neither, "" is returned and the
+// webhook fails closed (503) and setup refuses.
 async function telegramWebhookSecret(env){
   if(env.TELEGRAM_WEBHOOK_SECRET_TOKEN)return String(env.TELEGRAM_WEBHOOK_SECRET_TOKEN);
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
-  const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='telegram_webhook_secret'").first();
-  if(row?.value)return String(row.value);
-  const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);const secret=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
-  await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind('telegram_webhook_secret',secret,now()).run();return secret;
+  try{const row=await env.DB.prepare("SELECT value FROM system_kv WHERE key='telegram_webhook_secret'").first();return row?.value?String(row.value):"";}catch{return "";}
 }
 async function setupTelegramWebhook(env,req){
   if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);if(!auth(req,env))return json({ok:false,error:'Unauthorized'},401);if(!env.TELEGRAM_BOT_TOKEN)return json({ok:false,error:'Telegram bot token missing'},503);
   // Phase 16.16-A: a staging webhook is registered only with its own configured secret and a valid sender allow-list (fail closed).
   if(isStagingWorker(env)&&(!env.TELEGRAM_WEBHOOK_SECRET_TOKEN||!parseTelegramUserIdList(env.STAGING_TELEGRAM_ALLOWED_USER_IDS).ok))return json({ok:false,error:'Staging webhook needs TELEGRAM_WEBHOOK_SECRET_TOKEN and a valid STAGING_TELEGRAM_ALLOWED_USER_IDS'},503);
-  await ensureTelegramMediaTable(env);const secret=await telegramWebhookSecret(env);const url=new URL(req.url);url.pathname='/webhooks/telegram';url.search='';
+  const secret=await telegramWebhookSecret(env);if(!secret)return json({ok:false,error:'Webhook setup needs the Worker secret TELEGRAM_WEBHOOK_SECRET_TOKEN'},503);
+  await ensureTelegramMediaTable(env);const url=new URL(req.url);url.pathname='/webhooks/telegram';url.search='';
   const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url.toString(),secret_token:secret,allowed_updates:['channel_post','edited_channel_post','message','edited_message']})});
   const d=await r.json().catch(()=>({}));if(!r.ok||!d.ok)throw Error(d.description||'Telegram webhook setup failed');await audit(env,'telegram_webhook_configured','Telegram media intake webhook configured',{url:url.toString()});return json({ok:true,url:url.toString(),webhook_configured:true});
 }
@@ -6139,7 +6139,7 @@ async function handleTelegramWebhook(env,req){
   if(req.method!=='POST')return json({ok:false,error:'Method not allowed'},405);
   // Phase 16.16-A: staging authenticates only with its own configured secret (no D1-generated fallback, no write before auth).
   const staging=isStagingWorker(env);if(staging&&!env.TELEGRAM_WEBHOOK_SECRET_TOKEN)return json({ok:false,error:'Webhook not configured'},503);
-  const expected=await telegramWebhookSecret(env);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(!safeTokenEqual(provided,expected)){await noteTelegramWebhook(env,'secret_mismatch');return json({ok:false,error:'Unauthorized webhook'},401);}
+  const expected=await telegramWebhookSecret(env);if(!expected)return json({ok:false,error:'Webhook not configured'},503);const provided=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';if(!safeTokenEqual(provided,expected)){await noteTelegramWebhook(env,'secret_mismatch');return json({ok:false,error:'Unauthorized webhook'},401);}
   const body=await req.json().catch(()=>null);if(!body){await noteTelegramWebhook(env,'invalid_json');return json({ok:false,error:'Invalid JSON'},400);}
   // Staging sender allow-list: before ANY D1 write, lead, inbox row, AI call or reply. 200 so Telegram does not redeliver; the log
   // carries the reason only (no id, name or text).
@@ -11445,6 +11445,11 @@ function firstContactTemplate(market){
 async function firstContactDeliveryContact(env,leadId){
   return await env.DB.prepare("SELECT id,contact_type,evidence_status FROM lead_contacts WHERE lead_id=? AND contact_type IN ('whatsapp','phone','email','instagram','telegram') AND evidence_status!='invalid' ORDER BY CASE evidence_status WHEN 'owner_confirmed' THEN 0 WHEN 'provider_supplied' THEN 1 WHEN 'page_extracted' THEN 2 ELSE 3 END,CASE contact_type WHEN 'whatsapp' THEN 0 WHEN 'phone' THEN 1 WHEN 'telegram' THEN 2 WHEN 'instagram' THEN 3 ELSE 4 END,created_at LIMIT 1").bind(leadId).first();
 }
+// Phase 17.1: the lead's best independent REACHABLE contact (owner-confirmed, or extracted from a non-Google page), or null.
+async function leadIndependentContact(env,leadId){
+  try{return ((await env.DB.prepare("SELECT id,contact_type,evidence_status,evidence_url FROM lead_contacts WHERE lead_id=? AND contact_type IN ('whatsapp','phone','email','instagram','telegram') AND evidence_status IN ('owner_confirmed','page_extracted') ORDER BY CASE evidence_status WHEN 'owner_confirmed' THEN 0 ELSE 1 END,CASE contact_type WHEN 'whatsapp' THEN 0 WHEN 'phone' THEN 1 WHEN 'telegram' THEN 2 WHEN 'instagram' THEN 3 ELSE 4 END,created_at").bind(leadId).all()).results||[]).find(c=>independentContact(c))||null;}catch{return null;}
+}
+async function leadHasIndependentContact(env,leadId){return !!(await leadIndependentContact(env,leadId));}
 async function prepareFirstContacts(env,input={}){
   const ids=[...new Set((Array.isArray(input.lead_ids)?input.lead_ids:[]).map(x=>String(x||"").trim()).filter(Boolean))];
   if(!ids.length||ids.length>20)throw Error("lead_ids must list 1–20 leads");
@@ -11457,9 +11462,13 @@ async function prepareFirstContacts(env,input={}){
     if(!ADS_DRAFTABLE_STAGES.has(String(lead.stage||""))){items.push({lead_id:id,prepared:false,reason:"lead_stage_not_cold"});continue;}
     const meta=parseLeadNotes(lead);
     if(meta.do_not_contact||meta.opted_out){items.push({lead_id:id,prepared:false,reason:"do_not_contact"});continue;}
+    // Phase 17.1: a Google-originated lead's country/address/phone are Google content — not a verified market without an independent contact.
+    const google=googleOriginLead(meta),independent=google?await leadIndependentContact(env,id):null;
+    if(google&&!independent){items.push({lead_id:id,prepared:false,reason:"google_origin_unverified",message:"کشف Google Maps: ابتدا یک راه تماس مستقل (تأیید مالک یا سایت خود کسب‌وکار) ثبت کنید"});continue;}
     const market=firstContactMarket(meta);
     if(!market){items.push({lead_id:id,prepared:false,reason:"market_not_verified"});continue;}
-    const contact=await firstContactDeliveryContact(env,id),language=market==="iraq"?"Iraqi Arabic":"Persian",t=now(),oid=uid();
+    // a Google-originated lead is delivered through its independent contact, never a Google/provider-supplied one
+    const contact=independent||await firstContactDeliveryContact(env,id),language=market==="iraq"?"Iraqi Arabic":"Persian",t=now(),oid=uid();
     // One statement: no open/delivered first contact, no earlier conversation or inbound for this lead — a lost race inserts nothing.
     const r=await env.DB.prepare(`INSERT INTO lead_outreach(id,lead_id,contact_id,conversation_id,channel,recipient,message,language,status,created_at,updated_at)
       SELECT ?,?,?,NULL,?,?,?,?,'draft',?,? WHERE NOT EXISTS(SELECT 1 FROM lead_outreach WHERE lead_id=? AND channel=? AND status IN ('draft','approved','delivered'))
@@ -11484,6 +11493,9 @@ async function approveFirstContact(env,input={}){
   if(row.status==="approved"&&input.confirm_reissue!==true)return {ok:false,statusCode:409,error:"Already approved; pass confirm_reissue to issue a new link (the previous link stops working)"};
   let message=String(input.message??row.message).trim();
   if(!message||message.length>2000)return {ok:false,statusCode:400,error:"message must be 1–2000 characters"};
+  // Phase 17.1: re-checked at approval, so a draft prepared before this guard cannot be approved (or get a pilot link) unverified.
+  if(googleOriginLead(parseLeadNotes({notes:row.lead_notes}))&&!(await leadHasIndependentContact(env,row.lead_id)))
+    return {ok:false,statusCode:409,reason:"google_origin_unverified",error:"کشف Google Maps: ابتدا یک راه تماس مستقل (تأیید مالک یا سایت خود کسب‌وکار) ثبت کنید"};
   const market=firstContactMarket(parseLeadNotes({notes:row.lead_notes}));
   let link=null,pilot={issued:false,reason:market==="iraq"?null:"not_an_iraq_lead"};
   if(market==="iraq"){
@@ -12295,7 +12307,8 @@ if(/\u0628\u062f\u0644\u06cc|\u0627\u06a9\u0633\u0633\u0648\u0631\u06cc|fashion|
 if(stage==='customer'||stage==='converted')score=100;
 score=Math.max(0,Math.min(100,Math.round(score)));
 // Google Places IDs-only discoveries are provisional (no verified name/contact): the next step is the owner's check on Google Maps.
-const provisional=meta.lead_status==="provisional_place"&&!['customer','converted'].includes(stage)&&!meta.contact_url;
+// Phase 17.1: also an IDs-only Places row stored before the provisional flag existed.
+const provisional=(meta.lead_status==="provisional_place"||(!!meta.place_id&&/^google_places_ids/i.test(String(meta.provider||""))))&&!['customer','converted'].includes(stage)&&!meta.contact_url;
 if(provisional)factors.push("کشف اولیه Google Maps — نام و راه تماس تأیید نشده");
 const action=provisional?"تأیید روی Google Maps (نام و راه تماس تأیید نشده)":stage==='customer'||stage==='converted'
   ?"\u0645\u0634\u062a\u0631\u06cc \u062d\u0641\u0638 \u0634\u0648\u062f"
@@ -12430,7 +12443,9 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
         const tooBig=Number(res.headers.get("content-length")||0)>2000000;
         const html=res.ok&&!tooBig&&finalHost===siteHost&&String(res.headers.get("content-type")||"").toLowerCase().includes("text/html")?(await res.text()).slice(0,100000):"";
         if(res.ok&&finalHost!==siteHost)note="redirected_off_site";
-        if(html){const mk=leadMarketOf(m);stored=(await storeLeadContacts(env,r.id,await collectBoundedWebsiteContacts(site,html,mk==="ARAB"?"العراق":mk==="IRAN"?"ایران":"","own_site_enrichment"))).length;}
+        // Phase 17.1: "stored" counts only NEW reachable channels (the start URL and contacts already on file are re-upserted, not new).
+        if(html){const mk=leadMarketOf(m),reachN=async()=>Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram')").bind(r.id).first())?.n||0);
+          const before=await reachN();await storeLeadContacts(env,r.id,await collectBoundedWebsiteContacts(site,html,mk==="ARAB"?"العراق":mk==="IRAN"?"ایران":"","own_site_enrichment"));stored=Math.max(0,(await reachN())-before);}
         else if(note==="checked")note="fetch_failed";
       }
     }catch{note="fetch_failed";}
@@ -15013,8 +15028,9 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         if (!lead) return json({ ok: false, error: "Lead not found" }, 404);
         // An IDs-only Google Places discovery has no verified name or contact: a draft would be addressed to nobody (and cost an AI call).
         // It becomes draftable once the owner records an independent contact (owner_confirmed / own-website contact) for it.
+        // Phase 17.1: keyed on any Google origin (flag, place ID or Places provider), and a Google-hosted page is not independent.
         {const pm=parseLeadNotes(lead);
-         if(pm.lead_status==="provisional_place"&&!(await (async()=>{try{return await env.DB.prepare("SELECT 1 FROM lead_contacts WHERE lead_id=? AND evidence_status IN ('page_extracted','owner_confirmed') LIMIT 1").bind(leadId).first();}catch{return null;}})()))
+         if(googleOriginLead(pm)&&!/inbound/i.test(String(pm.source||""))&&!pm.last_reply_at&&!(await leadHasIndependentContact(env,leadId)))
            return json({ok:false,reason:"lead_not_contactable",error:"این lead فقط یک کشف اولیهٔ Google Maps است؛ ابتدا کسب‌وکار و راه تماس مستقل آن را تأیید کنید"},409);
          // Phase 17: any discovered lead with no reachable contact at all (and no inbound conversation) gets no draft either.
          if(!/inbound/i.test(String(pm.source||""))&&!pm.last_reply_at&&!(await (async()=>{try{return await env.DB.prepare("SELECT 1 FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram') AND evidence_status!='invalid' LIMIT 1").bind(leadId).first();}catch{return null;}})()))
