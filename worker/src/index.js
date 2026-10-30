@@ -12,6 +12,7 @@ import { bearerMatches, safeTokenEqual } from "./secure-compare.js";
 import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js";
 import { adsDraftSettings, buildAdsDraftPrompt, adsDraftRequestBody, adsDraftUsage, adsDraftOutcome, emptyAdsDraftStats, addAdsDraftUsage, reserveAdsDraft, adsDraftsToday } from "./ads-draft-guard.js";
 import { runWatchdog } from "./agent-watchdog.js";
+import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -206,7 +207,7 @@ if (/bing\.com$/i.test(parsed.hostname) && /^\/ck\/a/i.test(parsed.pathname)) {
 
   return out;
 }
-async function discoverWebLinks(query, limit = 8) {
+async function discoverWebLinks(query, limit = 8, env = null) {
   const providers = [
     `https://www.google.com/search?q=${encodeURIComponent(query)}&num=12`,
     `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=12`
@@ -217,6 +218,11 @@ async function discoverWebLinks(query, limit = 8) {
 
   for (const searchUrl of providers) {
     const host = new URL(searchUrl).hostname;
+    // After HTTP 429 the engine is skipped for 6 hours (shared in D1) instead of being called again every run.
+    if (env && await webSearchCoolingDown(env, host)) {
+      diagnostics.push({ provider: host, status: "cooldown", ok: false, html_length: 0, extracted_links: 0, added_links: 0 });
+      continue;
+    }
 
     try {
       const r = await fetchWithRetry(
@@ -227,6 +233,7 @@ async function discoverWebLinks(query, limit = 8) {
       );
 
       if (!r.ok) {
+        if (env && r.status === 429) await startWebSearchCooldown(env, host);
         diagnostics.push({
           provider: host,
           status: r.status,
@@ -12418,7 +12425,7 @@ async function adsMarketsStatus(env){
   const markets={};
   for(const m of ADS_MARKET_IDS){const c=cfgs[m],r=adsMarketReadiness(c,cap);markets[m]={...c,ready:r.ready,codes:r.codes,runs_today:runs[m],quota:m==="IRAN"?"ADS_IRAN_DISCOVERY":"ADS_IRAQ_DISCOVERY",exhausted:c.runs_per_day!=null&&runs[m]>=c.runs_per_day,label_fa:ADS_MARKETS[m].label_fa,language:ADS_MARKETS[m].language,currency:ADS_MARKETS[m].currency,city_options:adsCityOptions(m)};}
   const draftSettings=adsDraftSettings(env),draftCap=await adsDraftDailyCap(env),draftsToday=await adsDraftsToday(env);
-  return {markets,ai_drafts:{drafts_today:draftsToday,drafts_per_day:draftCap,exhausted:draftsToday>=draftCap,model:draftSettings.model,max_output_tokens:draftSettings.maxOutputTokens,reasoning_effort:draftSettings.reasoningEffort||"off",dollar_cap:null},crm_followups:{quota:"CRM_FOLLOWUP",runs_today:crmRuns,runs_per_day:crmCap,exhausted:crmRuns>=crmCap,independent_of_ads:true},global_runs_per_day:cap,max_market_runs_per_day:cap,runs_today_total:total,approval:"owner_approved_required_to_enable",external_send:"authorized_channel_only"};
+  return {markets,places:await placesBudgetStatus(env).catch(()=>null),ai_drafts:{drafts_today:draftsToday,drafts_per_day:draftCap,exhausted:draftsToday>=draftCap,model:draftSettings.model,max_output_tokens:draftSettings.maxOutputTokens,reasoning_effort:draftSettings.reasoningEffort||"off",dollar_cap:null},crm_followups:{quota:"CRM_FOLLOWUP",runs_today:crmRuns,runs_per_day:crmCap,exhausted:crmRuns>=crmCap,independent_of_ads:true},global_runs_per_day:cap,max_market_runs_per_day:cap,runs_today_total:total,approval:"owner_approved_required_to_enable",external_send:"authorized_channel_only"};
 }
 // Phase 09.7 CRM_FOLLOWUP gate: reserves one CRM follow-up run (own daily quota, never an Ads discovery quota) or returns the deferred
 // result (HTTP 200, ok:true) — never a failure, never an approval request.
@@ -12442,6 +12449,7 @@ async function adsReadyMarkets(env){
 }
 // CRM attribution of an Ads lead: target_market always; the lead country only with strong local evidence (local domain or local phone),
 // so quotes price in that market's currency (IRAN → TOMAN, ARAB → USD). Merged first-write-wins: an existing country is never replaced.
+const groupTypeFor=market=>market==="ARAB"?"gold_ar":"gold_fa";
 function adsAttribution(market,signals={}){
   const strong=!!(signals.local_domain||signals.local_phone);
   return {target_market:market,market_evidence:signals.local_domain?"local_domain":signals.local_phone?"local_phone":"page_text",...(strong?{country:ADS_MARKETS[market].country}:{})};
@@ -12510,12 +12518,33 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`)).filter(x=>x[0].endsWith(ADS_MARKETS[target.market].group_suffix));
   const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,rejected:0,rejected_reasons:{},dropped:{},provider_checks:[],error_details:[]};
   const items=[],seen=new Set(),started=now();
+  // Google Places (owner budget, places-budget.js): ONE reserved IDs-only Text Search per run for jewelry stores inside the run city's
+  // rectangle (type + location are Google-verified). Only the place ID is stored (Maps terms); the lead is labelled from our own data.
+  // Off unless ADS_PLACES_DISCOVERY=on; budget or provider limits only skip this step — web discovery below always runs.
+  if(placesBudgetSettings(env).adsEnabled&&groups.some(g=>g[0].startsWith("gold_"))){
+    const pl=summary.places={status:"skipped",place_ids:0,new_leads:0,updated:0};
+    try{
+      const res=await placesIdsOnlySearch(env,{market:target.market,city:target.city,purpose:"ads_discovery"});
+      pl.status=res.ok?"ok":(res.budget_limited?"budget_limited":res.reason||"failed");pl.http=res.status??null;pl.place_ids=res.place_ids.length;
+      const label=target.market==="ARAB"?`محل مجوهرات في ${target.city} (Google Maps)`:`طلافروشی در ${target.city} (Google Maps)`;
+      for(const placeId of res.place_ids.slice(0,10)){
+        const meta={source:"ad_autopilot",provider:"google_places_ids",ad_target:true,source_site:sourceSite,type:groupTypeFor(target.market),city:target.city,
+          target_market:target.market,market_evidence:"places_location_restriction",country:ADS_MARKETS[target.market].country,place_id:placeId,maps_url:placesMapsUrl(placeId),
+          qualification:{country_evidence:"places_location_restriction",included_type:"jewelry_store",strict_type:true,city:target.city,market:target.market},
+          score:60,updated_by:"autopilot",discovered_at:now()};
+        const saved=await upsertDiscoveredLead(env,{name:label,contact:meta.maps_url,stage:"discovered",priority:"normal",source:"ad_autopilot",meta});
+        if(saved.conflict){summary.errors++;continue;}
+        if(saved.created){pl.new_leads++;summary.new_leads++;}else{pl.updated++;summary.updated++;}
+        summary.found++;
+      }
+    }catch(e){pl.status="failed";summary.errors++;if(summary.error_details.length<20)summary.error_details.push({group:"google_places",error:String(e?.message||e).slice(0,300)});}
+  }
  
   for(const [groupType,term] of groups){
    let groupItems=0;
 const q=[term,city,extra].filter(Boolean).join(" ");
     try{
-      const discovery=await discoverWebLinks(q,6);
+      const discovery=await discoverWebLinks(q,6,env);
       if(discovery.diagnostics?.length) summary.provider_checks.push({query:q,checks:discovery.diagnostics});
       for(const href of discovery.links){
         if(items.length>=30 || groupItems>=5) break;
@@ -12634,6 +12663,7 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
   await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,market:target.market,found:summary.found,rejected:summary.rejected,rejected_reasons:summary.rejected_reasons,drafted:summary.drafted,errors:summary.errors,ai_usage:summary.ai||null,started,
     // Discovery evidence: links each search provider returned, candidate sites evaluated, and new vs. updated CRM leads.
     candidates:summary.candidates||0,dropped:summary.dropped,new_leads:summary.new_leads,updated:summary.updated,
+    places:summary.places||null,
     search:summary.provider_checks.map(p=>({query:String(p.query).slice(0,200),providers:(p.checks||[]).map(c=>({provider:c.provider,status:c.status,links:c.added_links||0}))}))});
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
@@ -12680,8 +12710,15 @@ async function discoverGooglePlaces(env, textQuery, languageCode = "fa", limit =
   }
 
   const url = "https://places.googleapis.com/v1/places:searchText";
+  // Monthly Places budget (places-budget.js): this field mask (phone, website) is billed as Text Search Enterprise.
+  const slot = await reservePlacesRequest(env, { sku: "enterprise", purpose: "crm_customer_discovery" });
+  if (!slot.reserved) {
+    return { ok: false, skipped: true, budget_limited: true, error: "Google Places monthly budget: " + slot.reason, items: [] };
+  }
 
-  const response = await fetch(url, {
+  let response;
+  try {
+  response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -12706,8 +12743,13 @@ async function discoverGooglePlaces(env, textQuery, languageCode = "fa", limit =
     }),
     signal: AbortSignal.timeout(12000)
   });
+  } catch (e) {
+    await finishPlacesRequest(env, slot.id, { status: null, timeout: /timeout|abort/i.test(String(e?.name || e?.message || e)) });
+    throw e;
+  }
 
   const data = await response.json().catch(() => ({}));
+  await finishPlacesRequest(env, slot.id, { status: response.status, results: (data.places || []).length });
 
   if (!response.ok || data.error) {
     return {

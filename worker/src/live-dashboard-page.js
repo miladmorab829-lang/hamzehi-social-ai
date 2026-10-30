@@ -983,7 +983,9 @@ async function loadAdsMarkets(){
   +"<div class='row hint'>پیش‌نویس پیگیری برای leadهای موعددار (از هر منبع)، فقط برای بررسی مالک؛ هیچ پیامی ارسال نمی‌شود. خاموش بودن بازارهای Ads روی آن اثری ندارد.</div></div>"
   +(d.ai_drafts?"<div class='card'><div class='row'><b>پیش‌نویس AI در Ads</b> <span class='pill "+(d.ai_drafts.exhausted?"warn":"ok")+"'>"+(d.ai_drafts.exhausted?"سقف امروز پر شد (lead ذخیره می‌شود)":"فعال")+"</span></div>"
    +"<div class='row'>امروز: "+esc(d.ai_drafts.drafts_today)+" / "+esc(d.ai_drafts.drafts_per_day)+" · مدل "+esc(d.ai_drafts.model)+" · سقف خروجی "+esc(d.ai_drafts.max_output_tokens)+" توکن · reasoning "+esc(d.ai_drafts.reasoning_effort)+"</div>"
-   +"<div class='row hint'>سقف دلاری تنظیم نشده است؛ مصرف واقعی توکن در هر اجرای Ads (ai_usage) ثبت می‌شود.</div></div>":"");
+   +"<div class='row hint'>سقف دلاری تنظیم نشده است؛ مصرف واقعی توکن در هر اجرای Ads (ai_usage) ثبت می‌شود.</div></div>":"")+(d.places?"<div class='card'><div class='row'><b>Google Places (کشف مغازه)</b> <span class='pill "+(!d.places.enabled?"gray":d.places.exhausted?"warn":"ok")+"'>"+(!d.places.enabled?"خاموش":d.places.exhausted?"بودجهٔ ماه تمام شد (کشف وب ادامه دارد)":"فعال")+"</span></div>"
+   +"<div class='row'>این ماه: "+esc(d.places.requests_month)+" درخواست · رزرو "+esc(Number(d.places.reserved_usd).toFixed(2))+" از "+esc(Number(d.places.effective_cap_usd).toFixed(2))+" دلار (بودجهٔ "+esc(d.places.monthly_budget_usd)+" دلار با حاشیهٔ اطمینان) · امروز "+esc(d.places.requests_today)+"</div>"
+   +"<div class='row hint'>فقط شناسهٔ مکان ذخیره می‌شود. "+(d.places.ids_only_billing_verified?"رایگان بودن درخواست‌های IDs-only تأیید شده است.":"تا تأیید صورت‌حساب Google، هر درخواست با قیمت Pro (۰٫۰۳۲ دلار) رزرو می‌شود.")+"</div></div>":"");
 }
 async function adsMarketClick(e){
  const b=e.target.closest("button[data-act]");if(!b)return;const card=b.closest("[data-market]"),m=card.dataset.market,msg=card.querySelector("[data-f=msg]"),x=(adsMk&&adsMk.markets[m])||{};

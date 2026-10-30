@@ -4,6 +4,7 @@
 // never sends anything, never approves anything and never deploys or rolls back code. Every query is bounded.
 import { raiseAlerts, recoverOpenAlerts, opsAvailable, autoRetryReadDeadLetter } from "./agent-ops-store.js";
 import { AUTONOMY_ACTION_CAPABILITY, safeErrorText } from "./agent-orchestrator.js";
+import { placesBudgetStatus } from "./places-budget.js";
 
 export const WATCHDOG=Object.freeze({heartbeatStaleMs:35*60*1000,stuckTaskMs:20*60*1000,deadLetterEscalateMs:24*3600*1000,maxAutoRetries:5,failingTasksPerDay:3,versionMinTasks:4});
 const iso=ms=>new Date(ms).toISOString();
@@ -64,6 +65,11 @@ export async function runWatchdog(env,{nowMs=Date.now(),orchestratorOn=env?.AUTO
   // with no heartbeat coverage, and nothing said so. Detection only (warning): nothing is paused, blocked or re-routed.
   if(!orchestratorOn)raised.push({code:"orchestrator_flag_off",agent:"orchestrator",level:"warning",cause:"AUTONOMY_ORCHESTRATOR is not \"on\" in the running Worker version: background tasks use the legacy loop without heartbeat coverage",
     fallback:"Tasks still run on the legacy loop; customer replies and owner approval gates are unaffected. Deploy a version with AUTONOMY_ORCHESTRATOR=on"});
+  // 0b. Google Places monthly budget used up (places-budget.js): information for the dashboard only — new paid Places requests pause until
+  // the next UTC month; web discovery, CRM and every agent keep running. No approval is requested.
+  try{const pb=await placesBudgetStatus(env,nowMs);
+    if(pb.enabled&&pb.exhausted)raised.push({code:"places_budget_exhausted",agent:"ads",level:"warning",cause:`Google Places monthly budget reached (${pb.reserved_usd.toFixed(2)} of ${pb.effective_cap_usd.toFixed(2)} USD reserved this month)`,
+      fallback:"New Google Places requests pause until the next month; Ads web discovery, CRM and all agents continue"});}catch{}
   // 1. Missing heartbeat / unhealthy runs (only when the orchestrated scheduler is expected to run).
   if(orchestratorOn&&master==="on"){
     const hb=await env.DB.prepare("SELECT last_finished_at,healthy FROM agent_heartbeat WHERE scheduler='autonomy'").first();
