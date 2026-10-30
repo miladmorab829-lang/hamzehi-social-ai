@@ -34,3 +34,8 @@ AUTO_AI_MEDIA_ENABLED = "true"
 # it lives here so every build path (wrangler deploy, versions upload, Workers Builds, GitHub Actions) carries it, not only uploads
 # made with --var. Without it the Worker silently falls back to the legacy sequential task loop.
 AUTONOMY_ORCHESTRATOR = "on"
+# Google Places Ads discovery (worker/src/places-budget.js): one IDs-only Text Search per Ads run, D1 monthly ledger. Owner budget
+# USD 10/month (2026-10-30); the code keeps a 20% margin (effective cap USD 8) and reserves IDs-only requests at the Pro price until
+# ADS_PLACES_IDS_ONLY_BILLING_VERIFIED = "true" is set after Google Cloud billing shows them at $0.
+ADS_PLACES_DISCOVERY = "on"
+ADS_PLACES_MONTHLY_BUDGET_USD = "10"

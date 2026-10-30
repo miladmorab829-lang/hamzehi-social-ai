@@ -18,7 +18,7 @@ const exp=PF.expectedFromToml(fs.readFileSync(path.join(REPO,"worker/wrangler.to
 ok("N1 worker/wrangler.toml declares AUTONOMY_ORCHESTRATOR = \"on\"",exp.vars.AUTONOMY_ORCHESTRATOR==="on",exp.vars);
 ok("N2 Production bindings unchanged: DB=40b272c5…, GALLERY_BUCKET=hamzehi-gallery, AI",exp.d1.length===1&&exp.d1[0].binding==="DB"&&exp.d1[0].database_id==="40b272c5-e368-4c33-8a41-7c63db98d7e8"
   &&exp.r2.length===1&&exp.r2[0].bucket_name==="hamzehi-gallery"&&exp.ai?.binding==="AI",exp);
-ok("N3 the 9 previously declared vars keep their values (10 vars total)",Object.keys(exp.vars).length===10&&exp.vars.SALES_AI_BRAIN==="on"&&exp.vars.SALES_AI_PROVIDER==="anthropic"&&exp.vars.RATE_LIMIT_PER_MINUTE==="60",exp.vars);
+ok("N3 the 9 previously declared vars keep their values (12 vars total since the Google Places vars)",Object.keys(exp.vars).length===12&&exp.vars.ADS_PLACES_DISCOVERY==="on"&&exp.vars.ADS_PLACES_MONTHLY_BUDGET_USD==="10"&&exp.vars.SALES_AI_BRAIN==="on"&&exp.vars.SALES_AI_PROVIDER==="anthropic"&&exp.vars.RATE_LIMIT_PER_MINUTE==="60",exp.vars);
 const stg=PF.expectedFromToml(fs.readFileSync(path.join(REPO,"staging/wrangler.staging.toml"),"utf8"));
 ok("N4 the staging config stays separate (own D1 only, flag on)",stg.d1.length===1&&stg.d1[0].database_id==="cddc10c5-2232-4334-8d99-fedb52fbd12d"&&stg.vars.AUTONOMY_ORCHESTRATOR==="on",stg);
 
@@ -28,7 +28,7 @@ const V=(over={})=>{const vars={...exp.vars,...(over.vars||{})};for(const k of o
     ...Object.entries(vars).map(([name,text])=>({name,type:"plain_text",text})),...PF.REQUIRED_SECRETS.filter(s=>s!==over.dropSecret).map(name=>({name,type:"secret_text"})),...(over.extra||[])];
   return {id:"00000000-0000-4000-8000-000000000000",annotations:over.untagged?{}:{"workers/tag":over.tag||"d7962d5-orch-on"},resources:{bindings:b}};};
 const good=PF.checkVersion(V(),exp);
-ok("N5 a tagged version with the full Production configuration (20 bindings) passes",good.ok&&good.summary.bindings===20,good);
+ok("N5 a tagged version with the full Production configuration (22 bindings) passes",good.ok&&good.summary.bindings===22,good);
 const auto=PF.checkVersion(V({untagged:true,dropVars:["AUTONOMY_ORCHESTRATOR"]}),exp);
 ok("N6 an automatic-build-shaped version (untagged, no AUTONOMY_ORCHESTRATOR, 19 bindings) is refused",!auto.ok&&auto.failures.some(f=>/AUTONOMY_ORCHESTRATOR/.test(f))&&auto.failures.some(f=>/no tag/.test(f)),auto.failures);
 ok("N7 flag present but \"off\" is refused",!PF.checkVersion(V({vars:{AUTONOMY_ORCHESTRATOR:"off"}}),exp).ok);
