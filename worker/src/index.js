@@ -12366,8 +12366,12 @@ function validateAdsInput(body){
 // and aggregator pages, and pages about another country, are rejected before any lead is stored. Pure functions: no I/O.
 const ADS_PRICE_NEWS=/سعر\s*(?:ال)?(?:ذهب|غرام|اونصة|أونصة|ليرة)|أسعار|اسعار|عيار\s*\d{2}|بورصة|لحظة\s*بلحظة|تحديث\s*لحظي|أخبار|الأخبار|اخبار|خبرگزاری|قیمت\s*(?:لحظه|روز|طلا|سکه|دلار|ارز|انس|مثقال|گرم)|نرخ\s*(?:طلا|سکه|ارز|دلار)|بورس|تحلیل\s*بازار|بازار\s*(?:طلا|ارز|سکه)|gold\s*(?:price|rate)s?|price\s*(?:today|live)|live\s*(?:rates?|prices?)|spot\s*price|per\s*(?:gram|ounce)|forex|stock\s*market|\bnews\b|exchange\s*rate/i;
 const ADS_AGGREGATOR=/digikala|okala|jetamooz|amazon|torob|snapp|basalam|divar|sheypoor|emalls|olx|opensooq|dubizzle|alibaba|aliexpress|ebay|etsy|wikipedia|youtube|facebook\.com|instagram\.com|linkedin|yellow\s*pages|yellowpages|directory|دایرکتوری|نیازمندی|آگهی|دليل\s*(?:ال)?(?:شركات|محلات)|إعلانات\s*مبوبة|marketplace|فروشگاه اینترنتی|خرید آنلاین/i;
-const ADS_FOREIGN_COUNTRY=/السعودية|سعودي|مصر|المصري|الإمارات|الامارات|دبي|سلطنة\s*عمان|في\s*عمان|الكويت|قطر|البحرين|الأردن|الاردن|تركيا|ترکیه|عربستان|امارات|saudi|egypt|\buae\b|dubai|oman|kuwait|qatar|bahrain|jordan|turkey/i;
-const ADS_FOREIGN_TLD=/\.(?:sa|eg|ae|om|kw|qa|bh|jo|tr)$/i;
+const ADS_FOREIGN_COUNTRY=/السعودية|سعودي|مصر|المصري|الإمارات|الامارات|دبي|سلطنة\s*عمان|في\s*عمان|الكويت|قطر|البحرين|الأردن|الاردن|تركيا|ترکیه|عربستان|امارات|افغانستان|کابل|saudi|egypt|\buae\b|dubai|oman|kuwait|qatar|bahrain|jordan|turkey|afghanistan|kabul/i;
+const ADS_FOREIGN_TLD=/\.(?:sa|eg|ae|om|kw|qa|bh|jo|tr|af)$/i;
+// Local phone numbers (after Persian/Arabic digits are mapped to ASCII): Iran +98 / 0098 / 09xx mobile / 0xx landline; Iraq +964 / 00964 / 07xx.
+const ADS_IR_PHONE=/(?:\+98|0098|\b09\d{2}[\s-]?\d{3}[\s-]?\d{4}\b|\b0\d{2,3}[\s-]?\d{3,4}[\s-]?\d{4}\b)/;
+const ADS_IQ_PHONE=/(?:\+964|00964|\b07\d{2}[\s-]?\d{3}[\s-]?\d{4}\b)/;
+const adsAsciiDigits=s=>String(s||"").replace(/[۰-۹]/g,d=>String(d.charCodeAt(0)-0x06F0)).replace(/[٠-٩]/g,d=>String(d.charCodeAt(0)-0x0660));
 const ADS_BUYER_SIGNAL=/طلافروشی|زرگری|جواهرفروشی|گالری\s*(?:طلا|جواهر|ساعت)|فروشگاه\s*(?:طلا|جواهر|ساعت|عطر)|عطرفروشی|عطر\s*فروشی|ساعت\s*فروشی|بدلیجات|محل\s*(?:ذهب|مجوهرات|عطور|ساعات)|معرض\s*(?:ذهب|مجوهرات|ساعات)|صائغ|صياغة|مجوهرات|jewell?er|jewelry\s*(?:store|shop)|goldsmith|boutique|showroom|perfume\s*(?:shop|store)|watch\s*(?:shop|store)/i;
 const ADS_PRICE_TICKER=/ريال|درهم|جنيه|دينار|تومان|ر\.س|\b(?:EGP|AED|SAR|OMR|KWD|USD|IQD|IRR)\b/gi;
 function adsTargetQualifies({title="",url="",plain="",target=null}={}){
@@ -12378,15 +12382,20 @@ function adsTargetQualifies({title="",url="",plain="",target=null}={}){
   if(ADS_AGGREGATOR.test(head))return {ok:false,reason:"aggregator"};
   if(ADS_FOREIGN_COUNTRY.test(head)||ADS_FOREIGN_TLD.test(host))return {ok:false,reason:"foreign_country"};
   const iraq=target.market==="ARAB",localTld=iraq?/\.iq$/i.test(host):/\.ir$/i.test(host);
-  const countryHit=localTld||(iraq?/العراق|عراق|iraq|\+964/i:/ایران|iran|\+98/i).test(all);
-  if(!countryHit)return {ok:false,reason:"target_country_missing"};
-  const normAll=adsNormalizeText(all);
-  if(!target.names.some(n=>normAll.includes(adsNormalizeText(n))))return {ok:false,reason:"target_city_missing"};
+  const phoneHit=(iraq?ADS_IQ_PHONE:ADS_IR_PHONE).test(adsAsciiDigits(body));
+  // Local shop pages rarely spell out "Iran"/"Iraq". The target city counts as country evidence only when it is reliable: named in
+  // the title/domain/path, or on a page carrying a local phone number. The two markets' city lists are disjoint and foreign pages
+  // were rejected above, so a city mentioned in passing (no local phone, not in the title) is still not enough.
+  const normAll=adsNormalizeText(all),cityHit=target.names.some(n=>normAll.includes(adsNormalizeText(n)));
+  const cityInHead=target.names.some(n=>adsNormalizeText(head).includes(adsNormalizeText(n)));
+  const countryWord=(iraq?/العراق|عراق|iraq|\+964/i:/ایران|iran|\+98/i).test(all);
+  const countryEvidence=localTld?"local_domain":countryWord?"country_word":cityHit&&cityInHead?"city_in_title":cityHit&&phoneHit?"city_and_local_phone":null;
+  if(!countryEvidence)return {ok:false,reason:"target_country_missing"};
+  if(!cityHit)return {ok:false,reason:"target_city_missing"};
   const buyerHead=ADS_BUYER_SIGNAL.test(head),buyerBody=ADS_BUYER_SIGNAL.test(body);
   if(!buyerHead&&!buyerBody)return {ok:false,reason:"no_buyer_signal"};
   if(!buyerHead&&((body.match(ADS_PRICE_TICKER)||[]).length>=8||(body.match(new RegExp(ADS_PRICE_NEWS.source,"gi"))||[]).length>=3))return {ok:false,reason:"price_or_news"};
-  const phoneHit=(iraq?/(?:\+964|00964|\b07\d{9})/:/(?:\+98|0098|\b0\d{10})/).test(body);
-  return {ok:true,score:Math.min(100,40+(buyerHead?20:0)+20+(localTld||phoneHit?10:0)),signals:{buyer_in_title:buyerHead,local_domain:localTld,local_phone:phoneHit,city:target.city,market:target.market}};
+  return {ok:true,score:Math.min(100,40+(buyerHead?20:0)+20+(localTld||phoneHit?10:0)),signals:{buyer_in_title:buyerHead,local_domain:localTld,local_phone:phoneHit,country_evidence:countryEvidence,city:target.city,market:target.market}};
 }
 
 // Shared Ads run gate: reserves one unit of the Ads daily run budget, or returns the deferred result every caller passes back as is
@@ -12484,29 +12493,27 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   const {type,city,extra}=input;
   const sourceSite="https://www.hamzehibox.com";
   const allGroups=[
-  ["gold_fa","طلافروشی طلا جواهر زرگری گالری طلا ایران تهران اصفهان شیراز مشهد تبریز"],
-  ["perfume_fa","عطر ادکلن عطر فروشی فروشگاه عطر و ادکلن ایران تهران اصفهان شیراز مشهد تبریز"],
+  // One country word only: the run's target city is appended below, so the query searches THAT city (no fixed city list diluting it).
+  // Gold queries ask for shops, not the metal, and exclude price/news words so price tickers do not crowd out businesses.
+  ["gold_fa","طلافروشی زرگری گالری طلا و جواهر ایران -قیمت -نرخ -اخبار"],
+  ["perfume_fa","عطر ادکلن عطر فروشی فروشگاه عطر و ادکلن ایران"],
   ["watch_fa","فروشگاه ساعت ساعت فروشی ساعت مچی ایران"],
   ["fashion_jewelry_fa","بدلیجات بدلی فروشی زیورآلات اکسسوری ایران"],
 
-  ["gold_ar","ذهب مجوهرات صياغة صائغ محل ذهب مجوهرات عراق بغداد اربيل البصرة النجف كربلاء"],
-  ["perfume_ar","عطور عطر محل عطور عطور عراق عطور بغداد عطور اربيل عطور البصرة عطور النجف عطور كربلاء برفانات"],
-  ["watch_ar","ساعات محل ساعات ساعات رجالية ساعات نسائية العراق بغداد اربيل"],
-  ["fashion_jewelry_ar","اكسسوارات حلي مجوهرات اكسسوارات نسائية العراق بغداد اربيل"]
+  ["gold_ar","محل ذهب مجوهرات صائغ صياغة العراق -سعر -أسعار -أخبار"],
+  ["perfume_ar","عطور عطر محل عطور برفانات العراق"],
+  ["watch_ar","ساعات محل ساعات ساعات رجالية ساعات نسائية العراق"],
+  ["fashion_jewelry_ar","اكسسوارات حلي مجوهرات اكسسوارات نسائية العراق"]
 ];
   const groups=(type==="all"
   ?allGroups
   :allGroups.filter(x=>x[0]===type || x[0]===`${type}_fa` || x[0]===`${type}_ar`)).filter(x=>x[0].endsWith(ADS_MARKETS[target.market].group_suffix));
-  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,rejected:0,rejected_reasons:{},provider_checks:[],error_details:[]};
+  const summary={found:0,updated:0,new_leads:0,drafted:0,followups_prepared:0,errors:0,rejected:0,rejected_reasons:{},dropped:{},provider_checks:[],error_details:[]};
   const items=[],seen=new Set(),started=now();
  
   for(const [groupType,term] of groups){
    let groupItems=0;
-    const regionTerms=groupType.endsWith("_ar")
-  ?"العراق عراق Iraqi Iraq بغداد بغداد اربيل أربيل البصرة النجف كربلاء"
-  :"ایران ایرانی Iran Iranian تهران اصفهان شیراز مشهد تبریز";
-
-const q=[term,regionTerms,city,extra].filter(Boolean).join(" ");
+const q=[term,city,extra].filter(Boolean).join(" ");
     try{
       const discovery=await discoverWebLinks(q,6);
       if(discovery.diagnostics?.length) summary.provider_checks.push({query:q,checks:discovery.diagnostics});
@@ -12514,11 +12521,13 @@ const q=[term,regionTerms,city,extra].filter(Boolean).join(" ");
         if(items.length>=30 || groupItems>=5) break;
         const safeHref=safeHttpUrl(href); if(!safeHref) continue;
         let uu; try{uu=new URL(safeHref); const key=uu.origin; if(seen.has(key))continue; seen.add(key);}catch{continue}
+        summary.candidates=(summary.candidates||0)+1;
+        const drop=r=>{summary.dropped[r]=(summary.dropped[r]||0)+1;};
         try{
           const rr=await fetchWithRetry(safeHref,{headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}},2,AD_FETCH_TIMEOUT_MS);
-          if(!rr.ok) continue;
+          if(!rr.ok){drop("fetch_failed");continue;}
           const contentType=String(rr.headers.get("content-type")||"").toLowerCase();
-if(contentType && !contentType.includes("text/html")) continue;
+if(contentType && !contentType.includes("text/html")){drop("not_html");continue;}
           const tx=(await rr.text()).slice(0,100000);
           const plain=tx.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
           const title=(tx.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||uu.hostname).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,140);
@@ -12544,18 +12553,18 @@ const localDomain=groupType.endsWith("_ar")
   ? /\.iq$/i.test(uu.hostname)
   : /\.ir$/i.test(uu.hostname);
 const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
-if(spamPattern.test(relevanceText)) continue;
+if(spamPattern.test(relevanceText)){drop("spam");continue;}
 const verdict=adsTargetQualifies({title,url:safeHref,plain,target});
 if(!verdict.ok){summary.rejected++;summary.rejected_reasons[verdict.reason]=(summary.rejected_reasons[verdict.reason]||0)+1;continue;}
-if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.test(relevanceText)) continue;
+if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.test(relevanceText)){drop("no_local_signal");continue;}
           const businessSignal=/فروشگاه|فروشنده|فروشی|طلافروشی|زرگری|جواهرفروشی|گالری|عطرفروشی|عطر فروشی|عطر و ادکلن|ساعت فروشی|ساعت مچی|بدلیجات|بدلی فروشی|محل ذهب|محل عطور|محل ساعات|مجوهرات|صياغة|صائغ|عطور|ساعات|اكسسوارات|shop|store|jewelry|jewellery|goldsmith|perfume|parfum|fragrance|watch shop|watch store|accessories/i;
 
 const titleBusiness=businessSignal.test(`${title} ${uu.hostname} ${uu.pathname}`);
 const titleMarket=strongRelevance;
 const genericMarketplacePattern=/digikala|okala|jetamooz|amazon|torob|snapp|basalam|marketplace|فروشگاه اینترنتی|فروشگاه آنلاین|خرید آنلاین|فروش آنلاین/i;
-if(genericMarketplacePattern.test(relevanceText) && !titleMarket) continue;
-if(!titleMarket && !titleBusiness) continue;
-if(!titleBusiness && marketHits<2) continue;
+if(genericMarketplacePattern.test(relevanceText) && !titleMarket){drop("marketplace");continue;}
+if(!titleMarket && !titleBusiness){drop("no_business_signal");continue;}
+if(!titleBusiness && marketHits<2){drop("no_business_signal");continue;}
           const adHit=/تبلیغ|رپورتاژ|همکاری|تماس با ما|إعلان|اعلانات|إعلانات|دعاية|ترويج|تعاون|رعاية|تواصل ويانا|راسلنا|اتصل بينا|advertis|advertising|sponsor|sponsorship|media kit|contact us|collaboration|partnership/i.test(plain);
 const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?|\/sponsor(?:ship)?\/?|\/collab(?:oration)?\/?/i.test(uu.pathname);    
           let contactUrl=null;
@@ -12581,7 +12590,7 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
             if(mail) contactUrl=mail[1];
           }
 
-          if(!contactUrl && !adHit && !contactPath) continue; 
+          if(!contactUrl && !adHit && !contactPath){drop("no_contact");continue;}
           const score=Math.min(100,verdict.score+(contactUrl?10:0));
           const meta={source:"ad_autopilot",ad_target:true,source_site:sourceSite,type:groupType,city,...adsAttribution(target.market,verdict.signals),qualification:verdict.signals,query:q,url:href,evidence:plain.slice(0,1500),contact_url:contactUrl,score,updated_by:"autopilot"};
           const saved=await upsertDiscoveredLead(env,{name:title,contact:href,stage:"discovered",priority:score>=70?"high":score>=45?"normal":"low",source:"ad_autopilot",meta});
@@ -12622,7 +12631,10 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
       }catch{}
     }
   }
-  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,market:target.market,found:summary.found,rejected:summary.rejected,rejected_reasons:summary.rejected_reasons,drafted:summary.drafted,errors:summary.errors,ai_usage:summary.ai||null,started});
+  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,market:target.market,found:summary.found,rejected:summary.rejected,rejected_reasons:summary.rejected_reasons,drafted:summary.drafted,errors:summary.errors,ai_usage:summary.ai||null,started,
+    // Discovery evidence: links each search provider returned, candidate sites evaluated, and new vs. updated CRM leads.
+    candidates:summary.candidates||0,dropped:summary.dropped,new_leads:summary.new_leads,updated:summary.updated,
+    search:summary.provider_checks.map(p=>({query:String(p.query).slice(0,200),providers:(p.checks||[]).map(c=>({provider:c.provider,status:c.status,links:c.added_links||0}))}))});
   return {ok:true,mode:"autopilot",source_site:sourceSite,type,targets:groups.map(x=>x[0]),summary,items:items.slice(0,30),external_send:"authorized_channel_only",reason};
 }
 function extractTelegramContact(text = "") {
