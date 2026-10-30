@@ -58,6 +58,16 @@ for(const market of ["IRAN","ARAB"])await call("/api/ads/markets/config",{market
  backdate();await tick();
  ok("P13 deduplication: the same place IDs next run update the leads, create none",placesLeads().length===4&&runs("IRAN")[1]?.places?.new_leads===0&&runs("IRAN")[1]?.places?.updated===2,runs("IRAN")[1]?.places);}
 
+// ---- provisional classification (Production audit 2026-10-30: 20 IDs-only leads were indistinguishable and scored like qualified leads)
+{const L=placesLeads();
+ ok("P28 Places leads are PROVISIONAL: lead_status provisional_place, identity_verified/contactable false, priority low, score 30",L.length===4&&L.every(l=>l.meta.lead_status==="provisional_place"&&l.meta.identity_verified===false&&l.meta.contactable===false&&l.meta.score===30&&l.meta.next_step==="verify_on_google_maps"),L.map(l=>l.meta.lead_status));
+ const pr=q("SELECT priority FROM leads WHERE instr(notes,'google_places_ids')>0").map(r=>r.priority);
+ ok("P29 CRM priority is low (never normal/high) and each lead has a distinct label (short place-ID reference)",pr.every(p=>p==="low")&&new Set(L.map(l=>l.name)).size===L.length&&L.every(l=>/ · #[A-Za-z0-9_-]{6}$/.test(l.name)),L.map(l=>l.name));
+ const ac=(await call("/api/ads/action-center",null,"GET")).body,intel=(await call("/api/ads/intelligence",null,"GET")).body;
+ const ids=new Set(q("SELECT id FROM leads WHERE instr(notes,'google_places_ids')>0").map(r=>r.id));
+ const acItems=(ac?.items||[]).filter(x=>ids.has(x.id)),inItems=(intel?.items||intel?.leads||[]).filter(x=>ids.has(x.id));
+ ok("P30 provisional leads are not in the owner's urgent/opportunity next actions; scoring says verify on Google Maps",acItems.length===0&&(inItems.length===0||inItems.every(x=>(x.score??0)<80&&/Google Maps/.test(x.action||""))),{ac:acItems.length,intel:inItems.slice(0,1)});}
+
 // ---- ledger: cap, allowance, concurrency, month reset (fixed clock)
 {clearLedger();const nov1=Date.UTC(2026,10,1,10),env=W.env;
  const r1=[];for(let i=0;i<10;i++)r1.push(await PB.reservePlacesRequest(env,{sku:"ids_only",purpose:"t",nowMs:nov1}));

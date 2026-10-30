@@ -12,6 +12,7 @@ import { bearerMatches, safeTokenEqual } from "./secure-compare.js";
 import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js";
 import { adsDraftSettings, buildAdsDraftPrompt, adsDraftRequestBody, adsDraftUsage, adsDraftOutcome, emptyAdsDraftStats, addAdsDraftUsage, reserveAdsDraft, adsDraftsToday } from "./ads-draft-guard.js";
 import { runWatchdog } from "./agent-watchdog.js";
+import { leadQualification, qualificationCounts } from "./lead-qualification.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
@@ -12287,7 +12288,10 @@ if(/\u0633\u0627\u0639\u062a|watch/.test(text)){score+=5;factors.push("\u062a\u0
 if(/\u0628\u062f\u0644\u06cc|\u0627\u06a9\u0633\u0633\u0648\u0631\u06cc|fashion|accessor/.test(text)){score+=5;factors.push("\u062a\u0646\u0627\u0633\u0628 \u0628\u062f\u0644\u06cc\u062c\u0627\u062a")}
 if(stage==='customer'||stage==='converted')score=100;
 score=Math.max(0,Math.min(100,Math.round(score)));
-const action=stage==='customer'||stage==='converted'
+// Google Places IDs-only discoveries are provisional (no verified name/contact): the next step is the owner's check on Google Maps.
+const provisional=meta.lead_status==="provisional_place"&&!['customer','converted'].includes(stage)&&!meta.contact_url;
+if(provisional)factors.push("کشف اولیه Google Maps — نام و راه تماس تأیید نشده");
+const action=provisional?"تأیید روی Google Maps (نام و راه تماس تأیید نشده)":stage==='customer'||stage==='converted'
   ?"\u0645\u0634\u062a\u0631\u06cc \u062d\u0641\u0638 \u0634\u0648\u062f"
   :(meta.followup_draft
     ?"\u0627\u0631\u0633\u0627\u0644/\u0628\u0631\u0631\u0633\u06cc \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0628\u0627 \u062a\u0623\u06cc\u06cc\u062f"
@@ -12296,7 +12300,7 @@ const action=stage==='customer'||stage==='converted'
       :(meta.contact_url
         ?"\u0628\u0631\u0631\u0633\u06cc \u0645\u0633\u06cc\u0631 \u062a\u0645\u0627\u0633"
         :"\u0628\u0631\u0631\u0633\u06cc Lead")));
-  return {score,factors,action,type:meta.type||null,ad_opportunity:!!(meta.ad_opportunity||meta.contact_url),contact_url:meta.contact_url||null,domain:meta.url?(()=>{try{return new URL(meta.url).hostname.replace(/^www\./,'')}catch{return null}})():null};
+  return {score,factors,action,provisional,type:meta.type||null,ad_opportunity:!!(meta.ad_opportunity||meta.contact_url),contact_url:meta.contact_url||null,domain:meta.url?(()=>{try{return new URL(meta.url).hostname.replace(/^www\./,'')}catch{return null}})():null};
 }
 
 async function updateLeadRecord(env, id, patch) {
@@ -12326,6 +12330,10 @@ async function updateLeadRecord(env, id, patch) {
   if (patch.score !== undefined) meta.score = Math.max(0, Math.min(100, Number(patch.score) || 0));
   meta.score = leadScoreFromData({ ...lead, stage, priority }, meta);
   if (patch.notes !== undefined) meta.manual_notes = String(patch.notes || "");
+  // Owner verification (qualification ladder): the owner confirms the business identity / its own website after checking it himself.
+  // Recorded as owner evidence, never as Google data.
+  if (patch.identity_verified === true) { meta.identity_verified = true; meta.identity_source = "owner"; meta.identity_verified_at = now(); }
+  if (patch.verified_website !== undefined) { const w = safeHttpUrl(String(patch.verified_website || "").trim()); if (!w) throw new Error("Invalid website"); meta.website = w; meta.website_source = "owner"; }
   const t = now();
   await env.DB.prepare("UPDATE leads SET stage=?,priority=?,notes=?,updated_at=? WHERE id=?")
     .bind(stage, priority, JSON.stringify(meta), t, id).run();
@@ -12334,10 +12342,17 @@ async function updateLeadRecord(env, id, patch) {
 
 async function leadOverview(env) {
   const r = await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
+  // Qualification ladder (lead-qualification.js): independent contacts only (own website page / owner-confirmed), one query.
+  const byLead = new Map();
+  try {
+    const c = await env.DB.prepare("SELECT lead_id,contact_type,evidence_status FROM lead_contacts WHERE evidence_status IN ('page_extracted','owner_confirmed')").all();
+    for (const x of (c.results || [])) { if (!byLead.has(x.lead_id)) byLead.set(x.lead_id, []); byLead.get(x.lead_id).push(x); }
+  } catch {}
   const items = (r.results || []).map(x => ({
     ...x,
     meta: parseLeadNotes(x),
-    score: leadScoreFromData(x, parseLeadNotes(x))
+    score: leadScoreFromData(x, parseLeadNotes(x)),
+    qualification: leadQualification(x, parseLeadNotes(x), byLead.get(x.id) || [])
   }));
   const stages = {};
   const priorities = { high: 0, normal: 0, low: 0 };
@@ -12347,7 +12362,7 @@ async function leadOverview(env) {
   const hot = items.filter(x => x.score >= 70 && !["converted","customer","rejected","archived"].includes(x.stage)).slice(0, 20);
   const converted = items.filter(x => ["converted","customer"].includes(x.stage)).length;
   const contacted = items.filter(x => ["contacted","replied","negotiation","converted","customer"].includes(x.stage)).length;
-  return { total: items.length, stages, priorities, hot, followups, converted, contacted, conversion_rate: contacted ? Math.round(converted / contacted * 100) : 0, items };
+  return { total: items.length, stages, priorities, qualification: qualificationCounts(items.map(x => x.qualification.state)), hot, followups, converted, contacted, conversion_rate: contacted ? Math.round(converted / contacted * 100) : 0, items };
 }
 
 
@@ -12526,13 +12541,17 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
     try{
       const res=await placesIdsOnlySearch(env,{market:target.market,city:target.city,purpose:"ads_discovery"});
       pl.status=res.ok?"ok":(res.budget_limited?"budget_limited":res.reason||"failed");pl.http=res.status??null;pl.place_ids=res.place_ids.length;
+      // A Places ID is a PROVISIONAL discovery: a jewelry store of that city per Google, but no verified name or contact channel yet.
+      // It is labelled distinctly (short ID reference), kept at low priority/score and marked unverified so the CRM never shows it as a
+      // qualified or contactable prospect; the owner verifies it on Google Maps.
       const label=target.market==="ARAB"?`محل مجوهرات في ${target.city} (Google Maps)`:`طلافروشی در ${target.city} (Google Maps)`;
       for(const placeId of res.place_ids.slice(0,10)){
         const meta={source:"ad_autopilot",provider:"google_places_ids",ad_target:true,source_site:sourceSite,type:groupTypeFor(target.market),city:target.city,
           target_market:target.market,market_evidence:"places_location_restriction",country:ADS_MARKETS[target.market].country,place_id:placeId,maps_url:placesMapsUrl(placeId),
           qualification:{country_evidence:"places_location_restriction",included_type:"jewelry_store",strict_type:true,city:target.city,market:target.market},
-          score:60,updated_by:"autopilot",discovered_at:now()};
-        const saved=await upsertDiscoveredLead(env,{name:label,contact:meta.maps_url,stage:"discovered",priority:"normal",source:"ad_autopilot",meta});
+          lead_status:"provisional_place",identity_verified:false,contactable:false,next_step:"verify_on_google_maps",
+          score:30,updated_by:"autopilot",discovered_at:now()};
+        const saved=await upsertDiscoveredLead(env,{name:`${label} · #${placeId.slice(-6)}`,contact:meta.maps_url,stage:"discovered",priority:"low",source:"ad_autopilot",meta});
         if(saved.conflict){summary.errors++;continue;}
         if(saved.created){pl.new_leads++;summary.new_leads++;}else{pl.updated++;summary.updated++;}
         summary.found++;
@@ -14858,6 +14877,12 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         try {
           const updated = await updateLeadRecord(env, id, b);
           if (!updated) return json({ ok: false, error: "Lead not found" }, 404);
+          // Contacts the owner verified himself (e.g. from the shop's own website or card) are stored as owner_confirmed.
+          if (Array.isArray(b.verified_contacts) && b.verified_contacts.length) {
+            await ensureLeadIdentityStore(env);
+            await storeLeadContacts(env, id, b.verified_contacts.slice(0, 10).filter(x => x && ["phone","email","whatsapp","telegram","instagram"].includes(x.contact_type) && String(x.value || "").trim())
+              .map(x => ({ contact_type: x.contact_type, raw_value: String(x.value).trim().slice(0, 200), source: "owner", evidence_status: "owner_confirmed", evidence_url: null })));
+          }
           await audit(env, "lead_updated", "Lead CRM record updated", { lead_id: id, stage: updated.stage, priority: updated.priority });
           return json({ ok: true, item: updated, score: leadScoreFromData(updated, parseLeadNotes(updated)) });
         } catch (e) { return json({ ok: false, error: e.message }, 400); }
@@ -14882,6 +14907,11 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         if (!leadId) return json({ ok: false, error: "lead_id is required" }, 400);
         const lead = await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(leadId).first();
         if (!lead) return json({ ok: false, error: "Lead not found" }, 404);
+        // An IDs-only Google Places discovery has no verified name or contact: a draft would be addressed to nobody (and cost an AI call).
+        // It becomes draftable once the owner records an independent contact (owner_confirmed / own-website contact) for it.
+        {const pm=parseLeadNotes(lead);
+         if(pm.lead_status==="provisional_place"&&!(await (async()=>{try{return await env.DB.prepare("SELECT 1 FROM lead_contacts WHERE lead_id=? AND evidence_status IN ('page_extracted','owner_confirmed') LIMIT 1").bind(leadId).first();}catch{return null;}})()))
+           return json({ok:false,reason:"lead_not_contactable",error:"این lead فقط یک کشف اولیهٔ Google Maps است؛ ابتدا کسب‌وکار و راه تماس مستقل آن را تأیید کنید"},409);}
         await ensureLeadOutreachStore(env);
         let selected;
         try { selected=await selectLeadOutreachContact(env,lead,b); }
