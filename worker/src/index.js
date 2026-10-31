@@ -12433,13 +12433,19 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
 // re-checked at most every 14 days). Directories, marketplaces, Google content and Places-only leads are never fetched.
 async function enrichOwnSiteContacts(env,{limit=2}={}){
   const since=new Date(Date.now()-14*86400e3).toISOString(),out={checked:0,stored:0,skipped_robots:0};
-  const rows=(await env.DB.prepare("SELECT id,name,notes FROM leads WHERE stage NOT IN ('rejected','archived','customer','converted') ORDER BY updated_at DESC LIMIT 300").all()).results||[];
+  // Phase 18.5: only rows that can ever be fetched are read (never Google-origin, a URL present, not excluded), never-checked ones first —
+  // so ~300 Google rows refreshed by every Places run can no longer push own-site and dataset candidates out of the window.
+  const rows=(await env.DB.prepare("SELECT id,name,notes FROM leads WHERE stage NOT IN ('rejected','archived','customer','converted') AND json_valid(notes)"
+    +" AND COALESCE(json_extract(notes,'$.provider'),'') NOT LIKE 'google_places%' AND json_extract(notes,'$.place_id') IS NULL"
+    +" AND (json_extract(notes,'$.url') IS NOT NULL OR json_extract(notes,'$.website') IS NOT NULL) AND COALESCE(json_extract(notes,'$.rejected_reason'),'')=''"
+    +" ORDER BY (json_extract(notes,'$.contact_enrichment_checked_at') IS NOT NULL), updated_at DESC LIMIT 300").all()).results||[];
   for(const r of rows){
     if(out.checked>=limit)break;
     // Phase 18.1: price/news information sites are never fetched (their runs went to real candidates instead).
     // Phase 18.4: a dataset candidate has only a URL until its first website check (no page text yet), so it is a candidate too.
     const m=parseLeadNotes(r),dsPending=m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result!=="verified_site"&&!!independentWebsiteHost(m.url);
-    if(m.provider==="dataset"&&m.rejected_reason)continue;
+    // Phase 18.5: switching DATASET_DISCOVERY off makes the whole pipeline inert at once — dataset leads are not fetched either.
+    if(m.provider==="dataset"&&(m.rejected_reason||env.DATASET_DISCOVERY!=="on"))continue;
     if(!dsPending&&!ownSiteCandidate(m,r))continue;
     if(m.contact_enrichment_checked_at&&m.contact_enrichment_checked_at>=since)continue;
     let has=null;try{has=await env.DB.prepare("SELECT 1 FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram') AND evidence_status IN ('page_extracted','owner_confirmed') LIMIT 1").bind(r.id).first();}catch{}
@@ -12465,7 +12471,7 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
         if(html&&dsPending){
           const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||"").replace(/<[^>]+>/g," ").replace(/&#8211;|&ndash;/g,"–").replace(/&amp;/g,"&").replace(/\s+/g," ").trim();
           const text=html.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/&nbsp;/g," ").replace(/\s+/g," ").trim();
-          const v=verifyDatasetSite(m,{title,text,host:finalHost},now());Object.assign(m,v.patch);
+          const v=verifyDatasetSite(m,{title,text,host:finalHost,url:res.url||site},now());Object.assign(m,v.patch);
           if(v.rejected_reason){m.rejected_reason=v.rejected_reason;dsRejected=true;note="dataset_"+v.rejected_reason;}
           try{await env.DB.prepare("UPDATE leads SET name=?,notes=? WHERE id=?").bind(v.rejected_reason?r.name:(v.name||r.name),JSON.stringify(m),r.id).run();}catch{}
         }

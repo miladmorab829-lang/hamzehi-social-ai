@@ -43,6 +43,8 @@ export function normalizeCandidates({ overture = [], osm = {} } = {}, { release,
     seen.add(v.candidate.host); per[c.market]++;
     const { host, ...keep } = v.candidate; candidates.push({ ...keep, websites: [v.candidate.url], url: undefined });
   }
+  // Phase 18.5: deterministic order (market, dataset, record id) — the same order the Worker uses for its cursors.
+  const k = c => c.market + "|" + c.dataset + "|" + c.record_id; candidates.sort((a, b) => k(a) < k(b) ? -1 : k(a) > k(b) ? 1 : 0);
   return { schema: DISCOVERY_SCHEMA, release, generated_at: generatedAt, sources_enabled: DISCOVERY_SOURCES, attribution: DATASET_ATTRIBUTION,
     licenses: { overture: "CDLA-Permissive-2.0 / Apache-2.0 (Foursquare) / CC0-1.0 (AllThePlaces) per record", osm: "ODbL-1.0 (internal use only; never publish a derived database)" },
     counts: { input: raw.length, kept: candidates.length, per_market: per, dropped }, candidates };

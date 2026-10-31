@@ -48,7 +48,8 @@ export function validateCandidate(c) {
   if (!c.record_id || typeof c.record_id !== "string") return { ok: false, reason: "missing_record_id" };
   if (!c.license || !DATASET_LICENSES[dataset].includes(c.license)) return { ok: false, reason: "missing_or_unknown_license" };
   // Google isolation: no place id, no Google provider/dataset, no Google URL anywhere in the record.
-  if (c.place_id || /^google/i.test(String(c.provider || "")) || (c.source_datasets || []).some(s => /google/i.test(String(s)))
+  // Phase 18.5: a Google place-ID string anywhere in the record (ChIJ…/GhIJ…/EhIJ… forms) is Google origin too.
+  if (c.place_id || /^google/i.test(String(c.provider || "")) || (c.source_datasets || []).some(s => /google/i.test(String(s))) || /\b[CGE]hIJ[\w-]{10,}/.test(JSON.stringify(c))
     || [...(c.websites || []), ...(c.socials || [])].some(u => GOOGLE_TEXT.test(String(u)))) return { ok: false, reason: "google_origin" };
   const site = (c.websites || []).map(u => ({ u: String(u).trim(), h: independentWebsiteHost(u) })).find(x => x.h);
   if (!site) return { ok: false, reason: "no_own_website" };
@@ -62,13 +63,28 @@ export function validateCandidate(c) {
     confidence: Number.isFinite(Number(c.confidence)) ? Number(c.confidence) : null } };
 }
 
+// Phase 18.5: release ids are Overture-style "YYYY-MM-DD.N" (same rule as the extractor); a file over the record limit is refused, never
+// truncated; valid records are put in a deterministic order (market, dataset, record id), so the cursor never depends on file order.
+export const RELEASE_ID = /^\d{4}-\d{2}-\d{2}\.\d{1,3}$/;
 export function validateCandidateFile(doc, settings = discoverySettings({})) {
-  if (!doc || doc.schema !== DISCOVERY_SCHEMA) return { ok: false, reason: "schema" };
-  if (!doc.release || typeof doc.release !== "string") return { ok: false, reason: "release" };
-  const list = Array.isArray(doc.candidates) ? doc.candidates.slice(0, settings.max_candidates) : [];
-  const rejected = {}, candidates = [];
-  for (const c of list) { const v = validateCandidate(c); if (v.ok) candidates.push(v.candidate); else rejected[v.reason] = (rejected[v.reason] || 0) + 1; }
-  return { ok: true, release: String(doc.release).slice(0, 40), candidates, rejected, truncated: (doc.candidates || []).length > list.length };
+  if (!doc || typeof doc !== "object" || doc.schema !== DISCOVERY_SCHEMA) return { ok: false, reason: "schema" };
+  if (typeof doc.release !== "string" || !RELEASE_ID.test(doc.release)) return { ok: false, reason: "release" };
+  if (!Array.isArray(doc.candidates)) return { ok: false, reason: "candidates_missing" };
+  if (doc.candidates.length > settings.max_candidates) return { ok: false, reason: "too_many_candidates" };
+  const rejected = {}, candidates = [], seen = new Set();
+  for (const c of doc.candidates) {
+    const v = validateCandidate(c); if (!v.ok) { rejected[v.reason] = (rejected[v.reason] || 0) + 1; continue; }
+    const key = v.candidate.market + "|" + v.candidate.dataset + "|" + v.candidate.record_id;
+    if (seen.has(key)) { rejected.duplicate_record = (rejected.duplicate_record || 0) + 1; continue; }
+    seen.add(key); candidates.push(v.candidate);
+  }
+  candidates.sort((a, b) => (a.market + "|" + a.dataset + "|" + a.record_id) < (b.market + "|" + b.dataset + "|" + b.record_id) ? -1 : 1);
+  return { ok: true, release: doc.release, candidates, rejected };
+}
+// SHA-256 of the canonical (sorted, validated) candidate list — identifies the CONTENT of a release.
+export async function candidateDigest(candidates) {
+  const bytes = new TextEncoder().encode(JSON.stringify(candidates.map(c => [c.market, c.dataset, c.record_id, c.url, c.name, c.city])));
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 // ---- business-name consistency (dataset name vs. the website itself)
@@ -103,7 +119,8 @@ const JEWELRY = /طلا|زرگر|جواهر|مجوهرات|ذهب|صياغ|صا�
 export function verifyDatasetSite(meta = {}, page = {}, at = new Date().toISOString()) {
   const market = meta.target_market === "ARAB" ? "ARAB" : "IRAN", claims = meta.dataset_claims || {};
   const title = String(page.title || "").replace(/\s+/g, " ").trim().slice(0, 160), text = String(page.text || "").replace(/\s+/g, " ").trim();
-  const base = { checked_at: at, final_host: page.host || null };
+  // Phase 18.5 provenance: the exact page that served as identity evidence, and the basis of the decision.
+  const base = { checked_at: at, final_host: page.host || null, evidence_url: page.url || null, identity_basis: "own_website_page" };
   if (informationSite({ name: title })) return { rejected_reason: "information_site", patch: { dataset_verification: { ...base, result: "information_site" } } };
   if (!JEWELRY.test(title + " " + text.slice(0, 4000))) return { rejected_reason: "unrelated_website", patch: { dataset_verification: { ...base, result: "unrelated_website" } } };
   const own = OWN_MARKET_PHONE[market].test(text), other = OTHER_MARKET_PHONE[market].test(text), ownTld = market === "IRAN" ? /\.ir$/i.test(page.host || "") : /\.iq$/i.test(page.host || "");
@@ -121,30 +138,43 @@ export function verifyDatasetSite(meta = {}, page = {}, at = new Date().toISOStr
 
 // Read the candidate file from an R2-compatible store ({get(key) → {text()}|null}); bounded size.
 export async function readCandidateFile(store, settings) {
-  if (!store?.get) return { ok: false, reason: "no_store" };
-  const obj = await store.get(settings.key); if (!obj) return { ok: false, reason: "no_candidate_file" };
+  if (typeof store?.get !== "function") return { ok: false, reason: "no_store" };
+  let obj; try { obj = await store.get(settings.key); } catch { return { ok: false, reason: "store_unavailable" }; }
+  if (!obj) return { ok: false, reason: "no_candidate_file" };
   if (Number(obj.size || 0) > settings.max_file_bytes) return { ok: false, reason: "file_too_large" };
-  const raw = await obj.text(); if (raw.length > settings.max_file_bytes) return { ok: false, reason: "file_too_large" };
+  let raw; try { raw = await obj.text(); } catch { return { ok: false, reason: "store_unavailable" }; }
+  if (raw.length > settings.max_file_bytes) return { ok: false, reason: "file_too_large" };
   let doc; try { doc = JSON.parse(raw); } catch { return { ok: false, reason: "invalid_json" }; }
-  return validateCandidateFile(doc, settings);
+  const v = validateCandidateFile(doc, settings); if (!v.ok) return v;
+  return { ...v, etag: obj.etag || obj.httpEtag || null, digest: await candidateDigest(v.candidates) };
 }
 
 // Bounded, resumable ingestion: a cursor per release and a per-market daily cap in system_kv. Each new candidate becomes ONE new lead
 // (stage discovered) — a domain already known to any lead is skipped, never merged. helpers: {upsert, identities} from index.js.
 export async function ingestDatasetCandidates(env, { settings = discoverySettings(env), store = env.DISCOVERY_BUCKET, helpers, now = () => new Date().toISOString() } = {}) {
   if (env.DATASET_DISCOVERY !== "on") return { ok: true, skipped: true, reason: "disabled" };
-  if (!store?.get) return { ok: true, skipped: true, reason: "no_store" };
-  const file = await readCandidateFile(store, settings); if (!file.ok) return { ok: false, reason: file.reason };
+  if (typeof store?.get !== "function") return { ok: true, skipped: true, reason: "no_store" };
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)").run();
   const kv = async k => (await env.DB.prepare("SELECT value FROM system_kv WHERE key=?").bind(k).first())?.value;
   const put = (k, v) => env.DB.prepare("INSERT INTO system_kv(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(k, String(v), now()).run();
-  const day = now().slice(0, 10), out = { ok: true, release: file.release, total: file.candidates.length, created: { IRAN: 0, ARAB: 0 }, cursor: {}, done: {}, skipped: {}, rejected_in_file: file.rejected };
+  // Phase 18.5 cost: once a file is fully ingested, later ticks only HEAD it (no download/parse) until its etag changes.
+  if (typeof store.head === "function") { try { const h = await store.head(settings.key); const tag = h?.etag || h?.httpEtag; if (tag && await kv("dataset_discovery:complete:" + tag)) return { ok: true, skipped: true, reason: "complete" }; } catch {} }
+  const file = await readCandidateFile(store, settings); if (!file.ok) return { ok: false, reason: file.reason };
+  // Phase 18.5 integrity: a release id is bound to its content. A different file under an already-used release id is refused (its cursor
+  // positions would point at other records); a new extraction must use a new release id.
+  const digestKey = "dataset_discovery:digest:" + file.release, knownDigest = await kv(digestKey);
+  if (knownDigest && knownDigest !== file.digest) return { ok: false, reason: "release_content_changed", release: file.release };
+  if (!knownDigest) await put(digestKey, file.digest);
+  const day = now().slice(0, 10), out = { ok: true, release: file.release, digest: file.digest, total: file.candidates.length, created: { IRAN: 0, ARAB: 0 }, cursor: {}, done: {}, skipped: {}, rejected_in_file: file.rejected };
   const skip = r => { out.skipped[r] = (out.skipped[r] || 0) + 1; };
   // One cursor per market and release, so a market at its limit never holds the other back and a restart resumes where it stopped.
   for (const market of ["IRAN", "ARAB"]) {
     const list = file.candidates.filter(c => c.market === market), cursorKey = `dataset_discovery:cursor:${file.release}:${market}`, dayKey = `dataset_discovery:day:${day}:${market}`;
     let cursor = Number(await kv(cursorKey) || 0); const used = Number(await kv(dayKey) || 0);
     const full = () => out.created[market] >= settings.ingest_per_run[market] || used + out.created[market] >= settings.daily_cap[market];
+    // Phase 18.5: progress is saved even when a run fails midway (finally); a record whose lead was created just before a failure is
+    // skipped on resume by its domain identity, so nothing is duplicated or lost.
+    try {
     while (cursor < list.length && !full()) {
     const c = list[cursor];
     cursor++;
@@ -160,9 +190,16 @@ export async function ingestDatasetCandidates(env, { settings = discoverySetting
     if (saved?.conflict) { skip("identity_conflict"); continue; }
     if (saved?.created) out.created[c.market]++; else skip("not_created");
     }
-    await put(cursorKey, cursor);
-    if (out.created[market]) await put(dayKey, used + out.created[market]);
-    out.cursor[market] = cursor; out.done[market] = cursor >= list.length;
+    } catch (e) {
+      // the failing record is retried next tick (cursor points at it); everything before it is kept
+      cursor = Math.max(0, cursor - 1); out.ok = false; out.error = String(e?.message || e).slice(0, 200);
+    } finally {
+      await put(cursorKey, cursor).catch(() => {});
+      if (out.created[market]) await put(dayKey, used + out.created[market]).catch(() => {});
+      out.cursor[market] = cursor; out.done[market] = cursor >= list.length;
+    }
+    if (!out.ok) break;
   }
+  if (out.ok && out.done.IRAN && out.done.ARAB && file.etag) await put("dataset_discovery:complete:" + file.etag, file.digest);
   return out;
 }
