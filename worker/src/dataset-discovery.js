@@ -55,6 +55,11 @@ export function validateCandidate(c) {
     || [...L(c.websites), ...L(c.socials)].some(u => GOOGLE_TEXT.test(String(u)))) return { ok: false, reason: "google_origin" };
   const site = L(c.websites).map(u => ({ u: String(u).trim(), h: independentWebsiteHost(u) })).find(x => x.h);
   if (!site) return { ok: false, reason: "no_own_website" };
+  // Phase 18.13: a real registrable host — at least two DNS labels, letters/digits/hyphens only, an alphabetic or punycode TLD. Pilot
+  // data held social handles typed as websites ("http://@shop_gold", "https://https//www.instagram.com/x") that parsed as hosts.
+  const labels = site.h.split(".");
+  if (labels.length < 2 || !labels.every(l => /^(?!-)[a-z0-9-]{1,63}(?<!-)$/.test(l)) || !/^(?:[a-z]{2,24}|xn--[a-z0-9-]{2,59})$/.test(labels[labels.length - 1]))
+    return { ok: false, reason: "invalid_website_host" };
   if ((market === "ARAB" && /\.ir$/i.test(site.h)) || (market === "IRAN" && /\.iq$/i.test(site.h))) return { ok: false, reason: "wrong_market_domain" };
   const url = /^https?:\/\//i.test(site.u) ? site.u : "https://" + site.u;
   try { const p = new URL(url); if (!/^https?:$/.test(p.protocol)) return { ok: false, reason: "bad_url" }; } catch { return { ok: false, reason: "bad_url" }; }

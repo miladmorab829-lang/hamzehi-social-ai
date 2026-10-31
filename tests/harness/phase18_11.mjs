@@ -11,7 +11,7 @@ const LQ=await import(pathToFileURL(path.join(SRC,"lead-qualification.js")).href
 const NC=await import(pathToFileURL(path.join(REPO,"scripts/discovery/candidates.mjs")).href);
 const EXTRACT=path.join(REPO,"scripts/discovery/extract-candidates.mjs");
 const KEY="discovery/candidates-latest.json";
-const ov=(id,o={})=>({id,name:"زرگری "+id,websites:[`https://${id}.ir/`],country:"IR",locality:"Tehran",src:["meta"],lic:["CDLA-Permissive-2.0"],confidence:0.9,...o});
+const ov=(id,o={})=>({id,name:"زرگری نگار "+id,websites:[`https://${id}.ir/`],country:"IR",locality:"Tehran",src:["meta"],lic:["CDLA-Permissive-2.0"],confidence:0.9,...o});
 const store=(doc,{raw=null}={})=>{const s={gets:0,heads:0,doc,raw};const body=()=>s.raw??JSON.stringify(s.doc),etag=()=>"e"+[...body()].reduce((h,ch)=>(h*31+ch.charCodeAt(0))>>>0,7).toString(16);
   s.get=async k=>{s.gets++;return k===KEY?{size:body().length,etag:etag(),text:async()=>body()}:null;};s.head=async k=>{s.heads++;return k===KEY?{etag:etag()}:null;};return s;};
 const S=o=>DD.discoverySettings({DATASET_DISCOVERY:"on",DISCOVERY_BUCKET:{},...o});
@@ -43,8 +43,8 @@ const run=args=>spawnSync(process.execPath,[EXTRACT,...args],{encoding:"utf8",ti
 // ---- N: deterministic normalization, malformed input, conservation, Iraq OSM, Google, cross-market duplicates
 {const rows=[ov("a1"),ov("a2",{country:"IQ",locality:"Baghdad",websites:["https://a2.iq/"]}),ov("a3",{websites:["https://maps.app.goo.gl/x"]}),ov("a4",{src:["google"]}),
    ov("a5",{websites:["https://shared.com/"]}),ov("a6",{country:"IQ",websites:["https://www.shared.com/fa"]}),ov("a7",{country:"AE"}),ov("a8",{operating_status:"permanently_closed"})];
- const osm={IRAN:[{kind:"node",id:1,tags:{shop:"jewelry",name:"طلای یک",website:"https://o1.ir/"}},null],ARAB:[{kind:"node",id:2,tags:{shop:"jewelry",website:"https://o2.iq/"}}]};
- const bad=[null,7,"x",{id:"m1",country:"IR",websites:"https://m1.ir/",src:"meta",phones:"+98 21 1"},{id:"",country:"IR",websites:["https://m2.ir/"]}];
+ const osm={IRAN:[{kind:"node",id:1,tags:{shop:"jewelry",name:"طلای یکتا",website:"https://o1.ir/"}},null],ARAB:[{kind:"node",id:2,tags:{shop:"jewelry",website:"https://o2.iq/"}}]};
+ const bad=[null,7,"x",{id:"m1",name:"طلافروشی مهتاب",country:"IR",websites:"https://m1.ir/",src:"meta",phones:"+98 21 1"},{id:"",country:"IR",websites:["https://m2.ir/"]}];
  let threw=null,doc,doc2;
  try{doc=NC.normalizeCandidates({overture:[...rows,...bad],osm},{release:"2026-11-01.0",overtureRelease:"2026-10-21.0",generatedAt:"t1"});
      doc2=NC.normalizeCandidates({overture:[...bad,...rows].reverse(),osm},{release:"2026-11-01.0",overtureRelease:"2026-10-21.0",generatedAt:"t2"});}catch(e){threw=e;}

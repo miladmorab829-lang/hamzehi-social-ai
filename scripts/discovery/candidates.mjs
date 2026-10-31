@@ -2,7 +2,7 @@
 // writes. The SAME validation as the Worker (worker/src/dataset-discovery.js) decides what is kept, so the file never carries a record
 // the Worker would refuse (Google origin, disabled source for the market, no own website, wrong-market domain, missing license).
 import fs from "node:fs";
-import { DISCOVERY_SCHEMA, DISCOVERY_SOURCES, DATASET_ATTRIBUTION, RELEASE_ID, validateCandidate, candidatesContentHash } from "../../worker/src/dataset-discovery.js";
+import { DISCOVERY_SCHEMA, DISCOVERY_SOURCES, DATASET_ATTRIBUTION, RELEASE_ID, validateCandidate, candidatesContentHash, nameTokens } from "../../worker/src/dataset-discovery.js";
 
 // Phase 18.11 (G-1/G-2): the FILE release id and the Overture SOURCE release are separate. Before, one --release value was both the
 // Overture S3 path and the file id, so a second file from the same Overture release (new OSM extract, other limits) could not get the
@@ -30,8 +30,11 @@ export async function sealCandidateFile(doc) {
 // contributors (Meta, Microsoft, PinMeTo, BrightQuery, …) CDLA-Permissive-2.0.
 export function overtureLicense(datasets = [], explicit = []) {
   const e = explicit.find(Boolean); if (e && /cdla|apache|cc0/i.test(e)) return /apache/i.test(e) ? "Apache-2.0" : /cc0/i.test(e) ? "CC0-1.0" : "CDLA-Permissive-2.0";
-  const d = datasets.map(x => String(x).toLowerCase());
-  return d.length && d.every(x => x.includes("foursquare")) ? "Apache-2.0" : d.length && d.every(x => x.includes("alltheplaces")) ? "CC0-1.0" : "CDLA-Permissive-2.0";
+  // Phase 18.13: Overture lists itself ("Overture") next to the real contributor, e.g. ["Foursquare","Overture"]. That pseudo-source is
+  // ignored; before, every Foursquare record was labelled CDLA and lost the Apache-2.0 / Foursquare-notice obligation. A record that
+  // mixes Foursquare with other contributors carries Apache-2.0, the license with the stricter notice duty.
+  const d = datasets.map(x => String(x).toLowerCase()).filter(x => x && x !== "overture");
+  return d.length && d.some(x => x.includes("foursquare")) ? "Apache-2.0" : d.length && d.every(x => x.includes("alltheplaces")) ? "CC0-1.0" : "CDLA-Permissive-2.0";
 }
 const marketOfCountry = cc => cc === "IR" ? "IRAN" : cc === "IQ" ? "ARAB" : null;
 const tagsOf = t => Array.isArray(t) ? Object.fromEntries(t.map(x => [x.key, x.value])) : (t || {});
@@ -70,6 +73,9 @@ export function normalizeCandidates({ overture = [], osm = {} } = {}, { release,
   const seen = new Set(), per = { IRAN: 0, ARAB: 0 }, candidates = [];
   for (const c of raw) {
     const v = validateCandidate(c); if (!v.ok) { drop(v.reason); continue; }
+    // Phase 18.13: a name made only of trade words / city names ("م گالری", "H&Y Jewellery") can never be confirmed by the business's
+    // own website, so the lead could never verify its identity; it is not shipped (counted as ambiguous_name).
+    if (!nameTokens(v.candidate.name).length) { drop("ambiguous_name"); continue; }
     if (seen.has(v.candidate.host)) { drop("duplicate_host"); continue; }
     if (per[c.market] >= maxPerMarket) { drop("market_limit"); continue; }
     seen.add(v.candidate.host); per[c.market]++;
