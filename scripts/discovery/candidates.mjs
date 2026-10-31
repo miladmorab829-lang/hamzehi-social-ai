@@ -1,7 +1,30 @@
 // Phase 18.4 — pure normalizer: raw Overture / OSM rows → one candidate file (schema hamzehi.discovery.candidates/1). No network, no
 // writes. The SAME validation as the Worker (worker/src/dataset-discovery.js) decides what is kept, so the file never carries a record
 // the Worker would refuse (Google origin, disabled source for the market, no own website, wrong-market domain, missing license).
-import { DISCOVERY_SCHEMA, DISCOVERY_SOURCES, DATASET_ATTRIBUTION, validateCandidate } from "../../worker/src/dataset-discovery.js";
+import fs from "node:fs";
+import { DISCOVERY_SCHEMA, DISCOVERY_SOURCES, DATASET_ATTRIBUTION, RELEASE_ID, validateCandidate, candidatesContentHash } from "../../worker/src/dataset-discovery.js";
+
+// Phase 18.11 (G-1/G-2): the FILE release id and the Overture SOURCE release are separate. Before, one --release value was both the
+// Overture S3 path and the file id, so a second file from the same Overture release (new OSM extract, other limits) could not get the
+// new id the Worker requires (2026-10-21.1 does not exist on S3). Both ids now use the Worker's own RELEASE_ID rule (N ≤ 3 digits).
+export function extractionPlan({ release, overtureRelease } = {}) {
+  const r = String(release || ""), o = String(overtureRelease || release || "");
+  if (!RELEASE_ID.test(r)) return { ok: false, error: "--release must be YYYY-MM-DD.N (N: 1-3 digits), a NEW id for every new file" };
+  if (!RELEASE_ID.test(o)) return { ok: false, error: "--overture-release must be an Overture release id YYYY-MM-DD.N" };
+  return { ok: true, release: r, overtureRelease: o,
+    overtureS3: `s3://overturemaps-us-west-2/release/${o}/theme=places/type=place/*`,
+    rawOvertureFile: `raw-overture-${o}.json`, candidateFile: `candidates-${r}.json` };
+}
+// Crash-safe write: a reader (or --resume) sees either the old file or the complete new one, never a partial one.
+export function writeFileAtomic(file, data) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, data); fs.renameSync(tmp, file);
+}
+// Integrity: SHA-256 of the exact serialized candidate list; the Worker refuses a file whose list no longer matches (corruption,
+// truncation, hand edits). Older files without the field are still accepted (recorded as integrity "unsigned").
+export async function sealCandidateFile(doc) {
+  return { ...doc, content_sha256: await candidatesContentHash(doc.candidates) };
+}
 
 // Overture per-source licenses (docs.overturemaps.org/attribution, 2026): Foursquare Apache-2.0, AllThePlaces CC0-1.0, all other
 // contributors (Meta, Microsoft, PinMeTo, BrightQuery, …) CDLA-Permissive-2.0.
@@ -15,18 +38,22 @@ const tagsOf = t => Array.isArray(t) ? Object.fromEntries(t.map(x => [x.key, x.v
 
 // overture: rows from the extractor query (id, name, websites, socials, emails, phones, country, locality, region, confidence,
 // operating_status, src[] datasets, lic[] licenses, tax/basic_category); osm: {IRAN:[{kind,id,tags}]} (IRAQ OSM is disabled).
-export function normalizeCandidates({ overture = [], osm = {} } = {}, { release, generatedAt = new Date().toISOString(), maxPerMarket = 500, minConfidence = 0 } = {}) {
+export function normalizeCandidates({ overture = [], osm = {} } = {}, { release, overtureRelease = null, generatedAt = new Date().toISOString(), maxPerMarket = 500, minConfidence = 0 } = {}) {
   const raw = [], dropped = {}, drop = r => { dropped[r] = (dropped[r] || 0) + 1; };
-  for (const r of overture) {
+  // Phase 18.11: malformed input is counted, never thrown — a null row or a scalar where a list is expected no longer aborts the run.
+  const list = v => Array.isArray(v) ? v.filter(x => x != null && x !== "") : v != null && v !== "" ? [v] : [];
+  for (const r of Array.isArray(overture) ? overture : []) {
+    if (!r || typeof r !== "object") { drop("invalid_row"); continue; }
     const market = marketOfCountry(r.country); if (!market) { drop("no_target_country"); continue; }
     if (/closed/i.test(String(r.operating_status || ""))) { drop("closed"); continue; }
     if (Number(r.confidence || 0) < minConfidence) { drop("low_confidence"); continue; }
-    raw.push({ market, dataset: "overture", record_id: String(r.id || ""), license: overtureLicense(r.src || [], r.lic || []), source_datasets: r.src || [],
-      name: r.name || "", city: r.locality || r.region || null, websites: r.websites || [], socials: r.socials || [], emails: r.emails || [], phones: r.phones || [],
+    raw.push({ market, dataset: "overture", record_id: String(r.id || ""), license: overtureLicense(list(r.src), list(r.lic)), source_datasets: list(r.src),
+      name: r.name || "", city: r.locality || r.region || null, websites: list(r.websites), socials: list(r.socials), emails: list(r.emails), phones: list(r.phones),
       category: r.tax || r.basic_category || null, confidence: r.confidence ?? null });
   }
-  for (const market of Object.keys(osm)) for (const r of osm[market] || []) {
+  for (const market of Object.keys(osm || {})) for (const r of Array.isArray(osm[market]) ? osm[market] : []) {
     if (!DISCOVERY_SOURCES[market]?.includes("osm")) { drop("source_disabled_for_market"); continue; }
+    if (!r || typeof r !== "object") { drop("invalid_row"); continue; }
     const t = tagsOf(r.tags), g = k => t[k] || "";
     raw.push({ market, dataset: "osm", record_id: `${r.kind}/${r.id}`, license: "ODbL-1.0", source_datasets: ["OpenStreetMap"],
       name: g("name") || g("name:fa") || g("name:ar") || g("name:en"), city: g("addr:city") || null,
@@ -35,6 +62,11 @@ export function normalizeCandidates({ overture = [], osm = {} } = {}, { release,
       category: g("shop") || g("craft") || null, confidence: null });
   }
   // Overture first, then OSM; one record per own-site host; bounded per market.
+  // Phase 18.11: a fixed order BEFORE de-duplication and the per-market limit (dataset, then market, then record id). DuckDB returns
+  // rows in no guaranteed order, so before this the record kept for a shared host — and which records fell under the limit — could
+  // change between two runs of the same release.
+  const rank = c => (c.dataset === "overture" ? "0" : "1") + "|" + c.market + "|" + c.record_id;
+  raw.sort((a, b) => rank(a) < rank(b) ? -1 : rank(a) > rank(b) ? 1 : 0);
   const seen = new Set(), per = { IRAN: 0, ARAB: 0 }, candidates = [];
   for (const c of raw) {
     const v = validateCandidate(c); if (!v.ok) { drop(v.reason); continue; }
@@ -45,7 +77,8 @@ export function normalizeCandidates({ overture = [], osm = {} } = {}, { release,
   }
   // Phase 18.5: deterministic order (market, dataset, record id) — the same order the Worker uses for its cursors.
   const k = c => c.market + "|" + c.dataset + "|" + c.record_id; candidates.sort((a, b) => k(a) < k(b) ? -1 : k(a) > k(b) ? 1 : 0);
-  return { schema: DISCOVERY_SCHEMA, release, generated_at: generatedAt, sources_enabled: DISCOVERY_SOURCES, attribution: DATASET_ATTRIBUTION,
+  return { schema: DISCOVERY_SCHEMA, release, generated_at: generatedAt, source_releases: { overture: overtureRelease || release },
+    sources_enabled: DISCOVERY_SOURCES, attribution: DATASET_ATTRIBUTION,
     licenses: { overture: "CDLA-Permissive-2.0 / Apache-2.0 (Foursquare) / CC0-1.0 (AllThePlaces) per record", osm: "ODbL-1.0 (internal use only; never publish a derived database)" },
     counts: { input: raw.length, kept: candidates.length, per_market: per, dropped }, candidates };
 }

@@ -13,7 +13,7 @@ import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js"
 import { adsDraftSettings, buildAdsDraftPrompt, adsDraftRequestBody, adsDraftUsage, adsDraftOutcome, emptyAdsDraftStats, addAdsDraftUsage, reserveAdsDraft, adsDraftsToday } from "./ads-draft-guard.js";
 import { runWatchdog } from "./agent-watchdog.js";
 import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, googleOriginLead, independentContact, leadDuplicateMap, independentWebsiteHost } from "./lead-qualification.js";
-import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite } from "./dataset-discovery.js";
+import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite, latinDigits } from "./dataset-discovery.js";
 import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
@@ -11755,7 +11755,8 @@ function normalizeLeadDomain(value) {
 }
 
 function normalizeLeadPhone(value, country = "") {
-  const raw = String(value || "").trim();
+  // Phase 18.11: Persian/Arabic-Indic digits were stripped by \D (ASCII-only), so a number written in local digits was lost.
+  const raw = latinDigits(value).trim();
   if (!raw) return null;
   const explicitPlus = raw.startsWith("+");
   let digits = raw.replace(/\D/g, "");
@@ -12028,7 +12029,8 @@ async function storeLeadContacts(env, leadId, contacts = []) {
 }
 
 function extractContactsFromHtml(html, pageUrl, country = "", source = "web") {
-  const text = String(html || "");
+  // Phase 18.11: local digits → ASCII first, so "۰۹۱۲…" (Iran) and "٠٧٧٠…" (Iraq) on a page are found like Latin-digit numbers.
+  const text = latinDigits(html);
   const out = [];
   const add = (contact_type, raw_value) => out.push({ contact_type, raw_value, country, source, evidence_url: pageUrl, evidence_status:'page_extracted' });
   for (const match of text.matchAll(/href=["']([^"']+)["']/gi)) {

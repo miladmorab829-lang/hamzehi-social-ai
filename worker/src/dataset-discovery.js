@@ -40,6 +40,8 @@ export function discoverySettings(env = {}) {
 // One candidate record → normalized candidate, or a rejection reason. Pure; shared with the local extractor (scripts/discovery).
 export function validateCandidate(c) {
   if (!c || typeof c !== "object") return { ok: false, reason: "invalid" };
+  // Phase 18.11: list fields are read defensively (a scalar or null in a hand-made file is refused or ignored, never thrown).
+  const L = v => Array.isArray(v) ? v : [];
   const market = c.market === "IRAN" || c.market === "ARAB" ? c.market : null;
   if (!market) return { ok: false, reason: "market_not_allowed" };
   const dataset = c.dataset === "overture" || c.dataset === "osm" ? c.dataset : null;
@@ -49,17 +51,17 @@ export function validateCandidate(c) {
   if (!c.license || !DATASET_LICENSES[dataset].includes(c.license)) return { ok: false, reason: "missing_or_unknown_license" };
   // Google isolation: no place id, no Google provider/dataset, no Google URL anywhere in the record.
   // Phase 18.5: a Google place-ID string anywhere in the record (ChIJ…/GhIJ…/EhIJ… forms) is Google origin too.
-  if (c.place_id || /^google/i.test(String(c.provider || "")) || (c.source_datasets || []).some(s => /google/i.test(String(s))) || /\b[CGE]hIJ[\w-]{10,}/.test(JSON.stringify(c))
-    || [...(c.websites || []), ...(c.socials || [])].some(u => GOOGLE_TEXT.test(String(u)))) return { ok: false, reason: "google_origin" };
-  const site = (c.websites || []).map(u => ({ u: String(u).trim(), h: independentWebsiteHost(u) })).find(x => x.h);
+  if (c.place_id || /^google/i.test(String(c.provider || "")) || L(c.source_datasets).some(s => /google/i.test(String(s))) || /\b[CGE]hIJ[\w-]{10,}/.test(JSON.stringify(c))
+    || [...L(c.websites), ...L(c.socials)].some(u => GOOGLE_TEXT.test(String(u)))) return { ok: false, reason: "google_origin" };
+  const site = L(c.websites).map(u => ({ u: String(u).trim(), h: independentWebsiteHost(u) })).find(x => x.h);
   if (!site) return { ok: false, reason: "no_own_website" };
   if ((market === "ARAB" && /\.ir$/i.test(site.h)) || (market === "IRAN" && /\.iq$/i.test(site.h))) return { ok: false, reason: "wrong_market_domain" };
   const url = /^https?:\/\//i.test(site.u) ? site.u : "https://" + site.u;
   try { const p = new URL(url); if (!/^https?:$/.test(p.protocol)) return { ok: false, reason: "bad_url" }; } catch { return { ok: false, reason: "bad_url" }; }
   const s = v => String(v || "").replace(/\s+/g, " ").trim();
-  return { ok: true, candidate: { market, dataset, record_id: s(c.record_id).slice(0, 120), license: c.license, source_datasets: (c.source_datasets || []).map(x => s(x).slice(0, 40)).slice(0, 8),
+  return { ok: true, candidate: { market, dataset, record_id: s(c.record_id).slice(0, 120), license: c.license, source_datasets: L(c.source_datasets).map(x => s(x).slice(0, 40)).slice(0, 8),
     name: s(c.name).slice(0, 160), city: s(c.city).slice(0, 80) || null, url: url.slice(0, 300), host: site.h, category: s(c.category).slice(0, 60) || null,
-    phones: (c.phones || []).map(s).filter(Boolean).slice(0, 5), socials: (c.socials || []).map(s).filter(Boolean).slice(0, 5), emails: (c.emails || []).map(s).filter(Boolean).slice(0, 5),
+    phones: L(c.phones).map(s).filter(Boolean).slice(0, 5), socials: L(c.socials).map(s).filter(Boolean).slice(0, 5), emails: L(c.emails).map(s).filter(Boolean).slice(0, 5),
     confidence: Number.isFinite(Number(c.confidence)) ? Number(c.confidence) : null } };
 }
 
@@ -81,11 +83,15 @@ export function validateCandidateFile(doc, settings = discoverySettings({})) {
   candidates.sort((a, b) => (a.market + "|" + a.dataset + "|" + a.record_id) < (b.market + "|" + b.dataset + "|" + b.record_id) ? -1 : 1);
   return { ok: true, release: doc.release, candidates, rejected };
 }
+const sha256Hex = async text => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2, "0")).join("");
 // SHA-256 of the canonical (sorted, validated) candidate list — identifies the CONTENT of a release.
 export async function candidateDigest(candidates) {
-  const bytes = new TextEncoder().encode(JSON.stringify(candidates.map(c => [c.market, c.dataset, c.record_id, c.url, c.name, c.city])));
-  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(b => b.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(JSON.stringify(candidates.map(c => [c.market, c.dataset, c.record_id, c.url, c.name, c.city])));
 }
+// Phase 18.11: file integrity seal — SHA-256 of the serialized raw candidate list, written by the extractor (content_sha256).
+export async function candidatesContentHash(candidates) { return sha256Hex(JSON.stringify(candidates || [])); }
+// Persian (۰-۹) and Arabic-Indic (٠-٩) digits → ASCII, so Iranian and Iraqi pages are read the same way as Latin-digit pages.
+export const latinDigits = s => String(s || "").replace(/[۰-۹]/g, d => "۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d));
 
 // ---- business-name consistency (dataset name vs. the website itself)
 const fold = s => adsNormalizeText(String(s || "").normalize("NFKD").replace(/[̀-ͯ]/g, "")).replace(/[ئؤ]/g, "و").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
@@ -113,12 +119,14 @@ export function resolveMarketCity(value, market) {
 }
 const OTHER_MARKET_PHONE = { IRAN: /(\+|00)964[\s-]?7\d{2}|(^|\D)07[3-9]\d[\s-]?\d{3}[\s-]?\d{4}/, ARAB: /(\+|00)98[\s-]?(9\d{2}|[1-8]\d)/ };
 const OWN_MARKET_PHONE = { IRAN: /(\+|00)98[\s-]?(9\d{2}|[1-8]\d)|(^|\D)0(9\d{2}|[1-8]\d)[\s-]?\d{3,4}[\s-]?\d{4}|[۰-۹]{10,}/, ARAB: /(\+|00)964[\s-]?7\d{2}|(^|\D)07[3-9]\d[\s-]?\d{3}[\s-]?\d{4}/ };
-const JEWELRY = /طلا|زرگر|جواهر|مجوهرات|ذهب|صياغ|صائغ|مصوغات|سبائك|gold|jewel|diamond|الماس|ألماس|سکه/i;
+// Phase 18.11: + صاغة (Iraqi goldsmiths) and زیورآلات/زيورآلات (Persian jewellery), both common on own-site titles.
+const JEWELRY = /طلا|زرگر|جواهر|مجوهرات|ذهب|صياغ|صائغ|صاغة|مصوغات|سبائك|زیورآلات|زيورآلات|gold|jewel|diamond|الماس|ألماس|سکه/i;
 
 // The website check for one dataset lead. Input: the lead's notes and the fetched page; output: notes patch + optional rejection.
 export function verifyDatasetSite(meta = {}, page = {}, at = new Date().toISOString()) {
   const market = meta.target_market === "ARAB" ? "ARAB" : "IRAN", claims = meta.dataset_claims || {};
-  const title = String(page.title || "").replace(/\s+/g, " ").trim().slice(0, 160), text = String(page.text || "").replace(/\s+/g, " ").trim();
+  // Phase 18.11: page digits normalized first — Iraqi sites often write 07xx numbers in Arabic-Indic digits, Iranian ones in Persian.
+  const title = String(page.title || "").replace(/\s+/g, " ").trim().slice(0, 160), text = latinDigits(page.text).replace(/\s+/g, " ").trim();
   // Phase 18.5 provenance: the exact page that served as identity evidence, and the basis of the decision.
   const base = { checked_at: at, final_host: page.host || null, evidence_url: page.url || null, identity_basis: "own_website_page" };
   if (informationSite({ name: title })) return { rejected_reason: "information_site", patch: { dataset_verification: { ...base, result: "information_site" } } };
@@ -145,9 +153,21 @@ export async function readCandidateFile(store, settings) {
   let raw; try { raw = await obj.text(); } catch { return { ok: false, reason: "store_unavailable" }; }
   if (raw.length > settings.max_file_bytes) return { ok: false, reason: "file_too_large" };
   let doc; try { doc = JSON.parse(raw); } catch { return { ok: false, reason: "invalid_json" }; }
+  // Phase 18.11: a sealed file (content_sha256 from the extractor) must still match its seal — corruption, truncation or a hand edit
+  // is refused before any record is read. Unsealed files (Phase 18.3 pilot format) remain accepted and are reported as such.
+  let integrity = "unsealed";
+  if (doc && typeof doc === "object" && doc.content_sha256 !== undefined) {
+    if (typeof doc.content_sha256 !== "string" || !Array.isArray(doc.candidates) || await candidatesContentHash(doc.candidates) !== doc.content_sha256.toLowerCase())
+      return { ok: false, reason: "content_hash_mismatch" };
+    integrity = "sealed";
+  }
   const v = validateCandidateFile(doc, settings); if (!v.ok) return v;
-  return { ...v, etag: obj.etag || obj.httpEtag || null, digest: await candidateDigest(v.candidates) };
+  return { ...v, integrity, etag: obj.etag || obj.httpEtag || null, digest: await candidateDigest(v.candidates) };
 }
+// Phase 18.11 cost: the parsed, validated file is kept per isolate (one entry, keyed by object key + etag). While a release is still
+// being imported (3 per market per tick), later ticks on a warm isolate reuse it instead of downloading and parsing up to 5 MB again.
+let PARSED_FILE = null;
+export function resetCandidateFileCache() { PARSED_FILE = null; }
 
 // Bounded, resumable ingestion: a cursor per release and a per-market daily cap in system_kv. Each new candidate becomes ONE new lead
 // (stage discovered) — a domain already known to any lead is skipped, never merged. helpers: {upsert, identities} from index.js.
@@ -158,14 +178,17 @@ export async function ingestDatasetCandidates(env, { settings = discoverySetting
   const kv = async k => (await env.DB.prepare("SELECT value FROM system_kv WHERE key=?").bind(k).first())?.value;
   const put = (k, v) => env.DB.prepare("INSERT INTO system_kv(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(k, String(v), now()).run();
   // Phase 18.5 cost: once a file is fully ingested, later ticks only HEAD it (no download/parse) until its etag changes.
-  if (typeof store.head === "function") { try { const h = await store.head(settings.key); const tag = h?.etag || h?.httpEtag; if (tag && await kv("dataset_discovery:complete:" + tag)) return { ok: true, skipped: true, reason: "complete" }; } catch {} }
-  const file = await readCandidateFile(store, settings); if (!file.ok) return { ok: false, reason: file.reason };
+  let headTag = null;
+  if (typeof store.head === "function") { try { const h = await store.head(settings.key); headTag = h?.etag || h?.httpEtag || null; if (headTag && await kv("dataset_discovery:complete:" + headTag)) { PARSED_FILE = null; return { ok: true, skipped: true, reason: "complete" }; } } catch {} }
+  const cached = headTag && PARSED_FILE && PARSED_FILE.key === settings.key && PARSED_FILE.etag === headTag && PARSED_FILE.max === settings.max_candidates ? PARSED_FILE.file : null;
+  const file = cached || await readCandidateFile(store, settings); if (!file.ok) return { ok: false, reason: file.reason };
+  if (!cached) PARSED_FILE = file.etag ? { key: settings.key, etag: file.etag, max: settings.max_candidates, file } : null;
   // Phase 18.5 integrity: a release id is bound to its content. A different file under an already-used release id is refused (its cursor
   // positions would point at other records); a new extraction must use a new release id.
   const digestKey = "dataset_discovery:digest:" + file.release, knownDigest = await kv(digestKey);
   if (knownDigest && knownDigest !== file.digest) return { ok: false, reason: "release_content_changed", release: file.release };
   if (!knownDigest) await put(digestKey, file.digest);
-  const day = now().slice(0, 10), out = { ok: true, release: file.release, digest: file.digest, total: file.candidates.length, created: { IRAN: 0, ARAB: 0 }, cursor: {}, done: {}, skipped: {}, rejected_in_file: file.rejected };
+  const day = now().slice(0, 10), out = { ok: true, release: file.release, digest: file.digest, integrity: file.integrity, cached: !!cached, total: file.candidates.length, created: { IRAN: 0, ARAB: 0 }, cursor: {}, done: {}, skipped: {}, rejected_in_file: file.rejected };
   const skip = r => { out.skipped[r] = (out.skipped[r] || 0) + 1; };
   // One cursor per market and release, so a market at its limit never holds the other back and a restart resumes where it stopped.
   for (const market of ["IRAN", "ARAB"]) {
@@ -200,6 +223,6 @@ export async function ingestDatasetCandidates(env, { settings = discoverySetting
     }
     if (!out.ok) break;
   }
-  if (out.ok && out.done.IRAN && out.done.ARAB && file.etag) await put("dataset_discovery:complete:" + file.etag, file.digest);
+  if (out.ok && out.done.IRAN && out.done.ARAB && file.etag) { await put("dataset_discovery:complete:" + file.etag, file.digest); PARSED_FILE = null; }
   return out;
 }
