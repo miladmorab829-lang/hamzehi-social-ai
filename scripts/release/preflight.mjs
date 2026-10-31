@@ -10,7 +10,9 @@ import fs from "node:fs";import path from "node:path";import {spawnSync} from "n
 const REPO=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../..");
 export const WORKER_NAME="hamzehi-social-ai";
 // Secret binding names Production has carried since Phase 14 (names only; values are never read).
-export const REQUIRED_SECRETS=Object.freeze(["ADMIN_TOKEN","ANTHROPIC_API_KEY","GOOGLE_PLACES_API_KEY","KLING_API_KEY","OPENAI_API_KEY","SHOTSTACK_API_KEY","TELEGRAM_BOT_TOKEN"]);
+// TELEGRAM_WEBHOOK_SECRET_TOKEN: Phase 17.1 rotation (8c3de836, 2026-10-31); a version without it would fall back to the
+// legacy D1 secret that Telegram no longer sends, so it is required, not optional.
+export const REQUIRED_SECRETS=Object.freeze(["ADMIN_TOKEN","ANTHROPIC_API_KEY","GOOGLE_PLACES_API_KEY","KLING_API_KEY","OPENAI_API_KEY","SHOTSTACK_API_KEY","TELEGRAM_BOT_TOKEN","TELEGRAM_WEBHOOK_SECRET_TOKEN"]);
 
 // Minimal reader for the parts of worker/wrangler.toml this check needs: [vars] strings, the D1 id, the R2 bucket, the AI binding.
 export function expectedFromToml(text){

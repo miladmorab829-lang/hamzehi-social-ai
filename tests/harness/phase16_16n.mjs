@@ -28,7 +28,7 @@ const V=(over={})=>{const vars={...exp.vars,...(over.vars||{})};for(const k of o
     ...Object.entries(vars).map(([name,text])=>({name,type:"plain_text",text})),...PF.REQUIRED_SECRETS.filter(s=>s!==over.dropSecret).map(name=>({name,type:"secret_text"})),...(over.extra||[])];
   return {id:"00000000-0000-4000-8000-000000000000",annotations:over.untagged?{}:{"workers/tag":over.tag||"d7962d5-orch-on"},resources:{bindings:b}};};
 const good=PF.checkVersion(V(),exp);
-ok("N5 a tagged version with the full Production configuration (22 bindings) passes",good.ok&&good.summary.bindings===22,good);
+ok("N5 a tagged version with the full Production configuration (23 bindings since the 17.1 webhook secret) passes",good.ok&&good.summary.bindings===23,good);
 const auto=PF.checkVersion(V({untagged:true,dropVars:["AUTONOMY_ORCHESTRATOR"]}),exp);
 ok("N6 an automatic-build-shaped version (untagged, no AUTONOMY_ORCHESTRATOR, 19 bindings) is refused",!auto.ok&&auto.failures.some(f=>/AUTONOMY_ORCHESTRATOR/.test(f))&&auto.failures.some(f=>/no tag/.test(f)),auto.failures);
 ok("N7 flag present but \"off\" is refused",!PF.checkVersion(V({vars:{AUTONOMY_ORCHESTRATOR:"off"}}),exp).ok);
@@ -38,6 +38,10 @@ ok("N10 a missing secret binding name is refused",PF.checkVersion(V({dropSecret:
 ok("N11 an unexpected extra binding is refused",PF.checkVersion(V({extra:[{name:"HAMZEHI_ENVIRONMENT",type:"plain_text",text:"staging"}]}),exp).failures.some(f=>/unexpected binding HAMZEHI_ENVIRONMENT/.test(f)));
 ok("N12 a changed var value is refused",PF.checkVersion(V({vars:{SALES_AI_PROVIDER:"openai"}}),exp).failures.some(f=>/SALES_AI_PROVIDER/.test(f)));
 ok("N13 a tag without the -orch-on suffix is refused",PF.checkVersion(V({tag:"d7962d5"}),exp).failures.some(f=>/tag/.test(f)));
+{const pre=PF.checkVersion(V({dropSecret:"TELEGRAM_WEBHOOK_SECRET_TOKEN"}),exp);
+ ok("N24 a pre-rotation version (22 bindings, no TELEGRAM_WEBHOOK_SECRET_TOKEN) is refused",!pre.ok&&pre.summary.bindings===22&&pre.failures.length===1&&/secret binding TELEGRAM_WEBHOOK_SECRET_TOKEN missing/.test(pre.failures[0]),pre.failures);
+ const wrongType=PF.checkVersion(V({dropSecret:"TELEGRAM_WEBHOOK_SECRET_TOKEN",extra:[{name:"TELEGRAM_WEBHOOK_SECRET_TOKEN",type:"plain_text",text:"x"}]}),exp);
+ ok("N25 TELEGRAM_WEBHOOK_SECRET_TOKEN as a plain var instead of a secret is refused",!wrongType.ok&&wrongType.failures.some(f=>/TELEGRAM_WEBHOOK_SECRET_TOKEN/.test(f)),wrongType.failures);}
 
 // ---- (3) Watchdog detection (warning only) and autonomy left untouched
 {const W=await makeWorld({aiBrain:"off"});W.d1.db.exec(OPS_SQL);
