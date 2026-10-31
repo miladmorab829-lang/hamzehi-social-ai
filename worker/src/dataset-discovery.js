@@ -26,12 +26,16 @@ const GOOGLE_TEXT = /google|goo\.gl|g\.page|googleusercontent|maps\.app/i;
 const clampInt = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.floor(n))) : d; };
 
 export function discoverySettings(env = {}) {
+  const ingest_per_run = { IRAN: clampInt(env.DATASET_DISCOVERY_IRAN_PER_RUN, 3, 0, 20), ARAB: clampInt(env.DATASET_DISCOVERY_ARAB_PER_RUN, 3, 0, 20) };
+  const daily_cap = { IRAN: clampInt(env.DATASET_DISCOVERY_IRAN_DAILY_CAP, 40, 0, 200), ARAB: clampInt(env.DATASET_DISCOVERY_ARAB_DAILY_CAP, 40, 0, 200) };
   return {
     enabled: env.DATASET_DISCOVERY === "on" && !!env.DISCOVERY_BUCKET,
     flag: env.DATASET_DISCOVERY === "on", store_bound: !!env.DISCOVERY_BUCKET,
     key: String(env.DATASET_DISCOVERY_KEY || "discovery/candidates-latest.json").slice(0, 200),
-    ingest_per_run: { IRAN: clampInt(env.DATASET_DISCOVERY_IRAN_PER_RUN, 3, 0, 20), ARAB: clampInt(env.DATASET_DISCOVERY_ARAB_PER_RUN, 3, 0, 20) },
-    daily_cap: { IRAN: clampInt(env.DATASET_DISCOVERY_IRAN_DAILY_CAP, 40, 0, 200), ARAB: clampInt(env.DATASET_DISCOVERY_ARAB_DAILY_CAP, 40, 0, 200) },
+    ingest_per_run, daily_cap,
+    // Phase 18.17: a market with a per-run OR daily limit of 0 is DISABLED as a whole — no imports AND no website checks of its
+    // already-imported dataset leads (e.g. switching to Iraq-only after Iran leads exist stops all fetching of Iranian sites).
+    markets: { IRAN: ingest_per_run.IRAN > 0 && daily_cap.IRAN > 0, ARAB: ingest_per_run.ARAB > 0 && daily_cap.ARAB > 0 },
     verify_per_run: clampInt(env.DATASET_DISCOVERY_VERIFY_PER_RUN, 2, 1, 6),
     max_file_bytes: 5_000_000, max_candidates: 5000, fail_limit: 2
   };

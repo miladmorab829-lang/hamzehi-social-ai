@@ -12434,7 +12434,7 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
 // Bounded, free re-check of a business's OWN website for published contacts (robots.txt respected; at most `limit` leads per run, each
 // re-checked at most every 14 days). Directories, marketplaces, Google content and Places-only leads are never fetched.
 async function enrichOwnSiteContacts(env,{limit=2}={}){
-  const since=new Date(Date.now()-14*86400e3).toISOString(),out={checked:0,stored:0,skipped_robots:0};
+  const since=new Date(Date.now()-14*86400e3).toISOString(),out={checked:0,stored:0,skipped_robots:0},dsMarkets=discoverySettings(env).markets;
   // Phase 18.5: only rows that can ever be fetched are read (never Google-origin, a URL present, not excluded), never-checked ones first —
   // so ~300 Google rows refreshed by every Places run can no longer push own-site and dataset candidates out of the window.
   const rows=(await env.DB.prepare("SELECT id,name,notes FROM leads WHERE stage NOT IN ('rejected','archived','customer','converted') AND json_valid(notes)"
@@ -12448,6 +12448,8 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
     const m=parseLeadNotes(r),dsPending=m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result!=="verified_site"&&!!independentWebsiteHost(m.url);
     // Phase 18.5: switching DATASET_DISCOVERY off makes the whole pipeline inert at once — dataset leads are not fetched either.
     if(m.provider==="dataset"&&(m.rejected_reason||env.DATASET_DISCOVERY!=="on"))continue;
+    // Phase 18.17: a market disabled by its limits (per-run or daily = 0) gets no website checks either (Iraq-only mode).
+    if(m.provider==="dataset"&&!dsMarkets[m.target_market==="ARAB"?"ARAB":"IRAN"])continue;
     if(!dsPending&&!ownSiteCandidate(m,r))continue;
     if(m.contact_enrichment_checked_at&&m.contact_enrichment_checked_at>=since)continue;
     let has=null;try{has=await env.DB.prepare("SELECT 1 FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram') AND evidence_status IN ('page_extracted','owner_confirmed') LIMIT 1").bind(r.id).first();}catch{}
