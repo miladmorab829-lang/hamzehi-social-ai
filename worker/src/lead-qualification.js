@@ -7,6 +7,8 @@
 //    VERIFIED when that site also carries a local signal (.ir/.iq domain or a local phone on the page) or a contact extracted from the
 //    SAME domain, or when the owner confirmed it himself.
 //  - Contact FOUND = a reachable channel extracted from a web page; VERIFIED = extracted from the business's own domain, or owner-confirmed.
+//  - Phase 18.1: price/news information sites and later copies of a known own-site identity are excluded automatically; a lead with no
+//    market takes the market of its own orders/quotes; contactability is never marketing permission; no routine step needs the owner.
 //  - Category is relevance, not demand. Packaging fit comes only from wording on the business's own page; commercial intent only from
 //    real activity (replies, quote requests, quotes, orders) or owner-recorded demand. Nothing is guessed.
 import { leadMarketOf } from "./ads-markets.js";
@@ -31,6 +33,14 @@ const PACKAGING_SELLER=/جعبه\s*سازی|تولید جعبه|ساخت جعب�
 const NOT_OWN_SITE=/(^|\.)(divar|sheypoor|torob|digikala|basalam|emalls|okala|blogfa|blogsky|persianblog|wixsite|myshopify|instagram|facebook|linkedin|youtube|opensooq|dubizzle|yellowpages|olx|alibaba|amazon|t\.me|wa\.me|wikipedia|linktr\.ee|wordpress|blogspot|business\.site|tiktok|x\.com|twitter|telegram\.me|pinterest|snapchat|threads|github\.io|pages\.dev|netlify\.app|vercel\.app)\./i;
 // Every Google Places provider variant (google_places, google_places_ids, …) is Google-originated, never independent.
 const GOOGLE_PROVIDER=/^google_places/i;
+// Phase 18.1: a gold/metal price or news page (rate ticker) is an information site, not a jewelry seller. Decided on the page title,
+// so a shop that merely shows a price widget is not affected; a title with a shop word ("گالری", "مجوهرات", "shop", …) is never one.
+const INFORMATION_SITE=/سعر\s*(?:ال)?ذهب|[أا]سعار\s*(?:ال)?(?:ذهب|معادن)|قیمت\s*(?:لحظه\s*‌?\s*ای\s*)?(?:طلا|سکه)|نرخ\s*(?:طلا|سکه)|gold\s*(?:price|rate)s?|price\s*of\s*gold|live\s*gold/i;
+// "محل" (shop) only as a whole word: it is also inside "المحلية" ("local", as in "local currencies" on rate tickers).
+const SHOP_TITLE=/طلافروشی|زرگری|جواهری|جواهرفروشی|گالری|فروشگاه|تولیدی|کارگاه|مجوهرات|صياغة|صائغ|(?<![؀-ۿ])محل(?![؀-ۿ])|ورشة|معرض|jewell?ery|jewell?er|goldsmith|boutique|shop|store/i;
+// Phase 18.1: another country's domain is not attributed to an Ads target market from the run alone (wrong-market record).
+const FOREIGN_CC=/\.(ae|sa|eg|om|kw|qa|bh|jo|lb|sy|ye|tr|af|pk|az|am|ma|dz|tn|ly|sd)$/i;
+export function informationSite(lead={},meta={}){const t=String(lead.name||meta.title||"");return INFORMATION_SITE.test(t)&&!SHOP_TITLE.test(t);}
 const hostOf=v=>{try{return new URL(String(v||"")).hostname.toLowerCase().replace(/^www\./,"");}catch{return "";}};
 // Phase 17.1: a Google-originated lead (provisional flag, a place ID or any Places provider variant). Its stored name, address, phone
 // and website are Google content: they never authorize a first contact or a draft without an independent contact.
@@ -49,7 +59,8 @@ const sameSite=(contactHost,site)=>!!contactHost&&!!site&&(contactHost===site||c
 export function leadQualification(lead={},meta={},contacts=[],activity={}){
   const stage=String(lead.stage||"new"),evidence=[],missing=[];
   const site=meta.url||meta.website||"",siteHost=hostOf(site);
-  const ownSite=!!siteHost&&!GOOGLE_HOST.test(siteHost)&&!NOT_OWN_SITE.test(siteHost+".")&&!GOOGLE_PROVIDER.test(String(meta.provider||""))&&!!meta.evidence;
+  const infoSite=informationSite(lead,meta);
+  const ownSite=!!siteHost&&!GOOGLE_HOST.test(siteHost)&&!NOT_OWN_SITE.test(siteHost+".")&&!GOOGLE_PROVIDER.test(String(meta.provider||""))&&!!meta.evidence&&!infoSite;
   const ownerIdentity=meta.identity_verified===true&&meta.identity_source==="owner";
   const q=meta.qualification||{};
   // A contact "extracted" from a Google-hosted page is Google content, not independent evidence (Phase 17 package guard).
@@ -74,7 +85,13 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
   else if(reach.length){contact="CONTACT_CHANNEL_FOUND";contactConf=40;}
   if(reach.length)evidence.push("contact:"+[...new Set(reach.map(c=>c.contact_type))].join("+")+(contact==="CONTACT_VERIFIED"?":verified":":unverified"));
   // ---- business relevance / market
-  const market=leadMarketOf(meta),marketKnown=market==="IRAN"||market==="ARAB";if(marketKnown)evidence.push("market:"+market);else if(market==="CONFLICT")evidence.push("market_conflict");
+  // Phase 18.1: market source is recorded. A lead without one takes the market of its OWN orders/quotes (a recorded CRM fact, never a
+  // guess from language); two different order markets are a conflict. A target market on a foreign-domain site is a conflict too.
+  let market=leadMarketOf(meta),marketSource=leadMarketOf({market:meta.market})!=="UNKNOWN"?"owner":leadMarketOf({country:meta.country})!=="UNKNOWN"?"country_evidence":market==="UNKNOWN"?null:"ads_target";
+  if(marketSource==="ads_target"&&FOREIGN_CC.test(siteHost)){market="CONFLICT";evidence.push("foreign_domain");}
+  const orderMarkets=[...new Set((activity.order_markets||[]).filter(m=>m==="IRAN"||m==="ARAB"))];
+  if(market==="UNKNOWN"&&orderMarkets.length===1){market=orderMarkets[0];marketSource="order_record";}else if(market==="UNKNOWN"&&orderMarkets.length>1)market="CONFLICT";
+  const marketKnown=market==="IRAN"||market==="ARAB";if(marketKnown)evidence.push("market:"+market+(marketSource==="order_record"?":order_record":""));else if(market==="CONFLICT")evidence.push("market_conflict");
   const relevant=!!(q.buyer_in_title===true||q.included_type)||RELEVANCE.test([meta.type,meta.evidence].filter(Boolean).join(" "));
   const verifiedId=identity==="IDENTITY_VERIFIED";
   const business=verifiedId&&marketKnown&&relevant&&!!meta.city;if(business)evidence.push("relevant_business_in_city");
@@ -87,7 +104,11 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
   const engaged=!!(meta.last_outreach_at||meta.last_reply_at||/inbound/i.test(String(meta.source||""))||activity.replied);
   const demand=meta.packaging_demand_evidence?"owner_recorded":activity.quote_requested||activity.quoted||activity.ordered?"customer_activity":"unknown";
   // ---- state ladder
-  const rejected=["rejected","archived"].includes(stage)||!!meta.rejected_reason;
+  // Phase 18.1: information sites and later copies of an already-known own-site identity are excluded automatically (computed on read,
+  // reversible, nothing stored); a lead with real engagement or a customer stage is never excluded this way.
+  const autoExclusion=engaged||["customer","converted"].includes(stage)?null:infoSite?"information_site":activity.duplicate_of?"duplicate_identity":null;
+  const rejected=["rejected","archived"].includes(stage)||!!meta.rejected_reason||!!autoExclusion;
+  if(infoSite)evidence.push("information_site");if(activity.duplicate_of)evidence.push("duplicate_of:"+activity.duplicate_of);
   let state;
   if(["customer","converted"].includes(stage))state="CUSTOMER";
   else if(rejected)state="REJECTED";
@@ -125,11 +146,18 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
   if(contact==="NONE")missing.push("contact_channel");else if(contact==="CONTACT_CHANNEL_FOUND")missing.push("contact_verification");
   if(!marketKnown)missing.push("market");if(!meta.city)missing.push("city");if(!relevant)missing.push("business_relevance");
   if(demand==="unknown"&&state!=="CUSTOMER")missing.push("packaging_demand_evidence");
-  const nba=nextBestAction({state,identity,contact,tier,engaged,activity,marketKnown,relevant,ownSite,meta});
+  const nba=nextBestAction({state,identity,contact,tier,engaged,activity,marketKnown,relevant,ownSite,meta,autoExclusion});
+  // Phase 18.1 provenance: where each decision came from and when it was observed (CRM timestamps only; nothing is invented).
+  const provenance={identity:{method:identityMethod,source_url:ownSite?site:null,observed_at:meta.discovered_at||lead.created_at||null,last_checked_at:meta.contact_enrichment_checked_at||null},
+    contacts:reach.map(c=>({type:c.contact_type,evidence_status:c.evidence_status,evidence_url:c.evidence_url||null,observed_at:c.created_at||null,
+      verified:verifiedContacts.includes(c)})),market:{market:marketKnown?market:market==="CONFLICT"?"CONFLICT":null,source:marketKnown?marketSource:null}};
   return {state,tier,priority_score:Math.max(0,Math.min(100,priority)),fit_score:Math.max(0,Math.min(100,priority)),sub_scores:sub,
     identity:{status:identity,confidence:identityConf,method:identityMethod,source:identityMethod==="google_place_id"?"google_places":identityMethod?.startsWith("own_site")?siteHost:identityMethod?"owner":null,
-      verified_at:ownerIdentity?meta.identity_verified_at||null:null,refresh_days:identity==="GOOGLE_DISCOVERED"?null:30},
-    contact:{status:contact,confidence:contactConf,channels:[...new Set(reach.map(c=>c.contact_type))],outreach_authorized:false},
+      verified_at:ownerIdentity?meta.identity_verified_at||null:identity==="IDENTITY_VERIFIED"?(meta.contact_enrichment_checked_at||meta.discovered_at||lead.created_at||null):null,refresh_days:identity==="GOOGLE_DISCOVERED"?null:30},
+    // Contactability (a verified business channel exists) is NOT permission to market: outreach always needs the owner's approval.
+    contact:{status:contact,confidence:contactConf,channels:[...new Set(reach.map(c=>c.contact_type))],outreach_authorized:false,
+      contactability:contact==="CONTACT_VERIFIED"?"verified":contact==="CONTACT_CHANNEL_FOUND"?"unverified":"none",marketing_permission:"not_established",outreach_requires:"owner_approval"},
+    rejection_reason:state==="REJECTED"?(autoExclusion||"crm_rejected"):null,market_source:marketKnown?marketSource:null,provenance,
     packaging_demand:demand,packaging_signals:fitSignals,market:marketKnown?market:null,evidence,missing,
     improvable_automatically:identity==="INDEPENDENT_IDENTITY_FOUND"||(ownSite&&contact!=="CONTACT_VERIFIED"),next_action:nba};
 }
@@ -137,15 +165,18 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
 // One evidence-grounded next action. Never sends anything: outreach and anything financial stay behind the owner's approval.
 export function nextBestAction(x){
   const A=(action,reason,{prereq=[],timing="now",autonomous=false,authorization="not_required"}={})=>({action,reason,prerequisites:prereq,priority:x.tier,timing,authorization,autonomous});
-  if(x.state==="REJECTED")return A("ARCHIVE_IRRELEVANT","Lead was rejected or archived",{timing:"none"});
+  if(x.state==="REJECTED")return A("ARCHIVE_IRRELEVANT",x.autoExclusion==="information_site"?"Price/news information site, not a jewelry business: excluded automatically"
+    :x.autoExclusion==="duplicate_identity"?"Same own-site identity as an earlier lead: the earlier lead is kept":"Lead was rejected or archived",{timing:"none",autonomous:!!x.autoExclusion});
   if(x.activity?.quote_requested&&!x.activity?.quoted)return A("ESCALATE_FINANCIAL_DECISION","Customer asked for a price/quote: route it to the existing quote approval flow (owner decides prices and terms)",{authorization:"owner_decision"});
   if(x.state==="CUSTOMER")return A("FOLLOW_UP_EXISTING_CONVERSATION","Existing customer: reorder or service follow-up from CRM memory",{timing:"per_follow_up_schedule",authorization:"owner_approval_before_send"});
   if(x.state==="CONTACTED"||x.state==="OPPORTUNITY")return A("FOLLOW_UP_EXISTING_CONVERSATION","Conversation in progress",{timing:"per_follow_up_schedule",authorization:"owner_approval_before_send"});
-  if(x.state==="PLACE_DISCOVERED")return A("WAIT_FOR_VERIFICATION","Only a Google place ID: no independent name or contact; owner verifies it on Google Maps",{prereq:["independent_identity","contact_channel"],timing:"when_owner_reviews",authorization:"owner_action"});
+  // Phase 18.1: no routine owner step. A Google-only lead stays provisional (never contactable) while independent web discovery for its
+  // city continues automatically; it advances only through an independent own-site lead or an owner-confirmed identity (optional).
+  if(x.state==="PLACE_DISCOVERED")return A("AWAIT_INDEPENDENT_EVIDENCE","Only a Google place ID: stays provisional and never contactable; independent discovery for this city continues automatically",{prereq:["independent_identity","contact_channel"],autonomous:true,timing:"next_discovery_cycle"});
   if(x.state==="DISCOVERED")return A("FIND_INDEPENDENT_IDENTITY","No independent identity evidence yet",{prereq:["independent_identity"],autonomous:true,timing:"next_discovery_cycle"});
   if(x.identity==="INDEPENDENT_IDENTITY_FOUND")return A("VERIFY_OFFICIAL_CONTACT","Own website found; identity becomes verified with a contact on the same domain or a local signal",{prereq:["identity_verification"],autonomous:x.ownSite,timing:"next_enrichment_run"});
   if(x.contact!=="CONTACT_VERIFIED")return A("VERIFY_OFFICIAL_CONTACT","Identity verified but no verified business contact",{prereq:["contact_verification"],autonomous:x.ownSite,timing:"next_enrichment_run"});
-  if(!x.marketKnown||!x.relevant)return A("REASSESS_BUSINESS_FIT","Contact verified but market or jewelry relevance is not established",{prereq:[!x.marketKnown?"market":null,!x.relevant?"business_relevance":null].filter(Boolean),timing:"when_owner_reviews",authorization:"owner_action"});
+  if(!x.marketKnown||!x.relevant)return A("REASSESS_BUSINESS_FIT","Contact verified but market or jewelry relevance is not established: excluded from outreach while evidence gathering continues",{prereq:[!x.marketKnown?"market":null,!x.relevant?"business_relevance":null].filter(Boolean),autonomous:true,timing:"next_enrichment_run"});
   const os=x.activity?.outreach_status;
   if(x.activity?.outreach_rejected_at&&!os)return A("NO_ACTION_REQUIRED","Owner rejected the last outreach draft; nothing is re-sent automatically",{timing:"none",authorization:"owner_decision"});
   if(os==="draft"||os==="pending_approval"||os==="approved")return A("AWAIT_OUTREACH_AUTHORIZATION","An outreach draft is waiting for the owner",{timing:"when_owner_reviews",authorization:"owner_approval_before_send"});
@@ -153,9 +184,22 @@ export function nextBestAction(x){
   return A("PREPARE_OUTREACH_DRAFT","Verified identity and contact, relevant business in a known market",{prereq:["owner_requests_draft"],timing:"when_owner_reviews",authorization:"owner_approval_before_send"});
 }
 // A lead whose own website can be checked again for contacts (own site, not Google, not a directory/marketplace, no Places-only lead).
-export function ownSiteCandidate(meta={}){
+export function ownSiteCandidate(meta={},lead={}){
   const h=hostOf(meta.url||meta.website||"");
-  return !!h&&!GOOGLE_HOST.test(h)&&!NOT_OWN_SITE.test(h+".")&&!GOOGLE_PROVIDER.test(String(meta.provider||""))&&!!meta.evidence;
+  return !!h&&!GOOGLE_HOST.test(h)&&!NOT_OWN_SITE.test(h+".")&&!GOOGLE_PROVIDER.test(String(meta.provider||""))&&!!meta.evidence&&!informationSite(lead,meta);
+}
+// Phase 18.1: own-site identities seen more than once. The earliest lead per site host is kept; a later lead with the same host and no
+// engagement of its own is marked duplicate_of the earliest. Google-provider rows are never part of this (their sites are Google content).
+export function leadDuplicateMap(leads=[],act=new Map(),parse=x=>x?.notes?JSON.parse(x.notes):{}){
+  const first=new Map(),dup=new Map();
+  for(const l of [...leads].sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at))||String(a.id).localeCompare(String(b.id)))){
+    let m={};try{m=parse(l)||{};}catch{}
+    if(GOOGLE_PROVIDER.test(String(m.provider||""))||m.place_id)continue;
+    const h=hostOf(m.url||m.website||"");if(!h||GOOGLE_HOST.test(h)||NOT_OWN_SITE.test(h+"."))continue;
+    const a=act.get(l.id)||{};
+    if(!first.has(h))first.set(h,l.id);else if(!a.replied&&!a.quote_requested&&!a.ordered&&!["customer","converted"].includes(String(l.stage||"")))dup.set(l.id,first.get(h));
+  }
+  return dup;
 }
 // Counts per state (dashboard / reports).
 export function qualificationCounts(items){const c=Object.fromEntries(QUALIFICATION_STATES.map(s=>[s,0]));for(const x of items)c[x]=(c[x]||0)+1;return c;}

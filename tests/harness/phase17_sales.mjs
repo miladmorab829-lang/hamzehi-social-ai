@@ -65,7 +65,7 @@ ok("B1 Iraq shop SALES_READY in market ARAB; draft language Iraqi Arabic and the
 // ---- C: Places ID only → provisional, no draft, no AI call
 const C=leadBy(l=>l.meta.provider==="google_places_ids"&&l.meta.target_market==="IRAN");const iC=C&&await intel(C.id);const n0=openaiPrompts.length;
 const dC=await call("/api/leads/outreach-draft",{lead_id:C.id});
-ok("C1 Places-only lead stays PLACE_DISCOVERED, tier D, identity GOOGLE_DISCOVERED, next action WAIT_FOR_VERIFICATION",iC?.state==="PLACE_DISCOVERED"&&iC.tier==="D"&&iC.identity.status==="GOOGLE_DISCOVERED"&&iC.next_action.action==="WAIT_FOR_VERIFICATION",iC&&{s:iC.state,t:iC.tier,i:iC.identity.status});
+ok("C1 Places-only lead stays PLACE_DISCOVERED, tier D, identity GOOGLE_DISCOVERED, next action AWAIT_INDEPENDENT_EVIDENCE (18.1: autonomous, no owner step)",iC?.state==="PLACE_DISCOVERED"&&iC.tier==="D"&&iC.identity.status==="GOOGLE_DISCOVERED"&&iC.next_action.action==="AWAIT_INDEPENDENT_EVIDENCE"&&iC.next_action.autonomous===true&&iC.next_action.authorization==="not_required",iC&&{s:iC.state,t:iC.tier,i:iC.identity.status,a:iC.next_action});
 ok("C2 outreach draft refused 409 lead_not_contactable with zero AI calls",dC.status===409&&dC.body?.reason==="lead_not_contactable"&&openaiPrompts.length===n0,dC.body);
 
 // ---- D: wrong country rejected without CRM contamination
