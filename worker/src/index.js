@@ -12,7 +12,8 @@ import { bearerMatches, safeTokenEqual } from "./secure-compare.js";
 import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js";
 import { adsDraftSettings, buildAdsDraftPrompt, adsDraftRequestBody, adsDraftUsage, adsDraftOutcome, emptyAdsDraftStats, addAdsDraftUsage, reserveAdsDraft, adsDraftsToday } from "./ads-draft-guard.js";
 import { runWatchdog } from "./agent-watchdog.js";
-import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, googleOriginLead, independentContact, leadDuplicateMap } from "./lead-qualification.js";
+import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, googleOriginLead, independentContact, leadDuplicateMap, independentWebsiteHost } from "./lead-qualification.js";
+import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite } from "./dataset-discovery.js";
 import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
@@ -12051,7 +12052,8 @@ function extractContactsFromHtml(html, pageUrl, country = "", source = "web") {
   return [...unique.values()];
 }
 
-async function collectBoundedWebsiteContacts(startUrl, initialHtml, country = "", source = "web") {
+// Phase 18.4 QA: optional allowPath(url) (robots.txt path rules); without it the behaviour is unchanged (Ads discovery path).
+async function collectBoundedWebsiteContacts(startUrl, initialHtml, country = "", source = "web", { allowPath = null } = {}) {
   const safeStart = safeHttpUrl(startUrl);
   if (!safeStart) return [];
   const origin = new URL(safeStart).origin;
@@ -12070,6 +12072,7 @@ async function collectBoundedWebsiteContacts(startUrl, initialHtml, country = ""
   for (const candidate of candidates) {
     if (pages.length >= 3 || usefulTypes.size >= 3 || seen.has(candidate)) continue;
     seen.add(candidate);
+    if (allowPath && !allowPath(candidate)) continue;
     try {
       const response = await fetchWithRetry(candidate, { headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"} }, 1, AD_FETCH_TIMEOUT_MS);
       const contentType = String(response.headers.get('content-type') || '').toLowerCase();
@@ -12381,7 +12384,7 @@ async function salesLeadActivity(env){
   for(const r of await rows("lead_outreach","SELECT lead_id,status,updated_at FROM lead_outreach ORDER BY created_at")){const a=get(r.lead_id);
     if(r.status==="rejected")a.outreach_rejected_at=r.updated_at;else a.outreach_status=r.status;}
   const contacts=new Map();
-  for(const c of await rows("lead_contacts","SELECT lead_id,contact_type,evidence_status,evidence_url,created_at FROM lead_contacts WHERE evidence_status IN ('page_extracted','owner_confirmed')")){if(!contacts.has(c.lead_id))contacts.set(c.lead_id,[]);contacts.get(c.lead_id).push(c);}
+  for(const c of await rows("lead_contacts","SELECT lead_id,contact_type,normalized_value,evidence_status,evidence_url,created_at FROM lead_contacts WHERE evidence_status IN ('page_extracted','owner_confirmed')")){if(!contacts.has(c.lead_id))contacts.set(c.lead_id,[]);contacts.get(c.lead_id).push(c);}
   return {have,act,contacts};
 }
 function salesLeadView(lead,profile){
@@ -12397,7 +12400,7 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
   const {have,act,contacts}=await salesLeadActivity(env);
   const leads=id?[await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(id).first()].filter(Boolean):((await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 2000").all()).results||[]);
   // Phase 18.1: duplicates are judged against every lead, also for a single-lead lookup.
-  const dups=leadDuplicateMap(id?((await env.DB.prepare("SELECT id,stage,created_at,notes FROM leads ORDER BY updated_at DESC LIMIT 2000").all()).results||[]):leads,act,parseLeadNotes);
+  const dups=leadDuplicateMap(id?((await env.DB.prepare("SELECT id,stage,created_at,notes FROM leads ORDER BY updated_at DESC LIMIT 2000").all()).results||[]):leads,act,parseLeadNotes,contacts);
   const all=leads.map(l=>({lead:l,p:leadQualification(l,parseLeadNotes(l),contacts.get(l.id)||[],{...(act.get(l.id)||{}),duplicate_of:dups.get(l.id)||null})}));
   if(id)return all[0]?{ok:true,item:salesLeadView(all[0].lead,all[0].p)}:{ok:false,error:"Lead not found",statusCode:404};
   const markets={};
@@ -12434,7 +12437,10 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
   for(const r of rows){
     if(out.checked>=limit)break;
     // Phase 18.1: price/news information sites are never fetched (their runs went to real candidates instead).
-    const m=parseLeadNotes(r);if(!ownSiteCandidate(m,r))continue;
+    // Phase 18.4: a dataset candidate has only a URL until its first website check (no page text yet), so it is a candidate too.
+    const m=parseLeadNotes(r),dsPending=m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result!=="verified_site"&&!!independentWebsiteHost(m.url);
+    if(m.provider==="dataset"&&m.rejected_reason)continue;
+    if(!dsPending&&!ownSiteCandidate(m,r))continue;
     if(m.contact_enrichment_checked_at&&m.contact_enrichment_checked_at>=since)continue;
     let has=null;try{has=await env.DB.prepare("SELECT 1 FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram') AND evidence_status IN ('page_extracted','owner_confirmed') LIMIT 1").bind(r.id).first();}catch{}
     if(has)continue;
@@ -12444,23 +12450,60 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
       const UA={headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}};
       const rr=await fetchWithRetry(new URL(site).origin+"/robots.txt",UA,1,5000).catch(()=>null);
       const robots=rr&&rr.ok?await rr.text():"";
-      if((rr&&rr.status>=500)||robotsDisallowsAll(robots)){out.skipped_robots++;note="robots_disallow";}
+      // Phase 18.4 QA: path rules are honoured too — for the start URL and for the contact/about pages fetched below.
+      const allowPath=u=>{try{const x=new URL(u);return robotsAllowsPath(robots,x.pathname+x.search);}catch{return false;}};
+      if((rr&&rr.status>=500)||robotsDisallowsAll(robots)||!allowPath(site)){out.skipped_robots++;note="robots_disallow";}
       else{
         const res=await fetchWithRetry(site,UA,1,AD_FETCH_TIMEOUT_MS);
         const finalHost=(()=>{try{return new URL(res.url||site).hostname.replace(/^www./,"");}catch{return "";}})(),siteHost=new URL(site).hostname.replace(/^www./,"");
         const tooBig=Number(res.headers.get("content-length")||0)>2000000;
         const html=res.ok&&!tooBig&&finalHost===siteHost&&String(res.headers.get("content-type")||"").toLowerCase().includes("text/html")?(await res.text()).slice(0,100000):"";
         if(res.ok&&finalHost!==siteHost)note="redirected_off_site";
+        // Phase 18.4: the first check of a dataset candidate decides identity from the website itself (dataset-discovery.js): an
+        // information, unrelated or wrong-market site is rejected; the dataset name/city are kept only when the site confirms the name.
+        let dsRejected=false;
+        if(html&&dsPending){
+          const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||"").replace(/<[^>]+>/g," ").replace(/&#8211;|&ndash;/g,"–").replace(/&amp;/g,"&").replace(/\s+/g," ").trim();
+          const text=html.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/&nbsp;/g," ").replace(/\s+/g," ").trim();
+          const v=verifyDatasetSite(m,{title,text,host:finalHost},now());Object.assign(m,v.patch);
+          if(v.rejected_reason){m.rejected_reason=v.rejected_reason;dsRejected=true;note="dataset_"+v.rejected_reason;}
+          try{await env.DB.prepare("UPDATE leads SET name=?,notes=? WHERE id=?").bind(v.rejected_reason?r.name:(v.name||r.name),JSON.stringify(m),r.id).run();}catch{}
+        }
         // Phase 17.1: "stored" counts only NEW reachable channels (the start URL and contacts already on file are re-upserted, not new).
-        if(html){const mk=leadMarketOf(m),reachN=async()=>Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram')").bind(r.id).first())?.n||0);
-          const before=await reachN();await storeLeadContacts(env,r.id,await collectBoundedWebsiteContacts(site,html,mk==="ARAB"?"العراق":mk==="IRAN"?"ایران":"","own_site_enrichment"));stored=Math.max(0,(await reachN())-before);}
+        if(html&&!dsRejected){const mk=leadMarketOf(m),reachN=async()=>Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram')").bind(r.id).first())?.n||0);
+          const before=await reachN();await storeLeadContacts(env,r.id,await collectBoundedWebsiteContacts(site,html,mk==="ARAB"?"العراق":mk==="IRAN"?"ایران":"","own_site_enrichment",{allowPath}));stored=Math.max(0,(await reachN())-before);}
         else if(note==="checked")note="fetch_failed";
       }
     }catch{note="fetch_failed";}
     out.stored+=stored;
+    // Phase 18.4: a dataset candidate whose site cannot be verified is excluded: a redirect to another site (identity uncertain) at once;
+    // no answer or a robots.txt refusal (also a robots 5xx) after `fail_limit` checks, 14 days apart, as unreachable / robots_disallow.
+    if(dsPending&&["fetch_failed","robots_disallow","redirected_off_site"].includes(note)){
+      const fails=Number(m.dataset_fetch_failures||0)+1,reason=note==="redirected_off_site"?note:fails>=discoverySettings(env).fail_limit?(note==="robots_disallow"?"robots_disallow":"unreachable_website"):null;
+      try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.dataset_fetch_failures',?"+(reason?",'$.rejected_reason',?,'$.dataset_verification',json(?)":"")+") WHERE id=? AND json_valid(notes)")
+        .bind(...(reason?[fails,reason,JSON.stringify({checked_at:now(),result:reason})]:[fails]),r.id).run();}catch{}
+    }
     try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.contact_enrichment_checked_at',?,'$.contact_enrichment_result',?) WHERE id=? AND json_valid(notes)").bind(now(),note+":"+stored,r.id).run();}catch{}
   }
   return out;
+}
+// Phase 18.4 QA: path rules of the "User-agent: *" group — longest match wins, Allow wins a tie, "*" wildcard and a trailing "$" anchor.
+function robotsAllowsPath(text,pathWithQuery){
+  let star=false,inAgents=false;const rules=[];
+  for(const raw of String(text||"").slice(0,20000).split(/\r?\n/)){
+    const line=raw.replace(/#.*/,"").trim();if(!line)continue;
+    const [k,...v]=line.split(":"),val=v.join(":").trim(),key=k.trim().toLowerCase();
+    if(key==="user-agent"){star=inAgents?(star||val==="*"):val==="*";inAgents=true;continue;}
+    inAgents=false;
+    if(star&&(key==="allow"||key==="disallow")&&val)rules.push({allow:key==="allow",val});
+  }
+  const p=String(pathWithQuery||"/");let best=null;
+  for(const r of rules){
+    const anchored=r.val.endsWith("$"),body=anchored?r.val.slice(0,-1):r.val;
+    const re=new RegExp("^"+body.replace(/[.+?^${}()|[\]\\]/g,"\\$&").replace(/\*/g,".*")+(anchored?"$":""));
+    if(re.test(p)&&(!best||r.val.length>best.val.length||(r.val.length===best.val.length&&r.allow)))best=r;
+  }
+  return !best||best.allow;
 }
 // robots.txt: true when the group for every crawler ("User-agent: *") disallows the whole site.
 function robotsDisallowsAll(text){
@@ -12481,7 +12524,7 @@ async function leadOverview(env) {
   // Phase 18.1: same activity (order/quote market, engagement) and duplicate map as /api/sales/intelligence, so both views agree.
   let byLead = new Map(), act = new Map();
   try { const s = await salesLeadActivity(env); byLead = s.contacts; act = s.act; } catch {}
-  const dups = leadDuplicateMap(r.results || [], act, parseLeadNotes);
+  const dups = leadDuplicateMap(r.results || [], act, parseLeadNotes, byLead);
   const items = (r.results || []).map(x => ({
     ...x,
     meta: parseLeadNotes(x),
@@ -13589,8 +13632,13 @@ export default {
           const tickAt=new Date(Number(event?.scheduledTime)||Date.now()),dailyWindow=tickAt.getUTCHours()===7&&tickAt.getUTCMinutes()<15;
           if(!dailyWindow&&env.OPENAI_API_KEY&&(await adsDueFollowups(env)).length&&await reserveCrmFollowupRun(env,Date.now(),"scheduled_followups"))
             await prepareAdsFollowups(env,{limit:AD_MAX_DRAFTS_PER_RUN,retry:true});
+          // Phase 18.4: open-dataset discovery (off unless DATASET_DISCOVERY=on and DISCOVERY_BUCKET is bound): a few new candidates per
+          // market per tick, then the same bounded own-website check verifies them (no AI, no paid call, nothing sent).
+          const ds=discoverySettings(env);
+          if(ds.enabled){try{const r=await ingestDatasetCandidates(env,{settings:ds,helpers:{upsert:upsertDiscoveredLead,identities:collectLeadIdentities}});
+            if(r.created&&(r.created.IRAN||r.created.ARAB))await audit(env,"dataset_discovery_ingested","Open-dataset candidates added for website verification",{release:r.release,created:r.created,skipped:r.skipped});}catch{}}
           // Phase 17: free, bounded re-check of 2 leads' own websites for published contacts (independent of the Ads markets).
-          try{await enrichOwnSiteContacts(env,{limit:2});}catch{}
+          try{await enrichOwnSiteContacts(env,{limit:ds.enabled?ds.verify_per_run:2});}catch{}
           // Actual sending remains authorized-channel/manual.
         } catch(e) { try{ await audit(env,"ad_autopilot_scheduled_error","Scheduled advertising Autopilot cycle failed",{error:sanitizeOperationalError(e?.message||e)}); }catch{} }
       })());

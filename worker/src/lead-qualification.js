@@ -41,6 +41,10 @@ const SHOP_TITLE=/طلافروشی|زرگری|جواهری|جواهرفروشی|
 // Phase 18.1: another country's domain is not attributed to an Ads target market from the run alone (wrong-market record).
 const FOREIGN_CC=/\.(ae|sa|eg|om|kw|qa|bh|jo|lb|sy|ye|tr|af|pk|az|am|ma|dz|tn|ly|sd)$/i;
 export function informationSite(lead={},meta={}){const t=String(lead.name||meta.title||"");return INFORMATION_SITE.test(t)&&!SHOP_TITLE.test(t);}
+// Phase 18.4: the business's own website host, or "" for Google, directory, marketplace and social hosts (shared with dataset discovery).
+export function independentWebsiteHost(url){const h=hostOf(/^https?:/i.test(String(url||""))?url:"https://"+String(url||""));return !!h&&!GOOGLE_HOST.test(h)&&!NOT_OWN_SITE.test(h+".")?h:"";}
+// Phase 18.4: a site on the OTHER target market's domain (.ir for an Iraq lead, .iq for an Iran lead).
+const OTHER_MARKET_CC={IRAN:/\.iq$/i,ARAB:/\.ir$/i};
 const hostOf=v=>{try{return new URL(String(v||"")).hostname.toLowerCase().replace(/^www\./,"");}catch{return "";}};
 // Phase 17.1: a Google-originated lead (provisional flag, a place ID or any Places provider variant). Its stored name, address, phone
 // and website are Google content: they never authorize a first contact or a draft without an independent contact.
@@ -74,6 +78,10 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
       businessDomainConfirmed:!!(q.local_domain||q.local_phone||ownDomainContact),verifiedBusinessDomain:siteHost}).verified){identity="IDENTITY_VERIFIED";identityConf=80;identityMethod=ownDomainContact?"own_site_contact":"own_site_local_signal";}
   else if(ownSite){identity="INDEPENDENT_IDENTITY_FOUND";identityConf=50;identityMethod="own_site_page";}
   else if(meta.place_id){identity="GOOGLE_DISCOVERED";identityConf=10;identityMethod="google_place_id";}
+  // Phase 18.4 QA: a dataset candidate is verified only when its website CONFIRMS the dataset business name. A site that merely loads
+  // (even with local signals, its own contacts or a city of its own) under another name stays unconfirmed; only the owner can confirm it.
+  const datasetNameUnconfirmed=meta.provider==="dataset"&&!ownerIdentity&&meta.dataset_verification?.name_consistent!==true;
+  if(datasetNameUnconfirmed&&identity==="IDENTITY_VERIFIED"){identity="INDEPENDENT_IDENTITY_FOUND";identityConf=50;identityMethod="own_site_page";evidence.push("dataset_name_unconfirmed");}
   if(identityMethod)evidence.push("identity:"+identityMethod);
   // ---- contact
   let contact="NONE",contactConf=0;
@@ -88,7 +96,7 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
   // Phase 18.1: market source is recorded. A lead without one takes the market of its OWN orders/quotes (a recorded CRM fact, never a
   // guess from language); two different order markets are a conflict. A target market on a foreign-domain site is a conflict too.
   let market=leadMarketOf(meta),marketSource=leadMarketOf({market:meta.market})!=="UNKNOWN"?"owner":leadMarketOf({country:meta.country})!=="UNKNOWN"?"country_evidence":market==="UNKNOWN"?null:"ads_target";
-  if(marketSource==="ads_target"&&FOREIGN_CC.test(siteHost)){market="CONFLICT";evidence.push("foreign_domain");}
+  if(marketSource==="ads_target"&&(FOREIGN_CC.test(siteHost)||OTHER_MARKET_CC[market]?.test(siteHost))){market="CONFLICT";evidence.push("foreign_domain");}
   const orderMarkets=[...new Set((activity.order_markets||[]).filter(m=>m==="IRAN"||m==="ARAB"))];
   if(market==="UNKNOWN"&&orderMarkets.length===1){market=orderMarkets[0];marketSource="order_record";}else if(market==="UNKNOWN"&&orderMarkets.length>1)market="CONFLICT";
   const marketKnown=market==="IRAN"||market==="ARAB";if(marketKnown)evidence.push("market:"+market+(marketSource==="order_record"?":order_record":""));else if(market==="CONFLICT")evidence.push("market_conflict");
@@ -106,7 +114,9 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
   // ---- state ladder
   // Phase 18.1: information sites and later copies of an already-known own-site identity are excluded automatically (computed on read,
   // reversible, nothing stored); a lead with real engagement or a customer stage is never excluded this way.
-  const autoExclusion=engaged||["customer","converted"].includes(stage)?null:infoSite?"information_site":activity.duplicate_of?"duplicate_identity":null;
+  // Phase 18.4: a dataset-discovered lead rejected by its own website check (unreachable, unrelated, wrong market, …) is excluded the same way.
+  const autoExclusion=engaged||["customer","converted"].includes(stage)?null:infoSite?"information_site":activity.duplicate_of?"duplicate_identity"
+    :meta.provider==="dataset"&&meta.rejected_reason?String(meta.rejected_reason).slice(0,40):null;
   const rejected=["rejected","archived"].includes(stage)||!!meta.rejected_reason||!!autoExclusion;
   if(infoSite)evidence.push("information_site");if(activity.duplicate_of)evidence.push("duplicate_of:"+activity.duplicate_of);
   let state;
@@ -146,11 +156,14 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
   if(contact==="NONE")missing.push("contact_channel");else if(contact==="CONTACT_CHANNEL_FOUND")missing.push("contact_verification");
   if(!marketKnown)missing.push("market");if(!meta.city)missing.push("city");if(!relevant)missing.push("business_relevance");
   if(demand==="unknown"&&state!=="CUSTOMER")missing.push("packaging_demand_evidence");
-  const nba=nextBestAction({state,identity,contact,tier,engaged,activity,marketKnown,relevant,ownSite,meta,autoExclusion});
+  if(datasetNameUnconfirmed&&ownSite)missing.push("dataset_name_confirmation");
+  const nba=nextBestAction({state,identity,contact,tier,engaged,activity,marketKnown,relevant,ownSite,meta,autoExclusion,datasetNameUnconfirmed:datasetNameUnconfirmed&&ownSite});
   // Phase 18.1 provenance: where each decision came from and when it was observed (CRM timestamps only; nothing is invented).
   const provenance={identity:{method:identityMethod,source_url:ownSite?site:null,observed_at:meta.discovered_at||lead.created_at||null,last_checked_at:meta.contact_enrichment_checked_at||null},
     contacts:reach.map(c=>({type:c.contact_type,evidence_status:c.evidence_status,evidence_url:c.evidence_url||null,observed_at:c.created_at||null,
-      verified:verifiedContacts.includes(c)})),market:{market:marketKnown?market:market==="CONFLICT"?"CONFLICT":null,source:marketKnown?marketSource:null}};
+      verified:verifiedContacts.includes(c)})),market:{market:marketKnown?market:market==="CONFLICT"?"CONFLICT":null,source:marketKnown?marketSource:null},
+    // Phase 18.4: open-dataset origin (record, release, license, attribution) and whether its claims were confirmed by the website.
+    source:meta.dataset_record?{...meta.dataset_record,claims_trusted:meta.dataset_verification?.dataset_claims_trusted===true,checked_at:meta.dataset_verification?.checked_at||null}:null};
   return {state,tier,priority_score:Math.max(0,Math.min(100,priority)),fit_score:Math.max(0,Math.min(100,priority)),sub_scores:sub,
     identity:{status:identity,confidence:identityConf,method:identityMethod,source:identityMethod==="google_place_id"?"google_places":identityMethod?.startsWith("own_site")?siteHost:identityMethod?"owner":null,
       verified_at:ownerIdentity?meta.identity_verified_at||null:identity==="IDENTITY_VERIFIED"?(meta.contact_enrichment_checked_at||meta.discovered_at||lead.created_at||null):null,refresh_days:identity==="GOOGLE_DISCOVERED"?null:30},
@@ -166,7 +179,8 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
 export function nextBestAction(x){
   const A=(action,reason,{prereq=[],timing="now",autonomous=false,authorization="not_required"}={})=>({action,reason,prerequisites:prereq,priority:x.tier,timing,authorization,autonomous});
   if(x.state==="REJECTED")return A("ARCHIVE_IRRELEVANT",x.autoExclusion==="information_site"?"Price/news information site, not a jewelry business: excluded automatically"
-    :x.autoExclusion==="duplicate_identity"?"Same own-site identity as an earlier lead: the earlier lead is kept":"Lead was rejected or archived",{timing:"none",autonomous:!!x.autoExclusion});
+    :x.autoExclusion==="duplicate_identity"?"Same own-site identity as an earlier lead: the earlier lead is kept"
+    :x.autoExclusion?"Website check excluded this dataset candidate ("+x.autoExclusion+")":"Lead was rejected or archived",{timing:"none",autonomous:!!x.autoExclusion});
   if(x.activity?.quote_requested&&!x.activity?.quoted)return A("ESCALATE_FINANCIAL_DECISION","Customer asked for a price/quote: route it to the existing quote approval flow (owner decides prices and terms)",{authorization:"owner_decision"});
   if(x.state==="CUSTOMER")return A("FOLLOW_UP_EXISTING_CONVERSATION","Existing customer: reorder or service follow-up from CRM memory",{timing:"per_follow_up_schedule",authorization:"owner_approval_before_send"});
   if(x.state==="CONTACTED"||x.state==="OPPORTUNITY")return A("FOLLOW_UP_EXISTING_CONVERSATION","Conversation in progress",{timing:"per_follow_up_schedule",authorization:"owner_approval_before_send"});
@@ -174,6 +188,7 @@ export function nextBestAction(x){
   // city continues automatically; it advances only through an independent own-site lead or an owner-confirmed identity (optional).
   if(x.state==="PLACE_DISCOVERED")return A("AWAIT_INDEPENDENT_EVIDENCE","Only a Google place ID: stays provisional and never contactable; independent discovery for this city continues automatically",{prereq:["independent_identity","contact_channel"],autonomous:true,timing:"next_discovery_cycle"});
   if(x.state==="DISCOVERED")return A("FIND_INDEPENDENT_IDENTITY","No independent identity evidence yet",{prereq:["independent_identity"],autonomous:true,timing:"next_discovery_cycle"});
+  if(x.datasetNameUnconfirmed)return A("AWAIT_INDEPENDENT_EVIDENCE","The website's business name differs from the dataset record: identity stays unconfirmed and the lead is excluded from outreach (owner confirmation is optional, never queued)",{prereq:["dataset_name_confirmation"],autonomous:true,timing:"next_discovery_cycle"});
   if(x.identity==="INDEPENDENT_IDENTITY_FOUND")return A("VERIFY_OFFICIAL_CONTACT","Own website found; identity becomes verified with a contact on the same domain or a local signal",{prereq:["identity_verification"],autonomous:x.ownSite,timing:"next_enrichment_run"});
   if(x.contact!=="CONTACT_VERIFIED")return A("VERIFY_OFFICIAL_CONTACT","Identity verified but no verified business contact",{prereq:["contact_verification"],autonomous:x.ownSite,timing:"next_enrichment_run"});
   if(!x.marketKnown||!x.relevant)return A("REASSESS_BUSINESS_FIT","Contact verified but market or jewelry relevance is not established: excluded from outreach while evidence gathering continues",{prereq:[!x.marketKnown?"market":null,!x.relevant?"business_relevance":null].filter(Boolean),autonomous:true,timing:"next_enrichment_run"});
@@ -190,14 +205,20 @@ export function ownSiteCandidate(meta={},lead={}){
 }
 // Phase 18.1: own-site identities seen more than once. The earliest lead per site host is kept; a later lead with the same host and no
 // engagement of its own is marked duplicate_of the earliest. Google-provider rows are never part of this (their sites are Google content).
-export function leadDuplicateMap(leads=[],act=new Map(),parse=x=>x?.notes?JSON.parse(x.notes):{}){
+// Phase 18.4: across DIFFERENT domains, two own-site leads are one business when they share a channel published on their own pages
+// (phone, email, Instagram, Telegram, WhatsApp from lead_contacts with evidence page_extracted/owner_confirmed) — never a dataset claim.
+const DUP_CHANNELS=new Set(["phone","email","instagram","telegram","whatsapp"]);
+export function leadDuplicateMap(leads=[],act=new Map(),parse=x=>x?.notes?JSON.parse(x.notes):{},contacts=new Map()){
   const first=new Map(),dup=new Map();
   for(const l of [...leads].sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at))||String(a.id).localeCompare(String(b.id)))){
     let m={};try{m=parse(l)||{};}catch{}
     if(GOOGLE_PROVIDER.test(String(m.provider||""))||m.place_id)continue;
     const h=hostOf(m.url||m.website||"");if(!h||GOOGLE_HOST.test(h)||NOT_OWN_SITE.test(h+"."))continue;
-    const a=act.get(l.id)||{};
-    if(!first.has(h))first.set(h,l.id);else if(!a.replied&&!a.quote_requested&&!a.ordered&&!["customer","converted"].includes(String(l.stage||"")))dup.set(l.id,first.get(h));
+    const keys=["host:"+h,...(contacts.get(l.id)||[]).filter(c=>DUP_CHANNELS.has(c.contact_type)&&INDEPENDENT_CONTACT.has(c.evidence_status)&&c.normalized_value)
+      .map(c=>"ch:"+c.contact_type+":"+String(c.normalized_value).toLowerCase())];
+    const a=act.get(l.id)||{},hit=keys.map(k=>first.get(k)).find(Boolean);
+    if(hit&&hit!==l.id&&!a.replied&&!a.quote_requested&&!a.ordered&&!["customer","converted"].includes(String(l.stage||"")))dup.set(l.id,hit);
+    else for(const k of keys)if(!first.has(k))first.set(k,l.id);
   }
   return dup;
 }
