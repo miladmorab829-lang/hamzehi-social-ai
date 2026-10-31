@@ -12458,7 +12458,10 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
       const robots=rr&&rr.ok?await rr.text():"";
       // Phase 18.4 QA: path rules are honoured too — for the start URL and for the contact/about pages fetched below.
       const allowPath=u=>{try{const x=new URL(u);return robotsAllowsPath(robots,x.pathname+x.search);}catch{return false;}};
-      if((rr&&rr.status>=500)||robotsDisallowsAll(robots)||!allowPath(site)){out.skipped_robots++;note="robots_disallow";}
+      // Phase 18.6 (RFC 9309 §2.3.1.4): robots.txt unreachable (network error/timeout) = complete disallow, recorded apart because the
+      // site itself is most likely down (a dataset lead then ends as unreachable_website); a 5xx = disallow; a 4xx = no rules.
+      if(!rr){out.skipped_robots++;note="robots_unreachable";}
+      else if(rr.status>=500||robotsDisallowsAll(robots)||!allowPath(site)){out.skipped_robots++;note="robots_disallow";}
       else{
         const res=await fetchWithRetry(site,UA,1,AD_FETCH_TIMEOUT_MS);
         const finalHost=(()=>{try{return new URL(res.url||site).hostname.replace(/^www./,"");}catch{return "";}})(),siteHost=new URL(site).hostname.replace(/^www./,"");
@@ -12484,7 +12487,7 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
     out.stored+=stored;
     // Phase 18.4: a dataset candidate whose site cannot be verified is excluded: a redirect to another site (identity uncertain) at once;
     // no answer or a robots.txt refusal (also a robots 5xx) after `fail_limit` checks, 14 days apart, as unreachable / robots_disallow.
-    if(dsPending&&["fetch_failed","robots_disallow","redirected_off_site"].includes(note)){
+    if(dsPending&&["fetch_failed","robots_disallow","robots_unreachable","redirected_off_site"].includes(note)){
       const fails=Number(m.dataset_fetch_failures||0)+1,reason=note==="redirected_off_site"?note:fails>=discoverySettings(env).fail_limit?(note==="robots_disallow"?"robots_disallow":"unreachable_website"):null;
       try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.dataset_fetch_failures',?"+(reason?",'$.rejected_reason',?,'$.dataset_verification',json(?)":"")+") WHERE id=? AND json_valid(notes)")
         .bind(...(reason?[fails,reason,JSON.stringify({checked_at:now(),result:reason})]:[fails]),r.id).run();}catch{}
