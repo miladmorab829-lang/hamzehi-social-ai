@@ -63,10 +63,12 @@ const dB=await call("/api/leads/outreach-draft",{lead_id:B.id});
 ok("B1 Iraq shop SALES_READY in market ARAB; draft language Iraqi Arabic and the prompt asks for Iraqi dialect (not MSA)",iB?.state==="SALES_READY"&&iB.market==="ARAB"&&dB.body?.language==="Iraqi Arabic"&&/Iraqi Arabic dialect/.test(openaiPrompts.at(-1)||""),[iB?.state,iB?.market,dB.body?.language]);
 
 // ---- C: Places ID only → provisional, no draft, no AI call
-const C=leadBy(l=>l.meta.provider==="google_places_ids"&&l.meta.target_market==="IRAN");const iC=C&&await intel(C.id);const n0=openaiPrompts.length;
+// 2026-11-01: Google Places is never called for IRAN (Maps Prohibited Territory), so the Places-only lead here is the Iraq one.
+const C=leadBy(l=>l.meta.provider==="google_places_ids"&&l.meta.target_market==="ARAB");const iC=C&&await intel(C.id);const n0=openaiPrompts.length;
 const dC=await call("/api/leads/outreach-draft",{lead_id:C.id});
 ok("C1 Places-only lead stays PLACE_DISCOVERED, tier D, identity GOOGLE_DISCOVERED, next action AWAIT_INDEPENDENT_EVIDENCE (18.1: autonomous, no owner step)",iC?.state==="PLACE_DISCOVERED"&&iC.tier==="D"&&iC.identity.status==="GOOGLE_DISCOVERED"&&iC.next_action.action==="AWAIT_INDEPENDENT_EVIDENCE"&&iC.next_action.autonomous===true&&iC.next_action.authorization==="not_required",iC&&{s:iC.state,t:iC.tier,i:iC.identity.status,a:iC.next_action});
 ok("C2 outreach draft refused 409 lead_not_contactable with zero AI calls",dC.status===409&&dC.body?.reason==="lead_not_contactable"&&openaiPrompts.length===n0,dC.body);
+ok("C3 no Places lead exists for IRAN (Places blocked for Iran; the Iran Ads run records places=market_blocked)",!leadBy(l=>l.meta.provider==="google_places_ids"&&l.meta.target_market==="IRAN")&&q("SELECT details_json FROM system_events WHERE type='ad_autopilot_run'").map(r=>JSON.parse(r.details_json)).filter(d=>d.market==="IRAN").every(d=>d.places?.status==="market_blocked"));
 
 // ---- D: wrong country rejected without CRM contamination
 ok("D1 a Dubai (.ae) jewelry page in the Iraq run is rejected (foreign_country) and never stored",!leadBy(l=>String(l.meta.url||"").includes("dubai-gold"))&&q("SELECT details_json FROM system_events WHERE type='ad_autopilot_run'").some(r=>JSON.parse(r.details_json).rejected_reasons?.foreign_country>=1));
@@ -102,8 +104,8 @@ draftText="سلام، ما HAMZEHI BOX هستیم. برای بسته‌بندی 
 
 // ---- H: Places budget exhausted → only Places stops
 for(let i=0;i<250;i++)dbrun("INSERT INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,?,?,?,?)",["p17full"+i,"places_reserved","info","x",JSON.stringify({sku:"ids_only",reserved_micros:32000}),new Date().toISOString()]);
-backdate();await tick();const lastIR=q("SELECT details_json FROM system_events WHERE type='ad_autopilot_run'").map(r=>JSON.parse(r.details_json)).filter(d=>d.market==="IRAN").at(-1);
-ok("H1 budget exhausted: Places step budget_limited, web discovery still ran (candidates evaluated), CRM unaffected",lastIR.places?.status==="budget_limited"&&lastIR.candidates>=1,lastIR.places);
+backdate();await tick();const runsH=q("SELECT details_json FROM system_events WHERE type='ad_autopilot_run'").map(r=>JSON.parse(r.details_json)),lastIQ=runsH.filter(d=>d.market==="ARAB").at(-1),lastIR=runsH.filter(d=>d.market==="IRAN").at(-1);
+ok("H1 budget exhausted: Places step budget_limited (Iraq), web discovery still ran in both markets (candidates evaluated), CRM unaffected",lastIQ.places?.status==="budget_limited"&&lastIR.places?.status==="market_blocked"&&lastIR.candidates>=1,[lastIQ.places,lastIR.places,lastIR.candidates]);
 
 // ---- I: AI provider unavailable → no draft, nothing created, CRM still answers
 const keep=W.env.OPENAI_API_KEY;delete W.env.OPENAI_API_KEY;const Ix=leadBy(l=>String(l.meta.url||"").includes("goldstar-iq.iq"));
@@ -142,7 +144,7 @@ ok("L1 two 'Gold Star Jewelry' businesses in Iran and Iraq stay two leads with t
 
 // ---- Intelligence API, security, market money
 const S=(await call("/api/sales/intelligence",null,"GET")).body;
-ok("S1 per-market metrics in each market's own currency (IRAN TOMAN, ARAB USD), provisional Places counted apart",S.markets.IRAN.currency==="TOMAN"&&S.markets.ARAB.currency==="USD"&&S.markets.IRAN.provisional_discoveries>=1&&S.markets.IRAN.sales_ready>=1&&S.markets.ARAB.sales_ready>=1,{IR:S.markets.IRAN.states,AR:S.markets.ARAB.states});
+ok("S1 per-market metrics in each market's own currency (IRAN TOMAN, ARAB USD), provisional Places counted apart",S.markets.IRAN.currency==="TOMAN"&&S.markets.ARAB.currency==="USD"&&S.markets.ARAB.provisional_discoveries>=1&&S.markets.IRAN.provisional_discoveries===0&&S.markets.IRAN.sales_ready>=1&&S.markets.ARAB.sales_ready>=1,{IR:S.markets.IRAN.states,AR:S.markets.ARAB.states});
 ok("S2 the ranked list never includes provisional Places IDs (unless tier D is requested) and is sorted by priority",S.items.every(i=>i.state!=="PLACE_DISCOVERED")&&S.items.every((x,i,a)=>!i||a[i-1].priority_score>=x.priority_score));
 const un=await W.run(new Request("https://w.test/api/sales/intelligence")),un2=await W.run(new Request("https://w.test/api/leads/intelligence?id="+A.id));
 ok("S3 intelligence routes require the admin token (401 without it)",un.status===401&&un2.status===401);

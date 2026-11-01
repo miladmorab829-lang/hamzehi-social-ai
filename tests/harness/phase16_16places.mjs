@@ -48,19 +48,20 @@ for(const market of ["IRAN","ARAB"])await call("/api/ads/markets/config",{market
 
 // ---- scheduled run with Places on
 {await tick();const ir=runs("IRAN")[0]||{},iq=runs("ARAB")[0]||{};
- ok("P7 one Places request per market run, field mask = places.id only (IDs-only SKU)",placesCalls.length===2&&placesCalls.every(c=>c.mask==="places.id"),placesCalls.map(c=>c.mask));
- ok("P8 IRAN: 2 place IDs → 2 new CRM leads for the run city, market IRAN, evidence = location restriction",ir.places?.status==="ok"&&ir.places.new_leads===2&&placesLeads("IRAN").length===2&&placesLeads("IRAN").every(l=>l.meta.city===cityIR&&l.meta.market_evidence==="places_location_restriction"),[ir.places,placesLeads("IRAN").length]);
+ // 2026-11-01 owner decision: no Places request for IRAN (Google Maps Prohibited Territory); Iraq (ARAB) keeps Places.
+ ok("P7 one Places request per eligible market run (Iraq only; none for Iran), field mask = places.id only (IDs-only SKU)",placesCalls.length===1&&placesCalls.every(c=>c.mask==="places.id"),placesCalls.map(c=>c.mask));
+ ok("P8 IRAN: Places is blocked (market_blocked) — no request, no Places lead; the Iran run itself still happens",ir.places?.status==="market_blocked"&&ir.places.new_leads===0&&placesLeads("IRAN").length===0&&placesLeads("ARAB").every(l=>l.meta.market_evidence==="places_location_restriction"),[ir.places,placesLeads("IRAN").length]);
  ok("P9 ARAB: 2 leads for the Iraq run city, market ARAB, country العراق; no IRAN/ARAB mix",iq.places?.new_leads===2&&placesLeads("ARAB").every(l=>l.meta.city===cityIQ&&l.meta.country==="العراق")&&placesLeads("IRAN").every(l=>l.meta.country==="ایران"),iq.places);
- const L=placesLeads("IRAN")[0];
+ const L=placesLeads("ARAB")[0];
  ok("P10 Maps terms: only the place ID is stored — no Google name, address, coordinates or types; Maps link built from the ID",L&&/^ChIJ/.test(L.meta.place_id)&&L.contact.startsWith("https://www.google.com/maps/place/?q=place_id:")&&!("lat" in L.meta)&&!("address" in L.meta)&&!("types" in L.meta)&&L.name.includes("(Google Maps)"),L);
- ok("P11 the ledger holds one reservation per request (ids_only, reserved 32000 µUSD, outcome status 200 + results recorded)",ledger().length===2&&ledger().every(x=>x.sku==="ids_only"&&x.reserved_micros===32000&&x.status===200&&x.results===2),ledger());
+ ok("P11 the ledger holds one reservation per request (ids_only, reserved 32000 µUSD, outcome status 200 + results recorded)",ledger().length===1&&ledger().every(x=>x.sku==="ids_only"&&x.reserved_micros===32000&&x.status===200&&x.results===2),ledger());
  ok("P12 no AI draft for Places leads (no OpenAI key here, and Places leads never enter the draft list)",(ir.drafted||0)===0);
  backdate();await tick();
- ok("P13 deduplication: the same place IDs next run update the leads, create none",placesLeads().length===4&&runs("IRAN")[1]?.places?.new_leads===0&&runs("IRAN")[1]?.places?.updated===2,runs("IRAN")[1]?.places);}
+ ok("P13 deduplication: the same place IDs next run update the leads, create none",placesLeads().length===2&&runs("ARAB")[1]?.places?.new_leads===0&&runs("ARAB")[1]?.places?.updated===2,runs("ARAB")[1]?.places);}
 
 // ---- provisional classification (Production audit 2026-10-30: 20 IDs-only leads were indistinguishable and scored like qualified leads)
 {const L=placesLeads();
- ok("P28 Places leads are PROVISIONAL: lead_status provisional_place, identity_verified/contactable false, priority low, score 30",L.length===4&&L.every(l=>l.meta.lead_status==="provisional_place"&&l.meta.identity_verified===false&&l.meta.contactable===false&&l.meta.score===30&&l.meta.next_step==="verify_on_google_maps"),L.map(l=>l.meta.lead_status));
+ ok("P28 Places leads are PROVISIONAL: lead_status provisional_place, identity_verified/contactable false, priority low, score 30",L.length===2&&L.every(l=>l.meta.lead_status==="provisional_place"&&l.meta.identity_verified===false&&l.meta.contactable===false&&l.meta.score===30&&l.meta.next_step==="verify_on_google_maps"),L.map(l=>l.meta.lead_status));
  const pr=q("SELECT priority FROM leads WHERE instr(notes,'google_places_ids')>0").map(r=>r.priority);
  ok("P29 CRM priority is low (never normal/high) and each lead has a distinct label (short place-ID reference)",pr.every(p=>p==="low")&&new Set(L.map(l=>l.name)).size===L.length&&L.every(l=>/ · #[A-Za-z0-9_-]{6}$/.test(l.name)),L.map(l=>l.name));
  const ac=(await call("/api/ads/action-center",null,"GET")).body,intel=(await call("/api/ads/intelligence",null,"GET")).body;
@@ -85,7 +86,7 @@ for(const market of ["IRAN","ARAB"])await call("/api/ads/markets/config",{market
 
 // ---- exhaustion during a real run: Places skipped, web discovery continues, watchdog warning, nothing else changes
 {clearLedger();for(let i=0;i<250;i++)dbrun("INSERT INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,?,?,?,?)",["full"+i,"places_reserved","info","x",JSON.stringify({sku:"ids_only",reserved_micros:32000}),new Date().toISOString()]);
- const p0=placesCalls.length,g0=googleCalls;backdate();await tick();const last=runs("IRAN").at(-1);
+ const p0=placesCalls.length,g0=googleCalls;backdate();await tick();const last=runs("ARAB").at(-1);
  ok("P19 budget exhausted: no Places request is sent; the run records places=budget_limited",placesCalls.length===p0&&last.places?.status==="budget_limited",last.places);
  ok("P20 web discovery still runs when Places is budget-limited (search engine called)",googleCalls>g0,[g0,googleCalls]);
  const snap=()=>JSON.stringify(q("SELECT key,value FROM autonomy_controls ORDER BY key"));const before=snap();
@@ -98,7 +99,7 @@ for(const market of ["IRAN","ARAB"])await call("/api/ads/markets/config",{market
 // ---- timeout accounting and 429 cooldown
 {clearLedger();placesMode="timeout";const p0=placesCalls.length;backdate();await tick();placesMode="ok";
  const lg=ledger();
- ok("P24 Places timeout: exactly one attempt per market run (no retry), each reservation kept and marked timeout (cost stays reserved)",placesCalls.length-p0===2&&lg.length===2&&lg.every(x=>x.timeout===1&&x.reserved_micros===32000),lg);
+ ok("P24 Places timeout: exactly one attempt per market run (no retry), each reservation kept and marked timeout (cost stays reserved)",placesCalls.length-p0===1&&lg.length===1&&lg.every(x=>x.timeout===1&&x.reserved_micros===32000),lg);
  googleStatus=429;const g0=googleCalls;backdate();await tick();const g1=googleCalls;backdate();await tick();googleStatus=200;
  ok("P25 Google search HTTP 429 → 6-hour cooldown in D1: the next run does not call Google again",g1>g0&&googleCalls===g1&&!!q("SELECT value FROM system_kv WHERE key='web_search_cooldown:www.google.com'")[0],[g0,g1,googleCalls]);}
 

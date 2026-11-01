@@ -12,6 +12,7 @@
 //  - No AI call, no paid request, no outbound message, no approval row.
 import { ADS_TARGET_CITIES, adsNormalizeText } from "./ads-markets.js";
 import { independentWebsiteHost, informationSite } from "./lead-qualification.js";
+import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market-isolation.js";
 
 export const DISCOVERY_SCHEMA = "hamzehi.discovery.candidates/1";
 // Approved source strategy (Phase 18.3): IRAQ OSM disabled (2% own-site coverage), Brave not used, Google never used.
@@ -230,23 +231,35 @@ export async function ingestDatasetCandidates(env, { settings = discoverySetting
   let headTag = null;
   if (typeof store.head === "function") { try { const h = await store.head(settings.key); headTag = h?.etag || h?.httpEtag || null; if (headTag && await kv("dataset_discovery:complete:" + headTag)) { PARSED_FILE = null; return { ok: true, skipped: true, reason: "complete" }; } } catch {} }
   const cached = headTag && PARSED_FILE && PARSED_FILE.key === settings.key && PARSED_FILE.etag === headTag && PARSED_FILE.max === settings.max_candidates ? PARSED_FILE.file : null;
-  const file = cached || await readCandidateFile(store, settings); if (!file.ok) return { ok: false, reason: file.reason };
+  // Market isolation: a failing shared file (corrupt, changed release, store error) is retried with backoff, not downloaded every tick.
+  // An empty bucket (no_candidate_file) is the intended "nothing to import" state, not a failure.
+  const nowMs = () => Date.parse(now());
+  const fileBackoff = await marketBackoff(env, "dataset", "FILE", nowMs());
+  if (fileBackoff.skip) return { ok: false, skipped: true, reason: "backoff", scope: "FILE", retry_after: fileBackoff.retry_after };
+  const fileFailed = async reason => { if (reason !== "no_candidate_file") await recordMarketFailure(env, "dataset", "FILE", reason, nowMs()); };
+  const file = cached || await readCandidateFile(store, settings); if (!file.ok) { await fileFailed(file.reason); return { ok: false, reason: file.reason }; }
   if (!cached) PARSED_FILE = file.etag ? { key: settings.key, etag: file.etag, max: settings.max_candidates, file } : null;
   // Phase 18.5 integrity: a release id is bound to its content. A different file under an already-used release id is refused (its cursor
   // positions would point at other records); a new extraction must use a new release id.
   const digestKey = "dataset_discovery:digest:" + file.release, knownDigest = await kv(digestKey);
-  if (knownDigest && knownDigest !== file.digest) return { ok: false, reason: "release_content_changed", release: file.release };
+  if (knownDigest && knownDigest !== file.digest) { await fileFailed("release_content_changed"); return { ok: false, reason: "release_content_changed", release: file.release }; }
   if (!knownDigest) await put(digestKey, file.digest);
-  const day = now().slice(0, 10), out = { ok: true, release: file.release, digest: file.digest, integrity: file.integrity, cached: !!cached, total: file.candidates.length, created: { IRAN: 0, ARAB: 0 }, cursor: {}, done: {}, skipped: {}, rejected_in_file: file.rejected };
+  await clearMarketFailure(env, "dataset", "FILE", nowMs());
+  const day = now().slice(0, 10), out = { ok: true, release: file.release, digest: file.digest, integrity: file.integrity, cached: !!cached, total: file.candidates.length, created: { IRAN: 0, ARAB: 0 }, cursor: {}, done: {}, skipped: {}, errors: {}, backoff: {}, rejected_in_file: file.rejected };
   const skip = r => { out.skipped[r] = (out.skipped[r] || 0) + 1; };
   // One cursor per market and release, so a market at its limit never holds the other back and a restart resumes where it stopped.
+  // Market isolation (2026-11-01): each market runs in its own try; an error in one never stops the other (no break). Failures are counted
+  // per market and back off after 3 in a row (market-isolation.js).
   for (const market of ["IRAN", "ARAB"]) {
+    const bo = await marketBackoff(env, "dataset", market, nowMs());
+    if (bo.skip) { out.backoff[market] = bo.retry_after; continue; }
     const list = file.candidates.filter(c => c.market === market), cursorKey = `dataset_discovery:cursor:${file.release}:${market}`, dayKey = `dataset_discovery:day:${day}:${market}`;
-    let cursor = Number(await kv(cursorKey) || 0); const used = Number(await kv(dayKey) || 0);
+    let cursor = 0, used = 0, loaded = false;
     const full = () => out.created[market] >= settings.ingest_per_run[market] || used + out.created[market] >= settings.daily_cap[market];
     // Phase 18.5: progress is saved even when a run fails midway (finally); a record whose lead was created just before a failure is
     // skipped on resume by its domain identity, so nothing is duplicated or lost.
     try {
+    cursor = Number(await kv(cursorKey) || 0); used = Number(await kv(dayKey) || 0); loaded = true;
     while (cursor < list.length && !full()) {
     const c = list[cursor];
     cursor++;
@@ -264,13 +277,17 @@ export async function ingestDatasetCandidates(env, { settings = discoverySetting
     }
     } catch (e) {
       // the failing record is retried next tick (cursor points at it); everything before it is kept
-      cursor = Math.max(0, cursor - 1); out.ok = false; out.error = String(e?.message || e).slice(0, 200);
+      if (loaded) cursor = Math.max(0, cursor - 1);
+      out.ok = false; out.errors[market] = String(e?.message || e).slice(0, 200); out.error = out.errors[market];
     } finally {
-      await put(cursorKey, cursor).catch(() => {});
-      if (out.created[market]) await put(dayKey, used + out.created[market]).catch(() => {});
-      out.cursor[market] = cursor; out.done[market] = cursor >= list.length;
+      if (loaded) {
+        await put(cursorKey, cursor).catch(() => {});
+        if (out.created[market]) await put(dayKey, used + out.created[market]).catch(() => {});
+        out.cursor[market] = cursor; out.done[market] = cursor >= list.length;
+      }
     }
-    if (!out.ok) break;
+    if (out.errors[market]) await recordMarketFailure(env, "dataset", market, out.errors[market], nowMs());
+    else await clearMarketFailure(env, "dataset", market, nowMs());
   }
   if (out.ok && out.done.IRAN && out.done.ARAB && file.etag) { await put("dataset_discovery:complete:" + file.etag, file.digest); PARSED_FILE = null; }
   return out;

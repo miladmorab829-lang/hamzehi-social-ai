@@ -59,7 +59,16 @@ export function adsMarketConfig(market,raw){
   const lim=Number(v.runs_per_day);
   return {market,enabled:v.enabled===true,city:String(v.city||"").trim().slice(0,100),type:ADS_MARKET_TYPES.includes(v.type)?v.type:"all",
     extra:String(v.extra||"").trim().slice(0,300),runs_per_day:Number.isInteger(lim)&&lim>0?lim:null,
-    approved_by:v.approved_by||null,approved_at:v.approved_at||null,updated_at:v.updated_at||null};
+    approved_by:v.approved_by||null,approved_at:v.approved_at||null,updated_at:v.updated_at||null,...adsSuspensionFields(v)};
+}
+// 2026-11-01: a suspension (owner decision, e.g. Iran Ads / Google Maps Prohibited Territory) is carried through every read and save, so
+// a dashboard save cannot clear it by accident. The last lift is kept as history. Unknown values are truncated, never invented.
+const SUSPENSION_KEYS=["suspended_at","suspended_by","suspended_reason","suspension_lifted_at","suspension_lifted_by","suspension_lifted_reason"];
+function adsSuspensionFields(v){
+  const out={};
+  if(v.suspended_reason){out.suspended=true;for(const k of ["suspended_at","suspended_by","suspended_reason"])out[k]=v[k]==null?null:String(v[k]).slice(0,100);}
+  for(const k of ["suspension_lifted_at","suspension_lifted_by","suspension_lifted_reason"])if(v[k])out[k]=String(v[k]).slice(0,100);
+  return out;
 }
 export async function readAdsMarketConfigs(env){
   const out=Object.fromEntries(ADS_MARKET_IDS.map(m=>[m,adsMarketConfig(m,null)]));
@@ -96,6 +105,17 @@ export function validateAdsMarketUpdate(body,current,globalCap,at){
   }
   if("type" in b){if(!ADS_MARKET_TYPES.includes(b.type))return {ok:false,reason:"ads_type_invalid",error:"نوع مشتری نامعتبر است"};next.type=b.type;}
   if("extra" in b){const e=String(b.extra||"").trim();if(e.length>300)return {ok:false,reason:"ads_extra_too_long",error:"جزئیات نباید بیشتر از 300 کاراکتر باشد"};next.extra=e;}
+  let suspension_change=null;
+  if(b.suspend===true){
+    // Explicit suspension of THIS market only: always allowed (it disables), recorded with time, actor and reason.
+    next.enabled=false;next.suspended=true;next.suspended_at=at;next.suspended_by="owner";next.suspended_reason=String(b.suspended_reason||"owner_suspension").slice(0,100);suspension_change="suspended";
+  }else if(current?.suspended){
+    if(b.lift_suspension===true){
+      if(b.owner_approved!==true)return {ok:false,reason:"owner_approval_required",error:"رفع تعلیق بازار، تأیید صریح مالک (owner_approved) لازم دارد"};
+      const prev=current.suspended_reason||null;delete next.suspended;delete next.suspended_at;delete next.suspended_by;delete next.suspended_reason;
+      next.suspension_lifted_at=at;next.suspension_lifted_by="owner";next.suspension_lifted_reason=String(prev||"").slice(0,100);suspension_change="lifted";
+    }else if(next.enabled)return {ok:false,reason:"ads_market_suspended",suspended_reason:current.suspended_reason||null,error:"این بازار معلق است؛ روشن کردن آن فقط با رفع تعلیق صریح (lift_suspension) و تأیید مالک ممکن است"};
+  }
   if(next.enabled){
     if(b.owner_approved!==true)return {ok:false,reason:"owner_approval_required",error:"روشن کردن یا تغییر بازار فعال، تأیید صریح مالک (owner_approved) لازم دارد"};
     const r=adsMarketReadiness(next,globalCap);if(!r.ready)return {ok:false,reason:"ads_market_not_ready",codes:r.codes,error:"برای روشن کردن، شهر معتبر همین بازار و سقف اجرای روزانه لازم است"};
@@ -103,5 +123,5 @@ export function validateAdsMarketUpdate(body,current,globalCap,at){
   }
   next.updated_at=at;
   const {market:_m,updated_at:_u,...stored}=next;
-  return {ok:true,market,config:next,stored:{...stored,updated_at:at}};
+  return {ok:true,market,config:next,stored:{...stored,updated_at:at},suspension_change};
 }

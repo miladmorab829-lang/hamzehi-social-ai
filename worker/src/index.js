@@ -15,7 +15,8 @@ import { runWatchdog } from "./agent-watchdog.js";
 import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, googleOriginLead, independentContact, leadDuplicateMap, independentWebsiteHost } from "./lead-qualification.js";
 import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite, latinDigits, DATASET_ATTRIBUTION } from "./dataset-discovery.js";
 import { phase17Overview } from "./phase17-dashboard-metrics.js";
-import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
+import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market-isolation.js";
+import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
@@ -12766,7 +12767,9 @@ async function runAdAutopilotOnce(env, input, reason="manual") {
   // Google Places (owner budget, places-budget.js): ONE reserved IDs-only Text Search per run for jewelry stores inside the run city's
   // rectangle (type + location are Google-verified). Only the place ID is stored (Maps terms); the lead is labelled from our own data.
   // Off unless ADS_PLACES_DISCOVERY=on; budget or provider limits only skip this step — web discovery below always runs.
-  if(placesBudgetSettings(env).adsEnabled&&groups.some(g=>g[0].startsWith("gold_"))){
+  // 2026-11-01 owner decision: no Google Places call for a blocked market (IRAN); its web discovery below still runs.
+  if(placesBudgetSettings(env).adsEnabled&&placesMarketBlocked(target.market))summary.places={status:"market_blocked",place_ids:0,new_leads:0,updated:0};
+  else if(placesBudgetSettings(env).adsEnabled&&groups.some(g=>g[0].startsWith("gold_"))){
     const pl=summary.places={status:"skipped",place_ids:0,new_leads:0,updated:0};
     try{
       const res=await placesIdsOnlySearch(env,{market:target.market,city:target.city,purpose:"ads_discovery"});
@@ -12948,7 +12951,14 @@ function extractTelegramContact(text = "") {
     telegram_url: null
   };
 }
-async function discoverGooglePlaces(env, textQuery, languageCode = "fa", limit = 10) {
+async function discoverGooglePlaces(env, textQuery, languageCode = "fa", limit = 10, market = null) {
+  // 2026-11-01 owner decision: no Google Places request for IRAN (Maps Prohibited Territory). The market comes from the caller; without
+  // one it is derived from the language (fa → IRAN, ar → ARAB) and an undeterminable market is refused (fail closed). Checked before the
+  // API key, the budget reservation and the request; Iraq is unaffected.
+  const placesMarket = normalizeAdsMarket(market) || (languageCode === "ar" ? "ARAB" : languageCode === "fa" ? "IRAN" : null);
+  if (!placesMarket || placesMarketBlocked(placesMarket)) {
+    return { ok: false, skipped: true, blocked: true, reason: placesMarket ? "market_blocked" : "market_unknown", market: placesMarket, error: `${placesMarket ? "market_blocked" : "market_unknown"}: Google Places is not used for market ${placesMarket || "unknown"}`, items: [] };
+  }
   if (!env.GOOGLE_PLACES_API_KEY) {
     return {
       ok: false,
@@ -12961,7 +12971,7 @@ async function discoverGooglePlaces(env, textQuery, languageCode = "fa", limit =
   const url = "https://places.googleapis.com/v1/places:searchText";
   // Monthly Places budget (places-budget.js). Phase 17 safety fix: only the fields the transient relevance filter needs are requested
   // (Text Search Pro); phone, website, coordinates and Maps URI are no longer requested because they may not be stored (Maps terms).
-  const slot = await reservePlacesRequest(env, { sku: "pro", purpose: "crm_customer_discovery" });
+  const slot = await reservePlacesRequest(env, { sku: "pro", purpose: "crm_customer_discovery", market: placesMarket });
   if (!slot.reserved) {
     return { ok: false, skipped: true, budget_limited: true, error: "Google Places monthly budget: " + slot.reason, items: [] };
   }
@@ -13162,7 +13172,8 @@ const googlePlaces = await discoverGooglePlaces(
   env,
   placesQuery,
   groupType.endsWith("_ar") ? "ar" : "fa",
-  10
+  10,
+  groupType.endsWith("_ar") ? "ARAB" : "IRAN"
 );
 
 summary.discovery_diagnostics.push({
@@ -13672,20 +13683,28 @@ export default {
           await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
           // Phase 09.4: Ads DISCOVERY runs for each READY market (owner-enabled, city of that market, owner-set limit) on its own; a
           // disabled market discovers nothing. runAdAutopilotOnce reserves that market's run itself and nothing is retried or released.
-          for(const {market,cfg} of await adsReadyMarkets(env)){
-            await runAdAutopilotOnce(env,{type:cfg.type,city:adsCityForRun(cfg),extra:cfg.extra,market},"scheduled");
-          }
+          // Market isolation (2026-11-01): each market in its own try — one market's failure never stops the other market, dataset
+          // discovery or the website checks below; 3 failures in a row back that market off (1 h doubling, max 24 h) so no quota or paid
+          // call is spent on a repeating error. Recorded for the dashboard and the Watchdog (market-isolation.js).
+          let readyAds=[];try{readyAds=await adsReadyMarkets(env);}catch(e){await stepFailed("ads_markets_read",e);}
+          // The markets run in parallel (2026-11-01): a slow Iran run no longer delays Iraq. Every quota they touch (Ads run, AI draft,
+          // Places budget) is reserved with one atomic D1 statement, so parallel runs cannot exceed a cap.
+          await Promise.allSettled(readyAds.map(async({market,cfg})=>{
+            if((await marketBackoff(env,"ads",market)).skip)return;
+            try{await runAdAutopilotOnce(env,{type:cfg.type,city:adsCityForRun(cfg),extra:cfg.extra,market},"scheduled");await clearMarketFailure(env,"ads",market);}
+            catch(e){await recordMarketFailure(env,"ads",market,sanitizeOperationalError(e?.message||e));}
+          }));
           // Phase 09.6/09.7: CRM follow-ups never depend on the market switches and never use an Ads quota. Only when a due lead still needs a
           // draft, one CRM_FOLLOWUP reservation is taken (55-minute spacing, own daily cap; no audit row when refused), so an idle tick spends
           // nothing. The 07:00–07:14 UTC tick leaves follow-ups to the daily sweep that fires at the same minute (no double sweep).
           const tickAt=new Date(Number(event?.scheduledTime)||Date.now()),dailyWindow=tickAt.getUTCHours()===7&&tickAt.getUTCMinutes()<15;
-          if(!dailyWindow&&env.OPENAI_API_KEY&&(await adsDueFollowups(env)).length&&await reserveCrmFollowupRun(env,Date.now(),"scheduled_followups"))
-            await prepareAdsFollowups(env,{limit:AD_MAX_DRAFTS_PER_RUN,retry:true});
+          try{if(!dailyWindow&&env.OPENAI_API_KEY&&(await adsDueFollowups(env)).length&&await reserveCrmFollowupRun(env,Date.now(),"scheduled_followups"))
+            await prepareAdsFollowups(env,{limit:AD_MAX_DRAFTS_PER_RUN,retry:true});}catch(e){await stepFailed("crm_followups",e);}
           // Phase 18.4: open-dataset discovery (off unless DATASET_DISCOVERY=on and DISCOVERY_BUCKET is bound): a few new candidates per
           // market per tick, then the same bounded own-website check verifies them (no AI, no paid call, nothing sent).
           const ds=discoverySettings(env);
           if(ds.enabled){try{const r=await ingestDatasetCandidates(env,{settings:ds,helpers:{upsert:upsertDiscoveredLead,identities:collectLeadIdentities}});
-            if(r.created&&(r.created.IRAN||r.created.ARAB))await audit(env,"dataset_discovery_ingested","Open-dataset candidates added for website verification",{release:r.release,created:r.created,skipped:r.skipped});}catch{}}
+            if(r.created&&(r.created.IRAN||r.created.ARAB))await audit(env,"dataset_discovery_ingested","Open-dataset candidates added for website verification",{release:r.release,created:r.created,skipped:r.skipped,errors:r.errors,backoff:r.backoff});}catch(e){await stepFailed("dataset_discovery",e);}}
           // Phase 17: free, bounded re-check of 2 leads' own websites for published contacts (independent of the Ads markets).
           try{await enrichOwnSiteContacts(env,{limit:ds.enabled?ds.verify_per_run:2});}catch{}
           // Actual sending remains authorized-channel/manual.
@@ -14928,7 +14947,8 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`).run();
         const cap=await adsGlobalRunCap(env),current=(await readAdsMarketConfigs(env))[market],t=now();
         const v=validateAdsMarketUpdate({...b,market},current,cap,t);
-        if(!v.ok) return json(v,v.reason==="owner_approval_required"?403:400);
+        if(!v.ok) return json(v,v.reason==="owner_approval_required"?403:v.reason==="ads_market_suspended"?409:400);
+        if(v.suspension_change)await audit(env,v.suspension_change==="suspended"?"ads_market_suspended":"ads_market_suspension_lifted",`Ads market ${market} suspension ${v.suspension_change} by the owner`,{market,before:{enabled:current.enabled,suspended:!!current.suspended,suspended_reason:current.suspended_reason||null},after:{enabled:v.config.enabled,suspended:!!v.config.suspended,suspended_reason:v.config.suspended_reason||null}});
         await env.DB.prepare("INSERT OR REPLACE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind(adsMarketKey(market),JSON.stringify(v.stored),t).run();
         await audit(env,v.config.enabled?"ads_market_enabled":"ads_market_updated",`Ads market ${market} ${v.config.enabled?"enabled":"updated"} by the owner`,{market,enabled:v.config.enabled,city:v.config.city,runs_per_day:v.config.runs_per_day,type:v.config.type});
         return json({ok:true,market,config:v.config,readiness:adsMarketReadiness(v.config,cap)});

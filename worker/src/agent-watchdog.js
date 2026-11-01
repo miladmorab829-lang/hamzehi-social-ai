@@ -3,6 +3,7 @@
 // re-queues failed READ-ONLY tasks (allow-list, once per task per day). It never runs a task, never repeats a paid or draft side effect,
 // never sends anything, never approves anything and never deploys or rolls back code. Every query is bounded.
 import { raiseAlerts, recoverOpenAlerts, opsAvailable, autoRetryReadDeadLetter } from "./agent-ops-store.js";
+import { failingMarkets } from "./market-isolation.js";
 import { AUTONOMY_ACTION_CAPABILITY, safeErrorText } from "./agent-orchestrator.js";
 import { placesBudgetStatus } from "./places-budget.js";
 
@@ -70,6 +71,11 @@ export async function runWatchdog(env,{nowMs=Date.now(),orchestratorOn=env?.AUTO
   try{const pb=await placesBudgetStatus(env,nowMs);
     if(pb.enabled&&pb.exhausted)raised.push({code:"places_budget_exhausted",agent:"ads",level:"warning",cause:`Google Places monthly budget reached (${pb.reserved_usd.toFixed(2)} of ${pb.effective_cap_usd.toFixed(2)} USD reserved this month)`,
       fallback:"New Google Places requests pause until the next month; Ads web discovery, CRM and all agents continue"});}catch{}
+  // 0c. Market isolation (2026-11-01): a market (or the shared dataset file) failing 3+ times in a row raises one alert per scope/market;
+  // the other market keeps running and retries back off. Recovered automatically after the next success.
+  for(const f of await failingMarkets(env))raised.push({code:"market_failing",agent:`${f.scope}:${f.market}`,level:"warning",
+    cause:`${f.scope==="ads"?"Ads":"Dataset discovery"} ${f.market}: ${f.count} failed runs in a row (${f.error})`,
+    fallback:`The other market continues; next retry after ${f.retry_after||"the next tick"}; no paid call and nothing sent while backing off`});
   // 1. Missing heartbeat / unhealthy runs (only when the orchestrated scheduler is expected to run).
   if(orchestratorOn&&master==="on"){
     const hb=await env.DB.prepare("SELECT last_finished_at,healthy FROM agent_heartbeat WHERE scheduler='autonomy'").first();

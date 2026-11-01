@@ -1,3 +1,4 @@
+import { normalizeAdsMarket } from "./ads-markets.js";
 // Google Places discovery with a monthly cost guard (owner budget 2026-10-30: USD 10 per calendar month).
 //
 // Pricing (Places API (New), Google Maps Platform price list, first volume tier, per request):
@@ -51,6 +52,7 @@ export async function placesBudgetStatus(env,nowMs=Date.now()){
 // Atomic reservation before one potentially billable request. Today's allowance spreads what is left of the month over the days left,
 // so the budget cannot be spent in the first days. Returns {reserved,id} or {reserved:false,reason:"monthly_budget"|"daily_allowance"}.
 export async function reservePlacesRequest(env,{sku,purpose,market=null,nowMs=Date.now()}={}){
+  if(placesMarketBlocked(market))return {reserved:false,reason:"market_blocked"};
   const st=placesBudgetSettings(env),cost=placesReserveMicros(sku,st),m=monthStartIso(nowMs),day=dayStartIso(nowMs);
   const before=Number((await env.DB.prepare("SELECT COALESCE(SUM(CAST(json_extract(details_json,'$.reserved_micros') AS INTEGER)),0) s FROM system_events WHERE type='places_reserved' AND created_at>=? AND created_at<?").bind(m,day).first())?.s||0);
   const left=st.capMicros-before;
@@ -93,7 +95,14 @@ export function placesIdsOnlyRequest({market,city}){
 const PLACE_ID=/^[A-Za-z0-9_-]{10,300}$/;
 export const placesMapsUrl=id=>`https://www.google.com/maps/place/?q=place_id:${encodeURIComponent(id)}`;
 // One reserved, bounded, non-retried IDs-only search. Returns {ok, place_ids[], status, reason}.
+// Markets for which Google Places is never called (owner decision 2026-11-01): Iran is a Google Maps Platform Prohibited Territory.
+// Checked before the API key and the budget reservation, so a blocked market costs nothing. Other markets are unaffected.
+export const PLACES_BLOCKED_MARKETS=Object.freeze({IRAN:"google_maps_prohibited_territory"});
+// Aliases ("ir", "iran", "ایران") resolve to the same market, so a differently spelled caller cannot bypass the block.
+export const placesMarketBlocked=market=>{const m=normalizeAdsMarket(market)||String(market||"").toUpperCase();return Object.prototype.hasOwnProperty.call(PLACES_BLOCKED_MARKETS,m);};
 export async function placesIdsOnlySearch(env,{market,city,purpose="ads_discovery",timeoutMs=10000,fetchImpl=fetch}){
+  // Fail closed: only a known, non-blocked market (today ARAB) may reach Google; a blocked, unknown or missing market is refused.
+  if(placesMarketBlocked(market)||!normalizeAdsMarket(market))return {ok:false,reason:placesMarketBlocked(market)?"market_blocked":"market_unknown",blocked:true,policy:PLACES_BLOCKED_MARKETS.IRAN,place_ids:[]};
   if(!env.GOOGLE_PLACES_API_KEY)return {ok:false,reason:"not_configured",place_ids:[]};
   const body=placesIdsOnlyRequest({market,city});if(!body)return {ok:false,reason:"city_bounds_missing",place_ids:[]};
   const slot=await reservePlacesRequest(env,{sku:"ids_only",purpose,market});
