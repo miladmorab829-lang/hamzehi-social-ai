@@ -18,8 +18,8 @@ const exp=PF.expectedFromToml(fs.readFileSync(path.join(REPO,"worker/wrangler.to
 ok("N1 worker/wrangler.toml declares AUTONOMY_ORCHESTRATOR = \"on\"",exp.vars.AUTONOMY_ORCHESTRATOR==="on",exp.vars);
 ok("N2 Production bindings unchanged: DB=40b272c5…, GALLERY_BUCKET=hamzehi-gallery, AI; plus the isolated Phase 18.5 DISCOVERY_BUCKET=hamzehi-discovery",exp.d1.length===1&&exp.d1[0].binding==="DB"&&exp.d1[0].database_id==="40b272c5-e368-4c33-8a41-7c63db98d7e8"
   &&exp.r2.length===2&&exp.r2.find(r=>r.binding==="GALLERY_BUCKET")?.bucket_name==="hamzehi-gallery"&&exp.r2.find(r=>r.binding==="DISCOVERY_BUCKET")?.bucket_name==="hamzehi-discovery"&&exp.ai?.binding==="AI",exp);
-ok("N3 the 9 previously declared vars keep their values (18 vars total: Google Places vars + DATASET_DISCOVERY=\"on\" with first-day limits 1/run, 10/day per market, 2 checks/run)",Object.keys(exp.vars).length===18&&exp.vars.DATASET_DISCOVERY==="on"
-  &&exp.vars.DATASET_DISCOVERY_IRAN_PER_RUN==="1"&&exp.vars.DATASET_DISCOVERY_ARAB_PER_RUN==="1"&&exp.vars.DATASET_DISCOVERY_IRAN_DAILY_CAP==="10"&&exp.vars.DATASET_DISCOVERY_ARAB_DAILY_CAP==="10"&&exp.vars.DATASET_DISCOVERY_VERIFY_PER_RUN==="2"&&exp.vars.ADS_PLACES_DISCOVERY==="on"&&exp.vars.ADS_PLACES_MONTHLY_BUDGET_USD==="10"&&exp.vars.SALES_AI_BRAIN==="on"&&exp.vars.SALES_AI_PROVIDER==="anthropic"&&exp.vars.RATE_LIMIT_PER_MINUTE==="60",exp.vars);
+ok("N3 the 9 previously declared vars keep their values (18 vars total: Google Places vars + DATASET_DISCOVERY=\"on\", IRAQ only: ARAB 1/run, 10/day; IRAN 0/0 (disabled); 2 checks/run)",Object.keys(exp.vars).length===18&&exp.vars.DATASET_DISCOVERY==="on"
+  &&exp.vars.DATASET_DISCOVERY_IRAN_PER_RUN==="0"&&exp.vars.DATASET_DISCOVERY_ARAB_PER_RUN==="1"&&exp.vars.DATASET_DISCOVERY_IRAN_DAILY_CAP==="0"&&exp.vars.DATASET_DISCOVERY_ARAB_DAILY_CAP==="10"&&exp.vars.DATASET_DISCOVERY_VERIFY_PER_RUN==="2"&&exp.vars.ADS_PLACES_DISCOVERY==="on"&&exp.vars.ADS_PLACES_MONTHLY_BUDGET_USD==="10"&&exp.vars.SALES_AI_BRAIN==="on"&&exp.vars.SALES_AI_PROVIDER==="anthropic"&&exp.vars.RATE_LIMIT_PER_MINUTE==="60",exp.vars);
 const stg=PF.expectedFromToml(fs.readFileSync(path.join(REPO,"staging/wrangler.staging.toml"),"utf8"));
 ok("N4 the staging config stays separate (own D1 only, flag on)",stg.d1.length===1&&stg.d1[0].database_id==="cddc10c5-2232-4334-8d99-fedb52fbd12d"&&stg.vars.AUTONOMY_ORCHESTRATOR==="on",stg);
 
@@ -34,7 +34,7 @@ ok("N5 a tagged version with the full activation configuration (30 bindings: 25 
 ok("N5b a version without DISCOVERY_BUCKET, with the GALLERY bucket in its place, with DATASET_DISCOVERY other than the committed value, without it, or with a changed limit is refused",
   PF.checkVersion(V({dropDiscoveryBucket:true}),exp).failures.some(f=>/DISCOVERY_BUCKET/.test(f))&&PF.checkVersion(V({discoveryBucket:"hamzehi-gallery"}),exp).failures.some(f=>/DISCOVERY_BUCKET/.test(f))
   &&PF.checkVersion(V({vars:{DATASET_DISCOVERY:"off"}}),exp).failures.some(f=>/DATASET_DISCOVERY/.test(f))&&PF.checkVersion(V({dropVars:["DATASET_DISCOVERY"]}),exp).failures.some(f=>/DATASET_DISCOVERY/.test(f))
-  &&PF.checkVersion(V({vars:{DATASET_DISCOVERY_IRAN_DAILY_CAP:"40"}}),exp).failures.some(f=>/DATASET_DISCOVERY_IRAN_DAILY_CAP/.test(f)));
+  &&PF.checkVersion(V({vars:{DATASET_DISCOVERY_IRAN_DAILY_CAP:"10"}}),exp).failures.some(f=>/DATASET_DISCOVERY_IRAN_DAILY_CAP/.test(f)));
 const auto=PF.checkVersion(V({untagged:true,dropVars:["AUTONOMY_ORCHESTRATOR"]}),exp);
 ok("N6 an automatic-build-shaped version (untagged, no AUTONOMY_ORCHESTRATOR, 19 bindings) is refused",!auto.ok&&auto.failures.some(f=>/AUTONOMY_ORCHESTRATOR/.test(f))&&auto.failures.some(f=>/no tag/.test(f)),auto.failures);
 ok("N7 flag present but \"off\" is refused",!PF.checkVersion(V({vars:{AUTONOMY_ORCHESTRATOR:"off"}}),exp).ok);
