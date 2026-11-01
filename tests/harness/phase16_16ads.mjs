@@ -5,6 +5,13 @@
 import fs from "node:fs";import path from "node:path";import {pathToFileURL,fileURLToPath} from "node:url";
 import {makeWorld,reporter} from "./harness.mjs";
 const {ok,J,done}=reporter("phase16_16ads");
+// Phase 18.22: deterministic test clock. The daily quota is per UTC day and the tests "backdate" reservations by 61 minutes; run within
+// 61 minutes after UTC midnight, that landed on the previous day and A18 failed (test artifact; the product logic is unchanged). The
+// process clock is pinned to 12:00:00Z of the current UTC date (HARNESS_CLOCK=<ISO> overrides) and advances in real time from there.
+const RealDate=Date;let clockOffset=0;
+const setClock=iso=>{clockOffset=new RealDate(iso).getTime()-RealDate.now();};
+globalThis.Date=class extends RealDate{constructor(...a){super(...(a.length?a:[RealDate.now()+clockOffset]));}static now(){return RealDate.now()+clockOffset;}};
+setClock(process.env.HARNESS_CLOCK||new RealDate().toISOString().slice(0,10)+"T12:00:00.000Z");
 const started=Date.now();
 const REPO=process.env.REPO||path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../.."),SRC=process.env.SRC||path.join(REPO,"worker/src");
 const W=await makeWorld({extraEnv:{OPENAI_API_KEY:"test-openai-not-real",PUBLIC_WORKER_BASE_URL:"https://w.test",AUTONOMY_ORCHESTRATOR:"on"}});const {q,dbrun,call}=W;
@@ -76,6 +83,12 @@ await call("/api/ads/autopilot/status",null,"GET");
 {await call("/api/ads/markets/config",{market:"IRAN",enabled:true,city:"ALL",type:"gold",runs_per_day:3,owner_approved:true});
  backdate();await tick();const afterThird=runs("IRAN").length;backdate();await tick();
  ok("A18 the daily limit is per MARKET (not per city): IRAN stops at 3 runs today although cities rotate; ARAB keeps running",afterThird===3&&runs("IRAN").length===3&&runs("ARAB").length===4,[runs("IRAN").length,runs("ARAB").length]);
+ // Phase 18.22: UTC day boundary — the per-market quota belongs to the UTC day: 00:30Z of the next day IRAN may run again (its 3 runs were
+ // "yesterday"); a reservation 61 minutes earlier (23:29Z yesterday) still satisfies the 55-minute spacing.
+ const day=new Date().toISOString().slice(0,10),next=new Date(new RealDate(day+"T00:00:00.000Z").getTime()+86400e3).toISOString().slice(0,10);
+ setClock(next+"T00:30:00.000Z");backdate();await tick();
+ ok("A18b UTC-midnight boundary: on the next UTC day (00:30Z) IRAN's daily quota is fresh and it runs again (4th run overall, 1st of the new day)",
+   new Date().toISOString().slice(0,10)===next&&runs("IRAN").length===4,{now:new Date().toISOString(),iran:runs("IRAN").length});
  const off=await call("/api/ads/markets/config",{market:"ARAB",enabled:false});const n=runs("ARAB").length;backdate();await tick();
  ok("A19 disabling needs no approval and stops that market at the next tick",off.status===200&&runs("ARAB").length===n);}
 
