@@ -47,8 +47,8 @@ ADS_PLACES_DISCOVERY = "on"
 ADS_PLACES_MONTHLY_BUDGET_USD = "10"
 # Phase 18.5: independent dataset discovery master switch. "off" = fully inert (no import, no dataset website checks), even with
 # DISCOVERY_BUCKET bound.
-# Activation configuration (2026-11-01): ON for IRAQ only with first-day limits. IRAN is disabled (limits 0 = no imports and no website
-# checks, D-17) until the OFAC/ITSR determination for Iran exists. Nothing is imported until the sealed
+# Activation configuration (2026-11-01): ON for IRAQ and IRAN, 1 per run / 10 per day each, 2 website checks per run. IRAN activated by the
+# owner after confirming the account holder is not located in Iran / not SDN-listed and no US person is involved. Nothing is imported until the sealed
 # candidate file is uploaded to the bucket (empty = no import). A market is disabled by setting its PER_RUN or DAILY_CAP to "0" (D-17).
 # Emergency stop: redeploy the previous tagged version (a22839b3, "off").
 DATASET_DISCOVERY = "on"
