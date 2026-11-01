@@ -17,6 +17,7 @@ import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite, latinDig
 import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market-isolation.js";
 import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE_STAGES, PIPELINE_SIDE_STATES } from "./lead-scoring.js";
+import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
@@ -12388,6 +12389,8 @@ async function salesLeadActivity(env){
   for(const r of await rows("lead_quotes","SELECT lead_id FROM lead_quotes WHERE inbox_message_id IS NOT NULL AND inbox_message_id<>'' AND status NOT IN ('rejected','cancelled','expired')"))get(r.lead_id).quote_customer_request=true;
   for(const r of await rows("lead_orders","SELECT lead_id FROM lead_orders WHERE status NOT IN ('cancelled','order_candidate')"))get(r.lead_id).ordered=true;
   for(const r of await rows("lead_orders","SELECT lead_id FROM lead_orders WHERE status IN ('confirmed','partially_paid','paid','shipped','fulfilled','delivered')"))get(r.lead_id).order_confirmed=true;
+  // Phase 20: when the last approved/sent quote went out (quote follow-up after REVENUE_FOLLOWUP_DAYS.quote_no_reply).
+  for(const r of await rows("lead_quotes","SELECT lead_id,MAX(COALESCE(sent_at,approved_at,updated_at)) t FROM lead_quotes WHERE status IN ('approved','sent','accepted') GROUP BY lead_id"))get(r.lead_id).quote_sent_at=r.t;
   // Phase 18.1: the market recorded on the lead's own quotes/orders (any status) — CRM evidence for a lead whose notes carry no market.
   const om=(r)=>{const a=get(r.lead_id);a.order_markets=a.order_markets||[];if(r.market&&!a.order_markets.includes(r.market))a.order_markets.push(r.market);};
   for(const r of await rows("lead_quotes","SELECT DISTINCT lead_id,market FROM lead_quotes WHERE market IS NOT NULL"))om(r);
@@ -12395,7 +12398,7 @@ async function salesLeadActivity(env){
   for(const r of await rows("lead_outreach","SELECT lead_id,status,updated_at,sent_at,approved_at FROM lead_outreach ORDER BY created_at")){const a=get(r.lead_id);
     // Phase 19: any sent/delivered row counts (a later draft does not undo a real send); the latest real send time (sent_at, else
     // updated_at) is the NO_RESPONSE basis; owner approval is the recorded approved_at, never inferred from the status.
-    if(["sent","delivered"].includes(r.status)){a.outreach_ever_sent=true;const ts=r.sent_at||r.updated_at;if(ts&&(!a.outreach_sent_at||ts>a.outreach_sent_at))a.outreach_sent_at=ts;}
+    if(["sent","delivered"].includes(r.status)){a.outreach_ever_sent=true;a.outreach_sent_count=(a.outreach_sent_count||0)+1;const ts=r.sent_at||r.updated_at;if(ts&&(!a.outreach_sent_at||ts>a.outreach_sent_at))a.outreach_sent_at=ts;}
     if(r.approved_at&&(!a.outreach_approved_at||r.approved_at>a.outreach_approved_at))a.outreach_approved_at=r.approved_at;
     if(r.status==="rejected")a.outreach_rejected_at=r.updated_at;else a.outreach_status=r.status;}
   const contacts=new Map();
@@ -12413,7 +12416,7 @@ function salesLeadView(lead,profile,scored=null){
     ...(scored?{lead_score:{...scored.score,fingerprint:scored.fingerprint},pipeline:scored.pipeline}:{})};
 }
 const SALES_VERIFIED_STATES=new Set(["IDENTITY_VERIFIED","CONTACT_CHANNEL_FOUND","CONTACT_VERIFIED","BUSINESS_QUALIFIED","SALES_READY","CONTACTED","OPPORTUNITY","CUSTOMER"]);
-async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id=null,band=null,stage=null,industry=null,sort=null}={}){
+async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id=null,band=null,stage=null,industry=null,sort=null,conversion=false}={}){
   const {have,act,contacts}=await salesLeadActivity(env);
   const leads=id?[await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(id).first()].filter(Boolean):((await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 2000").all()).results||[]);
   // Phase 18.1: duplicates are judged against every lead, also for a single-lead lookup.
@@ -12449,13 +12452,23 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
     &&(!band||x.s.score.band===band)&&(!stage||x.s.pipeline.stage===stage||x.s.pipeline.side_state===stage)&&(!industry||x.s.score.industry===industry));
   if(sort==="score")items.sort((a,b)=>b.s.score.score-a.s.score.score||b.p.priority_score-a.p.priority_score||String(b.lead.updated_at).localeCompare(String(a.lead.updated_at)));
   else items.sort((a,b)=>b.p.priority_score-a.p.priority_score||String(b.lead.updated_at).localeCompare(String(a.lead.updated_at)));
-  const total=items.length;items=items.slice(offset,offset+limit).map(x=>salesLeadView(x.lead,x.p,x.s));
+  const total=items.length;
+  // Phase 20: a deterministic conversion plan (next action, follow-up state, template draft PREVIEW) for the listed leads only. Read-only:
+  // nothing is stored or sent here; images are only owner-verified gallery photos.
+  let galleryIds=[];if(conversion&&have.has("visual_product_media")){try{galleryIds=((await env.DB.prepare("SELECT id FROM visual_product_media WHERE candidate_status='verified' AND verified_real_product=1 ORDER BY updated_at DESC LIMIT 3").all()).results||[]).map(r=>r.id);}catch{galleryIds=[];}}
+  const plans=[];
+  if(conversion){for(const x of items){x.c=conversionPlan(x.lead,parseLeadNotes(x.lead),x.p,x.s,{...(act.get(x.lead.id)||{}),strict_activity:true},{nowMs,galleryIds});plans.push({market:x.p.market,plan:x.c});}
+    // revenue order: actions closest to cash first, then the score
+    items.sort((a,b)=>a.c.next_action.rank-b.c.next_action.rank||b.s.score.score-a.s.score.score);}
+  items=items.slice(offset,offset+limit).map(x=>{const v=salesLeadView(x.lead,x.p,x.s);if(conversion)v.conversion=x.c;return v;});
   return {ok:true,generated_at:now(),truncated:leads.length>=2000,markets,leads_without_market:all.filter(x=>!x.p.market).length,
     // Phase 18.21: data credits (Overture / Foursquare / AllThePlaces / OSM notices) whenever dataset-discovered leads are shown
     dataset_attribution:all.some(x=>/"provider":"dataset"/.test(String(x.lead.notes||"")))?DATASET_ATTRIBUTION:null,
     owner_decisions:"Scoring and next actions never create approvals; outreach, prices, quotes and payments stay with the owner",
     scoring:{version:SCORE_VERSION,weights:SCORE_WEIGHTS,bands:{VERY_HIGH:"80-100",HIGH:"60-79",REVIEW:"40-59",LOW:"0-39",INSUFFICIENT_DATA:"too few known facts (not low value)",EXCLUDED:"rejected / duplicate / information site"},
-      pipeline:PIPELINE_STAGES,side_states:PIPELINE_SIDE_STATES,industries:[...new Set(all.map(x=>x.s.score.industry))].sort()},total,offset,limit,items};
+      pipeline:PIPELINE_STAGES,side_states:PIPELINE_SIDE_STATES,industries:[...new Set(all.map(x=>x.s.score.industry))].sort()},
+    ...(conversion?{conversion:{version:CONVERSION_VERSION,follow_up_rules:FOLLOWUP_RULES,summary:conversionSummary(markets,plans),verified_gallery_photos:galleryIds.length,
+      rules:"Drafts are previews; the owner stores one (template engine) and approves every send; no price, discount, stock or payment term is ever written"}}:{}),total,offset,limit,items};
 }
 // Bounded, free re-check of a business's OWN website for published contacts (robots.txt respected; at most `limit` leads per run, each
 // re-checked at most every 14 days). Directories, marketplaces, Google content and Places-only leads are never fetched.
@@ -15186,6 +15199,26 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
          if(open)return json({ok:true,lead_id:leadId,outreach_id:open.id,draft:open.message,mode,channel:open.channel,recipient:open.recipient,language:open.language,status:open.status,reused:true,send_mode:"manual_approval_only"});
          const rej=b.force===true?null:await env.DB.prepare("SELECT id FROM lead_outreach WHERE lead_id=? AND status='rejected' AND updated_at>=? LIMIT 1").bind(leadId,new Date(Date.now()-30*86400e3).toISOString()).first();
          if(rej)return json({ok:false,reason:"outreach_recently_rejected",error:"پیش‌نویس قبلی این lead را رد کرده‌اید؛ برای پیش‌نویس تازه force:true بفرستید"},409);}
+        // Phase 20: template drafts follow the records — no market → none; excluded leads, the price/quote decision and confirmed orders
+        // stay with their own flows; a follow-up/quote/conversation mode needs the matching record. Checked before any contact is touched.
+        let tplText=null,tmode=null;
+        if(b.engine==="template"){
+          const tm=parseLeadNotes(lead),mk=leadMarketOf(tm),pq=leadQualification(lead,tm,[],{});tmode=DRAFT_MODES.includes(String(b.mode||""))?String(b.mode):"initial";
+          if(mk!=="IRAN"&&mk!=="ARAB")return json({ok:false,reason:"market_unknown",error:"بازار این lead مشخص نیست؛ زبان و ارز پیش‌نویس به بازار بستگی دارد"},409);
+          if(pq.state==="REJECTED")return json({ok:false,reason:"lead_excluded",error:"این lead کنار گذاشته شده است"},409);
+          const one=async(sql)=>{try{return !!(await env.DB.prepare(sql).bind(leadId).first());}catch{return false;}};
+          const quoteSent=await one("SELECT 1 FROM lead_quotes WHERE lead_id=? AND status IN ('approved','sent','accepted') LIMIT 1");
+          if(await one("SELECT 1 FROM lead_orders WHERE lead_id=? AND status IN ('confirmed','partially_paid','paid','shipped','fulfilled','delivered') LIMIT 1"))return json({ok:false,reason:"use_order_flow",error:"این مشتری سفارش تأییدشده دارد؛ از جریان سفارش استفاده کنید"},409);
+          if(!quoteSent&&await one("SELECT 1 FROM lead_quotes WHERE lead_id=? LIMIT 1"))return json({ok:false,reason:"owner_financial_decision",error:"درخواست قیمت باز است؛ تصمیم قیمت با مالک و از جریان پیش‌فاکتور"},409);
+          const sentBefore=await one("SELECT 1 FROM lead_outreach WHERE lead_id=? AND status IN ('sent','delivered') LIMIT 1"),replied=/inbound/i.test(String(tm.source||""))||await one("SELECT 1 FROM inbox_messages WHERE lead_id=? LIMIT 1");
+          if(tmode==="followup"&&!sentBefore)return json({ok:false,reason:"mode_not_applicable",error:"پیامی ارسال نشده است؛ پیگیری معنا ندارد"},409);
+          if(tmode==="initial"&&(sentBefore||replied))return json({ok:false,reason:"already_contacted",error:"با این مشتری قبلاً تماس برقرار شده است؛ به‌جای معرفی اولیه از پیگیری استفاده کنید"},409);
+          if(tmode==="quote_followup"&&!quoteSent)return json({ok:false,reason:"mode_not_applicable",error:"پیش‌فاکتوری ارسال نشده است"},409);
+          if(tmode==="conversation"&&!replied)return json({ok:false,reason:"mode_not_applicable",error:"گفتگویی با این مشتری ثبت نشده است"},409);
+          let gal=[];try{gal=((await env.DB.prepare("SELECT id FROM visual_product_media WHERE candidate_status='verified' AND verified_real_product=1 LIMIT 2").all()).results||[]).map(r=>r.id);}catch{gal=[];}
+          tplText=buildConversionDraft({market:mk,mode:tmode,name:lead.name,city:tm.city,signals:pq.packaging_signals||[],galleryIds:gal})?.text||null;
+          if(!tplText)return json({ok:false,reason:"market_unknown",error:"پیش‌نویس ساخته نشد"},409);
+        }
         let selected;
         try { selected=await selectLeadOutreachContact(env,lead,b); }
         catch(e) { return json({ok:false,error:e.message},400); }
@@ -15194,6 +15227,11 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
         const sourceLabel = meta.source === "customer_discovery" ? "Google Maps/Places business" : meta.source === "instagram_hashtag_discovery" ? "Instagram business/page" : "business lead";
 const language = outreachLanguage(meta);
 const context = `${sourceLabel}: ${lead.name || ""}. Contact: ${lead.contact || "unknown"}. Website: ${meta.url || "unknown"}. City: ${meta.city || "unknown"}. Discovery query: ${meta.query || "unknown"}. Evidence: ${meta.evidence || ""}. Current stage: ${lead.stage || "new"}.`;
+        // Phase 20: engine:"template" = deterministic draft in the market's language (no AI call, no cost); the AI path below is unchanged.
+        let text=null;const templateEngine=b.engine==="template";
+        if(templateEngine){
+          text=tplText;
+        }else{
         if (!env.OPENAI_API_KEY) return json({ ok: false, error: "OPENAI_API_KEY not configured" }, 503);
         const task =
   mode === "followup"
@@ -15215,21 +15253,22 @@ Context: ${context}`;
         const r = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { "Authorization": `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: env.OPENAI_MODEL || "gpt-5.6-luna", input: prompt }), signal: AbortSignal.timeout(15000) });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) return json({ ok: false, error: d.error?.message || `OpenAI returned ${r.status}` }, 502);
-        const text = responseText(d).trim();
+        text = responseText(d).trim();
+        }
         if (!text) return json({ ok: false, error: "No outreach draft returned" }, 502);
         // Approved facts only: a draft that names a price, discount or currency amount is not saved (the owner decides those).
         if (OUTREACH_PRICE_TERMS.test(text.normalize("NFKC"))) { await audit(env, "lead_outreach_draft_blocked", "Outreach draft mentioned prices or discounts and was not saved", { lead_id: leadId, mode }); return json({ ok: false, reason: "draft_mentions_price", error: "پیش‌نویس به قیمت یا تخفیف اشاره داشت و ذخیره نشد" }, 422); }
         {const raced=await env.DB.prepare("SELECT id,message,channel,recipient,language,status FROM lead_outreach WHERE lead_id=? AND status IN ('draft','pending_approval','approved') AND created_at>=? ORDER BY created_at DESC LIMIT 1").bind(leadId,new Date(Date.now()-7*86400e3).toISOString()).first();
          if(raced)return json({ok:true,lead_id:leadId,outreach_id:raced.id,draft:raced.message,mode,channel:raced.channel,recipient:raced.recipient,language:raced.language,status:raced.status,reused:true,send_mode:"manual_approval_only"});}
-        meta.outreach_draft = text; meta.outreach_mode = mode; meta.outreach_drafted_at = now();
+        meta.outreach_draft = text; meta.outreach_mode = templateEngine?tmode:mode; meta.outreach_drafted_at = now();
         const t=now(),outreachId=uid();
         // Atomic: the draft is inserted only if no open draft of this lead exists (two simultaneous requests leave one draft).
         const ins=await env.DB.prepare("INSERT INTO lead_outreach(id,lead_id,contact_id,conversation_id,channel,recipient,message,language,status,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM lead_outreach WHERE lead_id=? AND status IN ('draft','pending_approval','approved') AND created_at>=?)").bind(outreachId,leadId,selected.contact?.id||null,conversation?.id||null,selected.channel,selected.recipient,text,language,"draft",t,t,leadId,new Date(Date.now()-7*86400e3).toISOString()).run();
         if(!Number(ins?.meta?.changes||0)){const open=await env.DB.prepare("SELECT id,message,channel,recipient,language,status FROM lead_outreach WHERE lead_id=? AND status IN ('draft','pending_approval','approved') ORDER BY created_at DESC LIMIT 1").bind(leadId).first();
           return json({ok:true,lead_id:leadId,outreach_id:open?.id||null,draft:open?.message||null,mode,channel:open?.channel,recipient:open?.recipient,language:open?.language,status:open?.status||"draft",reused:true,send_mode:"manual_approval_only"});}
         await env.DB.prepare("UPDATE leads SET notes=?,updated_at=? WHERE id=?").bind(JSON.stringify(meta), t, leadId).run();
-        await audit(env, "lead_outreach_draft", "Human-review outreach draft generated", { lead_id: leadId, outreach_id:outreachId, mode, channel:selected.channel });
-        return json({ ok: true, lead_id: leadId, outreach_id:outreachId, draft: text, mode, channel:selected.channel, recipient:selected.recipient, language, status:"draft", send_mode: "manual_approval_only" });
+        await audit(env, "lead_outreach_draft", "Human-review outreach draft generated", { lead_id: leadId, outreach_id:outreachId, mode:templateEngine?tmode:mode, channel:selected.channel, engine:templateEngine?"template":"ai" });
+        return json({ ok: true, lead_id: leadId, outreach_id:outreachId, draft: text, mode:templateEngine?tmode:mode, draft_kind:templateEngine?(tmode==="initial"?"INITIAL_OUTREACH":"FOLLOW_UP"):null, channel:selected.channel, recipient:selected.recipient, language, status:"draft", send_mode: "manual_approval_only" });
       }
 
       // ---- Phase 04: funnel (read-only), contact backfill (dry run by default), owner-approved first contact (manual delivery) ----
@@ -15242,6 +15281,12 @@ Context: ${context}`;
         const sq=u.searchParams.get("stage"),stage=[...PIPELINE_STAGES,...PIPELINE_SIDE_STATES].includes(sq)?sq:null;
         const iq=String(u.searchParams.get("industry")||"").trim(),industry=/^[a-z_]{2,30}$/.test(iq)?iq:null,sort=u.searchParams.get("sort")==="score"?"score":null;
         return json(await salesIntelligence(env,{market:mk,tier,limit,offset,band,stage,industry,sort}));
+      }
+      // Phase 20: sales conversion (read-only): high-priority leads with next action, follow-up state and a template draft preview.
+      if (u.pathname === "/api/sales/conversion" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const mk=normalizeAdsMarket(u.searchParams.get("market")),limit=Math.min(100,Math.max(1,Number(u.searchParams.get("limit"))||30));
+        return json(await salesIntelligence(env,{market:mk,limit,sort:"score",conversion:true}));
       }
       if (u.pathname === "/api/leads/intelligence" && req.method === "GET") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
@@ -15298,6 +15343,17 @@ Context: ${context}`;
         return json({ok:true,id,status:"draft",sending_enabled:false});
       }
 
+      // Phase 20: an outreach is approved or sent by the owner only when the lead's market is RECORDED (notes, or its own orders/quotes —
+      // never guessed) and the draft's language matches that market. Drafts are kept as they are; nothing is deleted. The inbound
+      // auto-reply policy (separate, owner-approved) is not changed by this.
+      const outreachMarketCheck=async(o)=>{
+        const lead=await env.DB.prepare("SELECT notes FROM leads WHERE id=?").bind(o.lead_id).first();let mk=leadMarketOf(parseLeadNotes(lead||{}));
+        if(mk!=="IRAN"&&mk!=="ARAB"){const ms=new Set();for(const t of ["lead_orders","lead_quotes"]){try{for(const r of ((await env.DB.prepare("SELECT DISTINCT market FROM "+t+" WHERE lead_id=? AND market IN ('IRAN','ARAB')").bind(o.lead_id).all()).results||[]))ms.add(r.market);}catch{}}
+          mk=ms.size===1?[...ms][0]:null;}
+        if(!mk)return {ok:false,reason:"market_required",error:"بازار این مشتری ثبت نشده است؛ تا تعیین بازار، تأیید و ارسال ممکن نیست"};
+        const want=mk==="IRAN"?"Persian":"Iraqi Arabic";
+        if(o.language&&o.language!==want)return {ok:false,reason:"language_market_mismatch",error:"زبان پیش‌نویس ("+o.language+") با بازار "+mk+" یکی نیست؛ پیش‌نویس تازه به زبان درست لازم است"};
+        return {ok:true,market:mk};};
       if (u.pathname === "/api/leads/outreach/transition" && req.method === "POST") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         await ensureLeadOutreachStore(env);
@@ -15311,7 +15367,8 @@ Context: ${context}`;
         if(quoteLinked)return json({ok:false,error:"Quote-linked outreach must use the quote approval controls"},409);
         if(!LEAD_OUTREACH_STATUSES.has(current.status))return json({ok:false,error:"Unknown outreach status"},409);
         if((action==="approve"&&current.status==="approved")||(action==="reject"&&current.status==="rejected")||(action==="submit"&&current.status==="pending_approval"))return json({ok:true,id,status:current.status,idempotent:true,sending_enabled:false});
-        if(action==="approve"){const freshness=await salesOutreachStillCurrent(env,id);if(!freshness.current)return json({ok:false,error:"Outreach draft is stale and cannot be approved; reject it",reason:freshness.reason},409);}
+        if(action==="approve"){const freshness=await salesOutreachStillCurrent(env,id);if(!freshness.current)return json({ok:false,error:"Outreach draft is stale and cannot be approved; reject it",reason:freshness.reason},409);
+          const mc=await outreachMarketCheck(current);if(!mc.ok)return json(mc,409);}
         const from=action==="submit"?"draft":"pending_approval",to=action==="submit"?"pending_approval":action==="approve"?"approved":"rejected",t=now();
         const result=action==="approve"
           ?await env.DB.prepare("UPDATE lead_outreach SET status=?,approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status=?").bind(to,t,(v=>v==="inbound_auto_policy"?"admin":v)(String(b.approved_by||"admin").slice(0,60)),t,id,from).run()
@@ -15339,6 +15396,7 @@ Context: ${context}`;
         const b=await req.json().catch(()=>({})),id=String(b.id||"").trim();
         if(!id)return json({ok:false,error:"id is required"},400);
         const freshness=await salesOutreachStillCurrent(env,id);if(!freshness.current)return json({ok:false,error:"Outreach draft is stale and must be reviewed again",reason:freshness.reason},409);
+        {const o=await env.DB.prepare("SELECT id,lead_id,language FROM lead_outreach WHERE id=?").bind(id).first();if(o){const mc=await outreachMarketCheck(o);if(!mc.ok)return json(mc,409);}}
         await ensureQuoteStore(env);const linkedQuote=await env.DB.prepare("SELECT id,status FROM lead_quotes WHERE outreach_id=? LIMIT 1").bind(id).first();
         if(linkedQuote&&linkedQuote.status!=="approved")return json({ok:false,error:"Quote is not approved for explicit sending"},409);
         const result=await sendApprovedTelegramOutreach(env,id);
