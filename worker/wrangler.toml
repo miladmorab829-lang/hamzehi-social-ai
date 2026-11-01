@@ -52,8 +52,8 @@ ADS_PLACES_MONTHLY_BUDGET_USD = "10"
 # candidate file is uploaded to the bucket (empty = no import). A market is disabled by setting its PER_RUN or DAILY_CAP to "0" (D-17).
 # Emergency stop: redeploy the previous tagged version (a22839b3, "off").
 DATASET_DISCOVERY = "on"
-DATASET_DISCOVERY_IRAN_PER_RUN = "0"
+DATASET_DISCOVERY_IRAN_PER_RUN = "1"
 DATASET_DISCOVERY_ARAB_PER_RUN = "1"
-DATASET_DISCOVERY_IRAN_DAILY_CAP = "0"
+DATASET_DISCOVERY_IRAN_DAILY_CAP = "10"
 DATASET_DISCOVERY_ARAB_DAILY_CAP = "10"
 DATASET_DISCOVERY_VERIFY_PER_RUN = "2"

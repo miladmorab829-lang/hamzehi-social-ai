@@ -19,7 +19,7 @@ const good={en:"Overture Maps Foundation … Copyright 2024 Foursquare Labs, Inc
 ok("G2 an activation config is refused while the text is unapproved, or approved but missing a required notice; accepted when approved and complete",
   gate(offToml,false,good)&&!gate(onToml,false,good)&&!gate(onToml,true,{en:"Overture Maps Foundation only, no Foursquare or OSM notice",fa:"x"})&&gate(onToml,true,DD.DATASET_ATTRIBUTION)&&!gate(onToml,true,{...good,en:good.en.replace("All rights reserved.","")})&&gate(onToml,true,good));
 ok("G3 activation configuration: attribution approved, DATASET_DISCOVERY=\"on\" IRAQ only (ARAB 1/run, 10/day; IRAN 0/0 disabled; 2 checks/run)",DD.DATASET_ATTRIBUTION_APPROVED===true&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY==="on"
-  &&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_ARAB_PER_RUN==="1"&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_ARAB_DAILY_CAP==="10"&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_IRAN_PER_RUN==="0"&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_IRAN_DAILY_CAP==="0"&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_VERIFY_PER_RUN==="2");
+  &&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_ARAB_PER_RUN==="1"&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_ARAB_DAILY_CAP==="10"&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_IRAN_PER_RUN==="1"&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_IRAN_DAILY_CAP==="10"&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_VERIFY_PER_RUN==="2");
 
 // ---- A: API credits only when dataset leads are present
 const W=await makeWorld({});const {call,dbrun}=W;
