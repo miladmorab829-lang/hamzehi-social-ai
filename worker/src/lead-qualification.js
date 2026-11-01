@@ -82,7 +82,8 @@ export function leadQualification(lead={},meta={},contacts=[],activity={}){
   else if(meta.place_id){identity="GOOGLE_DISCOVERED";identityConf=10;identityMethod="google_place_id";}
   // Phase 18.4 QA: a dataset candidate is verified only when its website CONFIRMS the dataset business name. A site that merely loads
   // (even with local signals, its own contacts or a city of its own) under another name stays unconfirmed; only the owner can confirm it.
-  const datasetNameUnconfirmed=meta.provider==="dataset"&&!ownerIdentity&&meta.dataset_verification?.name_consistent!==true;
+  // Phase 18.28 (P1): a phone link (dataset phone published on this own site, no contradiction, not shared with another lead) confirms it too.
+  const datasetNameUnconfirmed=meta.provider==="dataset"&&!ownerIdentity&&meta.dataset_verification?.name_consistent!==true&&meta.dataset_verification?.identity_link!=="phone_match";
   if(datasetNameUnconfirmed&&identity==="IDENTITY_VERIFIED"){identity="INDEPENDENT_IDENTITY_FOUND";identityConf=50;identityMethod="own_site_page";evidence.push("dataset_name_unconfirmed");}
   if(identityMethod)evidence.push("identity:"+identityMethod);
   // ---- contact

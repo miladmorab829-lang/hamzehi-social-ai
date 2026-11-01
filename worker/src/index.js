@@ -12046,6 +12046,9 @@ function extractContactsFromHtml(html, pageUrl, country = "", source = "web") {
   }
   const plain = text.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ");
   for (const match of plain.matchAll(/(?:\+?98|0)?9\d{9}|(?:\+?964|0)?7\d{9,10}/g)) add('phone', match[0]);
+  // Phase 18.28: the same mobile numbers written with spaces/dashes ("0781 834 5660", "+964 781 834 5660", "0912-345-6789"); anchored to
+  // the national mobile layout and bounded by non-digits, so separate numbers are never glued together.
+  for (const match of plain.matchAll(/(?<!\d)(?:(?:\+|00)964[ -]?|0)7\d{2}[ -]\d{3}[ -]\d{4}(?!\d)|(?<!\d)(?:(?:\+|00)98[ -]?|0)9\d{2}[ -]\d{3}[ -]\d{4}(?!\d)/g)) add('phone', match[0]);
   const unique = new Map();
   for (const item of out) {
     const normalized = normalizeLeadContact(item.contact_type, item.raw_value, country);
@@ -12436,7 +12439,7 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
 // Bounded, free re-check of a business's OWN website for published contacts (robots.txt respected; at most `limit` leads per run, each
 // re-checked at most every 14 days). Directories, marketplaces, Google content and Places-only leads are never fetched.
 async function enrichOwnSiteContacts(env,{limit=2}={}){
-  const since=new Date(Date.now()-14*86400e3).toISOString(),out={checked:0,stored:0,skipped_robots:0},dsMarkets=discoverySettings(env).markets;
+  const since=new Date(Date.now()-14*86400e3).toISOString(),out={checked:0,stored:0,skipped_robots:0,retired:0},dsMarkets=discoverySettings(env).markets;
   // Phase 18.5: only rows that can ever be fetched are read (never Google-origin, a URL present, not excluded), never-checked ones first —
   // so ~300 Google rows refreshed by every Places run can no longer push own-site and dataset candidates out of the window.
   const rows=(await env.DB.prepare("SELECT id,name,notes FROM leads WHERE stage NOT IN ('rejected','archived','customer','converted') AND json_valid(notes)"
@@ -12447,15 +12450,26 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
     if(out.checked>=limit)break;
     // Phase 18.1: price/news information sites are never fetched (their runs went to real candidates instead).
     // Phase 18.4: a dataset candidate has only a URL until its first website check (no page text yet), so it is a candidate too.
-    const m=parseLeadNotes(r),dsPending=m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result!=="verified_site"&&!!independentWebsiteHost(m.url);
+    // Phase 18.28: dsRecheck = a dataset lead verified BEFORE the phone-link rule (name not confirmed, no identity_link field yet) gets
+    // exactly ONE fresh check so the rule can apply; afterwards identity_link is set (value or null) and it is never re-checked again.
+    const m=parseLeadNotes(r),dsRecheck=m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result==="verified_site"&&m.dataset_verification.name_consistent===false&&!("identity_link" in m.dataset_verification)&&!!independentWebsiteHost(m.url),
+      dsPending=dsRecheck||(m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result!=="verified_site"&&!!independentWebsiteHost(m.url));
     // Phase 18.5: switching DATASET_DISCOVERY off makes the whole pipeline inert at once — dataset leads are not fetched either.
     if(m.provider==="dataset"&&(m.rejected_reason||env.DATASET_DISCOVERY!=="on"))continue;
     // Phase 18.17: a market disabled by its limits (per-run or daily = 0) gets no website checks either (Iraq-only mode).
     if(m.provider==="dataset"&&!dsMarkets[m.target_market==="ARAB"?"ARAB":"IRAN"])continue;
+    // Phase 18.28 (P2): a dataset lead imported before a source rule tightened (link-in-bio, short link, chat link, payment deep link) can
+    // never be checked. It is retired once (idempotent: rejected rows are no longer selected), without a fetch and without deleting
+    // anything; bounded to 10 per run. Only independently sourced dataset leads; customers/converted leads are never selected above.
+    if(m.provider==="dataset"&&!independentWebsiteHost(m.url||m.website)){
+      if(out.retired<10){out.retired++;
+        try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.rejected_reason','no_own_website','$.dataset_verification',json(?)) WHERE id=? AND json_valid(notes) AND COALESCE(json_extract(notes,'$.rejected_reason'),'')=''")
+          .bind(JSON.stringify({...(m.dataset_verification||{}),result:"no_own_website",checked_at:now(),rule:"not_an_own_website_link"}),r.id).run();}catch{}}
+      continue;}
     if(!dsPending&&!ownSiteCandidate(m,r))continue;
-    if(m.contact_enrichment_checked_at&&m.contact_enrichment_checked_at>=since)continue;
+    if(!dsRecheck&&m.contact_enrichment_checked_at&&m.contact_enrichment_checked_at>=since)continue;
     let has=null;try{has=await env.DB.prepare("SELECT 1 FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram') AND evidence_status IN ('page_extracted','owner_confirmed') LIMIT 1").bind(r.id).first();}catch{}
-    if(has)continue;
+    if(has&&!dsRecheck)continue;
     const site=safeHttpUrl(m.url||m.website);if(!site)continue;
     out.checked++;let stored=0,note="checked",detail="";
     try{
@@ -12480,7 +12494,15 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
         if(html&&dsPending){
           const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]||"").replace(/<[^>]+>/g," ").replace(/&#8211;|&ndash;/g,"–").replace(/&amp;/g,"&").replace(/\s+/g," ").trim();
           const text=html.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/&nbsp;/g," ").replace(/\s+/g," ").trim();
-          const v=verifyDatasetSite(m,{title,text,host:finalHost,url:res.url||site},now());Object.assign(m,v.patch);
+          const v=verifyDatasetSite(m,{title,text,host:finalHost,url:res.url||site},now());
+          // Phase 18.28 (P1): a phone link is void when that number already belongs to ANOTHER lead (phone reuse across businesses).
+          const dv=v.patch.dataset_verification;
+          if(dv?.identity_link==="phone_match"){let shared=null;
+            try{shared=await env.DB.prepare("SELECT lead_id FROM lead_contacts WHERE contact_type IN ('phone','whatsapp') AND normalized_value=? AND lead_id<>? LIMIT 1").bind(dv.matched_phone,r.id).first();}catch{}
+            if(!shared){try{shared=await env.DB.prepare("SELECT id FROM leads WHERE id<>? AND instr(notes,?)>0 LIMIT 1").bind(r.id,dv.matched_phone.slice(-10)).first();}catch{}}
+            if(shared){dv.identity_link=null;dv.dataset_claims_trusted=false;dv.phone_link_refused="phone_shared_with_other_lead";delete dv.matched_phone;
+              if(dv.city_source==="dataset_confirmed_by_phone"){v.patch.city=null;dv.city_source=null;}}}
+          Object.assign(m,v.patch);
           if(v.rejected_reason){m.rejected_reason=v.rejected_reason;dsRejected=true;note="dataset_"+v.rejected_reason;}
           try{await env.DB.prepare("UPDATE leads SET name=?,notes=? WHERE id=?").bind(v.rejected_reason?r.name:(v.name||r.name),JSON.stringify(m),r.id).run();}catch{}
         }
@@ -12497,7 +12519,11 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
     out.stored+=stored;
     // Phase 18.4: a dataset candidate whose site cannot be verified is excluded: a redirect to another site (identity uncertain) at once;
     // no answer or a robots.txt refusal (also a robots 5xx) after `fail_limit` checks, 14 days apart, as unreachable / robots_disallow.
-    if(dsPending&&["fetch_failed","robots_disallow","robots_unreachable","redirected_off_site"].includes(note)){
+    // Phase 18.28: a failed one-time re-check of an already verified lead is closed (identity_link null), never counted as a failure.
+    if(dsRecheck&&["fetch_failed","robots_disallow","robots_unreachable","redirected_off_site"].includes(note)){
+      try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.dataset_verification.identity_link',json('null'),'$.dataset_verification.phone_link_refused','recheck_'||?) WHERE id=? AND json_valid(notes)").bind(note,r.id).run();}catch{}
+    }
+    else if(dsPending&&["fetch_failed","robots_disallow","robots_unreachable","redirected_off_site"].includes(note)){
       const fails=Number(m.dataset_fetch_failures||0)+1,reason=note==="redirected_off_site"?note:fails>=discoverySettings(env).fail_limit?(note==="robots_disallow"?"robots_disallow"
         // Phase 18.24: a site that answers 403/429 to our honest User-Agent refuses automated access (e.g. Shopify bot protection): it is
         // retired under that name instead of "unreachable", and never retried with a different identity.

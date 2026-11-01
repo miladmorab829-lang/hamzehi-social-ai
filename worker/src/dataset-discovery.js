@@ -148,14 +148,46 @@ export function verifyDatasetSite(meta = {}, page = {}, at = new Date().toISOStr
   const own = OWN_MARKET_PHONE[market].test(text), other = OTHER_MARKET_PHONE[market].test(text), ownTld = market === "IRAN" ? /\.ir$/i.test(page.host || "") : /\.iq$/i.test(page.host || "");
   if (other && !own && !ownTld) return { rejected_reason: "wrong_market", patch: { dataset_verification: { ...base, result: "wrong_market" } } };
   const nc = nameConsistency(claims.name, { title, text, host: page.host });
-  const datasetCity = nc.consistent ? resolveMarketCity(claims.city, market) : null, pageCity = resolveMarketCity(title + " " + text.slice(0, 6000), market);
-  const city = datasetCity || pageCity;
+  // Phase 18.28 (P1): a trading-name difference is confirmed by a PHONE instead — the dataset's phone must be published on THIS site
+  // (so never cross-domain), be a valid own-market number, and nothing may contradict the link (a non-webmail dataset e-mail on another
+  // domain = conflated record; a different city named by the page). The website's own name is kept; only the record↔site link is trusted.
+  const link = nc.consistent ? null : phoneCorroboration(claims, { text, host: page.host, market });
+  const confirmed = nc.consistent || !!link;
+  const pageCity = resolveMarketCity(title + " " + text.slice(0, 6000), market);
+  const datasetCity = confirmed ? resolveMarketCity(claims.city, market) : null;
+  const city = nc.consistent ? (datasetCity || pageCity) : (pageCity || datasetCity);
   const name = nc.consistent && claims.name ? claims.name : (title.split(/\s[|–\-:—]\s|&#8211;/)[0] || title).trim().slice(0, 140) || claims.name || "";
   return { rejected_reason: null, name, patch: {
     evidence: (title + " " + text).slice(0, 1500), city: city || null,
     qualification: { ...(meta.qualification || {}), local_domain: ownTld, local_phone: own, buyer_in_title: JEWELRY.test(title) || undefined },
-    dataset_verification: { ...base, result: "verified_site", name_consistent: nc.consistent, matched_tokens: nc.matched.slice(0, 5), dataset_claims_trusted: nc.consistent,
-      city_source: datasetCity ? "dataset_confirmed_by_name" : pageCity ? "website" : null } } };
+    dataset_verification: { ...base, result: "verified_site", name_consistent: nc.consistent, matched_tokens: nc.matched.slice(0, 5), dataset_claims_trusted: confirmed,
+      identity_link: nc.consistent ? "name_match" : link ? "phone_match" : null, ...(link ? { matched_phone: link.phone, link_checked_at: at } : {}),
+      ...(!nc.consistent && !link && (claims.phones || []).length ? { phone_link_refused: phoneCorroboration(claims, { text, host: page.host, market, explain: true }).reason } : {}),
+      city_source: city && city === datasetCity && (nc.consistent || !pageCity) ? (nc.consistent ? "dataset_confirmed_by_name" : "dataset_confirmed_by_phone") : pageCity ? "website" : null } } };
+}
+
+// Phase 18.28 (P1) helpers. National significant number: IRAQ mobiles 7XXXXXXXXX; IRAN 10-digit numbers (mobile 9…, landline 1–8…).
+const WEBMAIL = /(^|\.)(gmail|googlemail|yahoo|hotmail|outlook|live|icloud|me|aol|mail|ymail|protonmail|yandex|msn)\.[a-z.]+$/i;
+export function nationalPhone(value, market) {
+  let d = latinDigits(value).replace(/\D/g, "");
+  if (market === "ARAB") { d = d.replace(/^(00)?964/, "").replace(/^0/, ""); return /^7\d{9}$/.test(d) ? d : null; }
+  d = d.replace(/^(00)?98/, "").replace(/^0/, ""); return /^[1-9]\d{9}$/.test(d) ? d : null;
+}
+export function phoneCorroboration(claims = {}, { text = "", host = "", market = "ARAB", explain = false } = {}) {
+  const no = reason => explain ? { reason } : null;
+  const wanted = [...new Set((Array.isArray(claims.phones) ? claims.phones : []).map(p => nationalPhone(p, market)).filter(Boolean))];
+  if (!wanted.length) return no("no_valid_dataset_phone");
+  // phone tokens on the page (digits with spaces/dashes/dots, optional +/00 prefix), normalized the same way
+  const onPage = new Set((latinDigits(text).match(/(?:\+|00)?\d[\d\s.\-()]{7,18}\d/g) || []).map(t => nationalPhone(t, market)).filter(Boolean));
+  const hit = wanted.find(p => onPage.has(p));
+  if (!hit) return no("dataset_phone_not_on_site");
+  const h = String(host || "").toLowerCase().replace(/^www\./, "");
+  const foreignMail = (Array.isArray(claims.emails) ? claims.emails : []).map(e => String(e).split("@")[1]?.toLowerCase().trim()).filter(Boolean)
+    .some(d => !WEBMAIL.test(d) && d !== h && !h.endsWith("." + d) && !d.endsWith("." + h));
+  if (foreignMail) return no("dataset_email_on_other_domain");
+  const dc = resolveMarketCity(claims.city, market), pc = resolveMarketCity(text.slice(0, 6000), market);
+  if (dc && pc && dc !== pc) return no("city_conflict");
+  return { phone: (market === "ARAB" ? "+964" : "+98") + hit };
 }
 
 // Read the candidate file from an R2-compatible store ({get(key) → {text()}|null}); bounded size.
