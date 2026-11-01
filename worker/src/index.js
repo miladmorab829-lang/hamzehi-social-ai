@@ -12452,7 +12452,8 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
     // Phase 18.4: a dataset candidate has only a URL until its first website check (no page text yet), so it is a candidate too.
     // Phase 18.28: dsRecheck = a dataset lead verified BEFORE the phone-link rule (name not confirmed, no identity_link field yet) gets
     // exactly ONE fresh check so the rule can apply; afterwards identity_link is set (value or null) and it is never re-checked again.
-    const m=parseLeadNotes(r),dsRecheck=m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result==="verified_site"&&m.dataset_verification.name_consistent===false&&!("identity_link" in m.dataset_verification)&&!!independentWebsiteHost(m.url),
+    const m=parseLeadNotes(r),dsRecheck=m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result==="verified_site"&&m.dataset_verification.name_consistent===false&&m.dataset_verification.link_rule!=="v2"
+        &&(!("identity_link" in m.dataset_verification)||(m.dataset_verification.identity_link===null&&m.dataset_verification.phone_link_refused==="dataset_phone_not_on_site"))&&!!independentWebsiteHost(m.url),
       dsPending=dsRecheck||(m.provider==="dataset"&&!m.rejected_reason&&m.dataset_verification?.result!=="verified_site"&&!!independentWebsiteHost(m.url));
     // Phase 18.5: switching DATASET_DISCOVERY off makes the whole pipeline inert at once — dataset leads are not fetched either.
     if(m.provider==="dataset"&&(m.rejected_reason||env.DATASET_DISCOVERY!=="on"))continue;
@@ -12521,7 +12522,7 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
     // no answer or a robots.txt refusal (also a robots 5xx) after `fail_limit` checks, 14 days apart, as unreachable / robots_disallow.
     // Phase 18.28: a failed one-time re-check of an already verified lead is closed (identity_link null), never counted as a failure.
     if(dsRecheck&&["fetch_failed","robots_disallow","robots_unreachable","redirected_off_site"].includes(note)){
-      try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.dataset_verification.identity_link',json('null'),'$.dataset_verification.phone_link_refused','recheck_'||?) WHERE id=? AND json_valid(notes)").bind(note,r.id).run();}catch{}
+      try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.dataset_verification.identity_link',json('null'),'$.dataset_verification.phone_link_refused','recheck_'||?,'$.dataset_verification.link_rule','v2') WHERE id=? AND json_valid(notes)").bind(note,r.id).run();}catch{}
     }
     else if(dsPending&&["fetch_failed","robots_disallow","robots_unreachable","redirected_off_site"].includes(note)){
       const fails=Number(m.dataset_fetch_failures||0)+1,reason=note==="redirected_off_site"?note:fails>=discoverySettings(env).fail_limit?(note==="robots_disallow"?"robots_disallow"

@@ -52,6 +52,7 @@ const page=(t,b)=>new Response(`<html><head><title>${t}</title></head><body>${b}
 const SITES={"https://alrukn-ds.com.iq/":()=>page("شركة الركن الذهبي","شركة الركن الذهبي للذهب والمجوهرات — اتصل بنا 0781 834 5660 <a href=\"mailto:info@alrukn-ds.com.iq\">info@alrukn-ds.com.iq</a>"),
   "https://shared-ds.iq/":()=>page("شركة النجمة الذهبية","شركة النجمة الذهبية للذهب والمجوهرات هاتف 0770 999 8877 <a href=\"mailto:a@shared-ds.iq\">a@shared-ds.iq</a>"),
   "https://rukn2-ds.com.iq/":()=>page("شركة الركن الثاني","شركة الركن الثاني للذهب والمجوهرات — هاتف 0781 222 3344"),
+  "https://rukn3-ds.com.iq/":()=>page("شركة الركن الثالث","شركة الركن الثالث للذهب والمجوهرات <i></i>07815556677  -  07819990011"),
   "https://normal-ds.iq/":()=>page("مجوهرات الفرات","مجوهرات الفرات في بغداد")};
 globalThis.fetch=async(u,o={})=>{const s=String(u?.url||u);if(s.startsWith("https://w.test/"))return W.run(new Request(s,o));
   if(/places\.googleapis|api\.openai|api\.anthropic|brave/.test(s))throw new Error("paid call attempted");
@@ -110,5 +111,17 @@ await tick();
    md.dataset_verification.identity_link===null&&md.dataset_verification.phone_link_refused==="recheck_fetch_failed"&&!md.dataset_fetch_failures&&!md.rejected_reason,md.dataset_verification);
  fetched.length=0;await tick();
  ok("X3 never re-checked again afterwards (both leads have an identity_link field now)",!fetched.some(u=>/rukn2-ds|down-ds/.test(u)),fetched);}
+// ---- T: Phase 18.28b tokenizer (real alrukn layout "07818345660  -  07818788624") and v2 re-check
+{const both=["07818345660  -  07818788624","07818345660 07818788624","هاتف: 07818345660 / 07818788624"];
+ ok("T1 two numbers printed together are read as two numbers: the dataset phone links in every real-world layout (first or second position)",
+   both.every(x=>V(claims(),x).patch.dataset_verification.identity_link==="phone_match")&&both.every(x=>V(claims({phones:["+9647818788624"]}),x).patch.dataset_verification.identity_link==="phone_match"),
+   both.map(x=>[x,V(claims(),x).patch.dataset_verification.phone_link_refused||"ok"]));
+ ok("T2 every verification records link_rule v2",V(claims(),"07818345660").patch.dataset_verification.link_rule==="v2");
+ const pre={checked_at:t,final_host:"rukn3-ds.com.iq",evidence_url:"https://rukn3-ds.com.iq/",identity_basis:"own_website_page",result:"verified_site",name_consistent:false,matched_tokens:[],dataset_claims_trusted:false,identity_link:null,phone_link_refused:"dataset_phone_not_on_site",city_source:null};
+ lead("t-v1","https://rukn3-ds.com.iq/",{dataset_claims:claims({phones:["+9647815556677"]}),dataset_verification:pre,contact_enrichment_checked_at:t,evidence:"x"});
+ fetched.length=0;await tick();const mt=M("t-v1");
+ ok("T3 a lead refused under the old tokenizer (dataset_phone_not_on_site, no link_rule) gets ONE v2 re-check and is linked",fetched.includes("https://rukn3-ds.com.iq/")&&mt.dataset_verification.identity_link==="phone_match"&&mt.dataset_verification.link_rule==="v2",mt.dataset_verification);
+ fetched.length=0;await tick();
+ ok("T4 never re-checked again after v2",!fetched.includes("https://rukn3-ds.com.iq/"));}
 ok("G1 nothing sent, no outreach row, no paid call",!q("SELECT 1 FROM lead_outreach").length&&!W.tg.some(x=>/^send/.test(x.method)));
 process.exit(done()?1:0);

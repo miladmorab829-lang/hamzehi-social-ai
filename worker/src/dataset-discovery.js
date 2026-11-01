@@ -161,7 +161,7 @@ export function verifyDatasetSite(meta = {}, page = {}, at = new Date().toISOStr
     evidence: (title + " " + text).slice(0, 1500), city: city || null,
     qualification: { ...(meta.qualification || {}), local_domain: ownTld, local_phone: own, buyer_in_title: JEWELRY.test(title) || undefined },
     dataset_verification: { ...base, result: "verified_site", name_consistent: nc.consistent, matched_tokens: nc.matched.slice(0, 5), dataset_claims_trusted: confirmed,
-      identity_link: nc.consistent ? "name_match" : link ? "phone_match" : null, ...(link ? { matched_phone: link.phone, link_checked_at: at } : {}),
+      identity_link: nc.consistent ? "name_match" : link ? "phone_match" : null, link_rule: "v2", ...(link ? { matched_phone: link.phone, link_checked_at: at } : {}),
       ...(!nc.consistent && !link && (claims.phones || []).length ? { phone_link_refused: phoneCorroboration(claims, { text, host: page.host, market, explain: true }).reason } : {}),
       city_source: city && city === datasetCity && (nc.consistent || !pageCity) ? (nc.consistent ? "dataset_confirmed_by_name" : "dataset_confirmed_by_phone") : pageCity ? "website" : null } } };
 }
@@ -178,7 +178,10 @@ export function phoneCorroboration(claims = {}, { text = "", host = "", market =
   const wanted = [...new Set((Array.isArray(claims.phones) ? claims.phones : []).map(p => nationalPhone(p, market)).filter(Boolean))];
   if (!wanted.length) return no("no_valid_dataset_phone");
   // phone tokens on the page (digits with spaces/dashes/dots, optional +/00 prefix), normalized the same way
-  const onPage = new Set((latinDigits(text).match(/(?:\+|00)?\d[\d\s.\-()]{7,18}\d/g) || []).map(t => nationalPhone(t, market)).filter(Boolean));
+  // Phase 18.28b: at most 2 separator characters between digit groups (so "07818345660  -  07818788624" is two numbers, not one
+  // swallowed 15-digit token), and a token holding two numbers side by side is split before each number start.
+  const tokens = (latinDigits(text).match(/(?:\+|00)?\d(?:[\s.\-()]{0,2}\d){7,30}/g) || []).flatMap(t => [t, ...t.split(/\s+(?=0|\+|00)/)]);
+  const onPage = new Set(tokens.map(t => nationalPhone(t, market)).filter(Boolean));
   const hit = wanted.find(p => onPage.has(p));
   if (!hit) return no("dataset_phone_not_on_site");
   const h = String(host || "").toLowerCase().replace(/^www\./, "");
