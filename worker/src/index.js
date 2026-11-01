@@ -13,7 +13,7 @@ import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js"
 import { adsDraftSettings, buildAdsDraftPrompt, adsDraftRequestBody, adsDraftUsage, adsDraftOutcome, emptyAdsDraftStats, addAdsDraftUsage, reserveAdsDraft, adsDraftsToday } from "./ads-draft-guard.js";
 import { runWatchdog } from "./agent-watchdog.js";
 import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, googleOriginLead, independentContact, leadDuplicateMap, independentWebsiteHost } from "./lead-qualification.js";
-import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite, latinDigits } from "./dataset-discovery.js";
+import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite, latinDigits, DATASET_ATTRIBUTION } from "./dataset-discovery.js";
 import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
@@ -12429,6 +12429,8 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
   items.sort((a,b)=>b.p.priority_score-a.p.priority_score||String(b.lead.updated_at).localeCompare(String(a.lead.updated_at)));
   const total=items.length;items=items.slice(offset,offset+limit).map(x=>salesLeadView(x.lead,x.p));
   return {ok:true,generated_at:now(),truncated:leads.length>=2000,markets,leads_without_market:all.filter(x=>!x.p.market).length,
+    // Phase 18.21: data credits (Overture / Foursquare / AllThePlaces / OSM notices) whenever dataset-discovered leads are shown
+    dataset_attribution:all.some(x=>/"provider":"dataset"/.test(String(x.lead.notes||"")))?DATASET_ATTRIBUTION:null,
     owner_decisions:"Scoring and next actions never create approvals; outreach, prices, quotes and payments stay with the owner",total,offset,limit,items};
 }
 // Bounded, free re-check of a business's OWN website for published contacts (robots.txt respected; at most `limit` leads per run, each

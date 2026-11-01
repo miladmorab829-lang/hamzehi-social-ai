@@ -975,7 +975,9 @@ async function loadSalesIntel(){
   +"<div class='row hint'>اولویت A/B/C/D: "+esc(x.tiers.A)+" / "+esc(x.tiers.B)+" / "+esc(x.tiers.C)+" / "+esc(x.tiers.D)+"</div></div>";
  const rows=(d.items||[]).map(i=>"<div class='row'><span class='pill "+(i.tier==="A"||i.tier==="B"?"ok":i.tier==="C"?"warn":"gray")+"'>"+esc(i.tier)+" · "+esc(i.priority_score)+"</span> "
   +esc(i.name||"—")+" <span class='muted'>"+esc(i.market||"?")+" · "+esc(i.city||"")+" · "+esc(SI_STATE_FA[i.state]||i.state)+"</span><br><span class='hint'>قدم بعدی: "+esc(SI_ACTION_FA[i.next_action&&i.next_action.action]||"")+(i.missing&&i.missing.length?" · کمبود: "+esc(i.missing.join("، ")):"")+"</span></div>").join("");
- $("salesIntelGrid").innerHTML=["IRAN","ARAB"].map(m=>card(m,d.markets[m])).join("")+"<div class='card'><div class='row'><b>اولویت‌دارها (بدون کشف‌های اولیه)</b> <span class='muted'>"+esc(d.total)+" مورد</span></div>"+(rows||"<div class='row hint'>هنوز موردی نیست.</div>")+"</div>";
+ $("salesIntelGrid").innerHTML=["IRAN","ARAB"].map(m=>card(m,d.markets[m])).join("")+"<div class='card'><div class='row'><b>اولویت‌دارها (بدون کشف‌های اولیه)</b> <span class='muted'>"+esc(d.total)+" مورد</span></div>"+(rows||"<div class='row hint'>هنوز موردی نیست.</div>")+"</div>"
+  // Phase 18.21: data credits whenever dataset-discovered leads are listed (source notices and links as plain, escaped text)
+  +(d.dataset_attribution?"<div class='card'><div class='row'><b>منابع داده</b></div><div class='row hint'>"+esc(d.dataset_attribution.fa)+"</div><div class='row hint' dir='ltr'>"+esc(d.dataset_attribution.en)+"</div></div>":"");
 }
 // Phase 09.4: Ads markets (GET /api/ads/markets, POST /api/ads/markets/config). Enabling asks the owner to confirm first; disabling never does.
 const ADS_CODE_FA={ADS_MARKET_DISABLED:"خاموش است",ADS_CITY_EMPTY:"شهر هدف تعیین نشده",ADS_CITY_INVALID:"شهر متعلق به این بازار نیست",ADS_LIMIT_MISSING:"سقف اجرای روزانه تعیین نشده",ADS_LIMIT_ABOVE_GLOBAL:"سقف بیشتر از سقف کلی Ads است"};

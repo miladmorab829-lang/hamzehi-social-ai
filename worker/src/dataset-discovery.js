@@ -17,7 +17,11 @@ export const DISCOVERY_SCHEMA = "hamzehi.discovery.candidates/1";
 // Approved source strategy (Phase 18.3): IRAQ OSM disabled (2% own-site coverage), Brave not used, Google never used.
 export const DISCOVERY_SOURCES = Object.freeze({ IRAN: Object.freeze(["overture", "osm"]), ARAB: Object.freeze(["overture"]) });
 export const DATASET_LICENSES = Object.freeze({ overture: ["CDLA-Permissive-2.0", "Apache-2.0", "CC0-1.0"], osm: ["ODbL-1.0"] });
-// Dashboard attribution text — prepared for owner approval, not shown anywhere yet.
+// Phase 18.21: owner approval of the attribution text. The release gate (phase18_21) refuses a configuration with
+// DATASET_DISCOVERY="on" while this is false. Set it to true only together with the owner-approved text (PHASE-18-16 §B2).
+// Kept separate from DATASET_ATTRIBUTION so extractor output (which embeds that object) stays byte-reproducible.
+export const DATASET_ATTRIBUTION_APPROVED = false;
+// Dashboard attribution text (the sales-intelligence "data sources" card shows it whenever dataset leads exist).
 export const DATASET_ATTRIBUTION = Object.freeze({
   en: "Business discovery data: Overture Maps Foundation (overturemaps.org) — Data from Meta, Microsoft and other Overture sources (CDLA Permissive 2.0); Foursquare data © 2024 Foursquare Labs, Inc. (Apache 2.0, transformed to the Overture schema). © OpenStreetMap contributors (ODbL 1.0), Iran only.",
   fa: "داده‌های کشف کسب‌وکار: Overture Maps Foundation (داده از Meta، Microsoft و سایر منابع Overture، مجوز CDLA Permissive 2.0؛ داده Foursquare © 2024 Foursquare Labs, Inc.، Apache 2.0) و © مشارکت‌کنندگان OpenStreetMap (ODbL 1.0)، فقط ایران."
