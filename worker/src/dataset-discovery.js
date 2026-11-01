@@ -20,11 +20,12 @@ export const DATASET_LICENSES = Object.freeze({ overture: ["CDLA-Permissive-2.0"
 // Phase 18.21: owner approval of the attribution text. The release gate (phase18_21) refuses a configuration with
 // DATASET_DISCOVERY="on" while this is false. Set it to true only together with the owner-approved text (PHASE-18-16 §B2).
 // Kept separate from DATASET_ATTRIBUTION so extractor output (which embeds that object) stays byte-reproducible.
-export const DATASET_ATTRIBUTION_APPROVED = false;
+// Approved by the owner on 2026-11-01 (instruction: apply the prepared Overture / Foursquare / OSM attribution, PHASE-18-16 §B2).
+export const DATASET_ATTRIBUTION_APPROVED = true;
 // Dashboard attribution text (the sales-intelligence "data sources" card shows it whenever dataset leads exist).
 export const DATASET_ATTRIBUTION = Object.freeze({
-  en: "Business discovery data: Overture Maps Foundation (overturemaps.org) — Data from Meta, Microsoft and other Overture sources (CDLA Permissive 2.0); Foursquare data © 2024 Foursquare Labs, Inc. (Apache 2.0, transformed to the Overture schema). © OpenStreetMap contributors (ODbL 1.0), Iran only.",
-  fa: "داده‌های کشف کسب‌وکار: Overture Maps Foundation (داده از Meta، Microsoft و سایر منابع Overture، مجوز CDLA Permissive 2.0؛ داده Foursquare © 2024 Foursquare Labs, Inc.، Apache 2.0) و © مشارکت‌کنندگان OpenStreetMap (ODbL 1.0)، فقط ایران."
+  en: "Business discovery data: Overture Maps Foundation (overturemaps.org), Places theme, release 2026-10-21.0. Data from Meta and Microsoft, available under CDLA Permissive 2.0 (cdla.dev/permissive-2-0). Data from AllThePlaces, available under CC0 1.0. Copyright 2024 Foursquare Labs, Inc. All rights reserved. Available under Apache 2.0 (apache.org/licenses/LICENSE-2.0). Foursquare data was transformed to the Overture schema. Notice: https://opensource.foursquare.com/places-notice-txt/ Iran only: © OpenStreetMap contributors (https://www.openstreetmap.org/copyright), available under the Open Database License (ODbL 1.0). Business names and contact details are verified on each business's own website before use.",
+  fa: "داده‌های کشف کسب‌وکار: بنیاد Overture Maps (overturemaps.org)، بخش Places، نسخه 2026-10-21.0. داده از Meta و Microsoft تحت مجوز CDLA Permissive 2.0. داده از AllThePlaces تحت مجوز CC0 1.0. Copyright 2024 Foursquare Labs, Inc. All rights reserved. تحت مجوز Apache 2.0. داده Foursquare به ساختار Overture تبدیل شده است. اطلاعیه: https://opensource.foursquare.com/places-notice-txt/ فقط ایران: © OpenStreetMap contributors (https://www.openstreetmap.org/copyright)، تحت مجوز Open Database License (ODbL 1.0). نام و اطلاعات تماس هر کسب‌وکار پیش از استفاده در وب‌سایت خود آن کسب‌وکار تأیید می‌شود."
 });
 const GOOGLE_TEXT = /google|goo\.gl|g\.page|googleusercontent|maps\.app/i;
 const clampInt = (v, d, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.floor(n))) : d; };

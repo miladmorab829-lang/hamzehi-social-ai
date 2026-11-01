@@ -18,7 +18,8 @@ const exp=PF.expectedFromToml(fs.readFileSync(path.join(REPO,"worker/wrangler.to
 ok("N1 worker/wrangler.toml declares AUTONOMY_ORCHESTRATOR = \"on\"",exp.vars.AUTONOMY_ORCHESTRATOR==="on",exp.vars);
 ok("N2 Production bindings unchanged: DB=40b272c5…, GALLERY_BUCKET=hamzehi-gallery, AI; plus the isolated Phase 18.5 DISCOVERY_BUCKET=hamzehi-discovery",exp.d1.length===1&&exp.d1[0].binding==="DB"&&exp.d1[0].database_id==="40b272c5-e368-4c33-8a41-7c63db98d7e8"
   &&exp.r2.length===2&&exp.r2.find(r=>r.binding==="GALLERY_BUCKET")?.bucket_name==="hamzehi-gallery"&&exp.r2.find(r=>r.binding==="DISCOVERY_BUCKET")?.bucket_name==="hamzehi-discovery"&&exp.ai?.binding==="AI",exp);
-ok("N3 the 9 previously declared vars keep their values (13 vars total: Google Places vars + DATASET_DISCOVERY=\"off\")",Object.keys(exp.vars).length===13&&exp.vars.DATASET_DISCOVERY==="off"&&exp.vars.ADS_PLACES_DISCOVERY==="on"&&exp.vars.ADS_PLACES_MONTHLY_BUDGET_USD==="10"&&exp.vars.SALES_AI_BRAIN==="on"&&exp.vars.SALES_AI_PROVIDER==="anthropic"&&exp.vars.RATE_LIMIT_PER_MINUTE==="60",exp.vars);
+ok("N3 the 9 previously declared vars keep their values (18 vars total: Google Places vars + DATASET_DISCOVERY=\"on\" with first-day limits 1/run, 10/day per market, 2 checks/run)",Object.keys(exp.vars).length===18&&exp.vars.DATASET_DISCOVERY==="on"
+  &&exp.vars.DATASET_DISCOVERY_IRAN_PER_RUN==="1"&&exp.vars.DATASET_DISCOVERY_ARAB_PER_RUN==="1"&&exp.vars.DATASET_DISCOVERY_IRAN_DAILY_CAP==="10"&&exp.vars.DATASET_DISCOVERY_ARAB_DAILY_CAP==="10"&&exp.vars.DATASET_DISCOVERY_VERIFY_PER_RUN==="2"&&exp.vars.ADS_PLACES_DISCOVERY==="on"&&exp.vars.ADS_PLACES_MONTHLY_BUDGET_USD==="10"&&exp.vars.SALES_AI_BRAIN==="on"&&exp.vars.SALES_AI_PROVIDER==="anthropic"&&exp.vars.RATE_LIMIT_PER_MINUTE==="60",exp.vars);
 const stg=PF.expectedFromToml(fs.readFileSync(path.join(REPO,"staging/wrangler.staging.toml"),"utf8"));
 ok("N4 the staging config stays separate (own D1 only, flag on)",stg.d1.length===1&&stg.d1[0].database_id==="cddc10c5-2232-4334-8d99-fedb52fbd12d"&&stg.vars.AUTONOMY_ORCHESTRATOR==="on",stg);
 
@@ -29,10 +30,11 @@ const V=(over={})=>{const vars={...exp.vars,...(over.vars||{})};for(const k of o
     ...Object.entries(vars).map(([name,text])=>({name,type:"plain_text",text})),...PF.REQUIRED_SECRETS.filter(s=>s!==over.dropSecret).map(name=>({name,type:"secret_text"})),...(over.extra||[])];
   return {id:"00000000-0000-4000-8000-000000000000",annotations:over.untagged?{}:{"workers/tag":over.tag||"d7962d5-orch-on"},resources:{bindings:b}};};
 const good=PF.checkVersion(V(),exp);
-ok("N5 a tagged version with the full Production configuration (25 bindings since Phase 18.5: + DISCOVERY_BUCKET, + DATASET_DISCOVERY) passes",good.ok&&good.summary.bindings===25,good);
-ok("N5b Phase 18.5: a version without DISCOVERY_BUCKET, with the GALLERY bucket name in its place, or with DATASET_DISCOVERY other than \"off\" is refused",
+ok("N5 a tagged version with the full activation configuration (30 bindings: 25 + the 5 first-day limit vars) passes",good.ok&&good.summary.bindings===30,good);
+ok("N5b a version without DISCOVERY_BUCKET, with the GALLERY bucket in its place, with DATASET_DISCOVERY other than the committed value, without it, or with a changed limit is refused",
   PF.checkVersion(V({dropDiscoveryBucket:true}),exp).failures.some(f=>/DISCOVERY_BUCKET/.test(f))&&PF.checkVersion(V({discoveryBucket:"hamzehi-gallery"}),exp).failures.some(f=>/DISCOVERY_BUCKET/.test(f))
-  &&PF.checkVersion(V({vars:{DATASET_DISCOVERY:"on"}}),exp).failures.some(f=>/DATASET_DISCOVERY/.test(f))&&PF.checkVersion(V({dropVars:["DATASET_DISCOVERY"]}),exp).failures.some(f=>/DATASET_DISCOVERY/.test(f)));
+  &&PF.checkVersion(V({vars:{DATASET_DISCOVERY:"off"}}),exp).failures.some(f=>/DATASET_DISCOVERY/.test(f))&&PF.checkVersion(V({dropVars:["DATASET_DISCOVERY"]}),exp).failures.some(f=>/DATASET_DISCOVERY/.test(f))
+  &&PF.checkVersion(V({vars:{DATASET_DISCOVERY_IRAN_DAILY_CAP:"40"}}),exp).failures.some(f=>/DATASET_DISCOVERY_IRAN_DAILY_CAP/.test(f)));
 const auto=PF.checkVersion(V({untagged:true,dropVars:["AUTONOMY_ORCHESTRATOR"]}),exp);
 ok("N6 an automatic-build-shaped version (untagged, no AUTONOMY_ORCHESTRATOR, 19 bindings) is refused",!auto.ok&&auto.failures.some(f=>/AUTONOMY_ORCHESTRATOR/.test(f))&&auto.failures.some(f=>/no tag/.test(f)),auto.failures);
 ok("N7 flag present but \"off\" is refused",!PF.checkVersion(V({vars:{AUTONOMY_ORCHESTRATOR:"off"}}),exp).ok);
@@ -43,7 +45,7 @@ ok("N11 an unexpected extra binding is refused",PF.checkVersion(V({extra:[{name:
 ok("N12 a changed var value is refused",PF.checkVersion(V({vars:{SALES_AI_PROVIDER:"openai"}}),exp).failures.some(f=>/SALES_AI_PROVIDER/.test(f)));
 ok("N13 a tag without the -orch-on suffix is refused",PF.checkVersion(V({tag:"d7962d5"}),exp).failures.some(f=>/tag/.test(f)));
 {const pre=PF.checkVersion(V({dropSecret:"TELEGRAM_WEBHOOK_SECRET_TOKEN"}),exp);
- ok("N24 a version without TELEGRAM_WEBHOOK_SECRET_TOKEN (24 of 25 bindings) is refused",!pre.ok&&pre.summary.bindings===24&&pre.failures.length===1&&/secret binding TELEGRAM_WEBHOOK_SECRET_TOKEN missing/.test(pre.failures[0]),pre.failures);
+ ok("N24 a version without TELEGRAM_WEBHOOK_SECRET_TOKEN (29 of 30 bindings) is refused",!pre.ok&&pre.summary.bindings===29&&pre.failures.length===1&&/secret binding TELEGRAM_WEBHOOK_SECRET_TOKEN missing/.test(pre.failures[0]),pre.failures);
  const wrongType=PF.checkVersion(V({dropSecret:"TELEGRAM_WEBHOOK_SECRET_TOKEN",extra:[{name:"TELEGRAM_WEBHOOK_SECRET_TOKEN",type:"plain_text",text:"x"}]}),exp);
  ok("N25 TELEGRAM_WEBHOOK_SECRET_TOKEN as a plain var instead of a secret is refused",!wrongType.ok&&wrongType.failures.some(f=>/TELEGRAM_WEBHOOK_SECRET_TOKEN/.test(f)),wrongType.failures);}
 

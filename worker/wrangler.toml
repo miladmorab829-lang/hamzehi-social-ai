@@ -17,9 +17,8 @@ binding = "AI"
 binding = "GALLERY_BUCKET"
 bucket_name = "hamzehi-gallery"
 
-# Phase 18.5 (prepared locally, NOT active): isolated bucket for the open-dataset candidate file (dataset-discovery.js reads
-# DATASET_DISCOVERY_KEY, default discovery/candidates-latest.json). The bucket must be created by the owner BEFORE this binding is
-# released; discovery stays off until DATASET_DISCOVERY = "on" is separately approved (legal/sanctions review first).
+# Phase 18.5: isolated private bucket for the sealed open-dataset candidate file (dataset-discovery.js reads DATASET_DISCOVERY_KEY,
+# default discovery/candidates-latest.json). Discovery behaviour is set by the DATASET_DISCOVERY vars below; an empty bucket imports nothing.
 [[r2_buckets]]
 binding = "DISCOVERY_BUCKET"
 bucket_name = "hamzehi-discovery"
@@ -47,5 +46,13 @@ AUTONOMY_ORCHESTRATOR = "on"
 ADS_PLACES_DISCOVERY = "on"
 ADS_PLACES_MONTHLY_BUDGET_USD = "10"
 # Phase 18.5: independent dataset discovery master switch. "off" = fully inert (no import, no dataset website checks), even with
-# DISCOVERY_BUCKET bound. Only "on" (separately approved) activates it.
-DATASET_DISCOVERY = "off"
+# DISCOVERY_BUCKET bound.
+# Activation configuration (owner request 2026-11-01): ON for IRAN and IRAQ with first-day limits. Nothing is imported until the sealed
+# candidate file is uploaded to the bucket (empty = no import). A market is disabled by setting its PER_RUN or DAILY_CAP to "0" (D-17).
+# Emergency stop: redeploy the previous tagged version (a22839b3, "off").
+DATASET_DISCOVERY = "on"
+DATASET_DISCOVERY_IRAN_PER_RUN = "1"
+DATASET_DISCOVERY_ARAB_PER_RUN = "1"
+DATASET_DISCOVERY_IRAN_DAILY_CAP = "10"
+DATASET_DISCOVERY_ARAB_DAILY_CAP = "10"
+DATASET_DISCOVERY_VERIFY_PER_RUN = "2"

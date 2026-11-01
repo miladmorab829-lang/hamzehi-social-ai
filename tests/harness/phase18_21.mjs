@@ -14,11 +14,12 @@ const gate=(toml,approved,attr)=>{const v=PF.expectedFromToml(toml).vars;if(v.DA
 const toml=fs.readFileSync(path.join(REPO,"worker/wrangler.toml"),"utf8");
 ok("G1 the committed configuration passes the guard: discovery is on only with approved attribution containing the Foursquare notice, the NOTICE link and the OSM copyright link",
   gate(toml,DD.DATASET_ATTRIBUTION_APPROVED,DD.DATASET_ATTRIBUTION),{flag:PF.expectedFromToml(toml).vars.DATASET_DISCOVERY,approved:DD.DATASET_ATTRIBUTION_APPROVED});
-const onToml=toml.replace(/DATASET_DISCOVERY = "off"/,'DATASET_DISCOVERY = "on"');
+const onToml=toml.replace(/^DATASET_DISCOVERY = "(off|on)"/m,'DATASET_DISCOVERY = "on"'),offToml=toml.replace(/^DATASET_DISCOVERY = "(off|on)"/m,'DATASET_DISCOVERY = "off"');
 const good={en:"Overture Maps Foundation … Copyright 2024 Foursquare Labs, Inc. All rights reserved. … https://opensource.foursquare.com/places-notice-txt/ … © OpenStreetMap contributors (https://www.openstreetmap.org/copyright)",fa:"…"};
 ok("G2 an activation config is refused while the text is unapproved, or approved but missing a required notice; accepted when approved and complete",
-  onToml!==toml&&!gate(onToml,false,good)&&!gate(onToml,true,DD.DATASET_ATTRIBUTION)&&!gate(onToml,true,{...good,en:good.en.replace("All rights reserved.","")})&&gate(onToml,true,good));
-ok("G3 today: attribution NOT approved and DATASET_DISCOVERY is \"off\"",DD.DATASET_ATTRIBUTION_APPROVED===false&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY==="off");
+  gate(offToml,false,good)&&!gate(onToml,false,good)&&!gate(onToml,true,{en:"Overture Maps Foundation only, no Foursquare or OSM notice",fa:"x"})&&gate(onToml,true,DD.DATASET_ATTRIBUTION)&&!gate(onToml,true,{...good,en:good.en.replace("All rights reserved.","")})&&gate(onToml,true,good));
+ok("G3 activation configuration: attribution approved, DATASET_DISCOVERY=\"on\" with first-day limits (1/run, 10/day per market, 2 checks/run)",DD.DATASET_ATTRIBUTION_APPROVED===true&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY==="on"
+  &&["IRAN","ARAB"].every(m=>PF.expectedFromToml(toml).vars["DATASET_DISCOVERY_"+m+"_PER_RUN"]==="1"&&PF.expectedFromToml(toml).vars["DATASET_DISCOVERY_"+m+"_DAILY_CAP"]==="10")&&PF.expectedFromToml(toml).vars.DATASET_DISCOVERY_VERIFY_PER_RUN==="2");
 
 // ---- A: API credits only when dataset leads are present
 const W=await makeWorld({});const {call,dbrun}=W;

@@ -113,8 +113,8 @@ const tick=async env=>{const p=[];await WK.scheduled({cron:"*/15 * * * *",schedu
 
 // ---- F19: wrangler.toml is in one of the two safe states: pre-activation (no bucket, no var: 23 bindings) or prepared (bucket + "off": 25)
 {const exp=PF.expectedFromToml(fs.readFileSync(path.join(REPO,"worker/wrangler.toml"),"utf8")),db=exp.r2.find(r=>r.binding==="DISCOVERY_BUCKET");
- ok("F19 wrangler.toml: either no DISCOVERY_BUCKET and no DATASET_DISCOVERY (inert), or DISCOVERY_BUCKET=hamzehi-discovery (separate from hamzehi-gallery) with DATASET_DISCOVERY=\"off\"; Telegram/Ads/orchestrator vars unchanged",
-  (db?db.bucket_name==="hamzehi-discovery"&&exp.vars.DATASET_DISCOVERY==="off":exp.vars.DATASET_DISCOVERY===undefined)&&exp.r2.find(r=>r.binding==="GALLERY_BUCKET")?.bucket_name==="hamzehi-gallery"
+ ok("F19 wrangler.toml: either no DISCOVERY_BUCKET and no DATASET_DISCOVERY (inert), or DISCOVERY_BUCKET=hamzehi-discovery (separate from hamzehi-gallery) with DATASET_DISCOVERY=\"off\" — or \"on\" only with owner-approved attribution (Phase 18 activation); Telegram/Ads/orchestrator vars unchanged",
+  (db?db.bucket_name==="hamzehi-discovery"&&(exp.vars.DATASET_DISCOVERY==="off"||(exp.vars.DATASET_DISCOVERY==="on"&&DD.DATASET_ATTRIBUTION_APPROVED===true)):exp.vars.DATASET_DISCOVERY===undefined)&&exp.r2.find(r=>r.binding==="GALLERY_BUCKET")?.bucket_name==="hamzehi-gallery"
   &&exp.vars.AUTONOMY_ORCHESTRATOR==="on"&&exp.vars.ADS_PLACES_DISCOVERY==="on"&&exp.vars.ADS_PLACES_MONTHLY_BUDGET_USD==="10"&&exp.vars.SALES_AI_BRAIN==="on"&&exp.vars.TELEGRAM_VAULT_CHAT_ID==="@mhboxgroup",exp);}
 // ---- F21: enrichment window is not starved by Google rows (Production has ~300 Places rows refreshed by every Ads run)
 {const old=new Date(Date.now()-30*86400e3).toISOString(),t=new Date().toISOString();
