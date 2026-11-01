@@ -15,6 +15,8 @@
 
 # Backups (handoff phase backups, D1 exports with customer data)
 **/BACKUPS/
+# Lower-case root backups folder (CRM snapshots with customer data); explicit for case-sensitive clones and CI
+/backups/
 HANDOFF-2026-10-21/PHASE-0*-BACKUPS/
 owner-actions/**/d1-backup*.sql
 *.sqlite

@@ -16,6 +16,7 @@ import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, g
 import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite, latinDigits, DATASET_ATTRIBUTION } from "./dataset-discovery.js";
 import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market-isolation.js";
+import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE_STAGES, PIPELINE_SIDE_STATES } from "./lead-scoring.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
@@ -12382,33 +12383,46 @@ async function salesLeadActivity(env){
   const rows=async(t,sql)=>have.has(t)?((await env.DB.prepare(sql).all()).results||[]):[];
   for(const r of await rows("inbox_messages","SELECT DISTINCT lead_id FROM inbox_messages WHERE lead_id IS NOT NULL"))get(r.lead_id).replied=true;
   for(const r of await rows("lead_quotes","SELECT lead_id,status FROM lead_quotes")){const a=get(r.lead_id);a.quote_requested=true;if(["approved","sent","accepted"].includes(r.status))a.quoted=true;}
+  // Phase 19 (pipeline only; leadQualification keeps the flags above): a quote counts as the CUSTOMER's request only when it came from
+  // their own message, and an order counts as ORDER only once confirmed (or later in its lifecycle).
+  for(const r of await rows("lead_quotes","SELECT lead_id FROM lead_quotes WHERE inbox_message_id IS NOT NULL AND inbox_message_id<>'' AND status NOT IN ('rejected','cancelled','expired')"))get(r.lead_id).quote_customer_request=true;
   for(const r of await rows("lead_orders","SELECT lead_id FROM lead_orders WHERE status NOT IN ('cancelled','order_candidate')"))get(r.lead_id).ordered=true;
+  for(const r of await rows("lead_orders","SELECT lead_id FROM lead_orders WHERE status IN ('confirmed','partially_paid','paid','shipped','fulfilled','delivered')"))get(r.lead_id).order_confirmed=true;
   // Phase 18.1: the market recorded on the lead's own quotes/orders (any status) — CRM evidence for a lead whose notes carry no market.
   const om=(r)=>{const a=get(r.lead_id);a.order_markets=a.order_markets||[];if(r.market&&!a.order_markets.includes(r.market))a.order_markets.push(r.market);};
   for(const r of await rows("lead_quotes","SELECT DISTINCT lead_id,market FROM lead_quotes WHERE market IS NOT NULL"))om(r);
   for(const r of await rows("lead_orders","SELECT DISTINCT lead_id,market FROM lead_orders WHERE market IS NOT NULL"))om(r);
-  for(const r of await rows("lead_outreach","SELECT lead_id,status,updated_at FROM lead_outreach ORDER BY created_at")){const a=get(r.lead_id);
+  for(const r of await rows("lead_outreach","SELECT lead_id,status,updated_at,sent_at,approved_at FROM lead_outreach ORDER BY created_at")){const a=get(r.lead_id);
+    // Phase 19: any sent/delivered row counts (a later draft does not undo a real send); the latest real send time (sent_at, else
+    // updated_at) is the NO_RESPONSE basis; owner approval is the recorded approved_at, never inferred from the status.
+    if(["sent","delivered"].includes(r.status)){a.outreach_ever_sent=true;const ts=r.sent_at||r.updated_at;if(ts&&(!a.outreach_sent_at||ts>a.outreach_sent_at))a.outreach_sent_at=ts;}
+    if(r.approved_at&&(!a.outreach_approved_at||r.approved_at>a.outreach_approved_at))a.outreach_approved_at=r.approved_at;
     if(r.status==="rejected")a.outreach_rejected_at=r.updated_at;else a.outreach_status=r.status;}
   const contacts=new Map();
   for(const c of await rows("lead_contacts","SELECT lead_id,contact_type,normalized_value,evidence_status,evidence_url,created_at FROM lead_contacts WHERE evidence_status IN ('page_extracted','owner_confirmed')")){if(!contacts.has(c.lead_id))contacts.set(c.lead_id,[]);contacts.get(c.lead_id).push(c);}
   return {have,act,contacts};
 }
-function salesLeadView(lead,profile){
+function salesLeadView(lead,profile,scored=null){
   const m=parseLeadNotes(lead);
   return {id:lead.id,name:lead.name,stage:lead.stage,market:profile.market,city:m.city||null,source:m.source||null,provider:m.provider||null,
     state:profile.state,tier:profile.tier,priority_score:profile.priority_score,sub_scores:profile.sub_scores,identity:profile.identity,contact:profile.contact,
     packaging_demand:profile.packaging_demand,packaging_signals:profile.packaging_signals,evidence:profile.evidence,missing:profile.missing,
     improvable_automatically:profile.improvable_automatically,next_action:profile.next_action,
-    market_source:profile.market_source,rejection_reason:profile.rejection_reason,provenance:profile.provenance,updated_at:lead.updated_at};
+    market_source:profile.market_source,rejection_reason:profile.rejection_reason,provenance:profile.provenance,updated_at:lead.updated_at,
+    // Phase 19: revenue score (0–100, explained, VERIFIED vs INFERRED) and the evidence-based sales pipeline stage.
+    ...(scored?{lead_score:{...scored.score,fingerprint:scored.fingerprint},pipeline:scored.pipeline}:{})};
 }
 const SALES_VERIFIED_STATES=new Set(["IDENTITY_VERIFIED","CONTACT_CHANNEL_FOUND","CONTACT_VERIFIED","BUSINESS_QUALIFIED","SALES_READY","CONTACTED","OPPORTUNITY","CUSTOMER"]);
-async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id=null}={}){
+async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id=null,band=null,stage=null,industry=null,sort=null}={}){
   const {have,act,contacts}=await salesLeadActivity(env);
   const leads=id?[await env.DB.prepare("SELECT * FROM leads WHERE id=?").bind(id).first()].filter(Boolean):((await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 2000").all()).results||[]);
   // Phase 18.1: duplicates are judged against every lead, also for a single-lead lookup.
   const dups=leadDuplicateMap(id?((await env.DB.prepare("SELECT id,stage,created_at,notes FROM leads ORDER BY updated_at DESC LIMIT 2000").all()).results||[]):leads,act,parseLeadNotes,contacts);
-  const all=leads.map(l=>({lead:l,p:leadQualification(l,parseLeadNotes(l),contacts.get(l.id)||[],{...(act.get(l.id)||{}),duplicate_of:dups.get(l.id)||null})}));
-  if(id)return all[0]?{ok:true,item:salesLeadView(all[0].lead,all[0].p)}:{ok:false,error:"Lead not found",statusCode:404};
+  const nowMs=Date.now();
+  const all=leads.map(l=>{const m=parseLeadNotes(l),a={...(act.get(l.id)||{}),duplicate_of:dups.get(l.id)||null,strict_activity:true},p=leadQualification(l,m,contacts.get(l.id)||[],a);
+    return {lead:l,p,s:scoreLeadCached(p,l,m,a,{nowMs})};});
+  if(id)return all[0]?{ok:true,item:salesLeadView(all[0].lead,all[0].p,all[0].s)}:{ok:false,error:"Lead not found",statusCode:404};
+  const revenue=revenueSummary(all.map(x=>({market:x.p.market,contact_status:x.p.contact.status,score:x.s.score,pipeline:x.s.pipeline})));
   const markets={};
   for(const mk of ADS_MARKET_IDS){
     const xs=all.filter(x=>x.p.market===mk),cur=ADS_MARKETS[mk].currency,os=xs.map(x=>act.get(x.lead.id)||{});
@@ -12426,16 +12440,22 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
       orders:ord?Number(ord.n):0,order_value_minor:ord?Number(ord.total):0,payments_received_minor:paid?Number(paid.total):0,
       outstanding_minor:Math.max(0,(ord?Number(ord.total):0)-(paid?Number(paid.total):0)),
       reply_rate:(()=>{const sent=os.filter(a=>["sent","delivered"].includes(a.outreach_status)).length;return sent?Math.round(os.filter(a=>a.replied).length/sent*100):null;})(),
-      by_source:by("source"),by_city:by("city")};
+      by_source:by("source"),by_city:by("city"),revenue:revenue[mk]};
   }
   // Ranked list: provisional Places IDs are excluded unless tier D is asked for explicitly.
-  let items=all.filter(x=>(!market||x.p.market===market)&&(!tier||x.p.tier===tier)&&(x.p.state!=="PLACE_DISCOVERED"||tier==="D"));
-  items.sort((a,b)=>b.p.priority_score-a.p.priority_score||String(b.lead.updated_at).localeCompare(String(a.lead.updated_at)));
-  const total=items.length;items=items.slice(offset,offset+limit).map(x=>salesLeadView(x.lead,x.p));
+  // Phase 19 filters (band / pipeline stage / industry) and sort=score; without them the list is exactly as before.
+  const p19=!!(band||stage||industry||sort==="score");
+  let items=all.filter(x=>(!market||x.p.market===market)&&(!tier||x.p.tier===tier)&&(x.p.state!=="PLACE_DISCOVERED"||tier==="D"||(p19&&(band==="INSUFFICIENT_DATA"||stage)))
+    &&(!band||x.s.score.band===band)&&(!stage||x.s.pipeline.stage===stage||x.s.pipeline.side_state===stage)&&(!industry||x.s.score.industry===industry));
+  if(sort==="score")items.sort((a,b)=>b.s.score.score-a.s.score.score||b.p.priority_score-a.p.priority_score||String(b.lead.updated_at).localeCompare(String(a.lead.updated_at)));
+  else items.sort((a,b)=>b.p.priority_score-a.p.priority_score||String(b.lead.updated_at).localeCompare(String(a.lead.updated_at)));
+  const total=items.length;items=items.slice(offset,offset+limit).map(x=>salesLeadView(x.lead,x.p,x.s));
   return {ok:true,generated_at:now(),truncated:leads.length>=2000,markets,leads_without_market:all.filter(x=>!x.p.market).length,
     // Phase 18.21: data credits (Overture / Foursquare / AllThePlaces / OSM notices) whenever dataset-discovered leads are shown
     dataset_attribution:all.some(x=>/"provider":"dataset"/.test(String(x.lead.notes||"")))?DATASET_ATTRIBUTION:null,
-    owner_decisions:"Scoring and next actions never create approvals; outreach, prices, quotes and payments stay with the owner",total,offset,limit,items};
+    owner_decisions:"Scoring and next actions never create approvals; outreach, prices, quotes and payments stay with the owner",
+    scoring:{version:SCORE_VERSION,weights:SCORE_WEIGHTS,bands:{VERY_HIGH:"80-100",HIGH:"60-79",REVIEW:"40-59",LOW:"0-39",INSUFFICIENT_DATA:"too few known facts (not low value)",EXCLUDED:"rejected / duplicate / information site"},
+      pipeline:PIPELINE_STAGES,side_states:PIPELINE_SIDE_STATES,industries:[...new Set(all.map(x=>x.s.score.industry))].sort()},total,offset,limit,items};
 }
 // Bounded, free re-check of a business's OWN website for published contacts (robots.txt respected; at most `limit` leads per run, each
 // re-checked at most every 14 days). Directories, marketplaces, Google content and Places-only leads are never fetched.
@@ -15218,7 +15238,10 @@ Context: ${context}`;
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         const mk=normalizeAdsMarket(u.searchParams.get("market")),tq=u.searchParams.get("tier"),tier=["A","B","C","D","REJECTED"].includes(tq)?tq:null;
         const limit=Math.min(200,Math.max(1,Number(u.searchParams.get("limit"))||50)),offset=Math.max(0,Number(u.searchParams.get("offset"))||0);
-        return json(await salesIntelligence(env,{market:mk,tier,limit,offset}));
+        const bq=u.searchParams.get("band"),band=["VERY_HIGH","HIGH","REVIEW","LOW","INSUFFICIENT_DATA","EXCLUDED"].includes(bq)?bq:null;
+        const sq=u.searchParams.get("stage"),stage=[...PIPELINE_STAGES,...PIPELINE_SIDE_STATES].includes(sq)?sq:null;
+        const iq=String(u.searchParams.get("industry")||"").trim(),industry=/^[a-z_]{2,30}$/.test(iq)?iq:null,sort=u.searchParams.get("sort")==="score"?"score":null;
+        return json(await salesIntelligence(env,{market:mk,tier,limit,offset,band,stage,industry,sort}));
       }
       if (u.pathname === "/api/leads/intelligence" && req.method === "GET") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);

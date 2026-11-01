@@ -979,6 +979,40 @@ async function loadSalesIntel(){
   // Phase 18.21: data credits whenever dataset-discovered leads are listed (source notices and links as plain, escaped text)
   +(d.dataset_attribution?"<div class='card'><div class='row'><b>منابع داده</b></div><div class='row hint'>"+esc(d.dataset_attribution.fa)+"</div><div class='row hint' dir='ltr'>"+esc(d.dataset_attribution.en)+"</div></div>":"");
 }
+// Phase 19: lead prioritization (GET /api/sales/intelligence?sort=score, read-only). Score 0-100 from recorded evidence only; VERIFIED and
+// INFERRED points are shown apart; missing data is shown as "needs data", never as low value. Nothing is sent or approved from here.
+const LP_BAND_FA={VERY_HIGH:"اولویت بسیار بالا",HIGH:"اولویت بالا",REVIEW:"نیازمند بررسی",LOW:"اولویت پایین",INSUFFICIENT_DATA:"داده ناکافی",EXCLUDED:"کنار گذاشته‌شده"};
+const LP_STAGE_FA={DISCOVERED:"کشف‌شده",QUALIFIED:"واجد شرایط",REVIEWED:"پیش‌نویس منتظر مالک",OWNER_APPROVED:"تأیید مالک",CONTACTED:"تماس برقرار شد",NEGOTIATION:"مذاکره",QUOTE:"پیش‌فاکتور",ORDER:"سفارش",
+ DISQUALIFIED:"رد صلاحیت",DUPLICATE:"تکراری",NO_RESPONSE:"بدون پاسخ",NEEDS_DATA:"نیاز به تکمیل اطلاعات"};
+const LP_COMP_FA={market_relevance:"ارتباط با بازار جواهرات",b2b_fit:"تناسب خرید عمده",contact_quality:"کیفیت تماس",business_evidence:"شواهد فعالیت",data_quality:"کیفیت و تازگی داده"};
+const LP_FACT_FA={market:"بازار",city:"شهر",website:"وب‌سایت مستقل",contact:"راه تماس",relevance:"ارتباط با جواهرات"};
+let lpData=null;
+function lpQuery(){const q=["sort=score","limit=100"];for(const k of ["market","band","stage","industry"]){const v=$("lp_"+k).value;if(v)q.push(k+"="+encodeURIComponent(v))}return "/api/sales/intelligence?"+q.join("&")}
+async function loadLeadPriority(){
+ const st=$("leadPriorityStatus");st.textContent="در حال دریافت…";
+ const d=await api(lpQuery());
+ if(!d||!d.ok||!d.markets){st.innerHTML=acErr(d);$("leadPriorityList").innerHTML="";$("leadPrioritySummary").innerHTML="";return}
+ lpData=d;
+ const ind=$("lp_industry"),cur=ind.value;ind.innerHTML="<option value=''>همه صنایع</option>"+((d.scoring&&d.scoring.industries)||[]).map(function(x){return "<option value='"+esc(x)+"'"+(x===cur?" selected":"")+">"+esc(x)+"</option>"}).join("");
+ st.innerHTML="<span class='pill ok'>داده واقعی</span> امتیاز ۰ تا ۱۰۰ فقط از شواهد ثبت‌شده (نسخه "+esc(d.scoring&&d.scoring.version)+")؛ نبود اطلاعات = «داده ناکافی»، نه کم‌ارزش. "+esc(d.total)+" مورد"+(d.truncated?" <span class='pill warn'>فقط ۲۰۰۰ سرنخ اخیر بررسی شد</span>":"");
+ const rate=function(r){return r&&r.percent!==null?esc(r.percent)+"٪ ("+esc(r.numerator)+" از "+esc(r.denominator)+")":"—"};
+ $("leadPrioritySummary").innerHTML=["IRAN","ARAB"].map(function(m){const x=(d.markets[m]||{}).revenue;if(!x)return "";
+  return "<div class='card'><div class='row'><b>"+(m==="IRAN"?"ایران":"عراق")+"</b> <span class='muted'>"+esc(m)+" · "+esc(x.currency)+"</span></div>"
+  +"<div class='row'>کشف‌شده: "+esc(x.discovered)+" · واجد شرایط: "+esc(x.qualified)+" · دارای تماس: "+esc(x.with_contact)+" · اولویت بالا: <b>"+esc(x.high_priority)+"</b></div>"
+  +"<div class='row'>منتظر بررسی مالک: "+esc(x.awaiting_owner)+" · تأیید مالک: "+esc(x.owner_approved)+" · تماس: "+esc(x.contacted)+" · مذاکره: "+esc(x.negotiation)+" · پیش‌فاکتور: "+esc(x.quotes)+" · سفارش: "+esc(x.orders)+"</div>"
+  +"<div class='row hint'>تبدیل تماس ← مذاکره: "+rate(x.conversion&&x.conversion.contacted_to_negotiation)+" · مذاکره ← سفارش: "+rate(x.conversion&&x.conversion.negotiation_to_order)+"</div>"
+  +"<div class='row hint'>بسیار بالا / بالا / بررسی / پایین / داده ناکافی: "+esc(x.bands.VERY_HIGH)+" / "+esc(x.bands.HIGH)+" / "+esc(x.bands.REVIEW)+" / "+esc(x.bands.LOW)+" / "+esc(x.bands.INSUFFICIENT_DATA)+"</div></div>"}).join("");
+ $("leadPriorityList").innerHTML=(d.items||[]).map(function(i){const s=i.lead_score||{},p=i.pipeline||{},c=s.components||{};
+  const pill=s.band==="VERY_HIGH"||s.band==="HIGH"?"ok":s.band==="REVIEW"?"warn":"gray";
+  const comps=Object.keys(c).map(function(k){return esc(LP_COMP_FA[k]||k)+" "+esc(c[k].points)+"/"+esc(c[k].max)}).join(" · ");
+  const ver=[].concat.apply([],Object.keys(c).map(function(k){return c[k].verified||[]})),inf=[].concat.apply([],Object.keys(c).map(function(k){return c[k].inferred||[]}));
+  return "<div class='row'><span class='pill "+pill+"'>"+esc(LP_BAND_FA[s.band]||s.band)+" · "+esc(s.score)+"</span> <b>"+esc(i.name||"—")+"</b> <span class='muted'>"+esc(i.market||"بازار نامشخص")+" · "+esc(i.city||"")+" · "+esc(s.industry||"")+"</span>"
+   +" <span class='tag'>"+esc(LP_STAGE_FA[p.stage]||p.stage||"")+"</span>"+(p.side_state?" <span class='pill warn'>"+esc(LP_STAGE_FA[p.side_state]||p.side_state)+"</span>":"")
+   +"<br><span class='hint'>علت امتیاز: "+comps+"</span>"
+   +(ver.length?"<br><span class='hint'>✔ تأییدشده: "+esc(ver.join(" | "))+"</span>":"")
+   +(inf.length?"<br><span class='hint'>≈ استنباط سیستم: "+esc(inf.join(" | "))+"</span>":"")
+   +((s.missing_facts||[]).length?"<br><span class='hint'>اطلاعات ناموجود: "+esc(s.missing_facts.map(function(f){return LP_FACT_FA[f]||f}).join("، "))+"</span>":"")+"</div>"}).join("")||"<div class='hint'>موردی با این فیلتر نیست.</div>";
+}
 // Phase 09.4: Ads markets (GET /api/ads/markets, POST /api/ads/markets/config). Enabling asks the owner to confirm first; disabling never does.
 const ADS_CODE_FA={ADS_MARKET_DISABLED:"خاموش است",ADS_CITY_EMPTY:"شهر هدف تعیین نشده",ADS_CITY_INVALID:"شهر متعلق به این بازار نیست",ADS_LIMIT_MISSING:"سقف اجرای روزانه تعیین نشده",ADS_LIMIT_ABOVE_GLOBAL:"سقف بیشتر از سقف کلی Ads است"};
 let adsMk=null;
@@ -2122,7 +2156,7 @@ async function refreshTick(){
  catch(e){$("masterState").textContent="DASHBOARD ERROR";$("masterState").className="pill bad"}
  finally{refreshInProgress=false}
 }
-updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();if(has("salesIntelGrid")){loadSalesIntel();$("salesIntelRefresh").addEventListener("click",loadSalesIntel)}if(has("adsMarketsGrid")){loadAdsMarkets();$("adsMarketsRefresh").addEventListener("click",loadAdsMarkets);$("adsMarketsGrid").addEventListener("click",adsMarketClick)}if(has("agentCenterGrid")){loadAgentCenter();$("agentCenterRefresh").addEventListener("click",loadAgentCenter);$("agentCenterFilter").addEventListener("click",e=>{const b=e.target.closest("button[data-f]");if(b){acFilter=b.dataset.f;acRender()}})}on("hubAgents",loadHubAgents);setInterval(refreshTick,15000);
+updateTokenUI();uxInit();refreshAll();on("diagMaster",loadDiagnostic);if(document.getElementById("agentOpsStatus"))loadAgentOps();if(has("salesIntelGrid")){loadSalesIntel();$("salesIntelRefresh").addEventListener("click",loadSalesIntel)}if(has("leadPriorityList")){loadLeadPriority();$("leadPriorityRefresh").addEventListener("click",loadLeadPriority);for(const k of ["market","industry","band","stage"])$("lp_"+k).addEventListener("change",loadLeadPriority)}if(has("adsMarketsGrid")){loadAdsMarkets();$("adsMarketsRefresh").addEventListener("click",loadAdsMarkets);$("adsMarketsGrid").addEventListener("click",adsMarketClick)}if(has("agentCenterGrid")){loadAgentCenter();$("agentCenterRefresh").addEventListener("click",loadAgentCenter);$("agentCenterFilter").addEventListener("click",e=>{const b=e.target.closest("button[data-f]");if(b){acFilter=b.dataset.f;acRender()}})}on("hubAgents",loadHubAgents);setInterval(refreshTick,15000);
 </script></body></html>`;
 
 // ---- Hub-only additions (summary of existing data + navigation; no new metrics, no new API).
@@ -2162,6 +2196,12 @@ DASH_SECTIONS.agentCenter=`<section class="card section" id="agentCenterPanel">
 </section>
 `;
 DASH_SECTIONS.salesIntel='<section class="card section" id="salesIntelPanel"><div class="title"><div><h2>🧭 هوش فروش (ایران / عراق)</h2><div class="hint">کسب‌وکارهای تأییدشده، تماس‌های تأییدشده، آمادهٔ فروش و قدم بعدی هر lead. فقط نمایش؛ هیچ پیامی ارسال نمی‌شود.</div></div><button class="btn" type="button" id="salesIntelRefresh">بروزرسانی</button></div><div id="salesIntelStatus" class="hint">در انتظار دریافت…</div><div id="salesIntelGrid" class="acgrid"></div></section>';
+DASH_SECTIONS.leadPriority='<section class="card section" id="leadPriorityPanel"><div class="title"><div><h2>🎯 اولویت‌بندی سرنخ‌ها (امتیاز درآمد)</h2><div class="hint">امتیاز ۰ تا ۱۰۰ با علت هر امتیاز؛ شواهد تأییدشده و استنباط سیستم جدا نمایش داده می‌شوند. فقط نمایش؛ هیچ پیامی ارسال و هیچ تأییدی ثبت نمی‌شود.</div></div><button class="btn" type="button" id="leadPriorityRefresh">بروزرسانی</button></div>'
+ +'<div class="filters"><select id="lp_market" class="input" aria-label="بازار"><option value="">همه بازارها</option><option value="IRAN">ایران</option><option value="ARAB">عراق</option></select>'
+ +'<select id="lp_industry" class="input" aria-label="صنعت"><option value="">همه صنایع</option></select>'
+ +'<select id="lp_band" class="input" aria-label="امتیاز"><option value="">همه امتیازها</option><option value="VERY_HIGH">اولویت بسیار بالا (۸۰–۱۰۰)</option><option value="HIGH">اولویت بالا (۶۰–۷۹)</option><option value="REVIEW">نیازمند بررسی (۴۰–۵۹)</option><option value="LOW">اولویت پایین (زیر ۴۰)</option><option value="INSUFFICIENT_DATA">داده ناکافی</option><option value="EXCLUDED">کنار گذاشته‌شده</option></select>'
+ +'<select id="lp_stage" class="input" aria-label="وضعیت CRM"><option value="">همه وضعیت‌ها</option><option value="DISCOVERED">کشف‌شده</option><option value="QUALIFIED">واجد شرایط</option><option value="REVIEWED">پیش‌نویس منتظر مالک</option><option value="OWNER_APPROVED">تأیید مالک</option><option value="CONTACTED">تماس برقرار شد</option><option value="NEGOTIATION">مذاکره</option><option value="QUOTE">پیش‌فاکتور</option><option value="ORDER">سفارش</option><option value="NEEDS_DATA">نیاز به تکمیل اطلاعات</option><option value="NO_RESPONSE">بدون پاسخ</option><option value="DUPLICATE">تکراری</option><option value="DISQUALIFIED">رد صلاحیت</option></select></div>'
+ +'<div id="leadPriorityStatus" class="hint">در انتظار دریافت…</div><div id="leadPrioritySummary" class="acgrid"></div><div id="leadPriorityList" class="rows"></div></section>';
 DASH_SECTIONS.adsMarkets='<section class="card section" id="adsMarketsPanel"><div class="title"><div><h2>📣 بازارهای Ads (ایران / عراق)</h2><div class="hint">هر بازار جداگانه روشن می‌شود. روشن کردن یا تغییر بازار روشن، تأیید صریح مالک لازم دارد. Ads فقط پیش‌نویس می‌سازد و هیچ پیامی ارسال یا هزینهٔ تبلیغاتی خرج نمی‌کند.</div></div><button class="btn" type="button" id="adsMarketsRefresh">بروزرسانی</button></div><div id="adsMarketsStatus" class="hint">در انتظار دریافت…</div><div id="adsMarketsGrid" class="acgrid"></div></section>';
 DASH_SECTIONS.hubAgents=`<section class="card section" id="hubAgentsPanel">
 <div class="title"><h2>🛰️ وضعیت عامل‌ها</h2><a class="btn" href="/dashboard/agents">مرکز کنترل عامل‌ها</a></div>
@@ -2323,7 +2363,7 @@ DASH_SECTIONS.telegramHealth=`<section class="card section" id="telegramHealth">
 // page — the lazy ones load their data only when opened (or when a link points into them).
 export const DASHBOARD_PAGES={
  hub:{path:"/dashboard",title:"خانه",icon:"home",desc:"خلاصه مدیریتی",sections:["home","ownerActions","hubAgents","authFold"]},
- customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["salesIntel","leadsList","negotiation","opportunities"]},
+ customers:{path:"/dashboard/customers",title:"مشتریان",icon:"users",desc:"مشتریان، گفتگوها و فرصت‌ها",sections:["salesIntel","leadPriority","leadsList","negotiation","opportunities"]},
  orders:{path:"/dashboard/orders",title:"سفارش‌ها",icon:"box",desc:"سفارش‌ها، پرداخت‌ها و درخواست‌های قیمت",sections:["orders","money","quotes"]},
  actions:{path:"/dashboard/actions",title:"مرکز اقدام مالک",icon:"check",desc:"همهٔ کارهای منتظر مالک، اولویت‌بندی‌شده (فقط نمایش)",sections:["ownerActions"]},
  approvals:{path:"/dashboard/approvals",title:"تأییدیه‌ها",icon:"check",desc:"قیمت، سفارش، پرداخت، پیام، محتوا",sections:["ownerActions","approvalsOverview","escalations","quotes","outreach","contentApproval","knowledgeApprovalsLink"]},
