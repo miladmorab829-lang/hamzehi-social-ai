@@ -18,6 +18,7 @@ import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market-isolation.js";
 import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE_STAGES, PIPELINE_SIDE_STATES } from "./lead-scoring.js";
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
+import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, isOptOutMessage } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
@@ -12383,6 +12384,8 @@ async function salesLeadActivity(env){
   const act=new Map(),get=id=>{if(!act.has(id))act.set(id,{});return act.get(id);};
   const rows=async(t,sql)=>have.has(t)?((await env.DB.prepare(sql).all()).results||[]):[];
   for(const r of await rows("inbox_messages","SELECT DISTINCT lead_id FROM inbox_messages WHERE lead_id IS NOT NULL"))get(r.lead_id).replied=true;
+  // Autonomous sales: when the customer last wrote (a silent customer after OUR message gets the no-response follow-up rule).
+  for(const r of await rows("inbox_messages","SELECT lead_id,MAX(created_at) t FROM inbox_messages WHERE lead_id IS NOT NULL GROUP BY lead_id"))get(r.lead_id).last_inbound_at=r.t;
   for(const r of await rows("lead_quotes","SELECT lead_id,status FROM lead_quotes")){const a=get(r.lead_id);a.quote_requested=true;if(["approved","sent","accepted"].includes(r.status))a.quoted=true;}
   // Phase 19 (pipeline only; leadQualification keeps the flags above): a quote counts as the CUSTOMER's request only when it came from
   // their own message, and an order counts as ORDER only once confirmed (or later in its lifecycle).
@@ -12398,9 +12401,10 @@ async function salesLeadActivity(env){
   for(const r of await rows("lead_outreach","SELECT lead_id,status,updated_at,sent_at,approved_at FROM lead_outreach ORDER BY created_at")){const a=get(r.lead_id);
     // Phase 19: any sent/delivered row counts (a later draft does not undo a real send); the latest real send time (sent_at, else
     // updated_at) is the NO_RESPONSE basis; owner approval is the recorded approved_at, never inferred from the status.
-    if(["sent","delivered"].includes(r.status)){a.outreach_ever_sent=true;a.outreach_sent_count=(a.outreach_sent_count||0)+1;const ts=r.sent_at||r.updated_at;if(ts&&(!a.outreach_sent_at||ts>a.outreach_sent_at))a.outreach_sent_at=ts;}
+    if(["sent","delivered"].includes(r.status)){a.outreach_ever_sent=true;a.outreach_sent_count=(a.outreach_sent_count||0)+1;const ts=r.sent_at||r.updated_at;if(ts&&(!a.outreach_sent_at||ts>a.outreach_sent_at))a.outreach_sent_at=ts;(a._sent_times=a._sent_times||[]).push(ts);}
     if(r.approved_at&&(!a.outreach_approved_at||r.approved_at>a.outreach_approved_at))a.outreach_approved_at=r.approved_at;
     if(r.status==="rejected")a.outreach_rejected_at=r.updated_at;else a.outreach_status=r.status;}
+  for(const a of act.values())if(a._sent_times){a.sends_after_last_inbound=a.last_inbound_at?a._sent_times.filter(t=>t&&t>a.last_inbound_at).length:a._sent_times.length;delete a._sent_times;}
   const contacts=new Map();
   for(const c of await rows("lead_contacts","SELECT lead_id,contact_type,normalized_value,evidence_status,evidence_url,created_at FROM lead_contacts WHERE evidence_status IN ('page_extracted','owner_confirmed')")){if(!contacts.has(c.lead_id))contacts.set(c.lead_id,[]);contacts.get(c.lead_id).push(c);}
   return {have,act,contacts};
@@ -13675,7 +13679,7 @@ configureSalesIntelligence({
   leadTestFlagSql
 });
 
-export default {
+const WORKER = {
   async scheduled(event, env, ctx) {
     // Phase 14: a scheduled failure is recorded (sanitized, at most one system_events row per step per hour via a deterministic id)
     // instead of being swallowed. Independent steps stay independent; the autopilot chain keeps its original stop-at-first-failure
@@ -13740,7 +13744,10 @@ export default {
             if(r.created&&(r.created.IRAN||r.created.ARAB))await audit(env,"dataset_discovery_ingested","Open-dataset candidates added for website verification",{release:r.release,created:r.created,skipped:r.skipped,errors:r.errors,backoff:r.backoff});}catch(e){await stepFailed("dataset_discovery",e);}}
           // Phase 17: free, bounded re-check of 2 leads' own websites for published contacts (independent of the Ads markets).
           try{await enrichOwnSiteContacts(env,{limit:ds.enabled?ds.verify_per_run:2});}catch{}
-          // Actual sending remains authorized-channel/manual.
+          // Autonomous sales messaging (owner switch, default OFF): first-contact drafts for the owner + permitted follow-ups in
+          // customer-opened Telegram conversations. Own try: a failure never affects discovery or the website checks.
+          try{await runAutoSalesMessaging(env,{internalFetch:r=>WORKER.fetch(r,env)});}catch(e){await stepFailed("auto_sales_messaging",e);}
+          // Every other send (first contacts, quotes, orders, payments) stays owner-approved.
         } catch(e) { try{ await audit(env,"ad_autopilot_scheduled_error","Scheduled advertising Autopilot cycle failed",{error:sanitizeOperationalError(e?.message||e)}); }catch{} }
       })());
     }
@@ -15282,6 +15289,24 @@ Context: ${context}`;
         const iq=String(u.searchParams.get("industry")||"").trim(),industry=/^[a-z_]{2,30}$/.test(iq)?iq:null,sort=u.searchParams.get("sort")==="score"?"score":null;
         return json(await salesIntelligence(env,{market:mk,tier,limit,offset,band,stage,industry,sort}));
       }
+      // Autonomous sales messaging: status (GET) and the owner's switch / emergency stop (POST). Default OFF.
+      if (u.pathname === "/api/sales/auto-messaging" && req.method === "GET") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        return json(await autoSalesMessagingStatus(env));
+      }
+      if (u.pathname === "/api/sales/auto-messaging" && req.method === "POST") {
+        if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+        const b=await req.json().catch(()=>({}));if(!b||typeof b!=="object")return json({ok:false,error:"Invalid JSON body"},400);
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS system_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)").run();
+        const cur=autoMessagingSettings((await env.DB.prepare("SELECT value FROM system_kv WHERE key=?").bind(AUTO_MESSAGING_KEY).first())?.value),t=now();
+        if(b.enabled===true&&b.owner_approved!==true)return json({ok:false,reason:"owner_approval_required",error:"روشن کردن ارسال خودکار، تأیید صریح مالک (owner_approved) لازم دارد"},403);
+        const next={...cur};for(const k of ["enabled","followups","initial_drafts"])if(typeof b[k]==="boolean")next[k]=b[k];
+        for(const k of ["per_run","per_day","local_start_hour","local_end_hour"])if(b[k]!==undefined)next[k]=b[k];
+        const norm=autoMessagingSettings({...next,updated_at:t,updated_by:"owner"});
+        await env.DB.prepare("INSERT INTO system_kv(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(AUTO_MESSAGING_KEY,JSON.stringify(norm),t).run();
+        await audit(env,norm.enabled?"auto_sales_messaging_enabled":"auto_sales_messaging_disabled","Autonomous sales messaging switch changed by the owner",{before:cur,after:norm});
+        return json({ok:true,settings:norm});
+      }
       // Phase 20: sales conversion (read-only): high-priority leads with next action, follow-up state and a template draft preview.
       if (u.pathname === "/api/sales/conversion" && req.method === "GET") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
@@ -15351,6 +15376,7 @@ Context: ${context}`;
         if(mk!=="IRAN"&&mk!=="ARAB"){const ms=new Set();for(const t of ["lead_orders","lead_quotes"]){try{for(const r of ((await env.DB.prepare("SELECT DISTINCT market FROM "+t+" WHERE lead_id=? AND market IN ('IRAN','ARAB')").bind(o.lead_id).all()).results||[]))ms.add(r.market);}catch{}}
           mk=ms.size===1?[...ms][0]:null;}
         if(!mk)return {ok:false,reason:"market_required",error:"بازار این مشتری ثبت نشده است؛ تا تعیین بازار، تأیید و ارسال ممکن نیست"};
+        if(await leadOptedOut(env,o.lead_id))return {ok:false,reason:"customer_opted_out",error:"مشتری درخواست توقف پیام داده است؛ ارسال متوقف است"};
         const want=mk==="IRAN"?"Persian":"Iraqi Arabic";
         if(o.language&&o.language!==want)return {ok:false,reason:"language_market_mismatch",error:"زبان پیش‌نویس ("+o.language+") با بازار "+mk+" یکی نیست؛ پیش‌نویس تازه به زبان درست لازم است"};
         return {ok:true,market:mk};};
@@ -15697,3 +15723,92 @@ Context: ${context}`;
     }
   }
 };
+export default WORKER;
+
+// ---------------------------------------------------------------- autonomous sales messaging (owner policy 2026-11-01)
+async function leadOptedOut(env,leadId){
+  try{const rows=(await env.DB.prepare("SELECT message FROM inbox_messages WHERE lead_id=? ORDER BY created_at DESC LIMIT 20").bind(leadId).all()).results||[];return rows.some(r=>isOptOutMessage(r.message));}catch{return false;}
+}
+async function readAutoMessagingSettings(env){try{return autoMessagingSettings((await env.DB.prepare("SELECT value FROM system_kv WHERE key=?").bind(AUTO_MESSAGING_KEY).first())?.value);}catch{return autoMessagingSettings(null);}}
+// Why a permitted automatic follow-up must NOT be sent to this lead now (null = may be sent). Records only; nothing is guessed.
+async function autoFollowupBlock(env,item,{nowMs,settings}){
+  const one=async(sql,...a)=>{try{return !!(await env.DB.prepare(sql).bind(...a).first());}catch{return true;}};
+  if(item.market!=="IRAN"&&item.market!=="ARAB")return "market_unknown";
+  if(!(await one("SELECT 1 FROM inbox_messages WHERE lead_id=? AND platform='telegram' LIMIT 1",item.id)))return "no_customer_conversation";   // consent = the customer opened the chat
+  if(await leadOptedOut(env,item.id))return "customer_opted_out";
+  if(await one("SELECT 1 FROM lead_quotes WHERE lead_id=? LIMIT 1",item.id)||await one("SELECT 1 FROM lead_orders WHERE lead_id=? LIMIT 1",item.id))return "financial_flow_owner";
+  if(await one("SELECT 1 FROM lead_outreach WHERE lead_id=? AND status IN ('sending','send_ambiguous') LIMIT 1",item.id))return "send_outcome_unresolved";
+  if(!withinContactHours(item.market,settings,nowMs))return "outside_contact_hours";
+  if((await marketBackoff(env,"autofu",item.market,nowMs)).skip)return "failure_backoff";
+  return null;
+}
+async function runAutoSalesMessaging(env,{nowMs=Date.now(),internalFetch}={}){
+  const st=await readAutoMessagingSettings(env);
+  if(!st.enabled||String(env.AUTO_SALES_MESSAGING||"on").toLowerCase()==="off")return {ok:true,skipped:"disabled"};
+  if(!(await autonomyMasterGate(env)))return {ok:true,skipped:"autonomy_master_off"};
+  if(typeof internalFetch!=="function"||!env.ADMIN_TOKEN)return {ok:false,skipped:"no_internal_route"};
+  const si=await salesIntelligence(env,{sort:"score",conversion:true,limit:100});if(!si.ok)return {ok:false,skipped:"intelligence_failed"};
+  const out={drafts:0,sent:0,failed:0,skipped:{}},skip=r=>{out.skipped[r]=(out.skipped[r]||0)+1;};
+  const draft=async(lead_id,mode)=>{try{const r=await internalFetch(new Request("https://internal.local/api/leads/outreach-draft",{method:"POST",headers:{Authorization:"Bearer "+env.ADMIN_TOKEN,"Content-Type":"application/json"},body:JSON.stringify({lead_id,engine:"template",mode})}));return await r.json();}catch{return null;}};
+  // 1) first-contact drafts for discovery leads: drafts ONLY (no consent → the owner approves every first contact)
+  if(st.initial_drafts)for(const i of (si.items||[]).filter(x=>x.conversion?.next_action.action==="PREPARE_FIRST_CONTACT_DRAFT").slice(0,st.per_run)){
+    const d=await draft(i.id,"initial");if(d?.ok&&!d.reused)out.drafts++;else skip("draft_"+(d?.reused?"open_exists":(d?.reason||"refused")));}
+  // 2) permitted follow-ups inside customer-opened conversations: sent automatically, at most per_run now and per_day per UTC day
+  if(st.followups){
+    const day=new Date(nowMs).toISOString().slice(0,10);
+    const today=Number((await env.DB.prepare("SELECT COUNT(*) n FROM lead_outreach WHERE approved_by=? AND approved_at>=?").bind(AUTO_POLICY_ACTOR,day).first())?.n||0);
+    let budget=Math.min(st.per_run,st.per_day-today);
+    for(const i of (si.items||[]).filter(x=>x.conversion?.next_action.action==="PREPARE_FOLLOW_UP_DRAFT")){
+      if(budget<=0){skip("cap_reached");break;}
+      const why=await autoFollowupBlock(env,i,{nowMs,settings:st});if(why){skip(why);continue;}
+      // one attempt per lead per follow-up window (concurrent ticks or retries can never send twice)
+      // (a definitive Telegram rejection may be retried ONCE, at least 1 hour later; an ambiguous outcome is never retried)
+      const lockKey="autofu:"+i.id+":"+(i.conversion.follow_up.due_at||day),t=new Date(nowMs).toISOString();
+      const lock=await env.DB.prepare("INSERT OR IGNORE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind(lockKey,"claimed",t).run();
+      if(!Number(lock?.meta?.changes||0)){
+        const prev=await env.DB.prepare("SELECT value,updated_at FROM system_kv WHERE key=?").bind(lockKey).first();
+        const retryOk=prev?.value==="failed_once"&&nowMs-Date.parse(prev.updated_at||"")>=3600000
+          &&Number((await env.DB.prepare("UPDATE system_kv SET value='retry_claimed',updated_at=? WHERE key=? AND value='failed_once'").bind(t,lockKey).run())?.meta?.changes||0)>0;
+        if(!retryOk){skip("already_attempted");continue;}
+      }
+      budget--;   // every attempt (sent or failed) counts against the per-run cap
+      const d=await draft(i.id,"followup");
+      if(!d?.ok||d.reused){skip(d?.reused?"old_draft_not_sent":"draft_"+(d?.reason||"refused"));continue;}   // an older open draft is never sent automatically
+      // recipient binding: the draft's contact must be the private Telegram chat the customer wrote from (else it waits for the owner)
+      const o=await env.DB.prepare("SELECT o.channel,c.contact_type,c.raw_value,c.normalized_value,c.evidence_status,c.source FROM lead_outreach o LEFT JOIN lead_contacts c ON c.id=o.contact_id AND c.lead_id=o.lead_id WHERE o.id=?").bind(d.outreach_id).first();
+      const chat=o?.channel==="telegram"?telegramLeadContactChatId(o):null;
+      if(!chat||!(await env.DB.prepare("SELECT 1 FROM inbox_messages WHERE lead_id=? AND platform='telegram' AND provider_conversation_id=? AND provider_sender_id=? LIMIT 1").bind(i.id,chat,chat).first())){skip("recipient_not_customer_chat");continue;}
+      const ap=await env.DB.prepare("UPDATE lead_outreach SET status='approved',approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status='draft' AND message=?").bind(t,AUTO_POLICY_ACTOR,t,d.outreach_id,d.draft).run();
+      if(!Number(ap?.meta?.changes||0)){skip("draft_changed");continue;}
+      const res=await sendApprovedTelegramOutreach(env,d.outreach_id);
+      if(res?.ok){out.sent++;await clearMarketFailure(env,"autofu",i.market,nowMs);}
+      else{out.failed++;await recordMarketFailure(env,"autofu",i.market,res?.error||res?.status||"send_failed",nowMs);
+        // refused before the claim → back to draft for the owner (nothing stays auto-approved); a definitive rejection → one later retry
+        await env.DB.prepare("UPDATE lead_outreach SET status='draft',approved_at=NULL,approved_by=NULL,updated_at=? WHERE id=? AND status='approved' AND approved_by=?").bind(t,d.outreach_id,AUTO_POLICY_ACTOR).run();
+        const fin=(await env.DB.prepare("SELECT status FROM lead_outreach WHERE id=?").bind(d.outreach_id).first())?.status;
+        if(fin==="send_failed")await env.DB.prepare("UPDATE system_kv SET value='failed_once',updated_at=? WHERE key=? AND value='claimed'").bind(t,lockKey).run();}
+    }
+  }
+  if(out.drafts||out.sent||out.failed)await audit(env,"auto_sales_messaging_run","Autonomous sales messaging run",out);
+  return {ok:true,...out};
+}
+async function autoSalesMessagingStatus(env){
+  const st=await readAutoMessagingSettings(env),day=new Date().toISOString().slice(0,10);
+  const n=async(sql,...a)=>{try{return Number((await env.DB.prepare(sql).bind(...a).first())?.n||0);}catch{return 0;}};
+  const fails=[];for(const m of ["IRAN","ARAB"]){try{const v=(await env.DB.prepare("SELECT value FROM system_kv WHERE key=?").bind("market_fail:autofu:"+m).first())?.value;if(v){const f=JSON.parse(v);if(f.count>0)fails.push(f);}}catch{}}
+  return {ok:true,settings:st,env_override_off:String(env.AUTO_SALES_MESSAGING||"on").toLowerCase()==="off",
+    today:{auto_sent:await n("SELECT COUNT(*) n FROM lead_outreach WHERE approved_by=? AND status IN ('sent','delivered') AND approved_at>=?",AUTO_POLICY_ACTOR,day),
+      auto_failed:await n("SELECT COUNT(*) n FROM lead_outreach WHERE approved_by=? AND status IN ('send_failed','send_ambiguous') AND approved_at>=?",AUTO_POLICY_ACTOR,day),
+      runs:await n("SELECT COUNT(*) n FROM system_events WHERE type='auto_sales_messaging_run' AND created_at>=?",day)},
+    failures:fails,catalog:await catalogReadiness(env),
+    rules:"Only follow-ups inside customer-opened Telegram conversations with a recorded market, outside quiet hours, never after an opt-out, never financial; discovery leads get drafts for the owner only"};
+}
+// Catalogue completeness for the dashboard (nothing is created or guessed).
+async function catalogReadiness(env){
+  const n=async(sql,...a)=>{try{return Number((await env.DB.prepare(sql).bind(...a).first())?.n||0);}catch{return 0;}};
+  const products=await n("SELECT COUNT(*) n FROM product_catalog WHERE status='current'"),iran=await n("SELECT COUNT(*) n FROM price_versions WHERE market='IRAN' AND status='current'"),arab=await n("SELECT COUNT(*) n FROM price_versions WHERE market='ARAB' AND status='current'"),photos=await n("SELECT COUNT(*) n FROM visual_product_media WHERE candidate_status='verified' AND verified_real_product=1");
+  const missing=[!products&&"products",!iran&&"iran_prices_toman",!arab&&"iraq_prices_usd",!photos&&"verified_photos"].filter(Boolean);
+  return {products,iran_prices:iran,iraq_prices:arab,verified_photos:photos,complete:missing.length===0,missing};
+}
+
+export { runAutoSalesMessaging };

@@ -87,7 +87,17 @@ export function followUpState(lead = {}, meta = {}, activity = {}, { nowMs = Dat
     const due = q + FOLLOWUP_RULES.quote_no_reply_days * DAY;
     return R(due <= nowMs ? "due" : "scheduled", iso(due), "quote_no_reply_3_days");
   }
-  if (activity.replied) return R("conversation_active", null, "customer_replied");
+  if (activity.replied) {
+    // The customer wrote; if OUR message came after their last one and they went silent, the same no-response rule applies
+    // (14 days, at most 2 unanswered follow-ups since their last message). Otherwise the inbound flow answers them.
+    const lastIn = Date.parse(activity.last_inbound_at || "");
+    if (Number.isFinite(lastSent) && Number.isFinite(lastIn) && lastSent > lastIn) {
+      if (Number(activity.sends_after_last_inbound || 1) - 1 >= FOLLOWUP_RULES.max_unanswered_followups) return R("exhausted", null, "max_unanswered_followups");
+      const due = lastSent + FOLLOWUP_RULES.first_contact_no_reply_days * DAY;
+      return R(due <= nowMs ? "due" : "scheduled", iso(due), "conversation_no_reply_14_days");
+    }
+    return R("conversation_active", null, "customer_replied");
+  }
   if (!sentCount) return R("none", null, "no_outreach_sent");
   if (Math.max(0, sentCount - 1) >= FOLLOWUP_RULES.max_unanswered_followups) return R("exhausted", null, "max_unanswered_followups");
   if (!Number.isFinite(lastSent)) return R("unknown", null, "send_time_missing");
@@ -117,6 +127,8 @@ export function conversionPlan(lead = {}, meta = {}, p = {}, s = {}, activity = 
   else if (pipe.stage === "QUOTE") next = fu.status === "due" ? (draftMode = "quote_followup", A("PREPARE_FOLLOW_UP_DRAFT", "quote without reply for " + FOLLOWUP_RULES.quote_no_reply_days + " days"))
     : A("WAIT", fu.status === "followed_up" ? "quote follow-up already sent; waiting for a reply" : "quote sent; follow-up at " + fu.due_at);
   else if (fu.status === "draft_waiting_for_owner") next = A("OWNER_REVIEW_DRAFT", "a draft is waiting for the owner's approval", { owner_decision: true });
+  else if ((pipe.stage === "NEGOTIATION" || pipe.stage === "CONTACTED") && fu.basis === "conversation_no_reply_14_days" && fu.status === "due") { draftMode = "followup"; next = A("PREPARE_FOLLOW_UP_DRAFT", "the customer has not replied for " + FOLLOWUP_RULES.first_contact_no_reply_days + " days after our last message"); }
+  else if (fu.status === "exhausted" && fu.basis === "max_unanswered_followups" && activity.replied) next = A("STOP_FOLLOW_UP", "two follow-ups without reply: no further automatic message");
   else if (pipe.stage === "NEGOTIATION" || fu.status === "conversation_active") { draftMode = "conversation"; next = A("CONTINUE_CONVERSATION", "customer replied: prepare the next message for owner review"); }
   else if (pipe.stage === "OWNER_APPROVED") next = A("SEND_APPROVED_MESSAGE", "already approved by the owner: send it through the existing approved channel (no new decision)");
   else if (pipe.stage === "CONTACTED") next = fu.status === "due" ? (draftMode = "followup", A("PREPARE_FOLLOW_UP_DRAFT", fu.basis === "owner_schedule" ? "owner-scheduled follow-up is due" : "no reply after " + FOLLOWUP_RULES.first_contact_no_reply_days + " days"))
