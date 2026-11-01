@@ -18,7 +18,7 @@ import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market-isolation.js";
 import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE_STAGES, PIPELINE_SIDE_STATES } from "./lead-scoring.js";
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
-import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, isOptOutMessage } from "./auto-sales-messaging.js";
+import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, optOutStateFromMessages, OPT_OUT_RULES_ID, OPT_OUT_RULES_KEY, OPT_OUT_ALL_LEGACY } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
 const H = {
@@ -15726,16 +15726,43 @@ Context: ${context}`;
 export default WORKER;
 
 // ---------------------------------------------------------------- autonomous sales messaging (owner policy 2026-11-01)
-async function leadOptedOut(env,leadId){
-  try{const rows=(await env.DB.prepare("SELECT message FROM inbox_messages WHERE lead_id=? ORDER BY created_at DESC LIMIT 20").bind(leadId).all()).results||[];return rows.some(r=>isOptOutMessage(r.message));}catch{return false;}
+// Phase 21.1: the customer's OWN inbound messages only (inbox_messages holds inbound rows only). A read failure never lets an
+// automatic message through (review), but never blocks the owner either.
+async function leadOptOutState(env,leadId){
+  // the same person writing under another lead (same Telegram/Instagram sender id) counts too; up to 500 messages, and a longer
+  // history that could hide an older stop request is held for review rather than assumed clean
+  try{const rows=(await env.DB.prepare(`SELECT id,message,created_at FROM inbox_messages WHERE lead_id=? OR (provider_sender_id IS NOT NULL AND provider_sender_id<>''
+      AND (platform,provider_sender_id) IN (SELECT platform,provider_sender_id FROM inbox_messages WHERE lead_id=? AND provider_sender_id IS NOT NULL AND provider_sender_id<>''))
+      ORDER BY created_at DESC LIMIT 501`).bind(leadId,leadId).all()).results||[];
+    const s=optOutStateFromMessages(rows.slice(0,500),{cutoff:await optOutCutoff(env)});
+    if(rows.length>500&&!s.opted_out)return {opted_out:false,review:true,reason:"opt_out_history_truncated"};
+    return s;}
+  catch{return {opted_out:false,review:true,reason:"opt_out_check_failed"};}
 }
+// The legacy cutoff is the release constant; no binding, route or request can change it (tests inject it inside the module only).
+// Phase 21.1 rule-change boundary = the instant the new rules first ran here (write-once; never moved by a later deploy). If it cannot
+// be read or recorded, every message keeps its earlier result (the safest reading).
+let OPT_OUT_BOUNDARY_CACHE=null;
+async function optOutBoundary(env){
+  if(OPT_OUT_BOUNDARY_CACHE)return OPT_OUT_BOUNDARY_CACHE;
+  try{const read=async()=>{const v=(await env.DB.prepare("SELECT value FROM system_kv WHERE key=?").bind(OPT_OUT_RULES_KEY).first())?.value;try{return JSON.parse(v||"null")?.since||null;}catch{return null;}};
+    let since=await read();
+    if(!since){await env.DB.prepare("INSERT OR IGNORE INTO system_kv(key,value,updated_at) VALUES(?,?,?)").bind(OPT_OUT_RULES_KEY,JSON.stringify({since:now(),rules:OPT_OUT_RULES_ID}),now()).run();since=await read();}
+    if(/^\d{4}-\d\d-\d\dT\d\d:\d\d/.test(String(since||""))){OPT_OUT_BOUNDARY_CACHE=since;return since;}
+  }catch{}
+  return OPT_OUT_ALL_LEGACY;
+}
+async function optOutCutoff(env){return await optOutBoundary(env);}
+async function leadOptedOut(env,leadId){return (await leadOptOutState(env,leadId)).opted_out===true;}
 async function readAutoMessagingSettings(env){try{return autoMessagingSettings((await env.DB.prepare("SELECT value FROM system_kv WHERE key=?").bind(AUTO_MESSAGING_KEY).first())?.value);}catch{return autoMessagingSettings(null);}}
 // Why a permitted automatic follow-up must NOT be sent to this lead now (null = may be sent). Records only; nothing is guessed.
 async function autoFollowupBlock(env,item,{nowMs,settings}){
   const one=async(sql,...a)=>{try{return !!(await env.DB.prepare(sql).bind(...a).first());}catch{return true;}};
   if(item.market!=="IRAN"&&item.market!=="ARAB")return "market_unknown";
   if(!(await one("SELECT 1 FROM inbox_messages WHERE lead_id=? AND platform='telegram' LIMIT 1",item.id)))return "no_customer_conversation";   // consent = the customer opened the chat
-  if(await leadOptedOut(env,item.id))return "customer_opted_out";
+  const oo=await leadOptOutState(env,item.id);
+  if(oo.opted_out)return "customer_opted_out";
+  if(oo.review)return "opt_out_needs_review";   // a possible stop request: automatic messages wait for the owner's review
   if(await one("SELECT 1 FROM lead_quotes WHERE lead_id=? LIMIT 1",item.id)||await one("SELECT 1 FROM lead_orders WHERE lead_id=? LIMIT 1",item.id))return "financial_flow_owner";
   if(await one("SELECT 1 FROM lead_outreach WHERE lead_id=? AND status IN ('sending','send_ambiguous') LIMIT 1",item.id))return "send_outcome_unresolved";
   if(!withinContactHours(item.market,settings,nowMs))return "outside_contact_hours";
@@ -15743,6 +15770,7 @@ async function autoFollowupBlock(env,item,{nowMs,settings}){
   return null;
 }
 async function runAutoSalesMessaging(env,{nowMs=Date.now(),internalFetch}={}){
+  await optOutBoundary(env);   // Phase 21.1: pin the rule-change boundary on the first scheduled tick (write-once)
   const st=await readAutoMessagingSettings(env);
   if(!st.enabled||String(env.AUTO_SALES_MESSAGING||"on").toLowerCase()==="off")return {ok:true,skipped:"disabled"};
   if(!(await autonomyMasterGate(env)))return {ok:true,skipped:"autonomy_master_off"};
@@ -15800,8 +15828,21 @@ async function autoSalesMessagingStatus(env){
     today:{auto_sent:await n("SELECT COUNT(*) n FROM lead_outreach WHERE approved_by=? AND status IN ('sent','delivered') AND approved_at>=?",AUTO_POLICY_ACTOR,day),
       auto_failed:await n("SELECT COUNT(*) n FROM lead_outreach WHERE approved_by=? AND status IN ('send_failed','send_ambiguous') AND approved_at>=?",AUTO_POLICY_ACTOR,day),
       runs:await n("SELECT COUNT(*) n FROM system_events WHERE type='auto_sales_messaging_run' AND created_at>=?",day)},
-    failures:fails,catalog:await catalogReadiness(env),
+    failures:fails,catalog:await catalogReadiness(env),opt_out:await optOutOverview(env),
     rules:"Only follow-ups inside customer-opened Telegram conversations with a recorded market, outside quiet hours, never after an opt-out, never financial; discovery leads get drafts for the owner only"};
+}
+// Opt-out overview for the owner (read-only; nothing is stored or removed): confirmed opt-outs and conversations to review.
+async function optOutOverview(env){
+  try{const rows=(await env.DB.prepare("SELECT id,lead_id,message,created_at FROM inbox_messages WHERE lead_id IS NOT NULL ORDER BY created_at DESC LIMIT 5000").all()).results||[];
+    const by=new Map();for(const r of rows){if(!by.has(r.lead_id))by.set(r.lead_id,[]);const a=by.get(r.lead_id);if(a.length<500)a.push(r);}
+    const opted_out=[],needs_review=[];
+    const cutoff=await optOutCutoff(env);
+    for(const [lead_id,list] of by){const s=optOutStateFromMessages(list,{cutoff});const x={lead_id,reason:s.reason,message_id:s.message_id,at:s.at,legacy:!!s.legacy,new_rules_on_old_message:!!s.new_rules_on_old_message};
+      if(s.opted_out)opted_out.push(x);else if(s.review)needs_review.push(x);}
+    // legacy = an earlier (pre-21.1) result kept as an opt-out until the owner reviews it
+    return {opted_out,needs_review,legacy_pending_owner_review:opted_out.filter(x=>x.legacy).length,partial:rows.length>=5000,
+      rules:OPT_OUT_RULES_ID,rules_since:cutoff===OPT_OUT_ALL_LEGACY?null:cutoff};
+  }catch{return {opted_out:[],needs_review:[],error:"unavailable"};}
 }
 // Catalogue completeness for the dashboard (nothing is created or guessed).
 async function catalogReadiness(env){
