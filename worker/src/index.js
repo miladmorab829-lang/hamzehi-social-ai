@@ -12457,7 +12457,7 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
     let has=null;try{has=await env.DB.prepare("SELECT 1 FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram') AND evidence_status IN ('page_extracted','owner_confirmed') LIMIT 1").bind(r.id).first();}catch{}
     if(has)continue;
     const site=safeHttpUrl(m.url||m.website);if(!site)continue;
-    out.checked++;let stored=0,note="checked";
+    out.checked++;let stored=0,note="checked",detail="";
     try{
       const UA={headers:{"User-Agent":"Mozilla/5.0 (compatible; HAMZEHI-SOCIAL-AI/1.0)"}};
       const rr=await fetchWithRetry(new URL(site).origin+"/robots.txt",UA,1,5000).catch(()=>null);
@@ -12487,18 +12487,25 @@ async function enrichOwnSiteContacts(env,{limit=2}={}){
         // Phase 17.1: "stored" counts only NEW reachable channels (the start URL and contacts already on file are re-upserted, not new).
         if(html&&!dsRejected){const mk=leadMarketOf(m),reachN=async()=>Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM lead_contacts WHERE lead_id=? AND contact_type IN ('phone','email','whatsapp','telegram','instagram')").bind(r.id).first())?.n||0);
           const before=await reachN();await storeLeadContacts(env,r.id,await collectBoundedWebsiteContacts(site,html,mk==="ARAB"?"العراق":mk==="IRAN"?"ایران":"","own_site_enrichment",{allowPath}));stored=Math.max(0,(await reachN())-before);}
-        else if(note==="checked")note="fetch_failed";
+        else if(note==="checked"){note="fetch_failed";
+          // Phase 18.24: the exact reason is recorded (before: a bare fetch_failed). http_429 / http_403 = the site refuses automated access.
+          detail=!res.ok?"http_"+res.status:tooBig?"too_large":"not_html";}
       }
-    }catch{note="fetch_failed";}
+    }catch(e){note="fetch_failed";
+      const msg=String(e?.name+" "+e?.message||"").toLowerCase();
+      detail=/abort|timeout/.test(msg)?"timeout":/blocked|invalid/.test(msg)?"url_blocked":/certificate|tls|ssl/.test(msg)?"tls":/dns|not found|enotfound|getaddrinfo|resolve/.test(msg)?"dns":"network";}
     out.stored+=stored;
     // Phase 18.4: a dataset candidate whose site cannot be verified is excluded: a redirect to another site (identity uncertain) at once;
     // no answer or a robots.txt refusal (also a robots 5xx) after `fail_limit` checks, 14 days apart, as unreachable / robots_disallow.
     if(dsPending&&["fetch_failed","robots_disallow","robots_unreachable","redirected_off_site"].includes(note)){
-      const fails=Number(m.dataset_fetch_failures||0)+1,reason=note==="redirected_off_site"?note:fails>=discoverySettings(env).fail_limit?(note==="robots_disallow"?"robots_disallow":"unreachable_website"):null;
+      const fails=Number(m.dataset_fetch_failures||0)+1,reason=note==="redirected_off_site"?note:fails>=discoverySettings(env).fail_limit?(note==="robots_disallow"?"robots_disallow"
+        // Phase 18.24: a site that answers 403/429 to our honest User-Agent refuses automated access (e.g. Shopify bot protection): it is
+        // retired under that name instead of "unreachable", and never retried with a different identity.
+        :/^http_(403|429)$/.test(detail)?"website_refuses_automated_access":"unreachable_website"):null;
       try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.dataset_fetch_failures',?"+(reason?",'$.rejected_reason',?,'$.dataset_verification',json(?)":"")+") WHERE id=? AND json_valid(notes)")
         .bind(...(reason?[fails,reason,JSON.stringify({checked_at:now(),result:reason})]:[fails]),r.id).run();}catch{}
     }
-    try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.contact_enrichment_checked_at',?,'$.contact_enrichment_result',?) WHERE id=? AND json_valid(notes)").bind(now(),note+":"+stored,r.id).run();}catch{}
+    try{await env.DB.prepare("UPDATE leads SET notes=json_set(notes,'$.contact_enrichment_checked_at',?,'$.contact_enrichment_result',?,'$.contact_enrichment_error',?) WHERE id=? AND json_valid(notes)").bind(now(),note+":"+stored,detail||null,r.id).run();}catch{}
   }
   return out;
 }

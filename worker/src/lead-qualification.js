@@ -30,7 +30,9 @@ const PACKAGING_SIGNALS=[["wholesale",/عمده|فروش عمده|جملة|با�
 const PACKAGING_SELLER=/جعبه\s*سازی|تولید جعبه|ساخت جعبه|فروش جعبه|چاپ جعبه|مصنع علب|صناعة علب|طباعة علب|بيع علب|packaging supplier|box supplier|box manufacturer/i;
 // Directories, marketplaces, blog/shop platforms and social sites are not "the business's own website" (CRM review: a directory page used
 // as the start URL must not become independent identity evidence).
-const NOT_OWN_SITE=/(^|\.)(divar|sheypoor|torob|digikala|basalam|emalls|okala|blogfa|blogsky|persianblog|wixsite|myshopify|instagram|facebook|linkedin|youtube|opensooq|dubizzle|yellowpages|olx|alibaba|amazon|t\.me|wa\.me|wikipedia|linktr\.ee|wordpress|blogspot|business\.site|tiktok|x\.com|twitter|telegram\.me|pinterest|snapchat|threads|github\.io|pages\.dev|netlify\.app|vercel\.app)\./i;
+// Phase 18.24: + link-in-bio, short-link, chat-link and payment deep-link services (fb.me, m.me, bio.link, unit.link, wsend, 2u.pw,
+// deeplink.*): 9 of 51 Iraq dataset "websites" were such links, never a business's own website.
+const NOT_OWN_SITE=/(^|\.)(divar|sheypoor|torob|digikala|basalam|emalls|okala|blogfa|blogsky|persianblog|wixsite|myshopify|instagram|facebook|linkedin|youtube|opensooq|dubizzle|yellowpages|olx|alibaba|amazon|t\.me|wa\.me|wikipedia|linktr\.ee|wordpress|blogspot|business\.site|tiktok|x\.com|twitter|telegram\.me|pinterest|snapchat|threads|github\.io|pages\.dev|netlify\.app|vercel\.app|fb\.me|m\.me|bio\.link|unit\.link|linkin\.bio|lnk\.bio|beacons\.ai|taplink|wsend|bit\.ly|tinyurl|cutt\.ly|2u\.pw|deeplink)\./i;
 // Every Google Places provider variant (google_places, google_places_ids, …) is Google-originated, never independent.
 const GOOGLE_PROVIDER=/^google_places/i;
 // Phase 18.1: a gold/metal price or news page (rate ticker) is an information site, not a jewelry seller. Decided on the page title,
