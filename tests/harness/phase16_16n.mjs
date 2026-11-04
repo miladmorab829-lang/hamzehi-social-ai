@@ -27,7 +27,7 @@ ok("N4 the staging config stays separate (own D1 only, flag on)",stg.d1.length==
 const V=(over={})=>{const vars={...exp.vars,...(over.vars||{})};for(const k of over.dropVars||[])delete vars[k];
   const b=[{name:"AI",type:"ai"},{name:"DB",type:"d1",id:over.d1||"40b272c5-e368-4c33-8a41-7c63db98d7e8"},{name:"GALLERY_BUCKET",type:"r2_bucket",bucket_name:over.r2||"hamzehi-gallery"},
     ...(over.dropDiscoveryBucket?[]:[{name:"DISCOVERY_BUCKET",type:"r2_bucket",bucket_name:over.discoveryBucket||"hamzehi-discovery"}]),
-    ...Object.entries(vars).map(([name,text])=>({name,type:"plain_text",text})),...PF.REQUIRED_SECRETS.filter(s=>s!==over.dropSecret).map(name=>({name,type:"secret_text"})),...(over.extra||[])];
+    ...Object.entries(vars).map(([name,text])=>({name,type:"plain_text",text})),...[...PF.REQUIRED_SECRETS,...(over.noRetired?[]:PF.RETIRED_SECRETS)].filter(s=>s!==over.dropSecret).map(name=>({name,type:"secret_text"})),...(over.extra||[])];
   return {id:"00000000-0000-4000-8000-000000000000",annotations:over.untagged?{}:{"workers/tag":over.tag||"d7962d5-orch-on"},resources:{bindings:b}};};
 const good=PF.checkVersion(V(),exp);
 ok("N5 a tagged version with the full activation configuration (30 bindings: 25 + the 5 first-day limit vars) passes",good.ok&&good.summary.bindings===30,good);
@@ -43,6 +43,8 @@ ok("N9 a different R2 bucket is refused",PF.checkVersion(V({r2:"other-bucket"}),
 ok("N10 a missing secret binding name is refused",PF.checkVersion(V({dropSecret:"TELEGRAM_BOT_TOKEN"}),exp).failures.some(f=>/TELEGRAM_BOT_TOKEN/.test(f)));
 ok("N11 an unexpected extra binding is refused",PF.checkVersion(V({extra:[{name:"HAMZEHI_ENVIRONMENT",type:"plain_text",text:"staging"}]}),exp).failures.some(f=>/unexpected binding HAMZEHI_ENVIRONMENT/.test(f)));
 ok("N12 a changed var value is refused",PF.checkVersion(V({vars:{SALES_AI_PROVIDER:"openai"}}),exp).failures.some(f=>/SALES_AI_PROVIDER/.test(f)));
+{const gone=PF.checkVersion(V({noRetired:true}),exp);
+ ok("N26 KLING_API_KEY is retired: allowed while it stays on the Worker, not required once the owner deletes it, and never required by name",good.ok&&gone.ok&&gone.summary.bindings===29&&!PF.REQUIRED_SECRETS.includes("KLING_API_KEY")&&PF.RETIRED_SECRETS.includes("KLING_API_KEY"),gone.failures);}
 ok("N13 a tag without the -orch-on suffix is refused",PF.checkVersion(V({tag:"d7962d5"}),exp).failures.some(f=>/tag/.test(f)));
 {const pre=PF.checkVersion(V({dropSecret:"TELEGRAM_WEBHOOK_SECRET_TOKEN"}),exp);
  ok("N24 a version without TELEGRAM_WEBHOOK_SECRET_TOKEN (29 of 30 bindings) is refused",!pre.ok&&pre.summary.bindings===29&&pre.failures.length===1&&/secret binding TELEGRAM_WEBHOOK_SECRET_TOKEN missing/.test(pre.failures[0]),pre.failures);

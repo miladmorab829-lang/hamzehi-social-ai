@@ -12,8 +12,8 @@ const CHANNELS={telegram:"telegram",whatsapp:"whatsapp",instagram:"instagram"};
 const SIGNALS={
   ads:{ok:["ad_autopilot_run"],info:["ads_run_deferred"]},
   content:{ok:["auto_content_generated","content_generated"],info:["auto_pilot_cycle"]},
-  media:{ok:["media_ai_video_generated","weekly_video_autopilot_kling_accepted","weekly_video_autopilot_shotstack_accepted"],
-    block:["weekly_video_autopilot_kling_rejected","weekly_video_autopilot_shotstack_rejected","weekly_video_autopilot_failed","weekly_video_autopilot_reservation_conflict","weekly_video_autopilot_ineligible","weekly_video_autopilot_poll_error","weekly_video_autopilot_kling_submission_ambiguous","weekly_video_autopilot_shotstack_submission_ambiguous","media_ai_video_failed"]},
+  media:{ok:["media_ai_video_generated","weekly_video_autopilot_provider_accepted","weekly_video_autopilot_kling_accepted","weekly_video_autopilot_shotstack_accepted"],
+    block:["weekly_video_autopilot_provider_rejected","weekly_video_autopilot_provider_submission_ambiguous","weekly_video_autopilot_kling_rejected","weekly_video_autopilot_shotstack_rejected","weekly_video_autopilot_failed","weekly_video_autopilot_reservation_conflict","weekly_video_autopilot_ineligible","weekly_video_autopilot_poll_error","weekly_video_autopilot_kling_submission_ambiguous","weekly_video_autopilot_shotstack_submission_ambiguous","media_ai_video_failed"]},
   photo:{ok:["photo_autopilot_completed"],fail:["photo_autopilot_error"]},
   learning:{ok:["analyze_optimize_cycle"]},
   crm:{ok:["customer_lead_discovery","telegram_inbound_lead_created","lead_order_candidate_created","lead_converted_to_customer"]},

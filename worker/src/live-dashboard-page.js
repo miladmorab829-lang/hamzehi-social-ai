@@ -887,7 +887,7 @@ const AC_META={
  crm:["CRM","هوش سرنخ، کشف مشتری، ثبت سرنخ ورودی","ورودی تلگرام، Ads، کشف پولی Google Places"],
  ads:["تبلیغات و کشف مشتری","Ads Autopilot: کشف، ارزیابی، پیش‌نویس مذاکره","شهر هدف معتبر، سقف مشترک ۲۴ اجرا در روز، OpenAI برای پیگیری"],
  content:["محتوا","تولید محتوا و صف انتشار کانال","OpenAI · انتشار فقط بعد از تأیید مالک یا سیاست محتوای روتین"],
- media:["ویدیو","ویدیوی هفتگی از عکس‌های هفته","عکس‌های هفته، Kling/Shotstack، رزرو هفتگی"],
+ media:["ویدیو","ویدیوی هفتگی از عکس‌های هفته","عکس‌های هفته، ارائه‌دهنده ویدیو/Shotstack، رزرو هفتگی"],
  photo:["عکس","ویرایش و تولید عکس روزانه","Telegram media vault، OpenAI، سقف روزانه"],
  learning:["یادگیری","تحلیل عملکرد و به‌روزرسانی پروفایل بهینه‌سازی","داده عملکرد محتوا و کانال"],
  revenue:["درآمد","تصویر قیف و درآمد در هر دور","سرنخ‌ها، سفارش‌ها، پرداخت‌ها"]
@@ -1272,6 +1272,9 @@ async function loadVideoAutopilot(){
 
   const on=d.enabled!==false;
   const videoStatusLabels={
+    video_submitting:"Video Submitting",
+    video_rejected:"Video Rejected",
+    video_submission_ambiguous:"Video Submission Ambiguous — DO NOT RETRY",
     kling_submitting:"Kling Submitting",
     kling_rejected:"Kling Rejected",
     kling_submission_ambiguous:"Kling Submission Ambiguous — DO NOT RETRY",
@@ -1309,7 +1312,7 @@ async function loadVideoAutopilot(){
       ? currentWeek.error
       : null;
     const eventText=error
-      ? "<div><b>Kling submission"+(error.stage?" ("+esc(error.stage)+")":"")+":</b> "+
+      ? "<div><b>Video submission"+(error.stage?" ("+esc(error.stage)+")":"")+":</b> "+
         (error.message?esc(error.message):esc(error.event_type||"Recorded"))+
         (error.http_status!==null&&error.http_status!==undefined?" · HTTP "+esc(error.http_status):"")+
         (error.response_category?" · "+esc(error.response_category):"")+
@@ -1322,7 +1325,7 @@ async function loadVideoAutopilot(){
       "<div>Status: "+esc(currentWeek.exists?statusLabel(currentWeek.status):"No weekly row")+"</div>"+
       "<div>Reservation: "+(currentWeek.reservation_exists?"Present":"Not present")+"</div>"+
       (sourceIds?"<div>Selected source IDs: "+sourceIds+"</div>":"")+
-      (currentWeek.task_id?"<div>Kling task: "+esc(currentWeek.task_id)+"</div>":"")+
+      (currentWeek.task_id?"<div>Video task: "+esc(currentWeek.task_id)+"</div>":"")+
       (currentWeek.shotstack_task_id?"<div>Shotstack render: "+esc(currentWeek.shotstack_task_id)+"</div>":"")+
       (currentWeek.output_media_id?"<div>Output: "+esc(currentWeek.output_media_id)+"</div>":"")+
       (currentWeek.created_at?"<div>Created: "+esc(currentWeek.created_at)+"</div>":"")+
@@ -1346,7 +1349,7 @@ async function loadVideoAutopilot(){
       (lastWeek.output_media_id?"<div>Output: "+esc(lastWeek.output_media_id)+"</div>":"")+
       (lastWeek.caption?"<div>Caption: "+esc(lastWeek.caption)+"</div>":"")+
       (sourceIds?"<div>Selected source IDs: "+sourceIds+"</div>":"")+
-      (lastWeek.task_id?"<div>Kling task: "+esc(lastWeek.task_id)+"</div>":"")+
+      (lastWeek.task_id?"<div>Video task: "+esc(lastWeek.task_id)+"</div>":"")+
       (lastWeek.shotstack_task_id?"<div>Shotstack render: "+esc(lastWeek.shotstack_task_id)+"</div>":"")+
       (lastWeek.created_at?"<div>Created: "+esc(lastWeek.created_at)+"</div>":"")+
       (lastWeek.updated_at?"<div>Updated: "+esc(lastWeek.updated_at)+"</div>":"");

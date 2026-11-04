@@ -9,7 +9,8 @@ import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiP
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
 import { bearerMatches, safeTokenEqual } from "./secure-compare.js";
-import { buildKlingShotPrompt, klingShotPromptProblem } from "./kling-prompt.js";
+import { buildWeeklyShotPrompt, weeklyShotPromptProblem } from "./weekly-video-prompt.js";
+import { weeklyVideoAdapter, weeklyVideoSubmissionError } from "./weekly-video-provider.js";
 import { adsDraftSettings, buildAdsDraftPrompt, adsDraftRequestBody, adsDraftUsage, adsDraftOutcome, emptyAdsDraftStats, addAdsDraftUsage, reserveAdsDraft, adsDraftsToday } from "./ads-draft-guard.js";
 import { runWatchdog } from "./agent-watchdog.js";
 import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, googleOriginLead, independentContact, leadDuplicateMap, independentWebsiteHost } from "./lead-qualification.js";
@@ -3755,13 +3756,13 @@ async function createShotstackWeeklyEndCardTask(env,videoUrl,weekId,duration){
   const url=String(videoUrl||'').trim();
 
   if(!/^https?:\/\//i.test(url)){
-    throw Error('Weekly Kling video URL missing or invalid');
+    throw Error('Weekly video URL missing or invalid');
   }
 
   const videoDuration=Number(duration);
 
   if(!Number.isFinite(videoDuration)||videoDuration<=0){
-    throw Error('Weekly Kling video duration missing or invalid');
+    throw Error('Weekly video duration missing or invalid');
   }
 
   const endCardDuration=2;
@@ -3897,7 +3898,7 @@ function shotstackSubmissionError(message,details={}){
   return error;
 }
 
-async function persistAcceptedShotstackRender(env,weekId,klingTaskId,renderId){
+async function persistAcceptedShotstackRender(env,weekId,videoTaskId,renderId){
   let lastError=null;
   for(let attempt=0;attempt<3;attempt++){
     try{
@@ -3910,7 +3911,7 @@ async function persistAcceptedShotstackRender(env,weekId,klingTaskId,renderId){
         String(renderId),
         now(),
         String(weekId),
-        String(klingTaskId)
+        String(videoTaskId)
       ).run();
       if(Number(updated?.meta?.changes||0)===1)return;
 
@@ -3919,7 +3920,7 @@ async function persistAcceptedShotstackRender(env,weekId,klingTaskId,renderId){
         FROM weekly_video_autopilot
         WHERE week_id=? AND task_id=?
         LIMIT 1
-      `).bind(String(weekId),String(klingTaskId)).first();
+      `).bind(String(weekId),String(videoTaskId)).first();
       if(
         String(existing?.status||'')==='compositing' &&
         String(existing?.shotstack_task_id||'')===String(renderId)
@@ -3935,164 +3936,72 @@ async function persistAcceptedShotstackRender(env,weekId,klingTaskId,renderId){
     render_id:String(renderId)
   });
 }
-function weeklyKlingExternalTaskId(weekId){
+function weeklyVideoExternalTaskId(weekId){
   return `weekly-video-${String(weekId||'').replace(/[^a-zA-Z0-9_-]/g,'-')}`;
 }
 
-function klingSubmissionError(message, details={}){
-  const error=Error(sanitizeOperationalError(message));
-  error.kling_submission={
-    outcome:String(details.outcome||'ambiguous'),
-    http_status:Number.isInteger(details.http_status)?details.http_status:null,
-    response_category:String(details.response_category||'unknown'),
-    external_task_id:String(details.external_task_id||''),
-    task_id:String(details.task_id||'')
-  };
-  return error;
-}
-
-async function createKlingWeeklyVideoTask(env,brief,imageUrls){
-  const apiKey=String(env.KLING_API_KEY||'').trim();
-  if(!apiKey) throw Error('KLING_API_KEY missing');
-
-  if(!brief?.ok) throw Error('Weekly creative brief is invalid');
-
-  const urls=Array.isArray(imageUrls)
-    ? imageUrls.filter(Boolean).slice(0,7)
-    : [];
-
-  if(!urls.length){
-    throw Error('No source images available for Kling');
-  }
-
-  const shots=Array.isArray(brief.shots)
-    ? brief.shots.slice(0,6)
-    : [];
-
-  if(!shots.length){
-    throw Error('No weekly shots available');
-  }
-
-  const duration=Math.min(
-  12,
-  shots.length*2
-);
-
-  // Phase 16.16-P1 (D-P1): each storyboard prompt is built by priority within Kling's 512-character limit (kling-prompt.js).
-  const multiPrompt=shots.map((shot,index)=>({
-    index:index+1,
-    prompt:buildKlingShotPrompt(shot,brief),
-    duration:String(
-  index===shots.length-1
-    ? Math.max(1,duration-(shots.length-1)*2)
-    : 2
-)
+// Hands the week's job to the selected adapter (weekly-video-provider.js). Each shot is bound to its own source image, so an adapter
+// can animate from that exact frame. Anything unclear is ambiguous: the week is then never retried, so a job cannot be paid for twice.
+async function submitWeeklyVideoJob(env,adapter,job){
+  if(!job?.brief?.ok) throw Error('Weekly creative brief is invalid');
+  const externalTaskId=weeklyVideoExternalTaskId(job.week_id);
+  const imageById=new Map((job.photos||[]).map(photo=>[String(photo.output_media_id||''),String(photo.image_url||'').trim()]));
+  const shots=(Array.isArray(job.brief.shots)?job.brief.shots.slice(0,6):[]).map((shot,index)=>({
+    order:index+1,
+    source_media_id:String(shot.source_media_id||''),
+    image_url:imageById.get(String(shot.source_media_id||''))||'',
+    // Phase 16.16-P1 (D-P1): each prompt is built by priority within the limit (weekly-video-prompt.js).
+    prompt:buildWeeklyShotPrompt(shot,job.brief),
+    duration_seconds:2
   }));
-
-  const externalTaskId=weeklyKlingExternalTaskId(brief.week_id);
-  // Checked before any request: an invalid prompt is a deterministic rejection (no Kling call, no spend, not retried).
-  const promptProblem=multiPrompt.map((p,i)=>{const why=klingShotPromptProblem(p.prompt);return why?`multiPrompt[${i}]: ${why}`:null;}).find(Boolean);
-  if(promptProblem){
-    throw klingSubmissionError(`Weekly video prompt failed local validation: ${promptProblem}`,{
+  if(!shots.length) throw Error('No weekly shots available');
+  // Checked before any request: an invalid job is a deterministic rejection (no provider call, no spend, not retried).
+  const problem=shots.map((shot,i)=>{const why=!shot.image_url?'missing source image':weeklyShotPromptProblem(shot.prompt);return why?`shots[${i}]: ${why}`:null;}).find(Boolean);
+  if(problem){
+    throw weeklyVideoSubmissionError(`Weekly video job failed local validation: ${problem}`,{
       outcome:'rejected',
       response_category:'local_validation',
       external_task_id:externalTaskId
     });
   }
-  const payload={
-    model_name:'kling-v3-omni',
-    multi_shot:true,
-    shot_type:'customize',
-    prompt:'',
-    multi_prompt:multiPrompt,
-    image_list:urls.map(image_url=>({image_url})),
-    element_list:[],
-    video_list:[],
-    mode:'pro',
-    sound:'on',
-    aspect_ratio:'16:9',
-    duration:String(duration),
-    callback_url:'',
-    external_task_id:externalTaskId
-  };
-
-  let response;
+  let result;
   try{
-    response=await fetch(
-      'https://api-singapore.klingai.com/v1/videos/omni-video',
-      {
-        method:'POST',
-        headers:{
-          Authorization:`Bearer ${apiKey}`,
-          'Content-Type':'application/json'
-        },
-        body:JSON.stringify(payload)
-      }
-    );
+    result=await adapter.submit(env,{week_id:job.week_id,external_task_id:externalTaskId,shots});
   }catch(e){
-    throw klingSubmissionError(e,{
+    if(e?.video_submission) throw e;
+    throw weeklyVideoSubmissionError(e,{
       outcome:'ambiguous',
-      response_category:'network_error',
+      response_category:'adapter_error',
       external_task_id:externalTaskId
     });
   }
-
-  const responseText=await response.text();
-  let data;
-  try{
-    data=responseText?JSON.parse(responseText):{};
-  }catch{
-    throw klingSubmissionError('Kling returned malformed JSON',{
-      outcome:response.ok?'ambiguous':'rejected',
-      http_status:response.status,
-      response_category:response.ok?'malformed_success_response':'http_rejection',
-      external_task_id:externalTaskId
-    });
-  }
-
-  if(!response.ok||Number(data?.code||0)!==0){
-    throw klingSubmissionError(
-      data?.message||
-      `Kling API request failed (HTTP ${response.status})`,
-      {
-        outcome:'rejected',
-        http_status:response.status,
-        response_category:response.ok?'provider_rejection':'http_rejection',
-        external_task_id:externalTaskId
-      }
-    );
-  }
-
-  const taskId=String(data?.data?.task_id||'').trim();
-
+  const taskId=String(result?.task_id||'').trim();
   if(!taskId){
-    throw klingSubmissionError('Kling API did not return task_id',{
+    throw weeklyVideoSubmissionError('Video provider did not return task_id',{
       outcome:'ambiguous',
-      http_status:response.status,
+      http_status:result?.http_status,
       response_category:'accepted_response_without_task_id',
       external_task_id:externalTaskId
     });
   }
-
   return {
     ok:true,
     task_id:taskId,
     external_task_id:externalTaskId,
-    http_status:response.status,
-    model:'kling-v3-omni',
-    duration,
-    image_count:urls.length
+    http_status:result?.http_status,
+    model:String(result?.model||''),
+    image_count:shots.length
   };
 }
 
-async function persistAcceptedKlingTask(env,weekId,taskId){
+async function persistAcceptedVideoTask(env,weekId,taskId){
   let lastError=null;
   for(let attempt=0;attempt<3;attempt++){
     try{
       const updated=await env.DB.prepare(`
         UPDATE weekly_video_autopilot
         SET status=?, task_id=?, updated_at=?
-        WHERE week_id=? AND status='kling_submitting'
+        WHERE week_id=? AND status='video_submitting'
       `).bind(
         'generating',
         String(taskId),
@@ -4110,58 +4019,18 @@ async function persistAcceptedKlingTask(env,weekId,taskId){
         String(existing?.status||'')==='generating' &&
         String(existing?.task_id||'')===String(taskId)
       ) return;
-      lastError=Error('Accepted Kling task could not be persisted in the expected weekly state');
+      lastError=Error('Accepted video task could not be persisted in the expected weekly state');
     }catch(e){
       lastError=e;
     }
   }
-  throw klingSubmissionError(lastError||'Accepted Kling task persistence failed',{
+  throw weeklyVideoSubmissionError(lastError||'Accepted video task persistence failed',{
     outcome:'ambiguous',
     response_category:'task_id_persistence_failed',
     task_id:String(taskId)
   });
 }
 
-async function getKlingWeeklyVideoTask(env,taskId){
-  const apiKey=String(env.KLING_API_KEY||'').trim();
-  if(!apiKey) throw Error('KLING_API_KEY missing');
-
-  const id=String(taskId||'').trim();
-  if(!id) throw Error('Kling task_id missing');
-
-  const response=await fetch(
-    `https://api-singapore.klingai.com/v1/videos/omni-video/${encodeURIComponent(id)}`,
-    {
-      method:'GET',
-      headers:{
-        Authorization:`Bearer ${apiKey}`
-      }
-    }
-  );
-
-  const data=await response.json().catch(()=>({}));
-
-  if(!response.ok||Number(data?.code||0)!==0){
-    throw Error(
-      data?.message||
-      `Kling task query failed (HTTP ${response.status})`
-    );
-  }
-
-  const task=data?.data||{};
-
-  return {
-    ok:true,
-    task_id:id,
-    status:String(task?.task_status||''),
-    task_status_msg:String(task?.task_status_msg||''),
-    video_url:String(
-      task?.task_result?.videos?.[0]?.url||
-      ''
-    ),
-    duration:task?.task_result?.videos?.[0]?.duration||null
-  };
-}
 async function generateWeeklyVideoCaption(env,brief){
   if(!env.OPENAI_API_KEY){
     throw Error('OPENAI_API_KEY missing');
@@ -4175,7 +4044,7 @@ async function generateWeeklyVideoCaption(env,brief){
     'Write one short Persian luxury advertising caption for the completed HAMZEHIBOX weekly video.',
     'Use only the verified information contained in the creative brief below.',
     'Do not invent price, dimensions, materials, specifications, features, certifications or claims.',
-    'Do not mention AI, Kling or the generation process.',
+    'Do not mention AI, any provider or the generation process.',
     'Do not use English except the brand name HAMZEHIBOX.',
     'Keep the tone elegant, premium and suitable for a luxury jewelry packaging brand.',
     'Return only the final Persian caption, with no quotation marks and no explanation.',
@@ -4533,22 +4402,40 @@ async function pollWeeklyVideoAutopilot(env){
           error:'Existing Shotstack render state could not be reconciled'
         };
       }
-      const task=await getKlingWeeklyVideoTask(
+      const adapter=weeklyVideoAdapter(env);
+      if(!adapter){
+        // A job accepted by a provider that is no longer selected: nothing can poll it, so the row stays exactly as it is.
+        await auditWeeklyVideoObservationOnce(
+          env,
+          "weekly_video_autopilot_ineligible",
+          "Weekly Video Autopilot has a job in progress but no video provider is selected",
+          {
+            week_id:row.week_id,
+            task_id:row.task_id,
+            reason:"video_provider_not_selected",
+            dedup_key:`${row.week_id}:poll:video_provider_not_selected`
+          }
+        );
+        return {
+          ok:false,
+          status:"no_video_provider",
+          week_id:row.week_id,
+          task_id:row.task_id
+        };
+      }
+      const task=await adapter.poll(
         env,
         row.task_id
       );
 
-      const klingStatus=String(
+      const providerStatus=String(
         task.status||''
       ).toLowerCase();
 
-      if(
-        klingStatus==='succeed' ||
-        klingStatus==='completed'
-      ){
+      if(providerStatus==='completed'){
         if(!task.video_url){
           throw Error(
-            'Kling completed but video_url is missing'
+            'Video provider completed but video_url is missing'
           );
         }
 
@@ -4559,7 +4446,7 @@ async function pollWeeklyVideoAutopilot(env){
           videoDuration<=0
         ){
           throw Error(
-            'Kling completed but video duration is missing'
+            'Video provider completed but video duration is missing'
           );
         }
 
@@ -4708,20 +4595,20 @@ async function pollWeeklyVideoAutopilot(env){
         };
       }
 
-      if(klingStatus==='failed'){
-               const klingError=String(
-          task.task_status_msg||"Kling task failed without error message"
+      if(providerStatus==='failed'){
+               const providerError=String(
+          sanitizeOperationalError(task.status_message||"Video provider task failed without error message")
         );
 
         await audit(
           env,
           "weekly_video_autopilot_failed",
-          "Weekly Video Autopilot failed at Kling",
+          "Weekly Video Autopilot failed at the video provider",
           {
             week_id:row.week_id,
             task_id:row.task_id,
-            stage:"kling",
-            error:klingError
+            stage:"video_provider",
+            error:providerError
           }
         );
         await env.DB.prepare(`
@@ -4751,7 +4638,7 @@ async function pollWeeklyVideoAutopilot(env){
         status:"generating",
         week_id:row.week_id,
         task_id:row.task_id,
-        kling_status:klingStatus
+        provider_status:providerStatus
       };
     }
 
@@ -5010,7 +4897,7 @@ async function pollWeeklyVideoAutopilot(env){
       };
     }
     const provider=String(row.status)==='generating'
-      ? 'kling'
+      ? 'video_provider'
       : String(row.status)==='compositing'
         ? 'shotstack'
         : 'unknown';
@@ -5299,6 +5186,27 @@ async function prepareWeeklyVideoAutopilot(env){
       reason:"video_autopilot_disabled"
     };
   }
+  // No provider selected: stop before the week is reserved, so nothing is spent and a provider chosen later can still run this week.
+  const adapter=weeklyVideoAdapter(env);
+  if(!adapter){
+    const weekId=getCurrentISOWeekWindow().weekId;
+    await auditWeeklyVideoObservationOnce(
+      env,
+      "weekly_video_autopilot_ineligible",
+      "Weekly Video Autopilot is waiting for a video provider decision",
+      {
+        week_id:weekId,
+        reason:"video_provider_not_selected",
+        dedup_key:`${weekId}:video_provider_not_selected`
+      }
+    );
+    return {
+      ok:true,
+      skipped:true,
+      reason:"video_provider_not_selected",
+      week_id:weekId
+    };
+  }
   const pool=await getWeeklyPhotoPool(env,6);
 
   if(!pool.photos.length){
@@ -5407,59 +5315,58 @@ async function prepareWeeklyVideoAutopilot(env){
     now(),
     pool.weekId
   ).run();
-  const klingReady={
+  const videoJob={
     week_id:pool.weekId,
-    image_urls:imageUrls,
-    source_media_ids:brief.source_media_ids,
+    photos:pool.photos,
     brief
   };
-  const externalTaskId=weeklyKlingExternalTaskId(pool.weekId);
+  const externalTaskId=weeklyVideoExternalTaskId(pool.weekId);
   const submittingAt=now();
   const submissionIntent=await env.DB.prepare(`
     UPDATE weekly_video_autopilot
     SET status=?, updated_at=?
     WHERE week_id=? AND status='prepared'
   `).bind(
-    'kling_submitting',
+    'video_submitting',
     submittingAt,
     pool.weekId
   ).run();
 
   if(submissionIntent.meta?.changes!==1){
-    throw Error('Kling submission intent could not be persisted');
+    throw Error('Video submission intent could not be persisted');
   }
 
   await audit(
     env,
-    'weekly_video_autopilot_kling_submitting',
-    'Weekly Video Autopilot is submitting to Kling',
+    'weekly_video_autopilot_provider_submitting',
+    'Weekly Video Autopilot is submitting to the video provider',
     {
       week_id:pool.weekId,
       external_task_id:externalTaskId,
-      stage:'kling_submission',
+      stage:'provider_submission',
       timestamp:submittingAt
     }
   );
 
-  let kling;
+  let video;
   try{
-    kling=await createKlingWeeklyVideoTask(
+    video=await submitWeeklyVideoJob(
       env,
-      klingReady.brief,
-      klingReady.image_urls
+      adapter,
+      videoJob
     );
   }catch(e){
-    const details=e?.kling_submission||{};
+    const details=e?.video_submission||{};
     const rejected=details.outcome==='rejected';
     const failureStatus=rejected
-      ? 'kling_rejected'
-      : 'kling_submission_ambiguous';
+      ? 'video_rejected'
+      : 'video_submission_ambiguous';
     const failureAt=now();
     await env.DB.prepare(`
       UPDATE weekly_video_autopilot
       SET status=?,
           updated_at=?
-      WHERE week_id=? AND status='kling_submitting'
+      WHERE week_id=? AND status='video_submitting'
     `).bind(
       failureStatus,
       failureAt,
@@ -5468,15 +5375,15 @@ async function prepareWeeklyVideoAutopilot(env){
     await audit(
       env,
       rejected
-        ? 'weekly_video_autopilot_kling_rejected'
-        : 'weekly_video_autopilot_kling_submission_ambiguous',
+        ? 'weekly_video_autopilot_provider_rejected'
+        : 'weekly_video_autopilot_provider_submission_ambiguous',
       rejected
-        ? 'Kling rejected the weekly video submission'
-        : 'Kling weekly video submission outcome is ambiguous; do not retry',
+        ? 'The video provider rejected the weekly video submission'
+        : 'Weekly video submission outcome is ambiguous; do not retry',
       {
         week_id:pool.weekId,
         external_task_id:String(details.external_task_id||externalTaskId),
-        stage:'kling_submission',
+        stage:'provider_submission',
         http_status:Number.isInteger(details.http_status)?details.http_status:null,
         response_category:String(details.response_category||'unknown'),
         task_id:String(details.task_id||'')||null,
@@ -5489,34 +5396,34 @@ async function prepareWeeklyVideoAutopilot(env){
   }
 
   try{
-    await persistAcceptedKlingTask(
+    await persistAcceptedVideoTask(
       env,
       pool.weekId,
-      kling.task_id
+      video.task_id
     );
   }catch(e){
     const failureAt=now();
     await env.DB.prepare(`
       UPDATE weekly_video_autopilot
       SET status=?, task_id=?, updated_at=?
-      WHERE week_id=? AND status='kling_submitting'
+      WHERE week_id=? AND status='video_submitting'
     `).bind(
-      'kling_submission_ambiguous',
-      String(kling.task_id||''),
+      'video_submission_ambiguous',
+      String(video.task_id||''),
       failureAt,
       pool.weekId
     ).run().catch(()=>{});
     await audit(
       env,
-      'weekly_video_autopilot_kling_submission_ambiguous',
-      'Kling task was accepted but local task persistence is ambiguous; do not retry',
+      'weekly_video_autopilot_provider_submission_ambiguous',
+      'Video task was accepted but local task persistence is ambiguous; do not retry',
       {
         week_id:pool.weekId,
-        external_task_id:String(kling.external_task_id||externalTaskId),
-        stage:'kling_task_persistence',
-        http_status:Number.isInteger(kling.http_status)?kling.http_status:null,
+        external_task_id:String(video.external_task_id||externalTaskId),
+        stage:'provider_task_persistence',
+        http_status:Number.isInteger(video.http_status)?video.http_status:null,
         response_category:'task_id_persistence_failed',
-        task_id:String(kling.task_id||'')||null,
+        task_id:String(video.task_id||'')||null,
         error:sanitizeOperationalError(e),
         timestamp:failureAt,
         retry_forbidden:true
@@ -5526,15 +5433,15 @@ async function prepareWeeklyVideoAutopilot(env){
   }
   await audit(
     env,
-    'weekly_video_autopilot_kling_accepted',
-    'Kling accepted the weekly video submission',
+    'weekly_video_autopilot_provider_accepted',
+    'The video provider accepted the weekly video submission',
     {
       week_id:pool.weekId,
-      external_task_id:String(kling.external_task_id||externalTaskId),
-      stage:'kling_submission',
-      http_status:Number.isInteger(kling.http_status)?kling.http_status:null,
+      external_task_id:String(video.external_task_id||externalTaskId),
+      stage:'provider_submission',
+      http_status:Number.isInteger(video.http_status)?video.http_status:null,
       response_category:'accepted_with_task_id',
-      task_id:String(kling.task_id),
+      task_id:String(video.task_id),
       timestamp:now()
     }
   );
@@ -14111,6 +14018,10 @@ if (u.pathname === "/api/photo-autopilot/activity" && req.method === "GET") {
         'weekly_video_autopilot_kling_rejected',
         'weekly_video_autopilot_kling_submission_ambiguous',
         'weekly_video_autopilot_kling_accepted',
+        'weekly_video_autopilot_provider_submitting',
+        'weekly_video_autopilot_provider_rejected',
+        'weekly_video_autopilot_provider_submission_ambiguous',
+        'weekly_video_autopilot_provider_accepted',
         'weekly_video_autopilot_shotstack_submitting',
         'weekly_video_autopilot_shotstack_rejected',
         'weekly_video_autopilot_shotstack_submission_ambiguous',
@@ -14426,6 +14337,10 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
       'weekly_video_autopilot_kling_rejected',
       'weekly_video_autopilot_kling_submission_ambiguous',
       'weekly_video_autopilot_kling_accepted',
+      'weekly_video_autopilot_provider_submitting',
+      'weekly_video_autopilot_provider_rejected',
+      'weekly_video_autopilot_provider_submission_ambiguous',
+      'weekly_video_autopilot_provider_accepted',
       'weekly_video_autopilot_shotstack_submitting',
       'weekly_video_autopilot_shotstack_rejected',
       'weekly_video_autopilot_shotstack_submission_ambiguous',

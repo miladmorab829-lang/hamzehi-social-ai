@@ -12,7 +12,10 @@ export const WORKER_NAME="hamzehi-social-ai";
 // Secret binding names Production has carried since Phase 14 (names only; values are never read).
 // TELEGRAM_WEBHOOK_SECRET_TOKEN: Phase 17.1 rotation (8c3de836, 2026-10-31); a version without it would fall back to the
 // legacy D1 secret that Telegram no longer sends, so it is required, not optional.
-export const REQUIRED_SECRETS=Object.freeze(["ADMIN_TOKEN","ANTHROPIC_API_KEY","GOOGLE_PLACES_API_KEY","KLING_API_KEY","OPENAI_API_KEY","SHOTSTACK_API_KEY","TELEGRAM_BOT_TOKEN","TELEGRAM_WEBHOOK_SECRET_TOKEN"]);
+export const REQUIRED_SECRETS=Object.freeze(["ADMIN_TOKEN","ANTHROPIC_API_KEY","GOOGLE_PLACES_API_KEY","OPENAI_API_KEY","SHOTSTACK_API_KEY","TELEGRAM_BOT_TOKEN","TELEGRAM_WEBHOOK_SECRET_TOKEN"]);
+
+// No longer used by the code but kept on the Worker until the owner deletes them: allowed, never required.
+export const RETIRED_SECRETS=Object.freeze(["KLING_API_KEY"]);
 
 // Minimal reader for the parts of worker/wrangler.toml this check needs: [vars] strings, the D1 id, the R2 bucket, the AI binding.
 export function expectedFromToml(text){
@@ -38,7 +41,7 @@ export function checkVersion(v,expected,{requiredSecrets=REQUIRED_SECRETS,requir
   for(const r of expected.r2){const x=by(r.binding);if(!x||x.type!=="r2_bucket"||x.bucket_name!==r.bucket_name)f.push(`R2 ${r.binding} is not ${r.bucket_name}`);}
   if(expected.ai?.binding&&by(expected.ai.binding)?.type!=="ai")f.push(`AI binding ${expected.ai.binding} missing`);
   for(const s of requiredSecrets)if(by(s)?.type!=="secret_text")f.push(`secret binding ${s} missing`);
-  const known=new Set([...Object.keys(expected.vars),...expected.d1.map(d=>d.binding),...expected.r2.map(r=>r.binding),expected.ai?.binding,...requiredSecrets]);
+  const known=new Set([...Object.keys(expected.vars),...expected.d1.map(d=>d.binding),...expected.r2.map(r=>r.binding),expected.ai?.binding,...requiredSecrets,...RETIRED_SECRETS]);
   for(const x of b)if(!known.has(x.name))f.push(`unexpected binding ${x.name} (${x.type})`);
   return {ok:!f.length,failures:f,summary:{id:v?.id||null,tag,bindings:b.length}};
 }
