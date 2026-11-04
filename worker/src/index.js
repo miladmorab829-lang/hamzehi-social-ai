@@ -19,6 +19,7 @@ import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market-isolation.js";
 import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE_STAGES, PIPELINE_SIDE_STATES } from "./lead-scoring.js";
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
+import { ownerChangeHash } from "./catalog-intake.js";
 import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, optOutStateFromMessages, OPT_OUT_RULES_ID, OPT_OUT_RULES_KEY, OPT_OUT_ALL_LEGACY } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
@@ -2925,16 +2926,70 @@ async function ownerImportView(env,importId){
   return {import_id:importId,import:imp,summary,review_counts,items:items.map(x=>({...x,thumbnail_url:x.telegram_media_id?`/media/telegram?id=${encodeURIComponent(x.telegram_media_id)}`:null}))};
 }
 // ---- Owner review of import items → existing authorities ----
-async function applyOwnerKnowledgeItem(env,item){
+// Approving an import item can change what customers are quoted. The admin token authenticates the owner; the approval itself is bound to a
+// server-computed preview of this exact item and the live data it would change. No flag in the request proves either.
+const OWNER_PREVIEW_REQUIRED="Owner confirmation is required: preview this change, then confirm it";
+function assertOwnerImportPrice(item){
+  if(!["IRAN","ARAB"].includes(item.market))throw Error("Select IRAN or ARAB for a price");
+  if(item.currency!==MARKET_CURRENCY[item.market])throw Error(`${item.market} prices must be in ${MARKET_CURRENCY[item.market]}`);
+  if(!Number.isSafeInteger(item.price_minor)||item.price_minor<=0||!item.product_key)throw Error("A valid product and price are required");
+}
+async function ownerImportLive(env){
+  await ensureQuoteStore(env);await ensureSalesKnowledgeStore(env);
+  const prices=(await env.DB.prepare("SELECT id,market,product_key,currency,unit_price_minor,version,active,updated_at FROM commercial_price_items").all()).results||[];
+  const facts=(await env.DB.prepare("SELECT id,version,domain,attribute,market FROM sales_knowledge_facts WHERE status='active' ORDER BY id").all()).results||[];
+  return {prices,facts};
+}
+// Read only. commercial means approving this item would change a live commercial value, so it needs the owner's bound approval.
+async function ownerImportItemPlan(item,live){
+  const subject={id:item.id,version:item.version,item_type:item.item_type,market:item.market,product_key:item.product_key,product_name:item.product_name,size:item.size,configuration:item.configuration,currency:item.currency,price_minor:item.price_minor,fact_domain:item.fact_domain,fact_attribute:item.fact_attribute,fact_value_json:item.fact_value_json};
+  let effect="knowledge",commercial=false,current=null,latest_version=null,state=null;
+  if(item.item_type==="price_row"){
+    if(item.price_minor==null)effect="no_price_recorded";
+    else{
+      assertOwnerImportPrice(item);
+      const rows=live.prices.filter(p=>p.market===item.market&&p.product_key===item.product_key),active=rows.filter(p=>p.active).sort((a,b)=>b.version-a.version)[0]||null;
+      latest_version=rows.reduce((m,p)=>Math.max(m,p.version),0);current=active&&{id:active.id,version:active.version,currency:active.currency,unit_price_minor:active.unit_price_minor};
+      effect=!active?"price_new":active.unit_price_minor===item.price_minor&&active.currency===item.currency?"price_unchanged":"price_replaced";commercial=effect!=="price_unchanged";
+      state={active:active&&{...current,updated_at:active.updated_at},latest_version};
+    }
+  }else if(item.item_type==="product_fact"||item.item_type==="rule"){
+    let value=null;try{value=JSON.parse(item.fact_value_json);}catch{}
+    commercial=item.item_type==="rule"||knowledgeSensitive(item.fact_domain,item.fact_attribute,knowledgeFieldType(item.fact_domain,item.fact_attribute),value);
+    if(commercial){effect="commercial_fact";current=live.facts.filter(f=>f.domain===item.fact_domain&&f.attribute===item.fact_attribute&&(f.market===item.market||f.market==="GLOBAL"));state=current;}
+  }
+  return {requires_owner_approval:commercial,commercial,effect,current,proposed:subject,latest_version,preview_hash:await ownerChangeHash({subject,state}),writes:0};
+}
+function ownerImportApproval(b,plan){
+  if(!plan.commercial)return null;
+  const problem=ownerApprovalProblem(b,plan);if(problem){const e=Error(problem);e.ownerApproval=true;throw e;}
+  return {method:"owner_preview",ref:plan.preview_hash,latest_version:plan.latest_version};
+}
+// What APPROVE ALL may do for one import. Rules, flagged rows and rows that would replace a live price always stay for individual review.
+async function ownerImportBulkPlan(env,importId){
+  const rows=(await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE import_id=? AND parse_status='parsed' AND review_status IN ('pending_review','approved') ORDER BY seq").bind(importId).all()).results||[];
+  const live=await ownerImportLive(env),staleBefore=new Date(Date.now()-120000).toISOString(),held=[],stalled=[],eligible=[];
+  for(const item of rows){
+    let issues=[];try{issues=JSON.parse(item.issues_json||"[]")}catch{}
+    const resuming=item.review_status==="approved";
+    // An item left 'approved' without a result (interrupted mid-apply) is resumed once it is clearly stale.
+    if(resuming&&(item.applied_at||item.result_ref||String(item.updated_at)>=staleBefore))continue;
+    if(!resuming&&(item.item_type==="rule"||issues.some(i=>/conflict|replaces_active_price|mismatch|ambiguous|priced_elsewhere|apply_failed/.test(i.code)))){held.push({id:item.id,reason:"needs_individual_review"});continue;}
+    let plan;try{plan=await ownerImportItemPlan(item,live);}catch{held.push({id:item.id,reason:"needs_individual_review"});continue;}
+    if(!resuming&&plan.effect==="price_replaced"){held.push({id:item.id,reason:"needs_individual_review"});continue;}
+    (resuming?stalled:eligible).push({item,plan,resuming});
+  }
+  return {held,ready:[...stalled,...eligible]};
+}
+async function applyOwnerKnowledgeItem(env,item,approval=null){
   if(item.item_type==="price_row"){
     // Approving a no-price row records that the configuration has NO authoritative price: nothing is priced or activated.
     if(item.price_minor==null)return {result_ref:"no_authoritative_price:recorded"};
-    if(!["IRAN","ARAB"].includes(item.market))throw Error("Select IRAN or ARAB for a price");
-    if(item.currency!==MARKET_CURRENCY[item.market])throw Error(`${item.market} prices must be in ${MARKET_CURRENCY[item.market]}`);
-    if(!Number.isSafeInteger(item.price_minor)||item.price_minor<=0||!item.product_key)throw Error("A valid product and price are required");
+    assertOwnerImportPrice(item);
     const active=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE market=? AND product_key=? AND active=1 ORDER BY version DESC LIMIT 1").bind(item.market,item.product_key).first();
     if(active&&active.unit_price_minor===item.price_minor&&active.currency===item.currency)return {result_ref:`commercial_price_items:${active.id}:unchanged`};
-    const created=await createPriceItemVersion(env,{market:item.market,base_id:active?.id||undefined,product_key:item.product_key,product_name:[item.product_name,item.size,item.configuration].filter(Boolean).join(" · "),currency:item.currency,unit_price_minor:item.price_minor},"admin");
+    if(!approval)throw Error(OWNER_PREVIEW_REQUIRED);
+    const created=await createPriceItemVersion(env,{market:item.market,base_id:active?.id||undefined,product_key:item.product_key,product_name:[item.product_name,item.size,item.configuration].filter(Boolean).join(" · "),currency:item.currency,unit_price_minor:item.price_minor},"admin",{expectLatest:approval.latest_version});
     return {result_ref:`commercial_price_items:${created.id}:v${created.version}`};
   }
   if(item.item_type==="product_fact"||item.item_type==="rule"){
@@ -2946,8 +3001,8 @@ async function applyOwnerKnowledgeItem(env,item){
     if(proposal.status==="conflict"){const reasons=(()=>{try{return JSON.parse(proposal.conflict_json).map(x=>x.reason)}catch{return []}})();if(reasons.every(r=>r==="duplicate"||r==="duplicate_member"))return {result_ref:`sales_knowledge:already_active`};return {result_ref:`sales_knowledge_change_requests:${proposal.id}:conflict`,conflict:true};}
     // Resume safety: the deterministic request id returns the SAME proposal on retry; never review/apply it twice.
     if(proposal.status==="applied")return {result_ref:`sales_knowledge_facts:${proposal.result_fact_id}`};
-    const reviewed=proposal.status==="approved"?proposal:await reviewSalesKnowledge(env,{id:proposal.id,decision:"approve",proposal_hash:proposal.proposal_hash,confirm_sensitive:true,note:"Approved from owner knowledge import review"});
-    const applied=await applySalesKnowledge(env,{id:reviewed.id,proposal_hash:reviewed.proposal_hash,confirm_apply:true});
+    const reviewed=proposal.status==="approved"?proposal:await reviewSalesKnowledge(env,{id:proposal.id,decision:"approve",proposal_hash:proposal.proposal_hash,confirm_sensitive:!!approval,note:"Approved from owner knowledge import review"});
+    const applied=await applySalesKnowledge(env,{id:reviewed.id,proposal_hash:reviewed.proposal_hash,confirm_apply:true},approval);
     return {result_ref:`sales_knowledge_facts:${applied.result_fact_id}`};
   }
   if(item.item_type==="visual"){
@@ -2996,16 +3051,17 @@ async function reviewOwnerKnowledgeItem(env,body){
     return await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE id=?").bind(id).first();
   }
   if(item.parse_status!=="parsed")throw Error("Ambiguous or rejected entries must be corrected before approval");
-  if(item.item_type==="price_row"&&body?.confirm_commercial!==true)throw Error("Explicit commercial confirmation is required for prices");
+  const approval=ownerImportApproval(body,await ownerImportItemPlan(item,await ownerImportLive(env)));
   const claimed=await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status='approved',reviewed_by='admin',reviewed_at=?,version=version+1,updated_at=? WHERE id=? AND version=? AND review_status='pending_review'").bind(t,t,id,version).run();
   if(!claimed.meta?.changes)throw Error("Concurrent review conflict");
   try{
-    const result=await applyOwnerKnowledgeItem(env,{...item,review_status:"approved"});
+    const result=await applyOwnerKnowledgeItem(env,{...item,review_status:"approved"},approval);
     await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status=?,result_ref=?,applied_at=?,updated_at=? WHERE id=?").bind(result.conflict?"approved":"applied",result.result_ref,result.conflict?null:now(),now(),id).run();
-    try{await audit(env,"owner_knowledge_item_applied","Owner approved an imported knowledge item",{item_id:id,item_type:item.item_type,result_ref:result.result_ref});}catch{}
+    try{await audit(env,"owner_knowledge_item_applied","Owner approved an imported knowledge item",{item_id:id,item_type:item.item_type,result_ref:result.result_ref,approval_method:approval?.method||null});}catch{}
   }catch(error){
     // Keep the owner's decision visible but nothing half-applied: return the item to review with the reason.
-    await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status='pending_review',issues_json=?,version=version+1,updated_at=? WHERE id=?").bind(JSON.stringify([{code:"apply_failed",detail:sanitizeOperationalError(error?.message||error)}]),now(),id).run();
+    let earlier=[];try{earlier=JSON.parse(item.issues_json||"[]").filter(i=>i.code!=="apply_failed")}catch{}
+    await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status='pending_review',reviewed_by=NULL,reviewed_at=NULL,issues_json=?,version=version+1,updated_at=? WHERE id=?").bind(JSON.stringify([...earlier,{code:"apply_failed",detail:sanitizeOperationalError(error?.message||error)}]),now(),id).run();
     throw error;
   }
   return await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE id=?").bind(id).first();
@@ -3025,35 +3081,50 @@ async function handleOwnerKnowledge(req,env){
       const r=await env.DB.prepare("SELECT id,market,status,summary_json,created_at FROM owner_knowledge_imports ORDER BY created_at DESC LIMIT 20").all();
       return json({ok:true,imports:(r.results||[]).map(x=>{let s={};try{s=JSON.parse(x.summary_json||"{}")}catch{}return {...x,summary:s};})});
     }
+    if(u.pathname==="/api/owner-knowledge/items/review/preview"&&req.method==="POST"){
+      const b=await req.json().catch(()=>null),id=String(b?.id||"");
+      const item=await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE id=? LIMIT 1").bind(id).first();if(!item)throw Error("Import item not found");
+      if(item.version!==Number(b?.expected_version))throw Error("Item changed since it was displayed; refresh");
+      if(item.review_status!=="pending_review"||item.parse_status!=="parsed")throw Error("Only clean parsed items awaiting review can be approved");
+      return json({ok:true,...await ownerImportItemPlan(item,await ownerImportLive(env))});
+    }
     if(u.pathname==="/api/owner-knowledge/items/review"&&req.method==="POST"){
       const b=await req.json().catch(()=>null);return json({ok:true,item:await reviewOwnerKnowledgeItem(env,b)});
+    }
+    if(u.pathname==="/api/owner-knowledge/imports/approve-parsed/preview"&&req.method==="POST"){
+      const b=await req.json().catch(()=>null),id=String(b?.import_id||"");if(!id)return json({ok:false,error:"import_id is required"},400);
+      const {held,ready}=await ownerImportBulkPlan(env,id),count=e=>ready.filter(r=>r.plan.effect===e).length;
+      const items=ready.map(({item,plan})=>({id:item.id,seq:item.seq,item_type:item.item_type,effect:plan.effect,commercial:plan.commercial,market:item.market,product_name:item.product_name,size:item.size,configuration:item.configuration,currency:item.currency,price_minor:item.price_minor,fact_domain:item.fact_domain,current:plan.current,item_hash:plan.preview_hash}));
+      return json({ok:true,import_id:id,requires_owner_approval:items.some(x=>x.commercial),items,held,summary:{eligible:items.length,commercial:items.filter(x=>x.commercial).length,price_new:count("price_new"),price_unchanged:count("price_unchanged"),commercial_fact:count("commercial_fact"),held:held.length},writes:0});
     }
     if(u.pathname==="/api/owner-knowledge/imports/approve-parsed"&&req.method==="POST"){
       // Bounded, resumable bulk approval: at most `batch_size` items (default 20, max 30) per request; the dashboard calls
       // again until `remaining` is 0. Only clean parsed items are eligible: rules, ambiguous/rejected/unparsed, conflicting,
       // price-replacing and previously failed items always stay for individual owner review. Every step is idempotent.
+      // Non-commercial items need only `confirm`. A commercial item runs only if its own hash from the preview route is sent and still
+      // matches live data; otherwise it is left untouched in `held`, so one stale row never blocks or rewrites the others.
       const b=await req.json().catch(()=>null),id=String(b?.import_id||""),limit=Math.min(30,Math.max(1,Math.floor(Number(b?.batch_size)||20)));
-      if(!id||b?.confirm_commercial!==true)return json({ok:false,error:"import_id and explicit commercial confirmation are required"},400);
-      const rows=(await env.DB.prepare("SELECT * FROM owner_knowledge_import_items WHERE import_id=? AND parse_status='parsed' AND review_status IN ('pending_review','approved') ORDER BY seq").bind(id).all()).results||[];
-      const staleBefore=new Date(Date.now()-120000).toISOString(),held=[],eligible=[],stalled=[];
-      for(const item of rows){
-        let issues=[];try{issues=JSON.parse(item.issues_json||"[]")}catch{}
-        // An item left 'approved' without a result (interrupted mid-apply) is resumed once it is clearly stale.
-        if(item.review_status==="approved"){if(!item.applied_at&&!item.result_ref&&String(item.updated_at)<staleBefore)stalled.push(item);continue;}
-        if(item.item_type==="rule"||issues.some(i=>/conflict|replaces_active_price|mismatch|ambiguous|priced_elsewhere|apply_failed/.test(i.code)))held.push({id:item.id,reason:"needs_individual_review"});
-        else eligible.push(item);
+      const confirmed=b?.confirm_owner_approved===true;
+      if(!id||(b?.confirm!==true&&!confirmed))return json({ok:false,error:"import_id and explicit confirmation are required"},400);
+      const {held,ready}=await ownerImportBulkPlan(env,id),hashes=new Map((Array.isArray(b?.approved)?b.approved:[]).map(x=>[String(x?.id),String(x?.item_hash)])),runnable=[];
+      for(const r of ready){
+        const hash=hashes.get(r.item.id);
+        if(!r.plan.commercial)runnable.push(r);
+        else if(!confirmed||!hash)held.push({id:r.item.id,reason:"owner_preview_required"});
+        else if(hash!==r.plan.preview_hash)held.push({id:r.item.id,reason:"stale_preview"});
+        else runnable.push(r);
       }
-      const batch=[...stalled,...eligible].slice(0,limit),applied=[],failed=[];
-      for(const item of batch){
+      const batch=runnable.slice(0,limit),applied=[],failed=[];
+      for(const {item,plan,resuming} of batch){
         try{
-          if(item.review_status==="approved"){
-            const result=await applyOwnerKnowledgeItem(env,item),t=now();
+          if(resuming){
+            const result=await applyOwnerKnowledgeItem(env,item,ownerImportApproval({confirm_owner_approved:confirmed,preview_hash:plan.preview_hash},plan)),t=now();
             await env.DB.prepare("UPDATE owner_knowledge_import_items SET review_status=?,result_ref=?,applied_at=?,updated_at=? WHERE id=? AND review_status='approved' AND applied_at IS NULL").bind(result.conflict?"approved":"applied",result.result_ref,result.conflict?null:t,t,item.id).run();
-          }else await reviewOwnerKnowledgeItem(env,{id:item.id,action:"approve",expected_version:item.version,confirm_commercial:true});
+          }else await reviewOwnerKnowledgeItem(env,{id:item.id,action:"approve",expected_version:item.version,confirm_owner_approved:confirmed,preview_hash:plan.preview_hash});
           applied.push(item.id);
         }catch(error){failed.push({id:item.id,reason:sanitizeOperationalError(error?.message||error)});}
       }
-      const remaining=Math.max(0,stalled.length+eligible.length-batch.length);
+      const remaining=Math.max(0,runnable.length-batch.length);
       return json({ok:true,applied:applied.length,approved:applied.length,failed:failed.length,failures:failed,skipped:held.length,held,remaining,batch_size:limit});
     }
     if(u.pathname==="/api/owner-knowledge/imports/reject-remaining"&&req.method==="POST"){
@@ -3076,7 +3147,7 @@ async function handleOwnerKnowledge(req,env){
       return json({ok:true,import_id:id,rejected:rejected.length,rejected_ids:rejected,already_final:rows.length-pending.length,failed:failed.length,failures:failed,remaining_review:Number(remaining),batch_size:limit});
     }
     return json({ok:false,error:"Not found"},404);
-  }catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+  }catch(error){if(error?.ownerApproval)return json({ok:false,reason:"owner_approval_required",error:String(error.message)},409);return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
 }
 // Text-only owner knowledge arriving through /api/autonomy/command (price lists, catalogs, rules).
 function looksLikeOwnerKnowledgeImport(text){
@@ -6263,6 +6334,7 @@ const SALES_KNOWLEDGE_FIELDS = {
 const SALES_KNOWLEDGE_COMMERCIAL = new Set(["quantity","production","shipping","deposit","payment","discount","pricing"]);
 const SALES_KNOWLEDGE_OPERATIONS = new Set(["ADD","EXPAND","UPDATE","REPLACE","DEACTIVATE","DELETE"]);
 
+function knowledgeSensitive(domain,attribute,type,value) {return SALES_KNOWLEDGE_COMMERCIAL.has(domain)||(type==="generic"&&knowledgeIsCommercial(attribute,value));}
 function knowledgeFieldType(domain,attribute) {
   if(Object.hasOwn(SALES_KNOWLEDGE_FIELDS,domain)&&Object.hasOwn(SALES_KNOWLEDGE_FIELDS[domain],attribute))return SALES_KNOWLEDGE_FIELDS[domain][attribute];
   // Open vocabulary: ANY concept name under the reserved "knowledge" domain is a generic structured record (engine envelope).
@@ -6388,7 +6460,7 @@ async function proposeSalesKnowledge(env,body,context={}) {
     env.DB.prepare(`INSERT OR IGNORE INTO sales_knowledge_change_requests
       (id,operation,fact_key,domain,entity_type,entity_key,attribute,market,member_key,target_fact_id,target_version,old_value_json,new_value_json,value_hash,effective_from,effective_until,proposal_hash,conflict_json,sensitivity,confidence,status,requested_by,source_type,source_command_id,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'admin',?,?,?,?)`)
-      .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),SALES_KNOWLEDGE_COMMERCIAL.has(domain)||(type==="generic"&&knowledgeIsCommercial(attribute,value))?"commercial":"standard",parserConfidence,status,context.sourceType||"owner_form",sourceCommandId,t,t),
+      .bind(id,operation,factKey,domain,entityType,entityKey,attribute,market,memberKey,target?.id||null,target?.version||null,(target||latest)?.value_json||null,valueJson,valueHash,effectiveFrom,effectiveUntil,proposalHash,JSON.stringify(conflicts),knowledgeSensitive(domain,attribute,type,value)?"commercial":"standard",parserConfidence,status,context.sourceType||"owner_form",sourceCommandId,t,t),
     knowledgeAuditStatement(env,id,"sales_knowledge_proposed",{request_id:id,operation,domain,source_command_id:sourceCommandId,parser_source:context.parserSource||"owner_form",parser_confidence:parserConfidence,source_text:context.sourceText?String(context.sourceText).slice(0,2000):undefined,notes:Array.isArray(context.notes)&&context.notes.length?context.notes.slice(0,8).map(x=>String(x).slice(0,300)):undefined},t)
   ]);
   const stored=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
@@ -6417,12 +6489,20 @@ async function reviewSalesKnowledge(env,body) {
   if(stored.status!==status)throw Error("Concurrent review conflict");
   return stored;
 }
-async function applySalesKnowledge(env,body) {
+// Read only. Commercial facts reach customers' terms, so Apply is bound to this preview of the exact proposal and the live facts in its slot.
+async function salesKnowledgePreview(env,body) {
+  const id=knowledgeId(body?.id),q=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();if(!q)throw Error("Proposal not found");
+  const live=(await env.DB.prepare("SELECT id,version,status FROM sales_knowledge_facts WHERE domain=? AND entity_type=? AND entity_key=? AND attribute=? AND market=? AND status IN ('active','inactive') ORDER BY id").bind(q.domain,q.entity_type,q.entity_key,q.attribute,q.market).all()).results||[];
+  const preview_hash=await ownerChangeHash({id:q.id,proposal_hash:q.proposal_hash,status:q.status,target_fact_id:q.target_fact_id,target_version:q.target_version,live});
+  return {requires_owner_approval:q.sensitivity==="commercial"&&q.status!=="applied",sensitivity:q.sensitivity,status:q.status,current:q.old_value_json,proposed:q.new_value_json,live_facts:live,preview_hash,writes:0};
+}
+async function applySalesKnowledge(env,body,approval=null) {
   knowledgeOnlyKeys(body,["id","proposal_hash","confirm_apply"]);
   const id=knowledgeId(body.id),q=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
   if(!q||q.proposal_hash!==body.proposal_hash||body.confirm_apply!==true)throw Error("Explicit Apply of the reviewed proposal is required");
   if(q.status==="applied")return q;
   if(q.status!=="approved"||q.reviewed_by!=="admin")throw Error("Owner review must precede Apply");
+  if(q.sensitivity==="commercial"&&!approval?.method)throw Error(OWNER_PREVIEW_REQUIRED);
   const t=now(),factId="knowledge-fact-"+id,version=(q.target_version||0)+1;
   const status=q.operation==="DELETE"?"tombstoned":q.operation==="DEACTIVATE"?"inactive":"active";
   // D1 batch is a transaction. A failed CAS forces the final CHECK to fail,
@@ -6443,7 +6523,7 @@ async function applySalesKnowledge(env,body) {
     WHERE id=? AND status='approved'`).bind(t,t,factId,id,id));
   statements.push(env.DB.prepare(`INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at)
     SELECT ?,'sales_knowledge_applied','info','Owner applied versioned knowledge',?,? FROM sales_knowledge_change_requests WHERE id=? AND status='applied'`)
-    .bind("knowledge:"+id+":apply",JSON.stringify({request_id:id,fact_id:factId,operation:q.operation,version,actor:"admin"}),t,id));
+    .bind("knowledge:"+id+":apply",JSON.stringify({request_id:id,fact_id:factId,operation:q.operation,version,actor:"admin",approval_method:approval?.method||null}),t,id));
   try {await env.DB.batch(statements);}
   catch {
     const latest=await env.DB.prepare("SELECT * FROM sales_knowledge_change_requests WHERE id=?").bind(id).first();
@@ -6483,7 +6563,7 @@ async function handleSalesKnowledge(req,env) {
       try{await attachKnowledgeProposalContext(env,rows);}catch{}
       return json({ok:true,facts:facts.results||[],requests:rows,fields:SALES_KNOWLEDGE_FIELDS,offset,page_size:100});
     }
-    if(req.method!=="POST"||![base+"/propose",base+"/review",base+"/apply",base+"/teach",base+"/correct"].includes(u.pathname))return json({ok:false,error:"Not found"},404);
+    if(req.method!=="POST"||![base+"/propose",base+"/review",base+"/apply",base+"/preview",base+"/teach",base+"/correct"].includes(u.pathname))return json({ok:false,error:"Not found"},404);
     // Teaching bodies may carry a few paragraphs of owner text; every other route keeps the original 16 KB bound.
     const bodyLimit=u.pathname===base+"/teach"?KNOWLEDGE_TEACH_BODY_BYTES:16384;
     if(Number(req.headers.get("Content-Length")||0)>bodyLimit)return json({ok:false,error:"Knowledge request too large"},413);
@@ -6496,7 +6576,13 @@ async function handleSalesKnowledge(req,env) {
     await ensureSalesKnowledgeStore(env);
     if(u.pathname===base+"/teach"){const taught=await teachKnowledge(env,body);return json(taught.body,taught.status);}
     if(u.pathname===base+"/correct")return json({ok:true,...await correctSalesKnowledge(env,body)});
-    const result=u.pathname.endsWith("/propose")?await proposeSalesKnowledge(env,body):u.pathname.endsWith("/review")?await reviewSalesKnowledge(env,body):await applySalesKnowledge(env,body);
+    if(u.pathname===base+"/preview")return json({ok:true,...await salesKnowledgePreview(env,body)});
+    if(u.pathname===base+"/apply"){
+      const {confirm_owner_approved,preview_hash,...applyBody}=body,plan=await salesKnowledgePreview(env,applyBody),problem=plan.requires_owner_approval?ownerApprovalProblem({confirm_owner_approved,preview_hash},plan):null;
+      if(problem)return json({ok:false,reason:"owner_approval_required",error:problem},409);
+      return json({ok:true,request:await applySalesKnowledge(env,applyBody,plan.requires_owner_approval?{method:"owner_preview",ref:plan.preview_hash}:null)});
+    }
+    const result=u.pathname.endsWith("/propose")?await proposeSalesKnowledge(env,body):await reviewSalesKnowledge(env,body);
     return json({ok:true,request:result});
   } catch(error) {
     const message=String(error?.message||error);
@@ -11105,7 +11191,9 @@ async function transitionQuote(env,id,action,actor="admin"){
   const updated=await env.DB.prepare("SELECT * FROM lead_quotes WHERE id=?").bind(id).first();await audit(env,"lead_quote_status_changed","Quote owner-review status changed",{quote_id:id,from:q.status,to:updated.status,action});return updated;
 }
 
-async function createPriceItemVersion(env,body,actor="admin"){
+// The price list is what customers are quoted today, so a change goes through the same preview → owner confirmation as the catalog.
+// Imports reach createPriceItemVersion only after ownerImportApproval has bound the owner's approval to the same kind of preview.
+async function priceItemPlan(env,body){
   await ensureQuoteStore(env);const baseId=String(body.base_id||"").trim();let base=null;if(baseId)base=await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=? LIMIT 1").bind(baseId).first();if(baseId&&!base)throw Error("Base price item not found");
   const productName=String(body.product_name??base?.product_name??"").trim(),productKey=normalizeProductKey(body.product_key??base?.product_key??productName),sku=String(body.sku??base?.sku??"").trim()||null,currency=String(body.currency??base?.currency??"").trim().toUpperCase(),unit=safeCommercialInteger(body.unit_price_minor??base?.unit_price_minor,{nullable:false}),moq=safeCommercialInteger(Object.prototype.hasOwnProperty.call(body,"moq")?body.moq:base?.moq,{nullable:true,positive:true});
   if(!productName||!productKey||!currency)throw Error("Product, product key and currency are required");
@@ -11117,11 +11205,33 @@ async function createPriceItemVersion(env,body,actor="admin"){
   if(market==="IRAN"&&canonicalCurrency(currency)!==MARKET_CURRENCY.IRAN)throw Error("IRAN prices must be in TOMAN");
   // Phase 12.1: Iraq (ARAB) price versions are USD only.
   if(market==="ARAB"&&canonicalCurrency(currency)!==MARKET_CURRENCY.ARAB)throw Error("ARAB (Iraq) prices must be in USD");
-  const latest=await env.DB.prepare("SELECT MAX(version) AS version FROM commercial_price_items WHERE market=? AND product_key=?").bind(market,productKey).first(),version=Number(latest?.version||0)+1,t=now(),id=uid();
+  return {base,productName,productKey,sku,currency,unit,moq,market};
+}
+async function priceItemPreview(env,body){
+  const p=await priceItemPlan(env,body);
+  const active=(await env.DB.prepare("SELECT id,product_name,currency,unit_price_minor,moq,version FROM commercial_price_items WHERE market=? AND product_key=? AND active=1 ORDER BY id").bind(p.market,p.productKey).all()).results||[];
+  const latest_version=Number((await env.DB.prepare("SELECT MAX(version) AS version FROM commercial_price_items WHERE market=? AND product_key=?").bind(p.market,p.productKey).first())?.version||0);
+  const proposed={market:p.market,product_key:p.productKey,product_name:p.productName,sku:p.sku,currency:p.currency,unit_price_minor:p.unit,moq:p.moq,base_id:p.base?.id||null,active:body.active!==false,deactivate_previous:body.deactivate_previous!==false,effective_from:body.effective_from??null,effective_until:body.effective_until??null};
+  return {requires_owner_approval:true,current:active,proposed,latest_version,preview_hash:await ownerChangeHash({proposed,active,latest_version}),writes:0};
+}
+async function priceActivationPreview(env,b){
+  await ensureQuoteStore(env);const id=String(b?.id||"").trim();if(!id||typeof b?.active!=="boolean")throw Error("id and boolean active are required");
+  const row=await env.DB.prepare("SELECT id,product_name,market,currency,unit_price_minor,active,updated_at FROM commercial_price_items WHERE id=? LIMIT 1").bind(id).first();if(!row)throw Error("Price item not found");
+  return {requires_owner_approval:true,current:row,proposed:{active:b.active},preview_hash:await ownerChangeHash({row,active:b.active}),writes:0};
+}
+function ownerApprovalProblem(b,plan){
+  if(b?.confirm_owner_approved!==true)return "Owner confirmation is required: preview this change, then confirm it";
+  return b?.preview_hash&&b.preview_hash===plan.preview_hash?null:"This is not what was previewed, or live data changed since; preview it again";
+}
+async function createPriceItemVersion(env,body,actor="admin",{expectLatest=null}={}){
+  const {base,productName,productKey,sku,currency,unit,moq,market}=await priceItemPlan(env,body);
+  const latest=await env.DB.prepare("SELECT MAX(version) AS version FROM commercial_price_items WHERE market=? AND product_key=?").bind(market,productKey).first(),latestVersion=Number(latest?.version||0),version=latestVersion+1,t=now(),id=uid();
+  const changedSince="This is not what was previewed, or live data changed since; preview it again";if(expectLatest!=null&&latestVersion!==expectLatest)throw Error(changedSince);
   const effectiveFrom=body.effective_from==null?(base?.effective_from||null):String(body.effective_from||"").trim()||null,effectiveUntil=body.effective_until==null?null:String(body.effective_until||"").trim()||null;
-  const statements=[];if(base&&body.deactivate_previous!==false)statements.push(env.DB.prepare("UPDATE commercial_price_items SET active=0,updated_at=? WHERE id=?").bind(t,base.id));
-  statements.push(env.DB.prepare("INSERT INTO commercial_price_items(id,product_key,product_name,sku,market,currency,unit_price_minor,moq,version,active,effective_from,effective_until,approved_by,approved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,productKey,productName,sku,market,currency,unit,moq,version,body.active===false?0:1,effectiveFrom,effectiveUntil,actor,t,t,t));
-  await env.DB.batch(statements);await audit(env,"commercial_price_version_created","Owner created immutable commercial price version",{price_item_id:id,product_key:productKey,version,active:body.active===false?0:1});return await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=?").bind(id).first();
+  // The new row lands only if no other version did in the meantime, and only that row retires the base: concurrent writers cannot leave two live prices.
+  const statements=[env.DB.prepare("INSERT INTO commercial_price_items(id,product_key,product_name,sku,market,currency,unit_price_minor,moq,version,active,effective_from,effective_until,approved_by,approved_at,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE COALESCE((SELECT MAX(version) FROM commercial_price_items WHERE market=? AND product_key=?),0)=?").bind(id,productKey,productName,sku,market,currency,unit,moq,version,body.active===false?0:1,effectiveFrom,effectiveUntil,actor,t,t,t,market,productKey,latestVersion)];
+  if(base&&body.deactivate_previous!==false)statements.push(env.DB.prepare("UPDATE commercial_price_items SET active=0,updated_at=? WHERE id=? AND EXISTS(SELECT 1 FROM commercial_price_items WHERE id=?)").bind(t,base.id,id));
+  await env.DB.batch(statements);if(!(await env.DB.prepare("SELECT id FROM commercial_price_items WHERE id=?").bind(id).first()))throw Error(changedSince);await audit(env,"commercial_price_version_created","Owner created immutable commercial price version",{price_item_id:id,product_key:productKey,version,active:body.active===false?0:1});return await env.DB.prepare("SELECT * FROM commercial_price_items WHERE id=?").bind(id).first();
 }
 
 async function selectLeadOutreachContact(env, lead, body = {}) {
@@ -15312,7 +15422,7 @@ Context: ${context}`;
           const mc=await outreachMarketCheck(current);if(!mc.ok)return json(mc,409);}
         const from=action==="submit"?"draft":"pending_approval",to=action==="submit"?"pending_approval":action==="approve"?"approved":"rejected",t=now();
         const result=action==="approve"
-          ?await env.DB.prepare("UPDATE lead_outreach SET status=?,approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status=?").bind(to,t,(v=>v==="inbound_auto_policy"?"admin":v)(String(b.approved_by||"admin").slice(0,60)),t,id,from).run()
+          ?await env.DB.prepare("UPDATE lead_outreach SET status=?,approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status=?").bind(to,t,"admin",t,id,from).run()
           :await env.DB.prepare("UPDATE lead_outreach SET status=?,updated_at=? WHERE id=? AND status=?").bind(to,t,id,from).run();
         if(!result.meta?.changes)return json({ok:false,error:`Invalid outreach transition from ${current.status}`},409);
         await audit(env,"lead_outreach_status_changed","Lead outreach review status changed",{outreach_id:id,lead_id:current.lead_id,from,to});
@@ -15372,7 +15482,7 @@ Context: ${context}`;
       }
       if (u.pathname === "/api/quotes/transition" && req.method === "POST") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),action=String(b.action||"").trim();if(!id||!["submit","approve","reject"].includes(action))return json({ok:false,error:"id and valid action are required"},400);
-        try{return json({ok:true,quote:await transitionQuote(env,id,action,String(b.approved_by||"admin"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
+        try{return json({ok:true,quote:await transitionQuote(env,id,action,"admin")});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},409);}
       }
       if (u.pathname === "/api/orders" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureOrderStore(env);
@@ -15477,12 +15587,17 @@ Context: ${context}`;
       if (u.pathname === "/api/commercial-price-items" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);const r=await env.DB.prepare("SELECT * FROM commercial_price_items ORDER BY product_key,version DESC LIMIT 300").all();return json({ok:true,items:r.results||[]});
       }
+      if ((u.pathname === "/api/commercial-price-items/preview" || u.pathname === "/api/commercial-price-items/activation/preview") && req.method === "POST") {
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({}));try{return json({ok:true,...(u.pathname.endsWith("activation/preview")?await priceActivationPreview(env,b):await priceItemPreview(env,b))});}catch(error){return json({ok:false,error:String(error?.message||error)},400);}
+      }
       if (u.pathname === "/api/commercial-price-items" && req.method === "POST") {
-        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({}));try{return json({ok:true,item:await createPriceItemVersion(env,b,String(b.approved_by||"admin"))});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
+        if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);const b=await req.json().catch(()=>({}));try{const plan=await priceItemPreview(env,b),problem=ownerApprovalProblem(b,plan);if(problem)return json({ok:false,reason:"owner_approval_required",error:problem},409);return json({ok:true,item:await createPriceItemVersion(env,b,"admin",{expectLatest:plan.latest_version})});}catch(error){return json({ok:false,error:sanitizeOperationalError(error?.message||error)},400);}
       }
       if (u.pathname === "/api/commercial-price-items/activation" && req.method === "PATCH") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureQuoteStore(env);const b=await req.json().catch(()=>({})),id=String(b.id||"").trim();if(!id||typeof b.active!=="boolean")return json({ok:false,error:"id and boolean active are required"},400);
-        const changed=await env.DB.prepare("UPDATE commercial_price_items SET active=?,updated_at=? WHERE id=?").bind(b.active?1:0,now(),id).run();if(!changed.meta?.changes)return json({ok:false,error:"Price item not found"},404);await audit(env,"commercial_price_activation_changed","Owner changed commercial price activation",{price_item_id:id,active:b.active});return json({ok:true,id,active:b.active});
+        let plan;try{plan=await priceActivationPreview(env,b);}catch(error){return json({ok:false,error:String(error?.message||error)},404);}
+        const problem=ownerApprovalProblem(b,plan);if(problem)return json({ok:false,reason:"owner_approval_required",error:problem},409);
+        const changed=await env.DB.prepare("UPDATE commercial_price_items SET active=?,updated_at=? WHERE id=? AND active=? AND updated_at=?").bind(b.active?1:0,now(),id,plan.current.active,plan.current.updated_at).run();if(!changed.meta?.changes)return json({ok:false,reason:"owner_approval_required",error:"This is not what was previewed, or live data changed since; preview it again"},409);await audit(env,"commercial_price_activation_changed","Owner changed commercial price activation",{price_item_id:id,active:b.active});return json({ok:true,id,active:b.active});
       }
 
       if (u.pathname === "/api/learning/status" && req.method === "GET") {

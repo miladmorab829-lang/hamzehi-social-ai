@@ -145,7 +145,8 @@ const show=r=>({action:r.action,status:r.draft?.status,by:r.draft?.approved_by||
 // ================= BLOCK M — currency integrity =================
 {const bad1=await call("/api/commercial-price-items",{market:"ARAB",product_name:"Gift box",product_key:"gift box",currency:"TOMAN",unit_price_minor:100});
  const bad2=await call("/api/commercial-price-items",{market:"IRAN",product_name:"Gift box",product_key:"gift box",currency:"USD",unit_price_minor:100});
- const good=await call("/api/commercial-price-items",{market:"ARAB",product_name:"Gift box",product_key:"gift box",currency:"USD",unit_price_minor:300,moq:10});
+ const goodBody={market:"ARAB",product_name:"Gift box",product_key:"gift box",currency:"USD",unit_price_minor:300,moq:10},goodPlan=await call("/api/commercial-price-items/preview",goodBody);
+ const good=await call("/api/commercial-price-items",{...goodBody,confirm_owner_approved:true,preview_hash:goodPlan.body.preview_hash});
  ok("M1 price versions: ARAB (Iraq) must be USD and IRAN must be TOMAN (400 otherwise); a correct ARAB USD price is created",bad1.status===400&&/USD/.test(bad1.body?.error||"")&&bad2.status===400&&good.status===200,[bad1.status,bad2.status,good.status]);
  const L=q("SELECT lead_id,conversation_id FROM inbox_messages LIMIT 1")[0];
  const qrow=(id,market,currency,status="draft",extra={})=>dbrun("INSERT INTO lead_quotes(id,lead_id,conversation_id,market,currency,product,quantity,unit_price_minor,status,pricing_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",[id,L.lead_id,L.conversation_id,market,currency,extra.product||"Gift box",extra.quantity??20,extra.unit??null,status,extra.mode??null,t0(),t0()]);

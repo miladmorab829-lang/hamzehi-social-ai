@@ -109,7 +109,7 @@ export async function makeWorld({aiBrain="off",extraEnv={},realAi=null,migrate:m
   const setMarket=(user,country)=>{const r=q("SELECT lead_id FROM inbox_messages WHERE provider_sender_id=? LIMIT 1",[String(user.id)])[0];const lead=q("SELECT notes FROM leads WHERE id=?",[r.lead_id])[0];let n={};try{n=JSON.parse(lead.notes||"{}");}catch{}
     n.country=country==="iraq"?"Iraq":country==="iran"?"Iran":country;dbrun("UPDATE leads SET notes=? WHERE id=?",[JSON.stringify(n),r.lead_id]);};
   const approveK=async id=>{const p=q("SELECT proposal_hash FROM sales_knowledge_change_requests WHERE id=?",[id])[0];await call("/api/sales-knowledge/review",{id,decision:"approve",proposal_hash:p.proposal_hash,confirm_sensitive:true,note:"test"});
-    const p2=q("SELECT proposal_hash,status FROM sales_knowledge_change_requests WHERE id=?",[id])[0];if(p2.status!=="applied")await call("/api/sales-knowledge/apply",{id,proposal_hash:p2.proposal_hash,confirm_apply:true});};
+    const p2=q("SELECT proposal_hash,status FROM sales_knowledge_change_requests WHERE id=?",[id])[0];if(p2.status!=="applied"){const pv=await call("/api/sales-knowledge/preview",{id});await call("/api/sales-knowledge/apply",{id,proposal_hash:p2.proposal_hash,confirm_apply:true,...(pv.body.requires_owner_approval?{confirm_owner_approved:true,preview_hash:pv.body.preview_hash}:{})});}};
   let seq=0;const jpg=()=>{seq++;return new File([new Uint8Array([0xFF,0xD8,0xFF,0xE0,seq&255,(seq>>8)&255,3,1,4,1,5,9,seq&7,2])],"IMG_"+(5000+seq)+".JPG",{type:"image/jpeg"});};
   const upload=async spec=>{const fd=new FormData();fd.append("images",jpg());fd.append("attest_real","yes");fd.append("spec",JSON.stringify(spec));
     const packed=new Response(fd),bytes=new Uint8Array(await packed.arrayBuffer());
@@ -117,7 +117,8 @@ export async function makeWorld({aiBrain="off",extraEnv={},realAi=null,migrate:m
     if(!b.items?.[0]?.visual_media_id)throw Error("upload failed "+JSON.stringify(b));const id=b.items[0].visual_media_id;const v=q("SELECT version FROM visual_product_media WHERE id=?",[id])[0].version;
     const rv=await call("/api/gallery/review",{id,action:"verify",expected_version:v});if(!rv.body?.ok)throw Error("verify failed "+JSON.stringify(rv.body));return id;};
   const importLine=async(text,market,cid)=>{const im=await call("/api/owner-knowledge/import",{text,market,client_request_id:cid});if(!im.body?.import_id)throw Error("import failed "+JSON.stringify(im.body));
-    const ap=await call("/api/owner-knowledge/imports/approve-parsed",{import_id:im.body.import_id,confirm_commercial:true});if(!ap.body?.ok)throw Error("approve failed "+JSON.stringify(ap.body));};
+    const pv=await call("/api/owner-knowledge/imports/approve-parsed/preview",{import_id:im.body.import_id});
+    const ap=await call("/api/owner-knowledge/imports/approve-parsed",{import_id:im.body.import_id,confirm:true,confirm_owner_approved:true,approved:(pv.body.items||[]).filter(x=>x.commercial).map(x=>({id:x.id,item_hash:x.item_hash}))});if(!ap.body?.ok)throw Error("approve failed "+JSON.stringify(ap.body));};
   const teach=async(text,market,cid)=>{const r=await call("/api/sales-knowledge/teach",{text,market,command_id:cid});for(const x of q("SELECT id FROM sales_knowledge_change_requests WHERE status NOT IN ('applied','rejected')"))await approveK(x.id);return r;};
   const resolve=(id,action,answer={})=>call("/api/si/decisions/resolve",{id,action,scope:"CASE_ONLY",answer});
   const transition=(id,action,extra={})=>call("/api/leads/outreach/transition",{id,action,...extra});

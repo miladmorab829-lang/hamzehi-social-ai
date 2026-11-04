@@ -2,6 +2,7 @@
 // Owner Decision Center, controlled learning, revenue attribution and AI usage accounting.
 // Code holds engines and safety rules; business knowledge lives in owner-approved, versioned DB rows.
 import { canonicalCurrency, MARKET_CURRENCY, CURRENCY_RULES } from "./autonomy-engine.js";
+import { previewProductSheets, applyProductSheets, ownerChangeHash } from "./catalog-intake.js";
 
 let D={};
 // index.js injects shared helpers (audit, draft gate, quote/order helpers) to avoid a circular import.
@@ -164,6 +165,12 @@ const KINDS={
   setting:{table:"business_settings",identity:["setting_key","scope_key"],cols:["setting_key","scope_key","value_json"]}
 };
 export const KNOWLEDGE_KINDS=Object.keys(KINDS);
+// The catalog is live: these rows reach customers' prices and payment terms (deposit and payment instructions included). Every save or
+// retire of them must carry a recorded owner approval, so a caller cannot skip it.
+const OWNER_GATED_KINDS=new Set(["product","attribute","configuration","compatibility","price","cost","setting"]);
+const ownerGated=kind=>OWNER_GATED_KINDS.has(kind);
+function requireOwnerApproval(kind,approval){if(ownerGated(kind)&&!(approval?.method&&approval?.ref))throw Error("Owner approval is required for this catalog change");}
+const STALE_PREVIEW="This is not what was previewed, or live data changed since; preview it again";
 function normalizeAllowedValues(list){
   const out=[];for(const v of Array.isArray(list)?list:[]){const o=typeof v==="object"&&v?v:{value:v};const value=normText(o.value);if(!value)continue;
     out.push({value,label:String(o.label||o.value).trim().slice(0,120),aliases:[...new Set((o.aliases||[]).map(normText).filter(Boolean))]});}
@@ -240,12 +247,38 @@ async function normalizeKnowledgeInput(env,kind,input){
   throw Error("Unknown knowledge kind");
 }
 function sameKnowledge(cur,row,cols){return cols.every(c=>String(cur[c]??"")===String(row[c]??""));}
-export async function saveKnowledgeVersion(env,kind,input,{actor="owner",decisionId=null,expectExisting=false}={}){
+async function currentKnowledge(env,spec,row){
+  const where=spec.identity.map(c=>row[c]===null?`${c} IS NULL`:`${c}=?`).join(" AND "),binds=spec.identity.filter(c=>row[c]!==null).map(c=>row[c]);
+  return {where,binds,cur:await first(env,`SELECT * FROM ${spec.table} WHERE ${where} AND status='current' LIMIT 1`,...binds)};
+}
+// Active price-list rows a catalog row with this product name would replace: part of what the owner approves.
+async function priceListRowsFor(env,row){
+  const name=row?.name||(row?.product_key?(await first(env,"SELECT name FROM product_catalog WHERE product_key=? AND status='current' LIMIT 1",row.product_key))?.name:null);
+  if(!name)return [];const base=normText(name);
+  return (await all(env,"SELECT id,market,product_name,currency,unit_price_minor,version FROM commercial_price_items WHERE active=1 ORDER BY id")).filter(r=>normText(String(r.product_name||"").split(" · ")[0])===base);
+}
+// Read only. id means retire that row; otherwise input is the proposed new version.
+export async function previewKnowledgeChange(env,kind,{input,id=null,expectExisting=false}){
+  await ensureSalesIntelligenceStore(env);const spec=KINDS[kind];if(!spec)throw Error("Unknown knowledge kind");
+  let row,current,op;
+  if(id){current=await first(env,`SELECT * FROM ${spec.table} WHERE id=?`,String(id));if(current?.status!=="current")throw Error("Only current knowledge can be retired");row=current;op="retire";}
+  else{row=await normalizeKnowledgeInput(env,kind,input);current=(await currentKnowledge(env,spec,row)).cur;if(expectExisting&&!current)throw Error("No current knowledge exists to update");op=!current?"create":sameKnowledge(current,row,spec.cols)?"unchanged":"update";}
+  const list=await priceListRowsFor(env,row),proposed=Object.fromEntries(spec.cols.map(c=>[c,row[c]??null]));
+  const preview_hash=await ownerChangeHash({op,kind,proposed,current:current?{id:current.id,version:current.version}:null,list});
+  return {kind,op,requires_owner_approval:ownerGated(kind),current:current||null,proposed:op==="retire"?null:proposed,price_list_rows:list,preview_hash,writes:0};
+}
+async function knowledgeApproval(env,kind,b,target){
+  const plan=await previewKnowledgeChange(env,kind,target);if(!plan.requires_owner_approval)return null;
+  if(b.confirm_owner_approved!==true)throw Error("Owner confirmation is required: preview this change, then confirm it");
+  if(!b.preview_hash||b.preview_hash!==plan.preview_hash)throw Error(STALE_PREVIEW);
+  return {method:"knowledge_preview",ref:plan.preview_hash};
+}
+export async function saveKnowledgeVersion(env,kind,input,{actor="owner",decisionId=null,expectExisting=false,approval=null}={}){
   await ensureSalesIntelligenceStore(env);
   const spec=KINDS[kind];if(!spec)throw Error("Unknown knowledge kind");
   const row=await normalizeKnowledgeInput(env,kind,input);
-  const where=spec.identity.map(c=>row[c]===null?`${c} IS NULL`:`${c}=?`).join(" AND "),binds=spec.identity.filter(c=>row[c]!==null).map(c=>row[c]);
-  const cur=await first(env,`SELECT * FROM ${spec.table} WHERE ${where} AND status='current' LIMIT 1`,...binds);
+  requireOwnerApproval(kind,approval);
+  const {where,binds,cur}=await currentKnowledge(env,spec,row);
   if(expectExisting&&!cur)throw Error("No current knowledge exists to update");
   if(cur&&sameKnowledge(cur,row,spec.cols))return {created:false,idempotent:true,row:cur};
   const max=await first(env,`SELECT MAX(version) AS v FROM ${spec.table} WHERE ${where}`,...binds),id=uid(),t=now(),version=Number(max?.v||0)+1;
@@ -254,14 +287,15 @@ export async function saveKnowledgeVersion(env,kind,input,{actor="owner",decisio
   stmts.push(env.DB.prepare(`INSERT INTO ${spec.table}(${cols.join(",")}) VALUES(${cols.map(()=>"?").join(",")})`).bind(...vals));
   await env.DB.batch(stmts);
   const saved=await first(env,`SELECT * FROM ${spec.table} WHERE id=?`,id);
-  await auditSafe(env,"knowledge_version_saved","Owner-approved knowledge version saved",{kind,id,version,superseded:cur?.id||null,decision_id:decisionId,actor});
+  await auditSafe(env,"knowledge_version_saved","Owner-approved knowledge version saved",{kind,id,version,superseded:cur?.id||null,decision_id:decisionId,actor,approval_method:approval?.method||null});
   return {created:true,row:saved,superseded_id:cur?.id||null};
 }
-export async function retireKnowledge(env,kind,id,actor="owner"){
+export async function retireKnowledge(env,kind,id,actor="owner",approval=null){
   const spec=KINDS[kind];if(!spec)throw Error("Unknown knowledge kind");
+  requireOwnerApproval(kind,approval);
   const r=await env.DB.prepare(`UPDATE ${spec.table} SET status='retired' WHERE id=? AND status='current'`).bind(id).run();
   if(!r.meta?.changes)throw Error("Only current knowledge can be retired");
-  await auditSafe(env,"knowledge_version_retired","Owner retired knowledge",{kind,id,actor});return {retired:true,id};
+  await auditSafe(env,"knowledge_version_retired","Owner retired knowledge",{kind,id,actor,approval_method:approval?.method||null});return {retired:true,id};
 }
 export async function listKnowledge(env,kind,{search="",status="current",identity=null}={}){
   await ensureSalesIntelligenceStore(env);const spec=KINDS[kind];if(!spec)throw Error("Unknown knowledge kind");
@@ -409,9 +443,9 @@ async function addCaseOverride(env,requestId,mutate){
   const o=parseJson(r.case_overrides_json,{});mutate(o);await env.DB.prepare("UPDATE sales_requests SET case_overrides_json=?,updated_at=? WHERE id=?").bind(JSON.stringify(o),now(),requestId).run();
 }
 // Each resolution kind applies the owner's answer either to the current case only or as a new versioned knowledge row.
-async function applyResolution(env,decision,{action,scope,answer,actor}){
+async function applyResolution(env,decision,{action,scope,answer,actor,approval=null}){
   const {request,payload}=await resolutionContext(env,decision),save=scope!=="CASE_ONLY",kind=payload.resolution||"record",result={knowledge_action:save?scope:"CASE_ONLY",resulting_ref:null};
-  const saveOpts={actor,decisionId:decision.id,expectExisting:scope==="UPDATE_EXISTING"};
+  const saveOpts={actor,decisionId:decision.id,expectExisting:scope==="UPDATE_EXISTING",approval};
   if(action==="REJECT"){
     if(request&&payload.attribute)await addCaseOverride(env,request.id,o=>{o.rejected=[...new Set([...(o.rejected||[]),`${payload.attribute}=${payload.value}`])];});
     if(kind==="learning"&&payload.gap_fingerprint)await env.DB.prepare("UPDATE knowledge_gaps SET status='ignored',updated_at=? WHERE fingerprint=?").bind(now(),payload.gap_fingerprint).run();
@@ -420,7 +454,7 @@ async function applyResolution(env,decision,{action,scope,answer,actor}){
   if(kind==="learning"){
     if(!save){if(payload.gap_fingerprint)await env.DB.prepare("UPDATE knowledge_gaps SET status='case_by_case',updated_at=? WHERE fingerprint=?").bind(now(),payload.gap_fingerprint).run();return {...result,knowledge_action:"KEEP_CASE_BY_CASE"};}
     const inner={...decision,payload_json:JSON.stringify(payload.proposal||{}),request_id:null};
-    const r=await applyResolution(env,inner,{action:"ANSWER",scope,answer,actor});
+    const r=await applyResolution(env,inner,{action:"ANSWER",scope,answer,actor,approval});
     if(payload.gap_fingerprint)await env.DB.prepare("UPDATE knowledge_gaps SET status='saved',updated_at=? WHERE fingerprint=?").bind(now(),payload.gap_fingerprint).run();
     return r;
   }
@@ -443,7 +477,7 @@ async function applyResolution(env,decision,{action,scope,answer,actor}){
     if(!save){if(request)await addCaseOverride(env,request.id,o=>{o.owner_price={unit_price_minor:unit,decision_id:decision.id};});return result;}
     let configKey=payload.config_key||request?.matched_config_key;
     if(!configKey){const attrs=parseJson(request?.requirements_json,{}),flat={};for(const [k,v] of Object.entries(attrs))flat[k]=v.value;
-      configKey=(await saveKnowledgeVersion(env,"configuration",{product_key:decision.product_key,market:decision.market,attributes:flat,label:answer.config_label},{actor,decisionId:decision.id})).row.config_key;}
+      configKey=(await saveKnowledgeVersion(env,"configuration",{product_key:decision.product_key,market:decision.market,attributes:flat,label:answer.config_label},{actor,decisionId:decision.id,approval})).row.config_key;}
     const saved=await saveKnowledgeVersion(env,"price",{market:decision.market,product_key:decision.product_key,config_key:configKey,quantity_min:answer.quantity_min??request?.quantity,quantity_max:answer.quantity_max??null,unit_price_minor:unit,moq:answer.moq??null,currency:answer.currency},saveOpts);
     return {...result,resulting_ref:`price:${saved.row.id}`};
   }
@@ -485,7 +519,29 @@ async function applyResolution(env,decision,{action,scope,answer,actor}){
   }
   return {...result,knowledge_action:save?"RECORDED":"CASE_ONLY"};
 }
-export async function resolveDecision(env,{id,action,scope="CASE_ONLY",answer={},note="",actor="owner"}){
+// Whether this resolution would save reusable catalog knowledge. Case-only answers and rejections do not.
+function decisionWritesCatalog(decision,{action,scope,answer}){
+  if(action==="REJECT"||scope==="CASE_ONLY"||decision.owner_escalation_id)return false;
+  const payload=parseJson(decision.payload_json,{}),p=payload.resolution==="learning"?(payload.proposal||{}):payload,kind=p.resolution||"record";
+  if(["attribute_value","combination","price","cost","setting"].includes(kind))return true;
+  return kind==="discount"&&!!answer?.rule;
+}
+// The current catalog rows a decision could supersede: part of what the owner approves, so a newer row makes the preview stale.
+async function decisionCatalogState(env,productKey){
+  const out={};
+  for(const t of ["product_catalog","product_attribute_schema","product_configurations","price_versions","cost_versions"])out[t]=await all(env,`SELECT id,version FROM ${t} WHERE product_key=? AND status='current' ORDER BY id`,String(productKey||""));
+  for(const t of ["compatibility_rules","business_settings"])out[t]=await all(env,`SELECT id,version FROM ${t} WHERE status='current' ORDER BY id`);
+  return out;
+}
+export async function previewDecisionChange(env,{id,action,scope="CASE_ONLY",answer={}}){
+  await ensureSalesIntelligenceStore(env);const act=String(action||"").toUpperCase(),sc=String(scope||"CASE_ONLY").toUpperCase();
+  const decision=await first(env,"SELECT * FROM owner_decisions WHERE id=?",String(id||""));if(!decision)throw Error("Decision not found");
+  const list=await priceListRowsFor(env,{product_key:decision.product_key});
+  const writes_catalog=decisionWritesCatalog(decision,{action:act,scope:sc,answer}),catalog=writes_catalog?await decisionCatalogState(env,decision.product_key):null;
+  const preview_hash=await ownerChangeHash({id:decision.id,updated_at:decision.updated_at,status:decision.status,action:act,scope:sc,answer:answer||{},list,catalog});
+  return {writes_catalog,decision_type:decision.decision_type,market:decision.market,product_key:decision.product_key,scope:sc,answer:answer||{},price_list_rows:list,preview_hash,writes:0};
+}
+export async function resolveDecision(env,{id,action,scope="CASE_ONLY",answer={},note="",actor="owner",confirm_owner_approved=false,preview_hash=null}){
   await ensureSalesIntelligenceStore(env);
   const act=String(action||"").toUpperCase(),sc=String(scope||"CASE_ONLY").toUpperCase();
   if(!["APPROVE","REJECT","ANSWER"].includes(act))throw Error("action must be APPROVE, REJECT or ANSWER");
@@ -504,7 +560,14 @@ export async function resolveDecision(env,{id,action,scope="CASE_ONLY",answer={}
     if(closed?.status!=="RESOLVED")throw Error("The order was confirmed but its approval could not be closed; refresh and retry");
     return {decision:closed,effect:{knowledge_action:"CASE_ONLY",resulting_ref:closed.resulting_ref}};
   }
-  const effect=await applyResolution(env,decision,{action:act,scope:sc,answer:answer||{},actor});
+  let approval=null;
+  const plan=await previewDecisionChange(env,{id,action:act,scope:sc,answer});
+  if(plan.writes_catalog){
+    if(confirm_owner_approved!==true)throw Error("Owner confirmation is required: preview this change, then confirm it");
+    if(!preview_hash||preview_hash!==plan.preview_hash)throw Error(STALE_PREVIEW);
+    approval={method:"owner_decision",ref:plan.preview_hash};
+  }
+  const effect=await applyResolution(env,decision,{action:act,scope:sc,answer:answer||{},actor,approval});
   const status=act==="REJECT"?"REJECTED":"RESOLVED",t=now();
   const changed=await env.DB.prepare(`UPDATE owner_decisions SET status=?,owner_decision=?,owner_answer_json=?,owner_note=?,scope_json=?,knowledge_action=?,resulting_ref=?,resolved_by=?,resolved_at=?,updated_at=? WHERE id=? AND status='PENDING'`)
     .bind(status,act,JSON.stringify(answer||{}),String(note||"").slice(0,1000)||null,JSON.stringify({scope:sc}),effect.knowledge_action,effect.resulting_ref,String(actor).slice(0,120),t,t,id).run();
@@ -1048,11 +1111,18 @@ export async function handleSalesIntelligence(req,env,u){
     await ensureSalesIntelligenceStore(env);
     if(p[0]==="locked-rules")return json({ok:true,locked:LOCKED_RULES,currency_rules:CURRENCY_RULES});
     if(p[0]==="knowledge"&&p[1]&&req.method==="GET")return json({ok:true,items:await listKnowledge(env,p[1],{search:u.searchParams.get("search")||"",status:u.searchParams.get("status")||"current"})});
-    if(p[0]==="knowledge"&&p[1]&&p[2]==="retire"&&req.method==="POST")return json({ok:true,...await retireKnowledge(env,p[1],String(b.id||""),actor)});
-    if(p[0]==="knowledge"&&p[1]&&req.method==="POST")return json({ok:true,...await saveKnowledgeVersion(env,p[1],b.input||b,{actor,expectExisting:!!b.expect_existing})});
+    if(p[0]==="knowledge"&&p[1]&&p[2]==="retire"&&p[3]==="preview"&&req.method==="POST")return json({ok:true,...await previewKnowledgeChange(env,p[1],{id:String(b.id||"")})});
+    if(p[0]==="knowledge"&&p[1]&&p[2]==="preview"&&req.method==="POST")return json({ok:true,...await previewKnowledgeChange(env,p[1],{input:b.input||b,expectExisting:!!b.expect_existing})});
+    if(p[0]==="knowledge"&&p[1]&&p[2]==="retire"&&req.method==="POST"){const id=String(b.id||"");return json({ok:true,...await retireKnowledge(env,p[1],id,actor,await knowledgeApproval(env,p[1],b,{id}))});}
+    if(p[0]==="knowledge"&&p[1]&&req.method==="POST"){const input=b.input||b,expectExisting=!!b.expect_existing;return json({ok:true,...await saveKnowledgeVersion(env,p[1],input,{actor,expectExisting,approval:await knowledgeApproval(env,p[1],b,{input,expectExisting})})});}
+    if(p[0]==="catalog-intake"&&req.method==="POST"){const tools={first,all,normKey,normText,saveKnowledgeVersion,systemKeys:SYSTEM_REQUIREMENT_KEYS};
+      if(p[1]==="preview")return json({ok:true,...await previewProductSheets(env,b.products,tools)});
+      if(p[1]==="apply"){const r=await applyProductSheets(env,b.products,{confirm_owner_approved:b.confirm_owner_approved,preview_hash:b.preview_hash,actor},tools);await auditSafe(env,r.ok?"catalog_intake_applied":"catalog_intake_partial",r.ok?"Owner applied a reviewed product sheet":"A reviewed product sheet stopped part-way",{...r,actor});return json(r,r.ok?200:409);}
+    }
     if(p[0]==="decisions"&&!p[1]&&req.method==="GET")return json({ok:true,items:await listDecisions(env,{status:(u.searchParams.get("status")||"PENDING").toUpperCase(),type:u.searchParams.get("type")})});
     if(p[0]==="decisions"&&p[1]&&p[2]==="history")return json({ok:true,items:await decisionHistory(env,p[1])});
-    if(p[0]==="decisions"&&p[1]==="resolve"&&req.method==="POST")return json({ok:true,...await resolveDecision(env,{id:String(b.id||""),action:b.action,scope:b.scope,answer:b.answer||{},note:b.note,actor})});
+    if(p[0]==="decisions"&&p[1]==="preview"&&req.method==="POST")return json({ok:true,...await previewDecisionChange(env,{id:String(b.id||""),action:b.action,scope:b.scope,answer:b.answer||{}})});
+    if(p[0]==="decisions"&&p[1]==="resolve"&&req.method==="POST")return json({ok:true,...await resolveDecision(env,{id:String(b.id||""),action:b.action,scope:b.scope,answer:b.answer||{},note:b.note,actor,confirm_owner_approved:b.confirm_owner_approved,preview_hash:b.preview_hash})});
     if(p[0]==="gaps")return json({ok:true,items:await all(env,"SELECT * FROM knowledge_gaps ORDER BY CASE status WHEN 'recurring' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,occurrences DESC LIMIT 100")});
     if(p[0]==="gaps-detect"&&req.method==="POST")return json({ok:true,...await detectRecurringGaps(env)});
     if(p[0]==="requests"&&!p[1]&&req.method==="GET")return json({ok:true,items:(await all(env,`SELECT r.*,q.status AS quote_status,q.total_minor,q.currency,q.unit_price_minor,q.price_version_id,q.margin_json,q.pricing_mode,pv.version AS price_version,pv.quantity_min,pv.quantity_max
