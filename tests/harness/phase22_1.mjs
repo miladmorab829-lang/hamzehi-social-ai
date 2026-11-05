@@ -8,7 +8,7 @@ await call("/api/quotes",null,"GET");await call("/api/si/knowledge/product",null
 const LIST=`INSERT INTO commercial_price_items(id,product_key,product_name,sku,market,currency,unit_price_minor,moq,version,active,effective_from,effective_until,approved_by,approved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 const T="2026-10-01T00:00:00.000Z";
 for(const [id,key,name,market,cur,price] of [["L1","test-a","علبة تجربة · 13x16x10 · قطعتين","ARAB","USD",250],["L2","test-b","علبة تجربة · 13x16x10 · ثلاث قطع","ARAB","USD",300],["L3","test-c","جعبه تست · 13x16 · 2 تکه","IRAN","TOMAN",90000]])
-  dbrun(LIST,[id,key,name,null,market,cur,price,null,1,1,null,null,"admin",T,T,T]);
+  dbrun(LIST,[id,key,name,null,market,cur,price,id==="L3"?100:null,1,1,null,null,"admin",T,T,T]);
 await call("/api/gallery/options",null,"GET");
 const seedPhoto=(id,{status="verified",real=1,generated=0,size="13x16x10",spec=true}={})=>{
   dbrun("INSERT INTO visual_product_media(id,source_platform,source_identity,media_type,source_kind,ownership_status,generated_detected,candidate_status,verified_real_product,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",[id,"r2","r2:"+id,"photo","owner_gallery","owned",generated,status,real,1,T,T]);

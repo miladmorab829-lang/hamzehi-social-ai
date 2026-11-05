@@ -1,3 +1,4 @@
+import { statesLessThanQuantity } from "./commercial-policy.js";
 // ============================================================================================================================
 // Sales AI Gateway — the conversational understanding + drafting layer of the Telegram Sales Brain.
 //
@@ -271,6 +272,7 @@ export function salesAiGroundedNumbers(input){
 // money multiplier but no quantity unit is not a quantity. Used to accept an AI-extracted quantity only when the customer said it now.
 const GATE_NOT_QUANTITY_NEXT=gateSet(["تکه","تیکه","قطعه","قطع","قطعتین","dim","درصد","تومان","تومن","ریال","دلار","دینار","usd"]);
 export function salesAiMessageQuantities(message){
+  if(statesLessThanQuantity(message))return [];
   return [...new Set(gateNumberMentions(message).filter(m=>Number.isSafeInteger(m.value)&&m.value>0&&!GATE_NOT_QUANTITY_NEXT.has(m.next)&&!GATE_TIME_UNITS.has(m.next)&&!(m.next==="تا"&&GATE_TIME_UNITS.has(m.next2))&&!(m.multiplied&&!GATE_QTY_UNITS.has(m.next))).map(m=>m.value))];
 }
 // The confirmation guard: AI prose never registers an order (that comes only from the deterministic segment after a validated

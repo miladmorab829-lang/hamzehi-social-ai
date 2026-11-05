@@ -3,6 +3,7 @@
 // Code holds engines and safety rules; business knowledge lives in owner-approved, versioned DB rows.
 import { canonicalCurrency, MARKET_CURRENCY, CURRENCY_RULES } from "./autonomy-engine.js";
 import { previewProductSheets, applyProductSheets, ownerChangeHash } from "./catalog-intake.js";
+import { commercialDefaultDiscount, moqPolicy } from "./commercial-policy.js";
 
 let D={};
 // index.js injects shared helpers (audit, draft gate, quote/order helpers) to avoid a circular import.
@@ -756,7 +757,7 @@ async function buildQuote(env,req,{mode,price=null,unit_price_minor=null,decisio
   if(!Number.isSafeInteger(subtotal))throw Error("Quote subtotal overflow");
   let discount=0,discountReason=null;
   if(overrides.discount){discount=overrides.discount.discount_minor;discountReason=`case:${overrides.discount.reason}`;}
-  else{const rule=(await getSetting(env,"discount_rule",ctx))?.value;if(rule&&(!rule.min_quantity||req.quantity>=rule.min_quantity)){discount=rule.type==="percent_bp"?Math.floor(subtotal*rule.value/10000):rule.value;discountReason="approved_discount_rule";}}
+  else{const rule=(await getSetting(env,"discount_rule",ctx))?.value||commercialDefaultDiscount(req.market);if(rule&&(!rule.min_quantity||req.quantity>=rule.min_quantity)){discount=rule.type==="percent_bp"?Math.floor(subtotal*rule.value/10000):rule.value;discountReason="approved_discount_rule";}}
   const q={market:req.market,product:k.product?.name||req.product_text,quantity:req.quantity,currency,unit_price_minor:unit,discount_minor:discount,shipping_minor:charges.shipping_minor,tax_minor:charges.tax_minor,other_fees_minor:charges.other_fees_minor,
     moq:price?.moq??null,payment_terms:charges.payment_terms,delivery_terms:charges.delivery_terms,expires_at:charges.expires_at,pricing_mode:mode,price_version_id:price?.id||null,custom_price_decision_id:decisionId,config_key:configKey,request_id:req.id,
     lead_id:req.lead_id,conversation_id:req.conversation_id,discount_reason:discountReason};
@@ -830,11 +831,11 @@ export async function siApprovedPrice(env,{market,productKey,texts=[],quantity=n
   if(!tiers.length)return {...base,status:"no_price",config_key:configKey};
   if(tiers.some(p=>canonicalCurrency(p.currency)!==MARKET_CURRENCY[market]))return {...base,status:"currency_conflict",config_key:configKey};
   const policy=pickSetting(settings,"quantity_tier_policy",ctx),moqSetting=pickSetting(settings,"moq",ctx),rule=pickSetting(settings,"discount_rule",ctx);
-  const moq=Number.isSafeInteger(Number(tiers[0].moq))&&Number(tiers[0].moq)>0?Number(tiers[0].moq):Number.isSafeInteger(Number(moqSetting?.value))&&Number(moqSetting.value)>0?Number(moqSetting.value):null;
+  const moq=Number.isSafeInteger(Number(tiers[0].moq))&&Number(tiers[0].moq)>0?Number(tiers[0].moq):Number.isSafeInteger(Number(moqSetting?.value))&&Number(moqSetting.value)>0?Number(moqSetting.value):moqPolicy({market,product:product.name,configuration:configurations.find(c=>c.config_key===configKey)?.label}).moq;
   // One approved row prices every quantity it covers; several rows need the owner's tier policy (never inferred).
   const tierOf=q=>tiers.length===1?((q===null||(q>=tiers[0].quantity_min&&(tiers[0].quantity_max===null||q<=tiers[0].quantity_max)))?{status:"matched",price:tiers[0]}:{status:"no_tier"}):policy?resolveTierPrice(tiers,q,policy.value):{status:"policy_missing"};
   const shared={...base,config_key:configKey,moq,policy:policy?.value||null,tiers:tiers.map(p=>({min:p.quantity_min,max:p.quantity_max,unit_price_minor:p.unit_price_minor,price_version_id:p.id,version:p.version})),
-    discount_rule:rule?.value&&["percent_bp","amount_minor"].includes(rule.value.type)?{type:rule.value.type,value:Number(rule.value.value),min_quantity:rule.value.min_quantity??null,id:rule.id,version:rule.version}:null};
+    discount_rule:rule?.value&&["percent_bp","amount_minor"].includes(rule.value.type)?{type:rule.value.type,value:Number(rule.value.value),min_quantity:rule.value.min_quantity??null,id:rule.id,version:rule.version}:commercialDefaultDiscount(market)};
   const q=Number.isSafeInteger(quantity)&&quantity>0?quantity:null;
   if(q===null&&tiers.length>1)return {...shared,status:"needs_quantity"};
   if(q!==null&&moq&&q<moq){const atMoq=tierOf(moq);return {...shared,status:"under_moq",quantity:q,unit_at_moq:atMoq.status==="matched"?atMoq.price.unit_price_minor:null};}

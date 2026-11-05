@@ -20,6 +20,7 @@ import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market
 import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE_STAGES, PIPELINE_SIDE_STATES } from "./lead-scoring.js";
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
 import { ownerChangeHash } from "./catalog-intake.js";
+import { commercialDefaultDiscount, evaluateOrderLines, isUnverifiedConfiguration, marketStandardMoq, statesLessThanQuantity } from "./commercial-policy.js";
 import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, optOutStateFromMessages, OPT_OUT_RULES_ID, OPT_OUT_RULES_KEY, OPT_OUT_ALL_LEGACY } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
@@ -7605,7 +7606,8 @@ function customerDestination(message){
 function extractConversationMemoryFacts(message,intent,inboxId,{lastAction=null}={}){
   const text=String(message||"").normalize("NFKC").trim().slice(0,2000),facts=[];
   if(!text)return facts;
-  const add=(fact_type,value,memory_key=fact_type)=>{const normalized=conversationMemoryValue(value);if(normalized!==null&&CONVERSATION_MEMORY_FACT_TYPES.has(fact_type))facts.push({fact_type,value:normalized,memory_key});};
+  const lessThan=statesLessThanQuantity(text);
+  const add=(fact_type,value,memory_key=fact_type)=>{if(fact_type==="requested_quantity"&&lessThan)return;const normalized=conversationMemoryValue(value);if(normalized!==null&&CONVERSATION_MEMORY_FACT_TYPES.has(fact_type))facts.push({fact_type,value:normalized,memory_key});};
   add("customer_message",text,`customer_message:${inboxId}`);
   // Quantity, in order of evidence: a labelled quantity, a correction («نه ۵۰۰ تا» / «لا مو 1000، 500» → the corrected value), a number
   // with a unit, a spoken quantity («پونصد تا»), a reply that is only a number. The newest statement supersedes the stored one.
@@ -8569,13 +8571,15 @@ function salesPickVariant(p,texts){
     if(best.length===1)return {variant:best[0]};
     break;
   }
-  const configs=[...new Set(pool.map(v=>v.configuration))];
+  // (a label the owner said is not a real model stays priced in the list, but is never offered as a choice)
+  const configs=[...new Set(pool.map(v=>v.configuration))].filter(c=>!isUnverifiedConfiguration(c));
   return {missing:{key:"configuration",label:"مدل",question_fa:"کدوم مدل رو می‌خواید؟ ("+configs.join("، ")+")",question_ar:"أي موديل تريد؟ ("+configs.join("، ")+")",values:configs}};
 }
-// The market's owner-approved discount rule (business setting discount_rule, e.g. ARAB: 10% from 1001 pieces). Only that market's rule.
+// The market's owner-approved discount rule: the business setting discount_rule (ARAB: 10% from 1001 pieces), else the Phase 23 policy
+// (IRAN: 10% from 1,000 of the same size). One rule per market, so two discounts can never stack.
 async function salesListDiscountRule(env,market){
   const s=await getSetting(env,"discount_rule",{market}).catch(()=>null),v=s?.value;
-  if(!v||!["percent_bp","amount_minor"].includes(v.type)||!(Number(v.value)>0)||(s.scope_key&&s.scope_key!==`market:${market}`))return null;
+  if(!v||!["percent_bp","amount_minor"].includes(v.type)||!(Number(v.value)>0)||(s.scope_key&&s.scope_key!==`market:${market}`))return commercialDefaultDiscount(market);
   return {type:v.type,value:Number(v.value),min_quantity:v.min_quantity??null,id:s.id,version:s.version};
 }
 function salesListPrice(p,market,quantity,{texts=[],discountRule=null}={}){
@@ -8588,16 +8592,16 @@ function salesListPrice(p,market,quantity,{texts=[],discountRule=null}={}){
     item=pick.variant.item;requirements={...(pick.variant.size?{size:pick.variant.size}:{}),configuration:pick.variant.configuration};
     name=[p.name,new Set(p.variants.map(v=>v.size)).size>1?pick.variant.size:null,pick.variant.configuration].filter(Boolean).join(" ");
   }else{if(p.items.length!==1)return {...base,status:"price_conflict"};item=p.items[0];}
-  const unit=Number(item.unit_price_minor),moq=Number.isSafeInteger(Number(item.moq))&&Number(item.moq)>0?Number(item.moq):null;
-  const priced={...base,product_name:name,requirements};
+  const unit=Number(item.unit_price_minor),priced={...base,product_name:name,requirements};
   if(canonicalCurrency(item.currency)!==MARKET_CURRENCY[market])return {...priced,status:"currency_conflict"};
   if(!Number.isSafeInteger(unit)||unit<=0)return {...priced,status:"no_price"};
-  const q=Number.isSafeInteger(quantity)&&quantity>0?quantity:null,shared={...priced,moq,policy:null,tiers:[{min:moq||1,max:null,unit_price_minor:unit}],discount_rule:discountRule,price_item:{id:item.id,version:Number(item.version)}};
-  if(q!==null&&moq&&q<moq)return {...shared,status:"under_moq",quantity:q,unit_at_moq:unit};
-  const subtotal=q===null?null:unit*q;if(subtotal!==null&&!Number.isSafeInteger(subtotal))return {...shared,status:"overflow",quantity:q};
-  const r=discountRule;let discount=null;
-  if(subtotal!==null&&r&&r.value>0&&(!r.min_quantity||q>=r.min_quantity)){const amount=r.type==="percent_bp"?Math.floor(subtotal*r.value/10000):r.value;discount={type:r.type,value:r.value,amount_minor:Math.min(amount,subtotal),rule_id:r.id,rule_version:r.version};}
-  return {...shared,status:"priced",quantity:q,unit_price_minor:unit,subtotal_minor:subtotal,discount,total_minor:subtotal===null?null:subtotal-(discount?.amount_minor||0)};
+  // MOQ, per-size quantity and discount come from the one commercial policy; the price stays the approved row's.
+  const [line]=evaluateOrderLines([{market,product:p.name,size:requirements.size||null,configuration:requirements.configuration||null,quantity,unit_price_minor:unit,currency:item.currency,row_moq:item.moq}],{discountRule});
+  const moq=line.moq,shared={...priced,moq,moq_rule:line.moq_rule,policy:null,tiers:[{min:moq||1,max:null,unit_price_minor:unit}],discount_rule:discountRule,price_item:{id:item.id,version:Number(item.version)}};
+  if(line.status==="owner_review")return {...shared,status:"owner_review",review_reason:line.review_reason,quantity:line.quantity};
+  if(line.status==="under_moq")return {...shared,status:"under_moq",quantity:line.quantity,unit_at_moq:unit};
+  if(line.status!=="priced")return {...shared,status:line.status,quantity:line.quantity};
+  return {...shared,status:"priced",quantity:line.quantity,unit_price_minor:unit,subtotal_minor:line.subtotal_minor,discount:line.discount,total_minor:line.total_minor};
 }
 // ---- Standard colour options come ONLY from approved Business Knowledge (typed color.exterior members or an engine-taught
 // exterior-colour collection) of this conversation's markets: the product's own approved colours when the owner set them for that
@@ -8763,7 +8767,7 @@ async function salesPricing(env,{market,message,history,chronological,memoryProd
    const fold=t=>{let x=salesColloquialFold(t);for(const n of names)for(const c of variants(n))x=x.replace(new RegExp(`(^|[^\\p{L}])${c.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}(?=$|[^\\p{L}])`,"gu"),"$1"+n);return x;};
    message=fold(message);if(Array.isArray(chronological))chronological=chronological.map(t=>typeof t==="string"?fold(t):t);if(typeof memoryProduct==="string")memoryProduct=fold(memoryProduct);}
   // What this market sells (names, models, sizes — never prices): the Sales AI's catalog context, from the same single read.
-  const catalog_summary=[...catalog.listProducts.map(p=>({product:p.name,models:p.variants?[...new Set(p.variants.map(v=>v.configuration))]:[],sizes:p.variants?[...new Set(p.variants.map(v=>v.size).filter(Boolean))]:[]})),...catalog.siProducts.map(p=>({product:p.name,models:[],sizes:[]}))].slice(0,30);
+  const catalog_summary=[...catalog.listProducts.map(p=>({product:p.name,models:p.variants?[...new Set(p.variants.map(v=>v.configuration))].filter(c=>!isUnverifiedConfiguration(c)):[],sizes:p.variants?[...new Set(p.variants.map(v=>v.size).filter(Boolean))]:[]})),...catalog.siProducts.map(p=>({product:p.name,models:[],sizes:[]}))].slice(0,30);
   // …and the keys those products are identified by (AI-02: the only product_key values an AI interpretation may name).
   const product_keys=[...new Map([...catalog.listProducts,...catalog.siProducts].filter(p=>p.key&&p.name).map(p=>[p.key,{key:p.key,product:p.name}])).values()].slice(0,30);
   const resolution=salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memorySource,history,productNamedNow});
@@ -8779,7 +8783,7 @@ async function salesPricing(env,{market,message,history,chronological,memoryProd
   return {...result,resolution,product:p,catalog_summary,product_keys};
 }
 const SALES_PRICE_STATUSES_PRICED=new Set(["priced","needs_quantity","under_moq"]);
-const SALES_PRICE_STATUSES_OWNER=new Set(["no_price","configuration_not_priced","configuration_not_available","policy_missing","no_tier","tier_conflict","currency_conflict","price_conflict","overflow","no_product"]);
+const SALES_PRICE_STATUSES_OWNER=new Set(["owner_review","no_price","configuration_not_priced","configuration_not_available","policy_missing","no_tier","tier_conflict","currency_conflict","price_conflict","overflow","no_product"]);
 const salesDigits=(n,language)=>language==="Iraqi Arabic"?String(n):String(n).replace(/[0-9]/g,d=>PERSIAN_DIGITS[d]);
 // Money as the customer reads it: «۴۵٬۰۰۰ تومان» / «45,000 تومان», «۲٫۵۰ دلار» / «2.50 دولار» (minor units, the market's currency rule).
 function salesMoneyText(currency,minor,language){
@@ -8804,7 +8808,10 @@ function salesPriceReply(r,language){
   if(r.status==="priced"&&Number.isSafeInteger(r.quantity)&&Number.isSafeInteger(r.total_minor)){
     const unit=money(r.unit_price_minor),total=money(r.total_minor),qty=d(r.quantity),disc=r.discount?(r.discount.type==="percent_bp"?salesPercentText(r.discount.value,language):money(r.discount.amount_minor)):null;
     if(!unit||!total)return null;
-    return {parts:[ar?`${name} لـ ${qty} قطعة: سعر القطعة ${unit}${disc?`، ومع خصم ${disc} يصير المجموع ${total}.`:` والمجموع ${total}.`}`:`${name} برای ${qty} عدد: هر عدد ${unit}${disc?`، با ${disc} تخفیف جمعش ${total}.`:` و جمعش ${total}.`}`,ar?"أسجله لك؟":"ثبتش کنم؟"],texts:[unit,total,qty,disc],offer:true};
+    // quantity, unit price, subtotal, discount and total: the customer sees how the total was reached
+    const subtotal=disc?money(r.subtotal_minor):null,saved=disc?money(r.discount.amount_minor):null;
+    if(disc&&(!subtotal||!saved))return null;
+    return {parts:[ar?`${name} لـ ${qty} قطعة: سعر القطعة ${unit}${disc?`، المجموع ${subtotal}، خصم ${disc} (${saved})، والمبلغ النهائي ${total}.`:` والمجموع ${total}.`}`:`${name} برای ${qty} عدد: هر عدد ${unit}${disc?`، جمع ${subtotal}، ${disc} تخفیف (${saved})، مبلغ نهایی ${total}.`:` و جمعش ${total}.`}`,ar?"أسجله لك؟":"ثبتش کنم؟"],texts:[unit,total,qty,disc,subtotal,saved],offer:true};
   }
   if(r.status==="priced"){
     const unit=money(r.unit_price_minor),moq=r.moq?d(r.moq):null;if(!unit)return null;
@@ -8836,7 +8843,7 @@ function salesNegotiationReply(kind,r,language){
   if(["discount","price","competitor"].includes(kind)&&rule&&rule.value>0){
     const pct=rule.type==="percent_bp"?salesPercentText(rule.value,language):money(rule.value);
     if(r.status==="priced"&&r.discount&&q!==null){const total=money(r.total_minor);return {action:"negotiate",parts:[ar?`لـ ${d(q)} قطعة ينطبق خصم ${pct}، والمجموع ${total}.`:`برای ${d(q)} عدد ${pct} تخفیف اعمال میشه و جمعش ${total}.`,ar?"أسجله لك؟":"ثبتش کنم؟"],texts:[pct,total,d(q)],offer:true};}
-    if(rule.min_quantity)return {action:"negotiate",parts:[ar?`عدنا خصم ${pct} للطلبات من ${d(rule.min_quantity)} قطعة وفوق.`:`برای سفارش ${d(rule.min_quantity)} عدد به بالا ${pct} تخفیف داریم.`],texts:[pct,d(rule.min_quantity)]};
+    if(rule.min_quantity)return {action:"negotiate",parts:[ar?`عدنا خصم ${pct} للطلبات من ${d(rule.min_quantity)} قطعة وفوق${rule.scope==="same_size"?" من نفس القياس":""}.`:`برای سفارش ${d(rule.min_quantity)} عدد به بالا${rule.scope==="same_size"?" از یک سایز":""} ${pct} تخفیف داریم.`],texts:[pct,d(rule.min_quantity)]};
     if(q===null)return {action:"negotiate",parts:[ar?`عدنا خصم ${pct} على الطلب؛ شكد العدد اللي تحتاجه؟`:`روی سفارش ${pct} تخفیف داریم؛ چند عدد لازم دارید؟`],texts:[pct]};
   }
   if(["price","competitor"].includes(kind)&&["RANGE","MINIMUM_BREAK"].includes(r.policy)&&(r.tiers||[]).length>1){
@@ -8844,7 +8851,8 @@ function salesNegotiationReply(kind,r,language){
     const better=r.tiers.filter(t=>(q===null||t.min>q)&&(current===null||t.unit_price_minor<current)).sort((a,b)=>a.min-b.min)[0];
     if(better){const unit=money(better.unit_price_minor),from=d(better.min),to=better.max&&r.policy==="RANGE"?d(better.max):null;if(unit)return {action:"handle_objection",parts:[ar?`${to?`من ${from} إلى ${to} قطعة`:`من ${from} قطعة وفوق`} سعر القطعة ${unit}.`:`${to?`برای ${from} تا ${to} عدد`:`از ${from} عدد به بالا`} هر عدد ${unit} میشه.`],texts:[unit,from,to]};}
   }
-  if(kind==="moq"&&Number.isSafeInteger(r.moq))return {action:"handle_objection",parts:[ar?`أقل كمية لـ ${name} هي ${d(r.moq)} قطعة.`:`حداقل سفارش ${name} ${d(r.moq)} عدده.`],texts:[d(r.moq)]};
+  // Below the MOQ is never refused and never granted here: the customer is asked the quantity, and that quantity goes to the owner.
+  if(kind==="moq"&&Number.isSafeInteger(r.moq))return {action:"handle_objection",parts:[ar?`أقل كمية لـ ${name} هي ${d(r.moq)} قطعة لكل قياس.`:`حداقل سفارش ${name} برای هر سایز ${d(r.moq)} عدده.`,...(q===null?[ar?"إذا تحتاج أقل، گلي شكد العدد حتى أعرضه على الإدارة.":"اگه کمتر لازم دارید، تعدادش رو بفرمایید تا برای تأیید بررسی کنم."]:[])],texts:[d(r.moq)]};
   return null;
 }
 // Said ONLY after the order candidate was actually written (see salesEnsureChatOrderCandidate). askName: the first missing order
@@ -8955,7 +8963,7 @@ const salesOfferPrice=p=>p?{ref:p.price_version?.id||p.price_item?.id||null,unit
 async function salesOpenAcceptanceDecision(env,{row,candidate}){
   const fingerprint=`ORDER_CANDIDATE|${candidate.candidate_id}|${candidate.offer.offer_hash}`;
   const result=await openDecision(env,{decision_type:"ORDER_CANDIDATE_APPROVAL",fingerprint,priority:15,order_id:candidate.order_id||null,lead_id:row.lead_id,conversation_id:row.conversation_id,market:candidate.market,product_key:candidate.product?.key||null,
-    question:"Customer accepted the approved offer: confirm this order candidate (approve the quote before anything is ordered or paid)",known:{order_candidate:candidate},missing:candidate.open_issues||[],
+    question:"Customer accepted the approved offer: confirm this order candidate (approve the quote before anything is ordered or paid)",known:{order_candidate:candidate,price_breakdown:{quantity:candidate.offer?.quantity??null,currency:candidate.price?.currency||null,unit_price_minor:candidate.price?.unit_price_minor??null,subtotal_minor:candidate.price?.subtotal_minor??null,discount_minor:candidate.price?.discount?.amount_minor??0,total_minor:candidate.price?.total_minor??null,moq:candidate.price?.moq??null}},missing:candidate.open_issues||[],
     recommendation:"Confirm through the existing quote approval (prepare, approve and send the quote). Nothing is ordered, charged or sent automatically.",
     risk:"Order candidate only: not an order and not a payment.",payload:{resolution:"order_candidate",candidate_id:candidate.candidate_id,offer_hash:candidate.offer.offer_hash}});
   if(result.created)await env.DB.prepare("UPDATE owner_decisions SET status='SUPERSEDED',updated_at=? WHERE status='PENDING' AND decision_type='ORDER_CANDIDATE_APPROVAL' AND fingerprint LIKE ? AND fingerprint<>?").bind(now(),`ORDER_CANDIDATE|${candidate.candidate_id}|%`,fingerprint).run();
@@ -9283,7 +9291,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // observation is advisory visual context and never an authoritative fact for the validator.
   const imageReference=preloaded.imageReference||loadedImageReference||{status:"none",images:[],image_count:0};
   const imageRefId=imageReference.status==="resolved"?imageReference.media_id:imageReference.status==="none"&&typeof memory.customer_image_reference==="string"?memory.customer_image_reference:null,currentImage=imageReference.basis==="current_message",imageAmbiguous=imageReference.status==="ambiguous";
-  let knownQuantity=memory.requested_quantity,quantityValid=Number.isSafeInteger(knownQuantity)&&knownQuantity>0;
+  // «less than N» asks for an exception: no quantity is assumed, neither N nor an older one, until the customer says how many.
+  let knownQuantity=statesLessThanQuantity(row.message)?undefined:memory.requested_quantity,quantityValid=Number.isSafeInteger(knownQuantity)&&knownQuantity>0;
   // ---- Conversation state → ONE next-best action (a salesperson, not a questionnaire).
   const known={product_or_model:!!model||!!imageRefId,quantity:quantityValid,size:!!memory.requested_size,customization:!!(memory.printing||memory.branding),destination:!!memory.destination,color:!!(memory.exterior_color||memory.interior_color)};
   // The referenced customer image's advisory category is used ONLY as a lookup key for requirement rules (e.g. ring_box);
@@ -9612,7 +9621,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const escalationTopic=e=>{const ev=eventsById.get("sales-brain:"+e.source_message_id);if(!ev?.details_json)return null;try{return JSON.parse(ev.details_json).owner_topic||null;}catch{return null;}};
   // Same issue = same reason AND (for prices) the same product AND (for missing knowledge) the same subject — a DIFFERENT unknown
   // request in the same conversation is its own owner question (never absorbed by an older one). No subject on either side = as before.
-  const sameIssue=(e,code,topic=null)=>e.reason_code===code&&(code!=="unsupported_price"||!priceProduct||!escalationProduct(e)||escalationProduct(e)===priceProduct)&&(code!=="missing_business_knowledge"||!topic||!escalationTopic(e)||escalationTopic(e)===topic);
+  // (an MOQ exception is one product at one quantity: another product, or a changed quantity, is a new question for the owner)
+  const escalationQuantity=e=>{const ev=eventsById.get("sales-brain:"+e.source_message_id);if(!ev?.details_json)return null;try{return JSON.parse(ev.details_json).customer_known_facts?.requested_quantity??null;}catch{return null;}};
+  const sameIssue=(e,code,topic=null)=>e.reason_code===code&&(!["unsupported_price","unclear_moq"].includes(code)||!priceProduct||!escalationProduct(e)||escalationProduct(e)===priceProduct)&&(code!=="unclear_moq"||!Number.isSafeInteger(pricing?.quantity)||escalationQuantity(e)===null||escalationQuantity(e)===pricing.quantity)&&(code!=="missing_business_knowledge"||!topic||!escalationTopic(e)||escalationTopic(e)===topic);
   let ownerTopic=null;
   const escalate=(kind,reason,topic=null)=>{const same=openEscalations.find(e=>sameIssue(e,ownerEscalationReason({needs_owner_reason:reason}),topic));if(same){action="wait_for_owner";waitingOn=same.reason_code;return;}action=kind;needsOwner=true;needsOwnerReason=reason;ownerTopic=topic;};
   // ---- Sales agent: the approved price of THIS market answers at once; what the approved data does not cover becomes ONE question
@@ -9624,6 +9635,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // mayEscalate=false (a turn that did not ask for a price): an approved price may still be given, but a missing one is never escalated.
   const priceHandled=({mayEscalate=true}={})=>{
     if(!pricing)return false;
+    // Below the MOQ: never a refusal and never an approval. The customer is told the minimum and the exception goes to the owner.
+    // (on any turn, a price question or not; while the same case is open the customer still gets this answer, not a generic wait)
+    if(pricing.status==="under_moq"){escalate("moq_owner","approved_moq_missing");if(action==="wait_for_owner")action="moq_owner";return true;}
+    // An unverified or unknown model is the owner's to review, whichever rule might have fitted.
+    if(pricing.status==="owner_review"){if(!mayEscalate)return false;escalate("price_owner","commercial_owner_review_required");return true;}
     if(pricedNow){priceReply=salesPriceReply(pricing,language);if(!priceReply)return false;action="answer_price";return true;}
     if(pricing.status==="product_ambiguous"){if(timesAsked("product_or_model")>=2){if(!mayEscalate)return false;escalate("price_owner","authoritative_price_required");return true;}action="clarify_product";askedField="product_or_model";clarifyCandidates=pricing.candidates.map(c=>({...c,name:salesBrainScriptLanguage(c.name)===language?c.name:c.terms.find(t=>salesBrainScriptLanguage(t)===language)||c.name}));return true;}
     if(pricing.status==="missing_attribute"){const field="attribute:"+pricing.attribute.key;if(timesAsked(field)>=2){if(!mayEscalate)return false;escalate("price_owner","authoritative_price_required");return true;}action="ask_attribute";askedField=field;attributeAsk=pricing.attribute;return true;}
@@ -9658,9 +9674,13 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // An acceptance without an open offer for exactly this deal first gets that offer (the customer confirms the exact approved price).
   else if(!acceptedAgain&&(acceptance||(intent==="accepted"&&!formalQuoteReply))&&pricedNow&&priceHandled()){}
   // The approved answer to an objection is given once; asked again (e.g. «more discount?»), anything beyond it is the owner's decision.
+  else if(pricing?.status==="under_moq"&&(objectionKind||intent==="asks_moq"))priceHandled();
   else if(objectionKind&&pricedNow&&(negotiation=salesNegotiationReply(objectionKind,pricing,language))&&!recentReplies.some(r=>salesBrainClaimText(r)===salesBrainClaimText(negotiation.parts.join(" ")))){action=negotiation.action;}
   else if(intent==="asks_shipping"||intent==="negotiating"||intent==="objection_price")escalate("commercial_owner","commercial_owner_review_required");
-  else if(intent==="asks_moq"){const moqFact=knowledge.filter(x=>x.domain==="quantity"&&x.attribute==="moq").sort((a,b)=>Number(b.market===conversationMarket)-Number(a.market===conversationMarket))[0];let moqValue=null;try{moqValue=JSON.parse(moqFact?.value_json||"null");}catch{}if(!(Number.isSafeInteger(moqValue)&&moqValue>0)&&pricedNow&&Number.isSafeInteger(pricing.moq))moqValue=pricing.moq;if(Number.isSafeInteger(moqValue)&&moqValue>0){action="answer_moq";answerNumbers.push(moqValue);}else escalate("moq_owner","approved_moq_missing");}
+  else if(intent==="asks_moq"){const moqFact=knowledge.filter(x=>x.domain==="quantity"&&x.attribute==="moq").sort((a,b)=>Number(b.market===conversationMarket)-Number(a.market===conversationMarket))[0];let moqValue=null;try{moqValue=JSON.parse(moqFact?.value_json||"null");}catch{}
+    // The priced model's own MOQ comes first (a general fact would be wrong for a bag drawer or a half-service size); then the general value.
+    if(pricedNow&&Number.isSafeInteger(pricing.moq))moqValue=pricing.moq;else if(pricing?.status==="owner_review")moqValue=null;else if(!(Number.isSafeInteger(moqValue)&&moqValue>0))moqValue=marketStandardMoq(conversationMarket);
+    if(Number.isSafeInteger(moqValue)&&moqValue>0){action="answer_moq";answerNumbers.push(moqValue);}else escalate("moq_owner","approved_moq_missing");}
   // Phase 14.1 (owner rule): «عرض سعر» / «پیش‌فاکتور» within approved authority is answered like a price question — approved,
   // versioned price (and approved discount) only; missing details are gathered; exceptional pricing escalates inside priceHandled.
   // Phase 14.1 (owner rule): a price / quote request with NO product known yet first collects the product (at most twice, the same
@@ -9782,6 +9802,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // Gallery: the product (approved price catalog of this market when resolved, else the customer's own product words), the box type /
   // size when known and the colours asked now (or chosen before). Found → those photos are attached to this draft; missing → queued.
   // the named model has no active price: said plainly (no other model's price, no number), the owner reviews it
+  if(action==="moq_owner"&&pricing?.status==="under_moq"&&Number.isSafeInteger(pricing.moq)&&Number.isSafeInteger(pricing.quantity)){const ar=language==="Iraqi Arabic",m=salesDigits(pricing.moq,language),n=salesDigits(pricing.quantity,language);answerNumbers.push(pricing.moq,pricing.quantity);salesTexts=[m,n];
+    salesDraft=ar?`أقل كمية لكل قياس هي ${m} قطعة. طلبك ${n} قطعة، راح أعرضه على الإدارة وأرجعلك بالجواب.`:`حداقل سفارش برای هر سایز ${m} عدده. درخواست ${n} عددی‌تون رو برای تأیید بررسی می‌کنم و خبرتون می‌دم.`;}
   if(action==="price_owner"&&priceUnavailable){const ar=language==="Iraqi Arabic";
     // the owner's configuration name, piece digits written as words (the reply carries no number)
     const named=priceUnavailable.configuration?String(priceUnavailable.configuration).replace(/(^|\s)[3۳٣]\s*(?=تکه|تیکه)/u,"$1سه ").replace(/(^|\s)[2۲٢]\s*(?=تکه|تیکه)/u,"$1دو ").replace(/(^|\s)[3۳٣]\s*قطع/u,"$1ثلاث قطع").replace(/(^|\s)[2۲٢]\s*قطع/u,"$1قطعتين").trim():null;
@@ -9907,7 +9929,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(ai&&ai.reply){
     const DET_ONLY=["accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","clarify_photo_or_order","answer_sizes","ask_color_placement","ask_image_reference","answer_catalog","welcome"];
     const SEGMENT=["answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner"];
-    if(orderStatusAsked||DET_ONLY.includes(action))aiInfo.fallback="deterministic_action";
+    // (a below-MOQ answer is exact: minimum, requested quantity, owner review; the model never rewords it)
+    if(orderStatusAsked||DET_ONLY.includes(action)||(action==="moq_owner"&&pricing?.status==="under_moq"))aiInfo.fallback="deterministic_action";
     // Truthfulness: the AI may say the colours are finalised / registered / noted only when they ARE saved (this turn or before).
     else if(!selectedColors.length&&salesAiClaimsColoursRecorded(ai.reply,colorOptions))aiInfo.fallback="colours_not_recorded";
     // …and the printing type only when an APPROVED type is saved (the same claim check, on the printing names).
