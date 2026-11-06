@@ -89,7 +89,7 @@ export async function makeWorld({aiBrain="off",extraEnv={},realAi=null,migrate:m
       if(pre==="reject")return new Response(JSON.stringify({ok:false,description:"Bad Request: test rejection"}),{status:400,headers:{"Content-Type":"application/json"}});
       if(TG.after)await TG.after(method,TG.n);
       let chatId=1;try{chatId=o.body instanceof FormData?Number(o.body.get("chat_id")):Number(JSON.parse(String(o.body||"{}")).chat_id)||1;}catch{}
-      if(method==="getChat")return new Response(JSON.stringify({ok:true,result:{id:chatId,type:"private"}}),{status:200,headers:{"Content-Type":"application/json"}});
+      if(method==="getChat")return new Response(JSON.stringify({ok:true,result:{id:chatId,type:chatId<0?"supergroup":"private",...(TG.chat||{})}}),{status:200,headers:{"Content-Type":"application/json"}});
       const result=method==="sendMediaGroup"?[{message_id:++tgId,chat:{id:chatId,type:"private"},photo:[{file_id:"F"+tgId}],date:Math.floor(Date.now()/1000)}]:{message_id:++tgId,chat:{id:chatId,type:"private"},photo:[{file_id:"F"+tgId}],date:Math.floor(Date.now()/1000)};
       return new Response(JSON.stringify({ok:true,result}),{headers:{"Content-Type":"application/json"}});}
     return new Response(JSON.stringify({ok:false,error:"network disabled in tests"}),{status:503,headers:{"Content-Type":"application/json"}});};

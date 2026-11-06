@@ -4,9 +4,10 @@ import {makeWorld,reporter} from "./harness.mjs";
 const {ok,done}=reporter("phase23_3");
 const REPO=process.env.REPO||path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../..");
 const FQ=await import(pathToFileURL(path.join(REPO,"worker/src/final-quote-review.js")).href);
-const OWNER="55512345";
+const OWNER="-100555123456";
 const T="2026-10-01T00:00:00.000Z",L=`INSERT INTO commercial_price_items(id,product_key,product_name,sku,market,currency,unit_price_minor,moq,version,active,effective_from,effective_until,approved_by,approved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 const world=async(extra={})=>{const W=await makeWorld({aiBrain:"off",extraEnv:{PUBLIC_WORKER_BASE_URL:"https://w.test",...extra}});await W.call("/api/quotes",null,"GET");await W.call("/api/si/knowledge/product",null,"GET");
+ W.dbrun("CREATE TABLE IF NOT EXISTS telegram_media_sources(id TEXT PRIMARY KEY,chat_id TEXT NOT NULL,chat_username TEXT,message_id TEXT NOT NULL,file_id TEXT NOT NULL,file_unique_id TEXT,media_type TEXT,caption TEXT,source_kind TEXT,created_at TEXT,updated_at TEXT)");
  W.dbrun(L,["R1","k1","انگشتر کوچک · 5x5 · 3 تکه",null,"IRAN","TOMAN",66000,null,1,1,null,null,"admin",T,T,T]);
  W.dbrun(L,["A1","a1","علبة خاتم صغيرة · 5x5x4 · ثلاث قطع",null,"ARAB","USD",60,null,1,1,null,null,"admin",T,T,T]);
  W.dbrun("INSERT INTO business_settings(id,setting_key,scope_key,value_json,version,status,approved_by,approved_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)",["ds","discount_rule","market:ARAB",JSON.stringify({type:"percent_bp",value:1000,min_quantity:1001}),1,"current","owner",T,T]);return W;};
@@ -38,10 +39,26 @@ for(const [label,env,state] of [["missing",{},"destination_missing"],["malformed
  const W=await world(env);const u=await customer(W,"iran");const before=W.tg.length;const r=await W.send(u,IR(1000));const s=W.tg.slice(before).filter(x=>x.method==="sendMessage");
  ok(`T1 destination ${label}: no alert, only the customer's acknowledgement, state ${state}`,s.length===1&&String(s[0].body).includes(String(u.id))&&review(W,r.draft.id)?.alert_status===state,{n:s.length,st:review(W,r.draft.id)?.alert_status});
  ok(`T2 destination ${label}: the quote is still held`,r.draft.status==="draft");}
-{const W=await world({OWNER_TELEGRAM_CHAT_ID:OWNER});const c={id:Number(OWNER),name:"X",username:"x"};await W.send(c,"سلام");const u=await customer(W,"iran");const b=W.tg.length;const r=await W.send(u,IR(1000));
- ok("T3 a chat that belongs to a customer is refused",review(W,r.draft.id)?.alert_status==="destination_is_customer_chat"&&!W.tg.slice(b).some(x=>x.method==="sendMessage"&&String(x.body).includes(`"chat_id":"${OWNER}"`)),review(W,r.draft.id)?.alert_status);}
-{const W=await world({OWNER_TELEGRAM_CHAT_ID:"-100555123456"});const u=await customer(W,"iran");const r=await W.send(u,IR(1000));
- ok("T4 a negative id Telegram does not confirm as a private group is refused",review(W,r.draft.id)?.alert_status==="destination_unverified",review(W,r.draft.id)?.alert_status);}
+// Destination: a private group only
+const joinGroup=async(W,id=OWNER)=>{const chat={id:Number(id),type:"supergroup",title:"Owner alerts"};const m={date:Math.floor(Date.now()/1000),from:{id:55512345,is_bot:false,first_name:"Owner"},chat};await W.post({update_id:880001,message:{...m,message_id:880001,new_chat_members:[{id:999,is_bot:true,first_name:"bot"}]}});await W.post({update_id:880002,message:{...m,message_id:880002,text:"/hamzehi_owner_setup"}});};
+{const W=await world({OWNER_TELEGRAM_CHAT_ID:OWNER});await joinGroup(W);const rows=W.q("SELECT lead_id FROM inbox_messages WHERE provider_conversation_id=?",[OWNER]);
+ ok("G1 a real private group with only unlinked rows is accepted",rows.length===2&&rows.every(r=>!r.lead_id)&&(await FQ.ownerAlertDestination(W.env)).ok===true,rows);
+ ok("G1b the bot neither answers the group nor creates a lead",W.q("SELECT COUNT(*) n FROM leads")[0].n===0&&!W.tg.some(x=>/^send/.test(x.method)));
+ const u=await customer(W,"iran");const r=await W.send(u,IR(1000));ok("G1c and it receives the alert for a held quote",toOwner(W).length===1&&review(W,r.draft.id).alert_status==="sent",toOwner(W).length);}
+{const W=await world({OWNER_TELEGRAM_CHAT_ID:OWNER});const u=await customer(W,"iran");await joinGroup(W);const lead=W.q("SELECT lead_id FROM inbox_messages WHERE provider_sender_id=? LIMIT 1",[String(u.id)])[0].lead_id;W.dbrun("UPDATE inbox_messages SET lead_id=? WHERE provider_conversation_id=?",[lead,OWNER]);
+ const b=toOwner(W).length,r=await W.send(u,IR(1000));ok("G2 a group with a row linked to a customer is refused",review(W,r.draft.id)?.alert_status==="destination_is_customer_chat"&&toOwner(W).length===b,review(W,r.draft.id)?.alert_status);}
+{const P="55512345",W=await world({OWNER_TELEGRAM_CHAT_ID:P});W.dbrun("INSERT INTO inbox_messages(id,platform,provider_conversation_id,provider_sender_id,message,category,created_at,updated_at) SELECT 'unl1','telegram',?,?,'x','other',?,? WHERE NOT EXISTS(SELECT 1 FROM inbox_messages WHERE id='unl1')",[P,P,T,T]);
+ const u=await customer(W,"iran");const r=await W.send(u,IR(1000));ok("G3 a private chat with an unlinked row is refused, and nothing goes to it",review(W,r.draft.id)?.alert_status==="destination_not_group"&&!W.tg.some(x=>String(x.body).includes('"chat_id":"'+P+'"')),review(W,r.draft.id)?.alert_status);}
+{const W=await world({OWNER_TELEGRAM_CHAT_ID:"55512345"});const c={id:55512345,name:"X",username:"x"};await W.send(c,"سلام");const u=await customer(W,"iran");const r=await W.send(u,IR(1000));
+ ok("G4 a private customer chat is refused",review(W,r.draft.id)?.alert_status==="destination_not_group",review(W,r.draft.id)?.alert_status);}
+for(const [label,chat] of [["a public group by username",{username:"public_group"}],["a public group by active usernames",{active_usernames:["public_group"]}],["a channel",{type:"channel"}],["a private chat answer for a group id",{type:"private"}]]){
+ const W=await world({OWNER_TELEGRAM_CHAT_ID:OWNER});W.TG.chat=chat;const u=await customer(W,"iran");const r=await W.send(u,IR(1000));
+ ok("G5 Telegram says "+label+": refused, no alert",review(W,r.draft.id)?.alert_status==="destination_unverified"&&toOwner(W).length===0,review(W,r.draft.id)?.alert_status);}
+{const W=await world({OWNER_TELEGRAM_CHAT_ID:OWNER});W.dbrun("INSERT INTO telegram_media_sources(id,chat_id,chat_username,message_id,file_id,file_unique_id,media_type,caption,source_kind,created_at,updated_at) VALUES('v1',?,'vault',1,'f','u','photo','','channel',?,?)",[OWNER,T,T]);const u=await customer(W,"iran");const r=await W.send(u,IR(1000));
+ ok("G6 a chat that is a media source is refused",review(W,r.draft.id)?.alert_status==="destination_is_system_chat"&&toOwner(W).length===0,review(W,r.draft.id)?.alert_status);}
+{const W=await world({OWNER_TELEGRAM_CHAT_ID:OWNER});const b=W.tg.length;const d=await fq(W);const calls=W.tg.slice(b).map(x=>x.method);
+ ok("G7 the dashboard check asks Telegram with getChat only and sends nothing",d.owner_alert.configured===true&&calls.includes("getChat")&&!calls.some(m=>/^send/.test(m))&&!JSON.stringify(d).includes(OWNER),calls);
+ W.TG.chat={username:"public_group"};const e=await fq(W);ok("G7b and it shows an unverified destination",e.owner_alert.configured===false&&e.owner_alert.reason==="destination_unverified",e.owner_alert);}
 {const W=await world();const u=await customer(W,"iran");const r=await W.send(u,IR(1000));for(let i=0;i<3;i++)await cron(W);
  ok("T5 with no destination, cron calls Telegram for nothing",review(W,r.draft.id).alert_attempts===0,review(W,r.draft.id).alert_attempts);
  W.env.OWNER_TELEGRAM_CHAT_ID=OWNER;await cron(W);await cron(W);ok("T6 once the owner sets it, the waiting quote gets exactly one alert",toOwner(W).length===1&&review(W,r.draft.id).alert_status==="sent",toOwner(W).length);}

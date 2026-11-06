@@ -27,24 +27,28 @@ export async function recordFinalQuoteReview(env, { outreach, row, quote, at }) 
     .bind(outreach.id, row.lead_id, row.conversation_id, quote?.market || null, quote?.product || null, Number.isSafeInteger(quote?.quantity) ? quote.quantity : null, quote?.reason || "total_in_reply", JSON.stringify(snapshot), at, at).run();
 }
 
-// A chat the owner configured, checked before anything is sent: never a channel or vault of this system, never a customer's chat, and
-// Telegram must confirm it is a private chat or a group without a public name. Any doubt means no alert.
+// A chat the owner configured, checked before anything is sent. Only a private group: never a private chat (a chat with this bot is a
+// customer's), a channel, a media vault or a group linked to a customer, and Telegram must confirm a group with no public name. getChat
+// only reads. Any doubt means no alert. (Group messages are stored unlinked, so an unlinked row alone is no customer.)
 export async function ownerAlertDestination(env, { check = true } = {}) {
   const id = String(env.OWNER_TELEGRAM_CHAT_ID || "").trim();
   if (!id) return { ok: false, reason: "destination_missing" };
-  if (!/^-?[1-9][0-9]{4,15}$/.test(id)) return { ok: false, reason: "destination_invalid" };
+  if (/^[1-9][0-9]{4,15}$/.test(id)) return { ok: false, reason: "destination_not_group" };
+  if (!/^-[1-9][0-9]{4,15}$/.test(id)) return { ok: false, reason: "destination_invalid" };
   const system = [env.TELEGRAM_CHAT_ID, env.TELEGRAM_VAULT_CHAT_ID, env.TELEGRAM_VIDEO_VAULT_CHAT_ID, env.TELEGRAM_MEDIA_READY_CHAT_ID].map(x => String(x || "").trim());
   if (system.includes(id)) return { ok: false, reason: "destination_is_system_chat" };
   try {
-    const customer = await env.DB.prepare("SELECT 1 x FROM inbox_messages WHERE provider_sender_id=? OR provider_conversation_id=? LIMIT 1").bind(id, id).first();
+    const customer = await env.DB.prepare("SELECT 1 x FROM inbox_messages WHERE lead_id IS NOT NULL AND provider_conversation_id=? LIMIT 1").bind(id).first();
     if (customer) return { ok: false, reason: "destination_is_customer_chat" };
+    const vault = await env.DB.prepare("SELECT 1 x FROM telegram_media_sources WHERE chat_id=? LIMIT 1").bind(id).first();
+    if (vault) return { ok: false, reason: "destination_is_system_chat" };
   } catch { return { ok: false, reason: "destination_unverified" }; }
   if (!check) return { ok: true, id };
   if (!env.TELEGRAM_BOT_TOKEN) return { ok: false, reason: "destination_unverified" };
   try {
     const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getChat`, { method: "POST", signal: AbortSignal.timeout(ALERT_TIMEOUT_MS), headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: id }) });
     const chat = (await r.json().catch(() => null))?.result;
-    const fits = id.startsWith("-") ? ["group", "supergroup"].includes(chat?.type) && !chat?.username : chat?.type === "private";
+    const fits = ["group", "supergroup"].includes(chat?.type) && !chat?.username && !chat?.active_usernames?.length;
     return fits ? { ok: true, id } : { ok: false, reason: "destination_unverified" };
   } catch { return { ok: false, reason: "destination_unverified" }; }
 }
@@ -61,7 +65,7 @@ function alertText(r) {
 export async function notifyFinalQuoteOwner(env, outreachId) {
   await ensureFinalQuoteStore(env);
   const row = await env.DB.prepare("SELECT r.*,o.status outreach_status FROM final_quote_reviews r LEFT JOIN lead_outreach o ON o.id=r.outreach_id WHERE r.outreach_id=? LIMIT 1").bind(outreachId).first();
-  if (!row || ![ "pending", "failed", "destination_missing", "destination_invalid", "destination_is_system_chat", "destination_is_customer_chat", "destination_unverified" ].includes(row.alert_status)) return { sent: false, reason: "not_due" };
+  if (!row || !(["pending", "failed"].includes(row.alert_status) || String(row.alert_status).startsWith("destination_"))) return { sent: false, reason: "not_due" };
   const t = new Date().toISOString(), set = (status, extra = {}) => env.DB.prepare("UPDATE final_quote_reviews SET alert_status=?,alert_error=?,next_attempt_at=?,alert_sent_at=COALESCE(?,alert_sent_at),updated_at=? WHERE outreach_id=?").bind(status, extra.error || null, extra.next || null, extra.sent || null, t, outreachId).run();
   if (!WAITING.includes(row.outreach_status)) { await set("closed"); return { sent: false, reason: "not_waiting" }; }
   const dest = await ownerAlertDestination(env);
@@ -136,6 +140,6 @@ export async function listFinalQuotes(env, { limit = 100 } = {}) {
   });
   const count = s => items.filter(x => x.state === s).length;
   const open = items.filter(x => ["pending", "unresolved"].includes(x.state));
-  const destination = await ownerAlertDestination(env, { check: false });
+  const destination = await ownerAlertDestination(env);
   return { items, summary: { pending: count("pending"), approved: count("approved"), unresolved: count("unresolved"), rejected: count("rejected"), alerts_not_delivered: open.filter(x => !x.alert_delivered).length }, owner_alert: { configured: destination.ok, reason: destination.reason || null } };
 }
