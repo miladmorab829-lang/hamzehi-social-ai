@@ -2,6 +2,7 @@
 // Owner Decision Center, controlled learning, revenue attribution and AI usage accounting.
 // Code holds engines and safety rules; business knowledge lives in owner-approved, versioned DB rows.
 import { canonicalCurrency, MARKET_CURRENCY, CURRENCY_RULES } from "./autonomy-engine.js";
+import { cleanupHiddenSql } from "./cleanup-center.js";
 import { previewProductSheets, applyProductSheets, ownerChangeHash } from "./catalog-intake.js";
 import { commercialDefaultDiscount, moqPolicy } from "./commercial-policy.js";
 
@@ -607,6 +608,7 @@ export async function listDecisions(env,{status="PENDING",type=null,limit=100}={
   await ensureSalesIntelligenceStore(env);
   const where=[],b=[];if(status&&status!=="ALL"){if(!DECISION_STATUSES.has(status))throw Error("Invalid status");where.push("status=?");b.push(status);}
   if(type){where.push("decision_type=?");b.push(String(type).toUpperCase());}
+  const hidden=await cleanupHiddenSql(env,"decisions","owner_decisions.id");if(hidden)where.push(`(status='PENDING' OR (1=1${hidden}))`);
   return (await all(env,`SELECT * FROM owner_decisions ${where.length?"WHERE "+where.join(" AND "):""} ORDER BY CASE status WHEN 'PENDING' THEN 0 ELSE 1 END,priority,created_at DESC LIMIT ?`,...b,Math.min(Number(limit)||100,300)))
     .map(d=>({...d,known:parseJson(d.known_json,{}),missing:parseJson(d.missing_json,[]),conflicting:parseJson(d.conflicting_json,[]),history:parseJson(d.history_json,[]),payload:parseJson(d.payload_json,{}),owner_answer:parseJson(d.owner_answer_json,null)}));
 }

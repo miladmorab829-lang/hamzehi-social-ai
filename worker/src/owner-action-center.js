@@ -198,7 +198,7 @@ export async function ownerActionCenter(env,query={},deps={}){
   // C/D — conversations in ONE pass over inbox_messages and lead_outreach (grouped per lead; no per-lead correlated scans). A lead whose
   // customer wrote last is WAITING; real contact = outreach 'sent' or 'delivered' only (drafts / failed sends are not contact).
   const convU=`inb.last_in IS NOT NULL AND inb.last_in>COALESCE(ob.last_out,'')`;
-  const convo=await read("conversations",["leads","inbox_messages","lead_outreach","lead_orders"],`WITH inb AS (SELECT lead_id,MAX(created_at) last_in,COUNT(*) msgs FROM inbox_messages WHERE lead_id IS NOT NULL GROUP BY lead_id),
+  const convo=await read("conversations",["leads","inbox_messages","lead_outreach","lead_orders"],`WITH inb AS (SELECT lead_id,MAX(created_at) last_in,COUNT(*) msgs FROM inbox_messages WHERE lead_id IS NOT NULL AND status<>'trashed' GROUP BY lead_id),
       ob AS (SELECT lead_id,MAX(sent_at) last_out,COUNT(*) contacts FROM lead_outreach WHERE status IN ('sent','delivered') AND lead_id IS NOT NULL GROUP BY lead_id),
       busyo AS (SELECT DISTINCT lead_id FROM lead_orders WHERE status IN ('order_candidate','confirmed','partially_paid') AND lead_id IS NOT NULL)
     SELECT l.id lead_id,l.stage,l.priority,${classSql} AS classification,${mktSql} AS meta,CASE WHEN l.notes IS NOT NULL AND json_valid(l.notes) THEN json_extract(l.notes,'$.discovered_at') END AS discovered_at,

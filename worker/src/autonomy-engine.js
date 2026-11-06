@@ -1,6 +1,7 @@
 import { runAgentGraph, autonomyActionCapability, autonomyTaskDedupKey, autonomyDailyQuota, AUTONOMY_DAILY_QUOTAS, AUTONOMY_UNIT_COST, AUTONOMY_PROVIDER, autonomyBudgets, ORCHESTRATOR_VERSION, redact, safeErrorText } from "./agent-orchestrator.js";
 import { recordRun, approvalForTask, requestApproval, consumeApproval, decideApproval, acknowledgeAlert, resolveDeadLetter, opsOverview, cancelObsoleteApprovals } from "./agent-ops-store.js";
 import { bearerMatches } from "./secure-compare.js";
+import { cleanupHiddenSql } from "./cleanup-center.js";
 import { qualitySummary, versionSummary, rollbackEligibility, deadLetterEligibility } from "./agent-watchdog.js";
 import { agentActivitySummary } from "./agent-activity.js";
 const now=()=>new Date().toISOString();
@@ -840,7 +841,7 @@ return Response.json({
 }
  if(u.pathname==="/api/autonomy/revenue")return Response.json(await revenue(env));
  if(u.pathname==="/api/autonomy/errors"){
-  const r=await env.DB.prepare("SELECT * FROM retry_queue ORDER BY updated_at DESC LIMIT 50").all(),t=await env.DB.prepare("SELECT * FROM autonomy_tasks WHERE status='failed' ORDER BY updated_at DESC LIMIT 50").all();return Response.json({ok:true,retries:r.results||[],tasks:t.results||[]});
+  const r=await env.DB.prepare("SELECT * FROM retry_queue WHERE 1=1"+await cleanupHiddenSql(env,"retry","retry_queue.id")+" ORDER BY updated_at DESC LIMIT 50").all(),t=await env.DB.prepare("SELECT * FROM autonomy_tasks WHERE status='failed'"+await cleanupHiddenSql(env,"tasks","autonomy_tasks.id")+" ORDER BY updated_at DESC LIMIT 50").all();return Response.json({ok:true,retries:r.results||[],tasks:t.results||[]});
  }
  if(u.pathname==="/api/autonomy/metrics"){
   const r=await env.DB.prepare("SELECT status,COUNT(*) n FROM autonomy_tasks GROUP BY status").all(),x=Object.fromEntries((r.results||[]).map(v=>[v.status,Number(v.n||0)])),total=(x.completed||0)+(x.failed||0)+(x.blocked||0),rate=total?Math.round((x.completed||0)/total*100):0;

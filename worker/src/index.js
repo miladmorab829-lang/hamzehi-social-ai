@@ -21,6 +21,7 @@ import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
 import { ownerChangeHash } from "./catalog-intake.js";
 import { commercialDefaultDiscount, evaluateOrderLines, isUnverifiedConfiguration, marketStandardMoq, statesLessThanQuantity } from "./commercial-policy.js";
+import { cleanupHiddenSql, cleanupRecentlyRestored, cleanupReviveLead, handleCleanup } from "./cleanup-center.js";
 import { draftFigures, finalQuoteEditAllowed, finalQuoteFreshness, finalQuoteWaiting, listFinalQuotes, notifyFinalQuoteOwner, recordFinalQuoteReview, retryFinalQuoteAlerts } from "./final-quote-review.js";
 import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, optOutStateFromMessages, OPT_OUT_RULES_ID, OPT_OUT_RULES_KEY, OPT_OUT_ALL_LEGACY } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
@@ -1072,7 +1073,7 @@ async function authorizedMarketingMedia(env,contentId){
   const vaults=[vaultChatId(env),videoVaultChatId(env)].map(norm).filter(Boolean);
   for(const r of rows){
     if(!['telegram','telegram_ai'].includes(String(r.source_type)))return {ok:false,reason:'unsupported_media_source'};
-    const s=await env.DB.prepare("SELECT chat_id,chat_username,source_kind FROM telegram_media_sources WHERE id=?").bind(String(r.source_id)).first();
+    const s=await env.DB.prepare("SELECT chat_id,chat_username,source_kind FROM telegram_media_sources WHERE id=?"+await cleanupHiddenSql(env,"vault","telegram_media_sources.id")).bind(String(r.source_id)).first();
     if(!s)return {ok:false,reason:'unknown_media_origin'};
     if(s.source_kind!=='vault')return {ok:false,reason:'not_vault_media'};
     if(/^\d+$/.test(String(s.chat_id||'').trim()))return {ok:false,reason:'private_chat_media'};
@@ -1205,7 +1206,7 @@ async function listContent(env, status) {
       "SELECT c.*, q.status approval_status FROM contents c " +
       "LEFT JOIN approval_queue q ON q.content_id=c.id " +
       "AND q.updated_at=(SELECT MAX(q2.updated_at) FROM approval_queue q2 " +
-      "WHERE q2.content_id=c.id) ORDER BY c.created_at DESC LIMIT 100"
+      "WHERE q2.content_id=c.id) WHERE c.status<>'trashed' ORDER BY c.created_at DESC LIMIT 100"
     ).all();
   }
   return r.results || [];
@@ -1274,10 +1275,10 @@ async function getContentDistributionStatus(env, contentId){
 
 async function getDistributionOverview(env){
   await ensureDistributionStore(env);
-  const rows=await env.DB.prepare("SELECT target,status,COUNT(*) n FROM content_distribution GROUP BY target,status ORDER BY target,status").all();
+  const rows=await env.DB.prepare("SELECT target,status,COUNT(*) n FROM content_distribution WHERE status<>'trashed' GROUP BY target,status ORDER BY target,status").all();
   const targets={telegram:{},website:{},whatsapp:{}};
   for(const r of rows.results||[]) if(targets[r.target]) targets[r.target][r.status]=Number(r.n||0);
-  const latest=await env.DB.prepare("SELECT d.content_id,d.target,d.status,d.planned_at,d.external_id,d.error,d.updated_at,c.topic FROM content_distribution d LEFT JOIN contents c ON c.id=d.content_id ORDER BY d.updated_at DESC LIMIT 30").all();
+  const latest=await env.DB.prepare("SELECT d.content_id,d.target,d.status,d.planned_at,d.external_id,d.error,d.updated_at,c.topic FROM content_distribution d LEFT JOIN contents c ON c.id=d.content_id WHERE d.status<>'trashed' ORDER BY d.updated_at DESC LIMIT 30").all();
   return {targets,latest:latest.results||[]};
 }
 
@@ -1510,7 +1511,7 @@ async function autoAttachTelegramMedia(env, contentId){
 
   const rows = await env.DB.prepare(
     "SELECT * FROM telegram_media_sources " +
-    "WHERE source_kind='vault' " +
+    "WHERE source_kind='vault'" + await cleanupHiddenSql(env,"vault","telegram_media_sources.id") + " " +
     "ORDER BY created_at DESC LIMIT 100"
   ).all();
 
@@ -2514,8 +2515,8 @@ async function galleryFunnel(env){
   for(const a of asked){
     const [sent,color,price,order]=await Promise.all([
       env.DB.prepare("SELECT 1 x FROM lead_outreach o JOIN lead_outreach_media m ON m.outreach_id=o.id WHERE o.conversation_id=? AND o.status='sent' LIMIT 1").bind(a.conversation_id).first(),
-      env.DB.prepare("SELECT 1 x FROM conversation_memory_facts WHERE conversation_id=? AND memory_key IN ('selected_colors','color_parts','exterior_color') AND created_at>=? LIMIT 1").bind(a.conversation_id,a.at).first().catch(()=>null),
-      env.DB.prepare("SELECT 1 x FROM inbox_messages WHERE conversation_id=? AND category IN ('asks_price','quote_requested','accepted') AND created_at>=? LIMIT 1").bind(a.conversation_id,a.at).first(),
+      env.DB.prepare("SELECT 1 x FROM conversation_memory_facts WHERE conversation_id=? AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND memory_key IN ('selected_colors','color_parts','exterior_color') AND created_at>=? LIMIT 1").bind(a.conversation_id,a.at).first().catch(()=>null),
+      env.DB.prepare("SELECT 1 x FROM inbox_messages WHERE conversation_id=? AND status<>'trashed' AND category IN ('asks_price','quote_requested','accepted') AND created_at>=? LIMIT 1").bind(a.conversation_id,a.at).first(),
       env.DB.prepare("SELECT status FROM lead_orders WHERE conversation_id=? AND created_at>=? ORDER BY created_at DESC LIMIT 1").bind(a.conversation_id,a.at).first().catch(()=>null)
     ]);
     if(sent)out.photos_sent++;if(color)out.color_chosen++;if(price)out.price_asked++;if(order){out.ordered++;if(["paid","shipped","fulfilled"].includes(order.status))out.paid++;}
@@ -5556,7 +5557,7 @@ async function getPhotoAutopilotSuccessEvidence(env, date) {
     JOIN telegram_media_sources m ON m.id=v.telegram_media_id
     WHERE v.source_type='ai_edit'
       AND v.ai_status='ready'
-      AND m.source_kind='vault'
+      AND m.source_kind='vault'${await cleanupHiddenSql(env,"vault","m.id")}
       AND m.media_type='photo'
       AND substr(v.created_at,1,10)=?
       AND instr(
@@ -5740,7 +5741,7 @@ const reservationCreatedAt=reservation.created_at;
     SELECT m.id,m.created_at,m.caption
     FROM telegram_media_sources m
     LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id
-    WHERE m.source_kind='vault'
+    WHERE m.source_kind='vault'${await cleanupHiddenSql(env,"vault","m.id")}
       AND m.media_type='photo'
       AND (v.parent_media_id IS NULL OR v.parent_media_id='')
     ORDER BY m.created_at ASC
@@ -5781,7 +5782,7 @@ for(;;){
     FROM telegram_media_sources m
     LEFT JOIN media_vault_items v
       ON v.telegram_media_id=m.id
-    WHERE m.source_kind='vault'
+    WHERE m.source_kind='vault'${await cleanupHiddenSql(env,"vault","m.id")}
       AND m.media_type='photo'
       AND (v.parent_media_id IS NULL OR v.parent_media_id='')
       AND NOT EXISTS (
@@ -5926,7 +5927,7 @@ async function getPhotoAutopilotStatus(env){
     END) n
     FROM telegram_media_sources m
     LEFT JOIN media_vault_items v ON v.telegram_media_id=m.id
-    WHERE m.source_kind='vault'
+    WHERE m.source_kind='vault'${await cleanupHiddenSql(env,"vault","m.id")}
       AND m.media_type='photo'
       AND (v.parent_media_id IS NULL OR v.parent_media_id='')
   `).first();
@@ -6199,7 +6200,8 @@ async function handleTelegramWebhook(env,req){
     const proc=existing?.lead_id&&existing?.conversation_id?await claimInboundProcessing(env,{inboxId:ex.id,leadId:existing.lead_id,conversationId:existing.conversation_id,duplicate:true}):{role:"unlinked"};
     if(proc.role==="busy"){try{await audit(env,"inbound_duplicate_suppressed","Duplicate Telegram delivery ignored while the message is being processed",{inbox_message_id:ex.id});}catch{}return json({ok:true,duplicate:true});}
     let customerMedia=null;const mediaStarted=Date.now();
-    if(privateCustomerChat&&existing?.lead_id&&existing?.conversation_id)try{customerMedia=await recordCustomerConversationMedia(env,{m,body,inboxId:ex.id,leadId:existing.lead_id,conversationId:existing.conversation_id,chatId});}catch{}
+    const existingTrashed=!!(await env.DB.prepare("SELECT 1 x FROM inbox_messages WHERE id=? AND status='trashed' LIMIT 1").bind(ex.id).first());
+    if(privateCustomerChat&&!existingTrashed&&existing?.lead_id&&existing?.conversation_id)try{customerMedia=await recordCustomerConversationMedia(env,{m,body,inboxId:ex.id,leadId:existing.lead_id,conversationId:existing.conversation_id,chatId});}catch{}
     if(customerMedia?.album_follower){}
     else if(existing?.lead_id&&existing?.conversation_id)try { await processNegotiationInbound(env,ex.id);await settleInboundProcessing(env,ex.id,proc,true); }
     catch(error){await settleInboundProcessing(env,ex.id,proc,false);try { await audit(env,"negotiation_reply_retry_failed","Persisted inbound reply recovery failed safely",{inbox_message_id:ex.id,error:sanitizeOperationalError(error?.message||error)}); } catch {}}
@@ -7480,10 +7482,10 @@ async function resolveCustomerImageReference(env,row){
   // own customer photos in telegram_media_sources (no analysis/observation): reference only, never visual knowledge.
   const images=((await env.DB.prepare(ready?`SELECT m.id,m.inbox_message_id,m.media_group_id,m.analysis_status,m.observation_json,m.telegram_message_id,i.created_at AS message_created_at
     FROM conversation_customer_media m JOIN inbox_messages i ON i.id=m.inbox_message_id AND i.lead_id=m.lead_id AND i.conversation_id=m.conversation_id
-    WHERE m.lead_id=? AND m.conversation_id=? AND i.created_at>=? AND i.created_at<=? ORDER BY CAST(m.telegram_message_id AS INTEGER) ASC,i.created_at ASC LIMIT 50`
+    WHERE i.status<>'trashed' AND m.lead_id=? AND m.conversation_id=? AND i.created_at>=? AND i.created_at<=? ORDER BY CAST(m.telegram_message_id AS INTEGER) ASC,i.created_at ASC LIMIT 50`
     :`SELECT t.id,i.id AS inbox_message_id,NULL AS media_group_id,'unavailable' AS analysis_status,NULL AS observation_json,t.message_id AS telegram_message_id,i.created_at AS message_created_at
     FROM inbox_messages i JOIN telegram_media_sources t ON t.chat_id=i.provider_conversation_id AND i.external_id=(t.chat_id||':'||t.message_id)
-    WHERE i.lead_id=? AND i.conversation_id=? AND i.platform='telegram' AND t.source_kind='customer' AND t.media_type='photo' AND i.created_at>=? AND i.created_at<=? ORDER BY CAST(t.message_id AS INTEGER) ASC,i.created_at ASC LIMIT 50`).bind(row.lead_id,row.conversation_id,since,row.created_at||now()).all()).results||[]).slice(-10);
+    WHERE i.status<>'trashed' AND i.lead_id=? AND i.conversation_id=? AND i.platform='telegram' AND t.source_kind='customer' AND t.media_type='photo' AND i.created_at>=? AND i.created_at<=? ORDER BY CAST(t.message_id AS INTEGER) ASC,i.created_at ASC LIMIT 50`).bind(row.lead_id,row.conversation_id,since,row.created_at||now()).all()).results||[]).slice(-10);
   const base={image_count:images.length,images};
   const current=images.find(x=>x.inbox_message_id===row.id);
   if(current)return {...base,status:"resolved",basis:"current_message",media_id:current.id};
@@ -7493,7 +7495,7 @@ async function resolveCustomerImageReference(env,row){
   if(!CUSTOMER_IMAGE_DEICTIC.test(customerImageText(row.message)))return {...base,status:"none"};
   if(images.length===1)return {...base,status:"resolved",basis:"single_recent_image",media_id:images[0].id};
   // Several images: reuse only a reference the customer already disambiguated in TEXT, with no newer image since then.
-  const active=await env.DB.prepare("SELECT f.value_json,f.source_message_id,i.created_at AS source_created_at FROM conversation_memory_facts f JOIN inbox_messages i ON i.id=f.source_message_id AND i.lead_id=f.lead_id AND i.conversation_id=f.conversation_id WHERE f.lead_id=? AND f.conversation_id=? AND f.memory_key='customer_image_reference' AND f.status='active' LIMIT 1").bind(row.lead_id,row.conversation_id).first();
+  const active=await env.DB.prepare("SELECT f.value_json,f.source_message_id,i.created_at AS source_created_at FROM conversation_memory_facts f JOIN inbox_messages i ON i.id=f.source_message_id AND i.lead_id=f.lead_id AND i.conversation_id=f.conversation_id WHERE i.status<>'trashed' AND f.lead_id=? AND f.conversation_id=? AND f.memory_key='customer_image_reference' AND f.status='active' LIMIT 1").bind(row.lead_id,row.conversation_id).first();
   if(active){let mediaId=null;try{mediaId=JSON.parse(active.value_json);}catch{}const fromText=!images.some(x=>x.inbox_message_id===active.source_message_id),newer=images.some(x=>String(x.message_created_at)>String(active.source_created_at));if(fromText&&!newer&&images.some(x=>x.id===mediaId))return {...base,status:"resolved",basis:"prior_customer_disambiguation",media_id:mediaId};}
   return {...base,status:"ambiguous",basis:"multiple_recent_images"};
 }
@@ -7657,7 +7659,8 @@ async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMes
   ]);
   if(same)return {fact:same,idempotent:true};
   // A weak mention (a city named in passing, not stated as the destination) fills an unknown value but never replaces a known one.
-  if(fact.weak&&current)return {fact:current,idempotent:true,kept_existing:true};
+  const currentHidden=current?!!(await env.DB.prepare("SELECT 1 x FROM inbox_messages WHERE id=? AND status='trashed' LIMIT 1").bind(current.source_message_id).first().catch(()=>null)):false;
+  if(fact.weak&&current&&!currentHidden)return {fact:current,idempotent:true,kept_existing:true};
   const t=now(),id="conversation-memory-"+uid(),version=(current?.version||0)+1;
   try{
     const statements=[];
@@ -7678,11 +7681,11 @@ async function captureConversationSalesMemory(env,inboxId,out=null){
   await ensureConversationMemoryStore(env);
   const row=await env.DB.prepare(`SELECT i.id,i.lead_id,i.conversation_id,i.message,i.category,i.created_at,c.id AS verified_conversation_id
     FROM inbox_messages i JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
-    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
+    WHERE i.id=? AND i.status<>'trashed' AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
   if(!row)return {captured:false,reason:"unlinked"};
   const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
   // Only a reply that is nothing but a number needs the previous question (one keyed read, skipped for every other message).
-  const lastAction=salesBareQuantity(row.message)!==null?(await env.DB.prepare("SELECT next_action FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null))?.next_action||null:null;
+  const lastAction=salesBareQuantity(row.message)!==null?(await env.DB.prepare("SELECT next_action FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_sales_state.last_meaningful_inbox_message_id AND mi.status='trashed') LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null))?.next_action||null:null;
   const facts=extractConversationMemoryFacts(row.message,intent,row.id,{lastAction}),captured=[];
   // The resolved customer image is a conversation-scoped REFERENCE (media id), never a product fact or visual knowledge.
   let imageReference=null;try{imageReference=await resolveCustomerImageReference(env,row);if(out)out.imageReference=imageReference;}catch{}
@@ -7836,7 +7839,7 @@ const NEGOTIATION_INTENTS = new Set(["interested","asks_price","asks_moq","asks_
 const NEGOTIATION_STAGE_INTENTS = new Set(["asks_price","asks_moq","asks_shipping","objection_price","negotiating","quote_requested","accepted"]);
 // Phase 04: recorded evidence that a PRICED offer exists for a lead (correlated on leads.id): a sent/accepted formal quote, a lead
 // order (formal or chat-offer), or the Sales Brain's active chat offer. Keyword intent alone is only preliminary interest.
-const LEAD_PRICED_OFFER_SQL="EXISTS(SELECT 1 FROM lead_quotes q WHERE q.lead_id=leads.id AND q.status IN ('sent','accepted')) OR EXISTS(SELECT 1 FROM lead_orders o WHERE o.lead_id=leads.id AND o.status<>'cancelled') OR EXISTS(SELECT 1 FROM conversation_memory_facts f WHERE f.lead_id=leads.id AND f.memory_key='order_candidate' AND f.status='active' AND instr(f.value_json,'\"offer_hash\"')>0)";
+const LEAD_PRICED_OFFER_SQL="EXISTS(SELECT 1 FROM lead_quotes q WHERE q.lead_id=leads.id AND q.status IN ('sent','accepted')) OR EXISTS(SELECT 1 FROM lead_orders o WHERE o.lead_id=leads.id AND o.status<>'cancelled') OR EXISTS(SELECT 1 FROM conversation_memory_facts f WHERE f.lead_id=leads.id AND f.memory_key='order_candidate' AND f.status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=f.source_message_id AND mi.status='trashed') AND instr(f.value_json,'\"offer_hash\"')>0)";
 
 // A shipping question: the shipping words themselves, or «ارسال» / «توصيل» only TOGETHER with a question cue («ارسال دارید؟»,
 // «التوصيل لبغداد شكد؟») — a statement or product text that merely contains them («جعبه ارسال کنید», «التوصيل الى بغداد») is not one.
@@ -7902,7 +7905,7 @@ function extractQuoteRequestDetails(value) {
 }
 
 async function getNegotiationConversationContext(env,leadId,conversationId) {
-  const inbound=await env.DB.prepare("SELECT id,message,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
+  const inbound=await env.DB.prepare("SELECT id,message,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND status<>'trashed' ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
   // Only what the customer actually received is "what we said": an unsent, rejected or failed draft (an old test reply, a payment
   // request still waiting for the owner) is never conversation context, never a repeat to avoid and never current deal state.
   const outbound=await env.DB.prepare("SELECT id,message,created_at,status FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status IN ('sent','sending','send_ambiguous') ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
@@ -8306,7 +8309,7 @@ async function ensureOwnerEscalationFromBrain(env,row,brain){
   return {escalation,owner_decision:linkedDecision,idempotent:escalation.id!==id};
 }
 async function ensureAmbiguousTelegramIdentityEscalation(env,inboxId){
-  const row=await env.DB.prepare("SELECT id,platform,message,lead_id,conversation_id,provider_sender_id,provider_conversation_id,created_at FROM inbox_messages WHERE id=? AND platform='telegram' LIMIT 1").bind(inboxId).first();
+  const row=await env.DB.prepare("SELECT id,platform,message,lead_id,conversation_id,provider_sender_id,provider_conversation_id,created_at FROM inbox_messages WHERE id=? AND platform='telegram' AND status<>'trashed' LIMIT 1").bind(inboxId).first();
   if(!row||row.lead_id||row.conversation_id)return null;
   return ensureOwnerEscalationFromBrain(env,{...row,conversation_platform:"telegram",contact_id:null},{needs_owner:true,needs_owner_reason:"ambiguous_customer_identity",source_message_id:row.id,current_stage:null,customer_known_facts:{customer_message:row.message},context_hash:await knowledgeHash(knowledgeCanonical([row.id,row.provider_sender_id||"",row.provider_conversation_id||""]))});
 }
@@ -8913,7 +8916,7 @@ async function salesEnsureChatOrderCandidate(env,{row,candidate,destination=null
 // deterministic reference (an existing row is reused — never a duplicate); the pending owner approval is linked to it.
 async function salesBackfillAcceptedOrder(env,{leadId,conversationId,candidate,destination=null,customerName=null,colors=null}){
   const offer=candidate?.offer||{};if(!offer.accepted_in||!offer.offer_hash)return null;
-  const acceptance=await env.DB.prepare("SELECT id,external_id,created_at,lead_id,conversation_id FROM inbox_messages WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(offer.accepted_in,leadId,conversationId).first();
+  const acceptance=await env.DB.prepare("SELECT id,external_id,created_at,lead_id,conversation_id FROM inbox_messages WHERE id=? AND lead_id=? AND conversation_id=? AND status<>'trashed' LIMIT 1").bind(offer.accepted_in,leadId,conversationId).first();
   if(!acceptance)return null;
   const {order}=await salesEnsureChatOrderCandidate(env,{row:acceptance,candidate,destination,customerName,colors});
   if(salesOrderColorsJson(colors)&&!order.colors_json)await env.DB.prepare("UPDATE lead_orders SET colors_json=?,updated_at=? WHERE id=? AND status='order_candidate' AND colors_json IS NULL").bind(JSON.stringify(colors),now(),order.id).run();
@@ -8930,7 +8933,7 @@ async function reconcileAcceptedChatOffers(env,{limit=10}={}){
     try{
       let candidate=null;try{candidate=JSON.parse(d.known_json||"{}").order_candidate||null;}catch{}
       if(!candidate?.offer?.accepted_in||!d.lead_id||!d.conversation_id)continue;
-      const facts=((await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND memory_key IN ('customer_name','destination','selected_colors')").bind(d.lead_id,d.conversation_id).all()).results||[]);
+      const facts=((await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND memory_key IN ('customer_name','destination','selected_colors')").bind(d.lead_id,d.conversation_id).all()).results||[]);
       const fact=k=>{const f=facts.find(x=>x.memory_key===k);try{const v=f?JSON.parse(f.value_json):null;return typeof v==="string"&&v.trim()?v.trim():null}catch{return null}};
       if(await salesBackfillAcceptedOrder(env,{leadId:d.lead_id,conversationId:d.conversation_id,candidate,destination:fact("destination"),customerName:fact("customer_name"),colors:(()=>{const f=facts.find(x=>x.memory_key==="selected_colors");try{const v=f?JSON.parse(f.value_json):null;return Array.isArray(v)?v.filter(c=>typeof c==="string"):null}catch{return null}})()}))created++;
     }catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be reconciled as an order candidate",{decision_id:d.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
@@ -9215,7 +9218,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+inboxId).first(),
     preRow?null:env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,c.platform AS conversation_platform,c.contact_id
     FROM inbox_messages i JOIN leads l ON l.id=i.lead_id JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
-    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first()
+    WHERE i.id=? AND i.status<>'trashed' AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first()
   ]);
   const row=preRow||loadedRow;
   if(!row)return {resolved:false,needs_owner:true,needs_owner_reason:"ambiguous_customer_identity",draft_customer_reply:null};
@@ -9226,16 +9229,16 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const [context,ownerCaseDecisions,memories,postSaleOrder,loadedImageReference,priorInbox,turnFactRows,openEscalations,salesState,formalQuoteReply]=await Promise.all([
     Array.isArray(preloaded.context)?preloaded.context:timed("history_ms",getNegotiationConversationContext(env,row.lead_id,row.conversation_id)),
     env.DB.prepare("SELECT id,source_message_id,reason_code,owner_decision,resolved_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='resolved' ORDER BY resolved_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[]),
-    timed("memory_load_ms",env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[])),
+    timed("memory_load_ms",env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[])),
     findPostSaleOrder(env,row.lead_id,row.conversation_id),
     preloaded.imageReference?null:timed("image_reference_ms",resolveCustomerImageReference(env,row).catch(()=>null)),
-    env.DB.prepare("SELECT id FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id<>? AND created_at<=? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,row.id,row.created_at||now()).all().then(r=>r.results||[]),
+    env.DB.prepare("SELECT id FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id<>? AND status<>'trashed' AND created_at<=? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,row.id,row.created_at||now()).all().then(r=>r.results||[]),
     // Facts this turn STATED, each flagged whether it CHANGED (a restated identical value is not new information).
     env.DB.prepare("SELECT f.fact_type,CASE WHEN p.id IS NULL OR p.value_hash<>f.value_hash THEN 1 ELSE 0 END AS changed FROM conversation_memory_facts f LEFT JOIN conversation_memory_facts p ON p.id=f.supersedes_fact_id WHERE f.lead_id=? AND f.conversation_id=? AND f.source_message_id=?").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
     // One durable owner escalation per open QUESTION (reason): a repeat waits for it; a different owner-only question gets its own.
     env.DB.prepare("SELECT id,reason_code,source_message_id,created_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) ORDER BY created_at DESC LIMIT 20").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
     // The conversation's ACTIVE reply language (language policy) — one keyed read.
-    env.DB.prepare("SELECT language FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null),
+    env.DB.prepare("SELECT language FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_sales_state.last_meaningful_inbox_message_id AND mi.status='trashed') LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null),
     // A Telegram reply to a SENT FORMAL QUOTE belongs to the formal-quote path (recordQuoteDecisionFromInbound) — never to a chat offer.
     row.reply_to_provider_message_id?env.DB.prepare("SELECT q.id FROM lead_quotes q JOIN lead_outreach o ON o.id=q.outreach_id WHERE q.lead_id=? AND q.conversation_id=? AND q.status IN ('sent','accepted') AND o.channel='telegram' AND o.status='sent' AND o.provider_message_id=? LIMIT 1").bind(row.lead_id,row.conversation_id,String(row.reply_to_provider_message_id)).first().catch(()=>null):null
   ]);
@@ -9277,7 +9280,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // «همون قبلی / مدل قبلی / السابق» → the product discussed BEFORE the current one (from this conversation's own memory history)
   let previousProductNamed=false;
   if(SALES_PREVIOUS_PRODUCT.test(salesNormal(String(row.message||"")))){
-    const hist=((await env.DB.prepare("SELECT value_json FROM conversation_memory_facts WHERE conversation_id=? AND lead_id=? AND memory_key='product_interest' ORDER BY created_at DESC").bind(row.conversation_id,row.lead_id).all()).results||[]).map(x=>{try{return JSON.parse(x.value_json);}catch{return null;}}).filter(x=>typeof x==="string"&&x.trim()&&!SALES_PREVIOUS_PRODUCT.test(salesNormal(x)));
+    const hist=((await env.DB.prepare("SELECT value_json FROM conversation_memory_facts WHERE conversation_id=? AND lead_id=? AND memory_key='product_interest' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') ORDER BY created_at DESC").bind(row.conversation_id,row.lead_id).all()).results||[]).map(x=>{try{return JSON.parse(x.value_json);}catch{return null;}}).filter(x=>typeof x==="string"&&x.trim()&&!SALES_PREVIOUS_PRODUCT.test(salesNormal(x)));
     // the products this conversation was PRICED for (the brain's own earlier matches), newest first
     const order=new Map(eventIds.map((id,i)=>[id,i]));
     const priced=[...priorEvents].sort((a,b)=>(order.get(a.id)??0)-(order.get(b.id)??0)).map(e=>{try{const k=JSON.parse(e.details_json||"{}").sales_agent?.product_match?.product_key;return typeof k==="string"&&k.startsWith("list:")?k.slice(5):null;}catch{return null;}}).filter(Boolean);
@@ -9322,7 +9325,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // Compared on the CUSTOMER messages' own times (the message that raised each question vs. the message the offer answered).
     const ids=[...new Set([dealOfferedIn,...openEscalations.map(e=>e.source_message_id).filter(Boolean)])],at=new Map(context.filter(x=>x.direction==="inbound"&&ids.includes(x.id)).map(x=>[x.id,x.created_at]));
     const missing=ids.filter(id=>!at.has(id));
-    if(missing.length)for(const r of ((await env.DB.prepare(`SELECT id,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id IN (${missing.map(()=>"?").join(",")})`).bind(row.lead_id,row.conversation_id,...missing).all().catch(()=>null))?.results||[]))at.set(r.id,r.created_at);
+    if(missing.length)for(const r of ((await env.DB.prepare(`SELECT id,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND status<>'trashed' AND id IN (${missing.map(()=>"?").join(",")})`).bind(row.lead_id,row.conversation_id,...missing).all().catch(()=>null))?.results||[]))at.set(r.id,r.created_at);
     const offeredAt=at.get(dealOfferedIn);
     if(offeredAt)dealEscalations=openEscalations.filter(e=>{const s=at.get(e.source_message_id);return !s||String(s)>=String(offeredAt);});
   }
@@ -9395,7 +9398,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(aiInfo.enabled&&!orderStatusAsked&&!formalQuoteReply&&String(row.message||"").trim()){
     const ctxStarted=Date.now();
     // Durable customer profile (other conversations of THIS lead only): informational context, never copied into the current deal.
-    const profileRows=await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id<>? AND status='active' AND memory_key IN ('customer_name','destination') ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[]).catch(()=>[]);
+    const profileRows=await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id<>? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND memory_key IN ('customer_name','destination') ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[]).catch(()=>[]);
     const profile={};for(const p of profileRows)if(profile[p.memory_key]===undefined)try{profile[p.memory_key]=JSON.parse(p.value_json);}catch{}
     const lang=language==="Iraqi Arabic"?"ar":"fa";
     const valueText=r=>{const e=r.envelope||{};const v=e.relation?{relation:e.relation.name,members:e.relation.members,allowed:e.value!==false}:e.conditions?.length||e.effect?{when:e.conditions,then:e.effect??e.value}:e.value;return typeof v==="string"?v:JSON.stringify(v);};
@@ -10180,7 +10183,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
     env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,l.stage AS lead_stage,c.contact_id,c.platform AS conversation_platform
     FROM inbox_messages i JOIN leads l ON l.id=i.lead_id
     JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
-    WHERE i.id=? AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first(),
+    WHERE i.id=? AND i.status<>'trashed' AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first(),
     env.DB.prepare("SELECT * FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first()
   ]);
   timing.context_ms=Date.now()-started;
@@ -10200,6 +10203,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
   const language=outreachLanguage(parseLeadNotes({notes:row.lead_notes}));
   // Customer memory reads the classified category, so it is stored first; everything else of this turn runs concurrently.
   await env.DB.prepare("UPDATE inbox_messages SET category=?,updated_at=? WHERE id=? AND lead_id=? AND conversation_id=?").bind(intent,now(),inboxId,row.lead_id,row.conversation_id).run();
+  await cleanupReviveLead(env,row.lead_id);   // a customer who writes back leaves Trash before the stage update below
   const nextStage=NEGOTIATION_STAGE_INTENTS.has(intent)?"negotiation":"replied",captureOut={},memoryStarted=Date.now();
   const [,,contact,context]=await Promise.all([
     captureConversationSalesMemory(env,inboxId,captureOut).catch(async error=>{try{await audit(env,"conversation_memory_capture_failed","Linked inbound remained stored after customer-memory capture failure",{inbox_message_id:inboxId,lead_id:row.lead_id,conversation_id:row.conversation_id,error:sanitizeOperationalError(error?.message||error)});}catch{}}).finally(()=>{timing.memory_ms=Date.now()-memoryStarted;}),
@@ -11052,7 +11056,7 @@ async function ensureQuoteFromInbox(env,inboxId,ownerMarket=null){
   await ensureQuoteStore(env);
   const row=await env.DB.prepare(`SELECT i.*,l.notes AS lead_notes FROM inbox_messages i JOIN leads l ON l.id=i.lead_id
     JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
-    WHERE i.id=? AND i.category='quote_requested' AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
+    WHERE i.id=? AND i.status<>'trashed' AND i.category='quote_requested' AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first();
   if(!row)return {created:false,reason:"not_linked_quote_request"};
   const existing=await env.DB.prepare("SELECT * FROM lead_quotes WHERE inbox_message_id=? LIMIT 1").bind(inboxId).first();if(existing)return {created:false,idempotent:true,quote:existing};
   const details=extractQuoteRequestDetails(row.message),meta=parseLeadNotes({notes:row.lead_notes});
@@ -11631,7 +11635,7 @@ async function leadFunnelReport(env){
     ${q("inbox_messages",`EXISTS(SELECT 1 FROM inbox_messages i WHERE i.lead_id=l.id AND i.category IN (${intents}))`)} AS interest,
     ${q("lead_quotes","EXISTS(SELECT 1 FROM lead_quotes x WHERE x.lead_id=l.id AND x.status IN ('sent','accepted'))")} AS formal_quote,
     ${q("lead_orders","EXISTS(SELECT 1 FROM lead_orders x WHERE x.lead_id=l.id AND x.status<>'cancelled' AND x.quote_id LIKE 'chat-offer:%')")} AS chat_offer_order,
-    ${have.has("conversation_memory_facts")&&have.has("lead_outreach")?`EXISTS(SELECT 1 FROM conversation_memory_facts f WHERE f.lead_id=l.id AND f.memory_key='order_candidate' AND f.status='active' AND instr(f.value_json,'"offer_hash"')>0 AND EXISTS(SELECT 1 FROM lead_outreach o WHERE o.lead_id=l.id AND o.conversation_id=f.conversation_id AND o.status='sent' AND o.sent_at>=f.created_at))`:"0"} AS chat_offer_sent,
+    ${have.has("conversation_memory_facts")&&have.has("lead_outreach")?`EXISTS(SELECT 1 FROM conversation_memory_facts f WHERE f.lead_id=l.id AND f.memory_key='order_candidate' AND f.status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=f.source_message_id AND mi.status='trashed') AND instr(f.value_json,'"offer_hash"')>0 AND EXISTS(SELECT 1 FROM lead_outreach o WHERE o.lead_id=l.id AND o.conversation_id=f.conversation_id AND o.status='sent' AND o.sent_at>=f.created_at))`:"0"} AS chat_offer_sent,
     ${q("lead_orders","EXISTS(SELECT 1 FROM lead_orders x WHERE x.lead_id=l.id AND x.status NOT IN ('cancelled','order_candidate'))")} AS ordered,
     ${q("lead_order_payments","EXISTS(SELECT 1 FROM lead_order_payments p WHERE p.lead_id=l.id)")} AS paid,
     ${q("lead_identities","(SELECT COUNT(*) FROM lead_identities li WHERE li.lead_id=l.id)")} AS identities
@@ -12475,7 +12479,7 @@ async function salesLeadActivity(env){
     // updated_at) is the NO_RESPONSE basis; owner approval is the recorded approved_at, never inferred from the status.
     if(["sent","delivered"].includes(r.status)){a.outreach_ever_sent=true;a.outreach_sent_count=(a.outreach_sent_count||0)+1;const ts=r.sent_at||r.updated_at;if(ts&&(!a.outreach_sent_at||ts>a.outreach_sent_at))a.outreach_sent_at=ts;(a._sent_times=a._sent_times||[]).push(ts);}
     if(r.approved_at&&(!a.outreach_approved_at||r.approved_at>a.outreach_approved_at))a.outreach_approved_at=r.approved_at;
-    if(r.status==="rejected")a.outreach_rejected_at=r.updated_at;else a.outreach_status=r.status;}
+    if(r.status==="rejected"||r.status==="trashed")a.outreach_rejected_at=r.updated_at;else a.outreach_status=r.status;}
   for(const a of act.values())if(a._sent_times){a.sends_after_last_inbound=a.last_inbound_at?a._sent_times.filter(t=>t&&t>a.last_inbound_at).length:a._sent_times.length;delete a._sent_times;}
   const contacts=new Map();
   for(const c of await rows("lead_contacts","SELECT lead_id,contact_type,normalized_value,evidence_status,evidence_url,created_at FROM lead_contacts WHERE evidence_status IN ('page_extracted','owner_confirmed')")){if(!contacts.has(c.lead_id))contacts.set(c.lead_id,[]);contacts.get(c.lead_id).push(c);}
@@ -14610,7 +14614,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
 
       if (u.pathname === "/api/calendar" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        const r = await env.DB.prepare("SELECT * FROM calendar ORDER BY planned_at ASC, created_at DESC LIMIT 200").all();
+        const r = await env.DB.prepare("SELECT * FROM calendar WHERE status<>'trashed' ORDER BY planned_at ASC, created_at DESC LIMIT 200").all();
         return json({ items: r.results || [] });
       }
 
@@ -14639,7 +14643,8 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const b = await req.json().catch(() => null);
         if (!b || typeof b !== "object") return json({ ok: false, error: "Invalid JSON body" }, 400);
         if (!b.id) return json({ ok: false, error: "id is required" }, 400);
-        await env.DB.prepare("DELETE FROM calendar WHERE id=?").bind(b.id).run();
+        const removed = await env.DB.prepare("DELETE FROM calendar WHERE id=? AND status NOT IN ('published','trashed')").bind(b.id).run();
+        if (!removed.meta?.changes) return json({ ok: false, error: "Calendar entry cannot be deleted" }, 409);
         return json({ ok: true, id: b.id });
       }
 
@@ -14709,6 +14714,11 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         try{return json(await ownerActionCenter(env,q,{leadTestFlagSql,findStalledRevenueItems,canonicalCurrency,leadMarketOf}));}
         catch(e){return json({ok:false,error:"Owner action center is unavailable"},500);}
       }
+      if (u.pathname.startsWith("/api/cleanup/")) {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        return await handleCleanup(req, env, u);
+      }
+
       if (u.pathname === "/api/final-quotes" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         await ensureLeadOutreachStore(env);
@@ -14721,7 +14731,8 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const status=String(u.searchParams.get("status")||"all").trim(),allowed=new Set(["open","resolved","all"]);
         if(!allowed.has(status))return json({ok:false,error:"Invalid escalation status"},400);
         const limit=Math.min(200,Math.max(1,Number(u.searchParams.get("limit")||100)));
-        const sql=status==="all"?`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id ORDER BY CASE e.status WHEN 'open' THEN 0 ELSE 1 END,e.created_at DESC LIMIT ?`:`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE e.status=? ORDER BY e.created_at DESC LIMIT ?`;
+        const hidden=await cleanupHiddenSql(env,"escalations","e.id"),visible=hidden?`(e.status='open' OR (1=1${hidden}))`:"1=1";
+        const sql=status==="all"?`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE ${visible} ORDER BY CASE e.status WHEN 'open' THEN 0 ELSE 1 END,e.created_at DESC LIMIT ?`:`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE e.status=? ORDER BY e.created_at DESC LIMIT ?`;
         const r=status==="all"?await env.DB.prepare(sql).bind(limit).all():await env.DB.prepare(sql).bind(status,limit).all();
         return json({ok:true,items:r.results||[]});
       }
@@ -14769,9 +14780,10 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         await ensureLeadOutreachStore(env);
         const mediaReady = await customerMediaStoreReady(env);
+        // trashed rows stay for deduplication and opt-out checks; they are not part of any view
         const r = await env.DB.prepare(`SELECT i.*,l.name AS lead_name,o.id AS outreach_id,o.status AS outreach_status,o.message AS outreach_message,o.language AS outreach_language,o.approved_by AS outreach_approved_by,o.error_code AS outreach_error_code,o.error_detail AS outreach_error_detail${mediaReady ? ",cm.analysis_status AS media_status,cm.media_group_id AS media_group_id" : ""}
           FROM inbox_messages i LEFT JOIN leads l ON l.id=i.lead_id LEFT JOIN lead_outreach o ON o.inbox_message_id=i.id${mediaReady ? " LEFT JOIN conversation_customer_media cm ON cm.inbox_message_id=i.id" : ""}
-          ORDER BY i.created_at DESC LIMIT 200`).all();
+          WHERE i.status<>'trashed' ORDER BY i.created_at DESC LIMIT 200`).all();
         let items = r.results || [];
         // Read-only marker: an auto-sent holding reply whose owner escalation is still open.
         try { const open = new Set(((await env.DB.prepare("SELECT source_message_id FROM owner_escalations WHERE status='open' AND source_message_id IS NOT NULL").all()).results || []).map(x => x.source_message_id)); items = items.map(x => ({ ...x, open_escalation: open.has(x.id) })); } catch {}
@@ -14799,13 +14811,14 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         if (!b.id) return json({ ok: false, error: "id is required" }, 400);
         const allowed = ["new", "handled", "archived", "pending"];
         if (!allowed.includes(b.status)) return json({ ok: false, error: "Invalid inbox status" }, 400);
-        await env.DB.prepare("UPDATE inbox_messages SET status=?,updated_at=? WHERE id=?").bind(b.status, now(), b.id).run();
+        const changed = await env.DB.prepare("UPDATE inbox_messages SET status=?,updated_at=? WHERE id=? AND status<>'trashed'").bind(b.status, now(), b.id).run();
+        if (!changed.meta?.changes) return json({ ok: false, error: "Inbox message not found or in Trash" }, 409);
         return json({ ok: true, id: b.id, status: b.status });
       }
 
       if (u.pathname === "/api/leads" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
-        const r = await env.DB.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 200").all();
+        const r = await env.DB.prepare("SELECT * FROM leads WHERE stage<>'archived' ORDER BY created_at DESC LIMIT 200").all();
         return json({ items: r.results || [] });
       }
 
@@ -15436,7 +15449,7 @@ Context: ${context}`;
         await ensureLeadOutreachStore(env);
         const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,c.contact_type,c.raw_value AS contact_raw_value,c.normalized_value AS contact_normalized_value,c.evidence_status,c.source AS contact_source,c.evidence_url
           FROM lead_outreach o JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_contacts c ON c.id=o.contact_id
-          ORDER BY o.created_at DESC LIMIT 100`).all();
+          WHERE o.status<>'trashed' ORDER BY o.created_at DESC LIMIT 100`).all();
         const mediaRows=await galleryStoreReady(env)&&(r.results||[]).length?((await env.DB.prepare(`SELECT outreach_id,visual_media_id,spec_id,position FROM lead_outreach_media WHERE outreach_id IN (${(r.results||[]).map(()=>"?").join(",")}) ORDER BY position`).bind(...(r.results||[]).map(x=>x.id)).all()).results||[]):[];
         const items=(r.results||[]).map(item=>({...item,media:mediaRows.filter(m=>m.outreach_id===item.id),telegram_sendable:!!telegramLeadContactChatId({contact_type:item.contact_type,raw_value:item.contact_raw_value,normalized_value:item.contact_normalized_value,evidence_status:item.evidence_status,source:item.contact_source})}));
         return json({ok:true,items,sending_enabled:true});
@@ -15705,7 +15718,7 @@ Context: ${context}`;
         // ?kind=errors (dashboard Errors page, read-only): only failure-like events, newest first. Without it: unchanged.
         const errorsOnly = u.searchParams.get("kind") === "errors";
         const r = errorsOnly
-          ? await env.DB.prepare("SELECT id,type,severity,message,details_json,created_at FROM system_events WHERE severity IN ('warning','error','critical') OR type LIKE '%fail%' OR type LIKE '%error%' OR type LIKE '%timeout%' OR type LIKE '%unavailable%' OR type LIKE '%blocked%' OR type LIKE '%refused%' OR type LIKE '%missing%' ORDER BY created_at DESC LIMIT 200").all()
+          ? await env.DB.prepare("SELECT id,type,severity,message,details_json,created_at FROM system_events WHERE (severity IN ('warning','error','critical') OR type LIKE '%fail%' OR type LIKE '%error%' OR type LIKE '%timeout%' OR type LIKE '%unavailable%' OR type LIKE '%blocked%' OR type LIKE '%refused%' OR type LIKE '%missing%')"+await cleanupHiddenSql(env,"errors","system_events.id")+" ORDER BY created_at DESC LIMIT 200").all()
           : await env.DB.prepare("SELECT id,type,severity,message,details_json,created_at FROM system_events ORDER BY created_at DESC LIMIT 100").all();
         return json({ items:r.results||[] });
       }
@@ -15853,7 +15866,8 @@ async function readAutoMessagingSettings(env){try{return autoMessagingSettings((
 async function autoFollowupBlock(env,item,{nowMs,settings}){
   const one=async(sql,...a)=>{try{return !!(await env.DB.prepare(sql).bind(...a).first());}catch{return true;}};
   if(item.market!=="IRAN"&&item.market!=="ARAB")return "market_unknown";
-  if(!(await one("SELECT 1 FROM inbox_messages WHERE lead_id=? AND platform='telegram' LIMIT 1",item.id)))return "no_customer_conversation";   // consent = the customer opened the chat
+  if(!(await one("SELECT 1 FROM inbox_messages WHERE lead_id=? AND platform='telegram' AND status<>'trashed' LIMIT 1",item.id)))return "no_customer_conversation";   // consent = the customer opened the chat
+  if(await cleanupRecentlyRestored(env,item.id,nowMs))return "restored_recently";
   const oo=await leadOptOutState(env,item.id);
   if(oo.opted_out)return "customer_opted_out";
   if(oo.review)return "opt_out_needs_review";   // a possible stop request: automatic messages wait for the owner's review
@@ -15908,7 +15922,7 @@ async function runAutoSalesMessaging(env,{nowMs=Date.now(),internalFetch}={}){
       // recipient binding: the draft's contact must be the private Telegram chat the customer wrote from (else it waits for the owner)
       const o=await env.DB.prepare("SELECT o.channel,c.contact_type,c.raw_value,c.normalized_value,c.evidence_status,c.source FROM lead_outreach o LEFT JOIN lead_contacts c ON c.id=o.contact_id AND c.lead_id=o.lead_id WHERE o.id=?").bind(d.outreach_id).first();
       const chat=o?.channel==="telegram"?telegramLeadContactChatId(o):null;
-      if(!chat||!(await env.DB.prepare("SELECT 1 FROM inbox_messages WHERE lead_id=? AND platform='telegram' AND provider_conversation_id=? AND provider_sender_id=? LIMIT 1").bind(i.id,chat,chat).first())){skip("recipient_not_customer_chat");continue;}
+      if(!chat||!(await env.DB.prepare("SELECT 1 FROM inbox_messages WHERE lead_id=? AND platform='telegram' AND status<>'trashed' AND provider_conversation_id=? AND provider_sender_id=? LIMIT 1").bind(i.id,chat,chat).first())){skip("recipient_not_customer_chat");continue;}
       const ap=await env.DB.prepare("UPDATE lead_outreach SET status='approved',approved_at=?,approved_by=?,updated_at=? WHERE id=? AND status='draft' AND message=?").bind(t,AUTO_POLICY_ACTOR,t,d.outreach_id,d.draft).run();
       if(!Number(ap?.meta?.changes||0)){skip("draft_changed");continue;}
       const res=await sendApprovedTelegramOutreach(env,d.outreach_id);
