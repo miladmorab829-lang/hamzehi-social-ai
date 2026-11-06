@@ -128,8 +128,14 @@ export async function finalQuoteEditAllowed(env, outreachId, message) {
   return draftFigures(message).join("|") === (parseSnapshot(row)?.figures || []).join("|");
 }
 
+// A held reply of this lead still waiting for the owner.
+export async function finalQuoteWaiting(env, leadId) {
+  await ensureFinalQuoteStore(env);
+  return !!(await env.DB.prepare("SELECT 1 x FROM final_quote_reviews r JOIN lead_outreach o ON o.id=r.outreach_id WHERE r.lead_id=? AND o.status IN ('draft','pending_approval','approved') LIMIT 1").bind(leadId).first());
+}
+
 // Owner dashboard: only held replies created by this gate (older drafts have no row here).
-export async function listFinalQuotes(env, { limit = 100 } = {}) {
+export async function listFinalQuotes(env, { limit = 100, verify = false } = {}) {
   await ensureFinalQuoteStore(env);
   const rows = (await env.DB.prepare(`SELECT r.outreach_id,r.lead_id,r.market,r.product,r.quantity,r.reason,r.snapshot_json,r.alert_status,r.alert_error,r.alert_attempts,r.alert_sent_at,r.stale_reason,r.created_at,o.status outreach_status FROM final_quote_reviews r LEFT JOIN lead_outreach o ON o.id=r.outreach_id ORDER BY r.created_at DESC LIMIT ?`).bind(limit).all()).results || [];
   const nowMs = Date.now();
@@ -140,6 +146,7 @@ export async function listFinalQuotes(env, { limit = 100 } = {}) {
   });
   const count = s => items.filter(x => x.state === s).length;
   const open = items.filter(x => ["pending", "unresolved"].includes(x.state));
-  const destination = await ownerAlertDestination(env);
+  // verify: the panel asks Telegram (getChat reads only); the approval counters do not
+  const destination = await ownerAlertDestination(env, { check: verify });
   return { items, summary: { pending: count("pending"), approved: count("approved"), unresolved: count("unresolved"), rejected: count("rejected"), alerts_not_delivered: open.filter(x => !x.alert_delivered).length }, owner_alert: { configured: destination.ok, reason: destination.reason || null } };
 }

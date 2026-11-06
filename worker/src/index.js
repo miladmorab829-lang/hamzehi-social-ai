@@ -21,7 +21,7 @@ import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
 import { ownerChangeHash } from "./catalog-intake.js";
 import { commercialDefaultDiscount, evaluateOrderLines, isUnverifiedConfiguration, marketStandardMoq, statesLessThanQuantity } from "./commercial-policy.js";
-import { draftFigures, finalQuoteEditAllowed, finalQuoteFreshness, listFinalQuotes, notifyFinalQuoteOwner, recordFinalQuoteReview, retryFinalQuoteAlerts } from "./final-quote-review.js";
+import { draftFigures, finalQuoteEditAllowed, finalQuoteFreshness, finalQuoteWaiting, listFinalQuotes, notifyFinalQuoteOwner, recordFinalQuoteReview, retryFinalQuoteAlerts } from "./final-quote-review.js";
 import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, optOutStateFromMessages, OPT_OUT_RULES_ID, OPT_OUT_RULES_KEY, OPT_OUT_ALL_LEGACY } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
@@ -1174,7 +1174,8 @@ async function runAutoContentGeneration(env, source = "scheduled", force = false
 async function getAutoContentStatus(env) {
   const cfg = await getAutoContentConfig(env);
   const last = await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_content_last_generated_at'").first();
-  const pending = await env.DB.prepare("SELECT COUNT(*) n FROM approval_queue WHERE status='pending'").first();
+  // (approval_queue keeps history: an approved item's earlier pending row is not work waiting for the owner)
+  const pending = await env.DB.prepare("SELECT COUNT(*) n FROM contents c WHERE c.status='generated' AND EXISTS (SELECT 1 FROM approval_queue q WHERE q.content_id=c.id AND q.status='pending')").first();
   const generatedToday = await env.DB.prepare("SELECT COUNT(*) n FROM contents WHERE created_at>=?").bind(new Date(Date.now()-24*3600000).toISOString()).first();
   const next = last?.value && Date.parse(last.value) ? new Date(Date.parse(last.value)+cfg.interval_hours*3600000).toISOString() : null;
   return {
@@ -1362,7 +1363,8 @@ async function telegramFileIdFor(env,sourceId){const r=await env.DB.prepare("SEL
 // Phase 12.1: sends exactly the revision that was hashed (rev), and calls finalGate() immediately before the public post (no await
 // between the gate and the request). A network error / timeout on the public post means the outcome is unknown.
 async function sendTelegramDistribution(env, contentId, rev, finalGate){
-  if(!env.TELEGRAM_BOT_TOKEN||!mainTelegramChatId(env)) throw Error('Telegram credentials missing');
+  if(!env.TELEGRAM_BOT_TOKEN) throw Error('Telegram credentials missing');
+  if(!mainTelegramChatId(env)) throw Error('Telegram publishing destination not configured (TELEGRAM_CHAT_ID)');
   const c=rev?.content;
   if(!c) throw Error('Content not found');
   const text=[c.hook,c.body,c.caption,c.cta].filter(Boolean).join('\n\n').trim();
@@ -1618,8 +1620,7 @@ async function getContentPipelineStatus(env){
   const counts={generated:0,pending_approval:0,approved:0,rejected:0,scheduled:0,published:0,failed:0,manual_required:0};
   const rows=await env.DB.prepare("SELECT status, COUNT(*) n FROM contents GROUP BY status").all();
   for(const r of rows.results||[]) if(Object.prototype.hasOwnProperty.call(counts,String(r.status))) counts[String(r.status)]=Number(r.n||0);
-  const ap=await env.DB.prepare("SELECT status, COUNT(*) n FROM approval_queue GROUP BY status").all();
-  counts.pending_approval=0; for(const r of ap.results||[]) if(r.status==='pending') counts.pending_approval=Number(r.n||0);
+  counts.pending_approval=Number((await env.DB.prepare("SELECT COUNT(*) n FROM contents c WHERE c.status='generated' AND EXISTS (SELECT 1 FROM approval_queue q WHERE q.content_id=c.id AND q.status='pending')").first())?.n||0);
   const dist=await env.DB.prepare("SELECT status, COUNT(*) n FROM content_distribution GROUP BY status").all();
   for(const r of dist.results||[]){const st=String(r.status),n=Number(r.n||0);if(st==='queued')counts.scheduled+=n;else if(st==='published')counts.published+=n;else if(st==='failed')counts.failed+=n;else if(st==='manual_required')counts.manual_required+=n;}
   const last=await env.DB.prepare("SELECT value FROM system_kv WHERE key='auto_content_last_generated_at'").first();
@@ -1703,7 +1704,8 @@ async function publish(env,b){
     if(state?.status==='failed'){const re=await env.DB.prepare("UPDATE production_runs SET status='started',error=NULL,updated_at=? WHERE id=? AND status='failed'").bind(now(),runId).run();if(!re.meta?.changes)throw Error(`Publish already in progress for ${platform}`)}
     try{let externalId='';
       if(platform==='telegram'){
-        if(!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_CHAT_ID)throw Error('Telegram credentials missing');
+        if(!env.TELEGRAM_BOT_TOKEN)throw Error('Telegram credentials missing');
+        if(!env.TELEGRAM_CHAT_ID)throw Error('Telegram publishing destination not configured (TELEGRAM_CHAT_ID)');
         const text=[c.hook,c.body,c.caption,c.cta].filter(Boolean).join('\n\n');
         await ensureContentMediaStore(env);
         const media=rev.media;
@@ -14710,7 +14712,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
       if (u.pathname === "/api/final-quotes" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         await ensureLeadOutreachStore(env);
-        return json({ ok: true, ...await listFinalQuotes(env) });
+        return json({ ok: true, ...await listFinalQuotes(env, { verify: u.searchParams.get("verify") === "1" }) });
       }
 
       if (u.pathname === "/api/owner-escalations" && req.method === "GET") {
@@ -15857,6 +15859,9 @@ async function autoFollowupBlock(env,item,{nowMs,settings}){
   if(oo.review)return "opt_out_needs_review";   // a possible stop request: automatic messages wait for the owner's review
   if(await one("SELECT 1 FROM lead_quotes WHERE lead_id=? LIMIT 1",item.id)||await one("SELECT 1 FROM lead_orders WHERE lead_id=? LIMIT 1",item.id))return "financial_flow_owner";
   if(await one("SELECT 1 FROM lead_outreach WHERE lead_id=? AND status IN ('sending','send_ambiguous') LIMIT 1",item.id))return "send_outcome_unresolved";
+  // The customer's matter is with the owner: an automatic nudge would talk over the owner's answer.
+  if(await one("SELECT 1 FROM owner_escalations WHERE lead_id=? AND status='open' LIMIT 1",item.id)||await one("SELECT 1 FROM owner_decisions WHERE lead_id=? AND status='PENDING' LIMIT 1",item.id))return "owner_decision_open";
+  if(await finalQuoteWaiting(env,item.id).catch(()=>true))return "final_quote_waiting";
   if(!withinContactHours(item.market,settings,nowMs))return "outside_contact_hours";
   if((await marketBackoff(env,"autofu",item.market,nowMs)).skip)return "failure_backoff";
   return null;
@@ -15871,8 +15876,14 @@ async function runAutoSalesMessaging(env,{nowMs=Date.now(),internalFetch}={}){
   const out={drafts:0,sent:0,failed:0,skipped:{}},skip=r=>{out.skipped[r]=(out.skipped[r]||0)+1;};
   const draft=async(lead_id,mode)=>{try{const r=await internalFetch(new Request("https://internal.local/api/leads/outreach-draft",{method:"POST",headers:{Authorization:"Bearer "+env.ADMIN_TOKEN,"Content-Type":"application/json"},body:JSON.stringify({lead_id,engine:"template",mode})}));return await r.json();}catch{return null;}};
   // 1) first-contact drafts for discovery leads: drafts ONLY (no consent → the owner approves every first contact)
-  if(st.initial_drafts)for(const i of (si.items||[]).filter(x=>x.conversion?.next_action.action==="PREPARE_FIRST_CONTACT_DRAFT").slice(0,st.per_run)){
-    const d=await draft(i.id,"initial");if(d?.ok&&!d.reused)out.drafts++;else skip("draft_"+(d?.reused?"open_exists":(d?.reason||"refused")));}
+  if(st.initial_drafts){
+    // (the draft route reuses only a recent open draft; an older one waiting for the owner must not get a twin. Such a lead does not use
+    // up a slot of this run, so it cannot starve the next leads. If the check fails, no first-contact draft is made and step 2 still runs.)
+    let open=null;try{open=new Set(((await env.DB.prepare("SELECT DISTINCT lead_id FROM lead_outreach WHERE status IN ('draft','pending_approval','approved')").all()).results||[]).map(r=>r.lead_id));}catch{skip("draft_check_failed");}
+    if(open){let room=st.per_run;for(const i of (si.items||[]).filter(x=>x.conversion?.next_action.action==="PREPARE_FIRST_CONTACT_DRAFT")){
+      if(room<=0)break;
+      if(open.has(i.id)){skip("draft_open_exists");continue;}
+      room--;const d=await draft(i.id,"initial");if(d?.ok&&!d.reused)out.drafts++;else skip("draft_"+(d?.reused?"open_exists":(d?.reason||"refused")));}}}
   // 2) permitted follow-ups inside customer-opened conversations: sent automatically, at most per_run now and per_day per UTC day
   if(st.followups){
     const day=new Date(nowMs).toISOString().slice(0,10);

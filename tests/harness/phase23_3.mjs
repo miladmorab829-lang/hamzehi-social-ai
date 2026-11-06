@@ -16,7 +16,7 @@ const IR=n=>`قیمت انگشتر کوچک 3 تکه برای ${n} عدد چند
 const toOwner=W=>W.tg.filter(x=>x.method==="sendMessage"&&String(x.body).includes(`"chat_id":"${OWNER}"`)).map(x=>JSON.parse(x.body).text);
 const review=(W,o)=>W.q("SELECT * FROM final_quote_reviews WHERE outreach_id=?",[o])[0];
 const cron=W=>FQ.retryFinalQuoteAlerts(W.env,{limit:5});
-const fq=async W=>(await W.call("/api/final-quotes",null,"GET")).body;
+const fq=async W=>(await W.call("/api/final-quotes?verify=1",null,"GET")).body;
 
 // Creation and content
 {const W=await world({OWNER_TELEGRAM_CHAT_ID:OWNER});const u=await customer(W,"iran");const r=await W.send(u,IR(1000));const a=toOwner(W);
