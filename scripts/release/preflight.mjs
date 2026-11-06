@@ -17,6 +17,9 @@ export const REQUIRED_SECRETS=Object.freeze(["ADMIN_TOKEN","ANTHROPIC_API_KEY","
 // No longer used by the code but kept on the Worker until the owner deletes them: allowed, never required.
 export const RETIRED_SECRETS=Object.freeze(["KLING_API_KEY"]);
 
+// Set by the owner when wanted; a version without it still runs (held quotes then stay on the dashboard, with no owner alert).
+export const OPTIONAL_SECRETS=Object.freeze(["OWNER_TELEGRAM_CHAT_ID"]);
+
 // Minimal reader for the parts of worker/wrangler.toml this check needs: [vars] strings, the D1 id, the R2 bucket, the AI binding.
 export function expectedFromToml(text){
   const vars={},d1=[],r2=[];let ai=null,section="",cur=null;
@@ -41,7 +44,7 @@ export function checkVersion(v,expected,{requiredSecrets=REQUIRED_SECRETS,requir
   for(const r of expected.r2){const x=by(r.binding);if(!x||x.type!=="r2_bucket"||x.bucket_name!==r.bucket_name)f.push(`R2 ${r.binding} is not ${r.bucket_name}`);}
   if(expected.ai?.binding&&by(expected.ai.binding)?.type!=="ai")f.push(`AI binding ${expected.ai.binding} missing`);
   for(const s of requiredSecrets)if(by(s)?.type!=="secret_text")f.push(`secret binding ${s} missing`);
-  const known=new Set([...Object.keys(expected.vars),...expected.d1.map(d=>d.binding),...expected.r2.map(r=>r.binding),expected.ai?.binding,...requiredSecrets,...RETIRED_SECRETS]);
+  const known=new Set([...Object.keys(expected.vars),...expected.d1.map(d=>d.binding),...expected.r2.map(r=>r.binding),expected.ai?.binding,...requiredSecrets,...RETIRED_SECRETS,...OPTIONAL_SECRETS]);
   for(const x of b)if(!known.has(x.name))f.push(`unexpected binding ${x.name} (${x.type})`);
   return {ok:!f.length,failures:f,summary:{id:v?.id||null,tag,bindings:b.length}};
 }

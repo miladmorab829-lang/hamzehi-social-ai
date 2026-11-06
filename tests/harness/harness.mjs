@@ -89,6 +89,7 @@ export async function makeWorld({aiBrain="off",extraEnv={},realAi=null,migrate:m
       if(pre==="reject")return new Response(JSON.stringify({ok:false,description:"Bad Request: test rejection"}),{status:400,headers:{"Content-Type":"application/json"}});
       if(TG.after)await TG.after(method,TG.n);
       let chatId=1;try{chatId=o.body instanceof FormData?Number(o.body.get("chat_id")):Number(JSON.parse(String(o.body||"{}")).chat_id)||1;}catch{}
+      if(method==="getChat")return new Response(JSON.stringify({ok:true,result:{id:chatId,type:"private"}}),{status:200,headers:{"Content-Type":"application/json"}});
       const result=method==="sendMediaGroup"?[{message_id:++tgId,chat:{id:chatId,type:"private"},photo:[{file_id:"F"+tgId}],date:Math.floor(Date.now()/1000)}]:{message_id:++tgId,chat:{id:chatId,type:"private"},photo:[{file_id:"F"+tgId}],date:Math.floor(Date.now()/1000)};
       return new Response(JSON.stringify({ok:true,result}),{headers:{"Content-Type":"application/json"}});}
     return new Response(JSON.stringify({ok:false,error:"network disabled in tests"}),{status:503,headers:{"Content-Type":"application/json"}});};
@@ -122,9 +123,11 @@ export async function makeWorld({aiBrain="off",extraEnv={},realAi=null,migrate:m
   const teach=async(text,market,cid)=>{const r=await call("/api/sales-knowledge/teach",{text,market,command_id:cid});for(const x of q("SELECT id FROM sales_knowledge_change_requests WHERE status NOT IN ('applied','rejected')"))await approveK(x.id);return r;};
   const resolve=(id,action,answer={})=>call("/api/si/decisions/resolve",{id,action,scope:"CASE_ONLY",answer});
   const transition=(id,action,extra={})=>call("/api/leads/outreach/transition",{id,action,...extra});
+  // The owner's own release of a held reply, through the real routes: submit, approve, send.
+  const releaseDraft=async id=>{await transition(id,"submit");await transition(id,"approve");return call("/api/leads/outreach/send-telegram",{id});};
   // no outbound call may reach anything except the two in-process mocks
   const offNet=()=>net.filter(u=>!/^https:\/\/api\.telegram\.org\/bot\*\*\*\//.test(u)&&u!=="https://api.anthropic.com/v1/messages");
-  return {TG,run,env,d1,q,dbrun,call,post,send,brain,age,setMarket,approveK,upload,importLine,teach,tg,R2,AI,D,EV,net,offNet,resolve,transition};
+  return {TG,run,env,d1,q,dbrun,call,post,send,brain,age,setMarket,approveK,upload,importLine,teach,tg,R2,AI,D,EV,net,offNet,resolve,transition,releaseDraft};
 }
 // tiny reporter
 export function reporter(name){const res=[];const J=v=>JSON.stringify(v);

@@ -123,7 +123,7 @@ const health=(live=false)=>call("/api/telegram/inbound-health"+(live?"?live=1":"
  const a={id:714500001,name:"Iq",username:"iq_country"};await V.send(a,"هلا");await V.send(a,"احنا من العراق");
  ok("I1 explicit «العراق» is remembered as the customer's COUNTRY (market evidence), and NOT as a delivery city",J(mem(a,"customer_country"))===J(["العراق"])&&mem(a,"destination").length===0,[mem(a,"customer_country"),mem(a,"destination")]);
  const ap=await V.send(a,"بكم علبة الخاتم؟ أريد 100");
- ok("I2 with only the country known, a price question gets the APPROVED ARAB price in USD (2.50 / 250.00), auto-sent within authority",ap.action==="answer_price"&&ap.draft?.status==="sent"&&/2\.50/.test(ap.draft?.message||"")&&/250\.00/.test(ap.draft?.message||""),[ap.action,ap.draft?.status,String(ap.draft?.message||"").slice(0,90)]);
+ ok("I2 with only the country known, a price question gets the APPROVED ARAB price in USD (2.50 / 250.00), held for the owner because it states a total",ap.action==="answer_price"&&ap.draft?.status==="draft"&&ap.draft?.error_detail==="final_quote_owner_approval"&&/2\.50/.test(ap.draft?.message||"")&&/250\.00/.test(ap.draft?.message||""),[ap.action,ap.draft?.status,String(ap.draft?.message||"").slice(0,90)]);
  // prefixes and ambiguity
  const b={id:714500002,name:"Iq2",username:"iq_prefix"};await V.send(b,"هلا");await V.send(b,"التوصيل للرمادي");
  ok("I3 attached prefix «للرمادي» (to Ramadi) is recognised as the destination city الرمادي",J(mem(b,"destination"))===J(["الرمادي"]),mem(b,"destination"));
@@ -138,7 +138,7 @@ const health=(live=false)=>call("/api/telegram/inbound-health"+(live?"?live=1":"
  // price requests («عرض سعر»)
  const g={id:714500007,name:"Q",username:"iq_quote"};await V.send(g,"هلا");V.setMarket(g,"iraq");
  const q1=await V.send(g,"أريد عرض سعر لـ 100 علبة خاتم");
- ok("P1 «عرض سعر» with product + quantity and an approved price → the approved USD price is answered automatically (no owner approval needed within authority)",q1.action==="answer_price"&&q1.draft?.status==="sent"&&/250\.00/.test(q1.draft?.message||""),[q1.action,q1.draft?.status]);
+ ok("P1 «عرض سعر» with product + quantity and an approved price → the approved USD total is prepared and held for the owner",q1.action==="answer_price"&&q1.draft?.status==="draft"&&/250\.00/.test(q1.draft?.message||""),[q1.action,q1.draft?.status]);
  const h={id:714500008,name:"Q2",username:"iq_quote2"};await V.send(h,"هلا");V.setMarket(h,"iraq");
  const q2=await V.send(h,"أريد عرض سعر");
  ok("P2 «عرض سعر» with nothing known → requirements are gathered (ask product), not escalated to the owner",["ask_product","ask_quantity","price_discovery","clarify_product","ask_details","welcome"].includes(q2.action)&&q2.brain?.needs_owner!==true,[q2.action,q2.brain?.needs_owner]);

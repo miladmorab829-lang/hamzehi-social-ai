@@ -286,6 +286,11 @@ const DASH_SECTIONS={
 </section>
 `,
  negotiation:`<section class="card section">
+<div class="title"><div><h2>🧾 FINAL QUOTES</h2><div class="hint">پاسخ‌های دارای جمع مبلغ که منتظر تأیید مالک هستند. اعلان، تأیید تجاری نیست؛ ارسال فقط پس از Approve انجام می‌شود.</div></div><button class="btn" onclick="loadFinalQuotes()">REFRESH</button></div>
+<div id="finalQuoteStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
+<div id="finalQuoteItems" class="rows"></div>
+</section>
+<section class="card section">
 <div class="title"><div><h2>💬 NEGOTIATION INBOX</h2><div class="hint">پاسخ‌های لینک‌شده، نیت محدود و پیش‌نویس قابل ویرایش. تأیید به‌تنهایی ارسال نمی‌کند.</div></div><button class="btn" onclick="loadNegotiationInbox()">↻ REFRESH</button></div>
 <div id="negotiationInboxStatus" class="hint" style="margin-top:9px">در انتظار دریافت…</div>
 <div id="negotiationInboxItems" class="rows"></div>
@@ -568,6 +573,14 @@ async function sendTelegramOutreach(id){
  if(!d.ok){$("outreachApprovalStatus").innerHTML="<span class='bad'>✕ "+esc(d.error||"Telegram send failed")+"</span>";await loadOutreachApprovals();return}
  $("outreachApprovalStatus").innerHTML="<span class='ok'>✓ پیام تأییدشده ارسال و ثبت شد.</span>";
  await loadOutreachApprovals();
+}
+async function loadFinalQuotes(){
+ const status=document.getElementById("finalQuoteStatus"),list=document.getElementById("finalQuoteItems");if(!status||!list)return;
+ try{const d=await api("/api/final-quotes");if(!d.ok)throw Error(d.error||"Final quotes unavailable");const s=d.summary||{},a=d.owner_alert||{},items=d.items||[];
+  status.innerHTML="منتظر: "+esc(s.pending||0)+" · تأییدشده: "+esc(s.approved||0)+" · حل‌نشده: "+esc(s.unresolved||0)+" · ردشده: "+esc(s.rejected||0)+" · اعلان نرسیده: "+esc(s.alerts_not_delivered||0)+(a.configured?"":" · <span class='warn'>اعلان مالک فعال نیست ("+esc(a.reason||"")+")</span>");
+  const label={pending:"PENDING",approved:"APPROVED",unresolved:"UNRESOLVED",rejected:"REJECTED"},tone={pending:"warn",approved:"ok",unresolved:"bad",rejected:"mini"};
+  list.innerHTML=items.length?items.map(x=>"<div class='row'><b>"+esc(x.product||"نامشخص")+"</b> · "+esc(x.quantity??"—")+" عدد · "+esc(x.market||"—")+(x.total_minor!==null&&x.total_minor!==undefined?" · "+esc(x.total_minor)+" "+esc(x.currency||""):"")+" <span class='"+tone[x.state]+"'>"+label[x.state]+"</span><div class='mini'>CRM: "+esc(String(x.lead_id||"").slice(0,8))+" · شناسه: "+esc(String(x.outreach_id||"").slice(0,8))+" · پیش‌نویس: "+esc(x.outreach_status||"—")+" · اعلان: "+esc(x.alert_status||"—")+(x.stale_reason?" · <span class='bad'>قیمت تغییر کرده؛ رد کنید ("+esc(x.stale_reason)+")</span>":"")+" · "+esc(x.created_at||"")+"</div></div>").join(""):"<div class='hint'>موردی وجود ندارد.</div>";
+ }catch(e){status.textContent=String(e.message||e);}
 }
 async function loadNegotiationInbox(){
  const status=$("negotiationInboxStatus"),list=$("negotiationInboxItems");
@@ -2174,7 +2187,7 @@ let refreshInProgress=false,dashTick=1;
 // escalation count (written by loadOwnerEscalations) wherever it is shown.
 function dashSectionLoads(){
  return [on("tasks",loadTasks),on("brain",loadBrain),on("revenue",loadRevenue),on("opportunities",loadOpp),on("errors",loadErrors),on("safety",loadSafety),
-  on("approvalItems",loadApprovals),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox),on("quoteItems",loadQuotes),
+  on("approvalItems",loadApprovals),on("outreachApprovalItems",loadOutreachApprovals),on("negotiationInboxItems",loadNegotiationInbox),on("finalQuoteItems",loadFinalQuotes),on("quoteItems",loadQuotes),
   on("orderItems",loadOrders),on("priceItems",loadPriceItems),on("knowledgeFacts",loadSalesKnowledge),(has("ownerEscalationsItems")||has("siMoney"))?loadOwnerEscalations():null,
   on("hubDecisions",loadHubSummary),on("homeStats",loadHome),on("leadsListItems",loadLeadsList),on("approvalsChips",loadApprovalsOverview),on("errorsCenterItems",loadErrorsCenter),on("oacItems",loadOwnerActions),on("tgHealthBody",function(){return loadTelegramHealth(false)}),on("galProduct",loadGalleryOptions),on("galReviewItems",loadGallery),on("galRequestItems",loadGalleryRequests),on("galFunnel",loadGalleryFunnel),on("mpOut",function(){return mpLoaded?null:mpLoad(false)})];
 }

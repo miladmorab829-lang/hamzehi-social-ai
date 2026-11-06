@@ -173,7 +173,7 @@ for(const [id,label,fn,code] of [
 {const u={id:705220001,name:"Test",username:"p22_a"};await send(u,"هلا");setMarket(u,"iraq");
  const pr=await send(u,"بكم علبة تجربة قطعتين؟ أريد 100");
  ok("D1 the live Sales Brain answers from the catalog, not the older list price (2.75, not 2.50)",pr.action==="answer_price"&&/2\.75/.test(pr.draft?.message||"")&&!/2\.50/.test(pr.draft?.message||""),{a:pr.action,m:pr.draft?.message});
- ok("D2 and that answer goes out automatically, which is why apply needs a preview and confirmation",pr.draft?.status==="sent"&&pr.draft?.approved_by==="inbound_auto_policy",{s:pr.draft?.status,b:pr.draft?.approved_by});}
+ ok("D2 and that total waits for the owner; it is not sent automatically",pr.draft?.status==="draft"&&!pr.draft?.approved_by,{s:pr.draft?.status,b:pr.draft?.approved_by});}
 {const u={id:705220002,name:"Test2",username:"p22_b"};await send(u,"سلام");setMarket(u,"iran");
  const pr=await send(u,"قیمت جعبه تست 2 تکه برای 400 عدد چنده؟");
  ok("D3 a product not in the catalog still answers from its price list, in toman",/90[,٬]?000|۹۰[,٬]?۰۰۰/.test(pr.draft?.message||""),{a:pr.action,m:pr.draft?.message});}

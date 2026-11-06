@@ -140,7 +140,7 @@ const orderCount=u=>q("SELECT COUNT(*) n FROM lead_orders WHERE lead_id IN (SELE
  const u3=await customer("iran"),r3=await send(u3,"قیمت نیم ست کوچک چنده؟");
  ok("H3 the model question never offers «یک‌دار» or «بازدار»",/مدل/.test(msg(r3))&&!/یک‌دار|بازدار/.test(msg(r3))&&/بگ‌دار/.test(msg(r3)),{a:r3.action,m:msg(r3)});}
 
-{const u=await customer("iran");await send(u,"قیمت انگشتر کوچک 3 تکه برای 1000 عدد چنده؟");const acc=await send(u,"ثبتش کن");
+{const u=await customer("iran");const offered=await send(u,"قیمت انگشتر کوچک 3 تکه برای 1000 عدد چنده؟");await W.releaseDraft(offered.draft.id);const acc=await send(u,"ثبتش کن");
  const orders=q("SELECT status,total_minor,currency,confirmed_by FROM lead_orders WHERE lead_id IN (SELECT lead_id FROM inbox_messages WHERE provider_sender_id=?)",[String(u.id)]);
  ok("A1 acceptance creates one order candidate, never a confirmed order",orders.length===1&&orders[0].status==="order_candidate"&&!orders[0].confirmed_by,orders);
  ok("A2 it keeps the discounted total once (no second discount) in TOMAN",orders[0]?.total_minor===59400000&&orders[0]?.currency==="TOMAN",orders);

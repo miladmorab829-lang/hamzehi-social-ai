@@ -93,7 +93,8 @@ dbrun("INSERT INTO commercial_price_items(id,product_key,product_name,sku,market
 const show=r=>({action:r.action,status:r.draft?.status,by:r.draft?.approved_by||null,msg:String(r.draft?.message||"").slice(0,120)});
 {const u={id:705200001,name:"Ali",username:"ali_s"};await send(u,"هلا");setMarket(u,"iraq");
  const pr=await send(u,"بكم علبة الخاتم؟ أريد 100");
- ok("S1 an approved price is sent automatically (owner-approved autonomy): exact approved unit price and total in USD",pr.action==="answer_price"&&pr.draft?.status==="sent"&&pr.draft?.approved_by==="inbound_auto_policy"&&/2\.50/.test(pr.draft.message)&&/250\.00/.test(pr.draft.message),show(pr));
+ ok("S1 an approved price with a total is held for the owner: exact approved unit price and total in USD, not sent",pr.action==="answer_price"&&pr.draft?.status==="draft"&&!pr.draft?.approved_by&&/2\.50/.test(pr.draft.message)&&/250\.00/.test(pr.draft.message),show(pr));
+ await W.releaseDraft(pr.draft.id);
  AI.script.set("نزلها 30% وأوكيه",()=>({requests:["discount"],reply:"تمام، نعطيك خصم 30% والسعر يصير 1.75 دولار للقطعة",facts:{product:"علبة خاتم",quantity:100}}));
  const tg0=W.tg.filter(x=>/^send/.test(x.method)).length,ds=await send(u,"نزلها 30% وأوكيه");
  ok("S2 a discount outside the approved rule is rejected: the AI's 30% / 1.75 is never sent; the reply is held for the owner",ds.draft?.status!=="sent"&&!/1\.75|30%/.test(String(ds.draft?.message||""))&&!W.tg.filter(x=>/^send/.test(x.method)).slice(tg0).some(x=>/1\.75|30%/.test(x.body)),show(ds));
@@ -108,7 +109,7 @@ const show=r=>({action:r.action,status:r.draft?.status,by:r.draft?.approved_by||
 {// a discount INSIDE the owner-approved rule is applied automatically
  dbrun("INSERT INTO business_settings(id,setting_key,scope_key,value_json,version,status,approved_by,approved_at,source_decision_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",["BS-D","discount_rule","market:ARAB",JSON.stringify({type:"percent_bp",value:1000,min_quantity:100}),1,"current","owner",t0(),null,t0()]);
  const u={id:705200002,name:"Omar",username:"omar_s"};await send(u,"هلا");setMarket(u,"iraq");const pr=await send(u,"بكم علبة الخاتم؟ أريد 100");
- ok("S7 a discount within the owner-approved rule (10% from 100 pcs) is sent automatically with the grounded total 225.00 USD",pr.draft?.status==="sent"&&/225\.00/.test(pr.draft?.message||"")&&!/250\.00 دولار\.?$/.test(pr.draft?.message||""),show(pr));
+ ok("S7 a discount within the owner-approved rule (10% from 100 pcs) is calculated with the grounded total 225.00 USD and held for the owner",pr.draft?.status==="draft"&&/225\.00/.test(pr.draft?.message||"")&&!/250\.00 دولار\.?$/.test(pr.draft?.message||""),show(pr));
  /* business_settings history is append-only (trigger); later blocks use quantities below min_quantity */}
 
 // ================= BLOCK R — revenue follow-ups =================

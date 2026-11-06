@@ -21,6 +21,7 @@ import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
 import { ownerChangeHash } from "./catalog-intake.js";
 import { commercialDefaultDiscount, evaluateOrderLines, isUnverifiedConfiguration, marketStandardMoq, statesLessThanQuantity } from "./commercial-policy.js";
+import { draftFigures, finalQuoteEditAllowed, finalQuoteFreshness, listFinalQuotes, notifyFinalQuoteOwner, recordFinalQuoteReview, retryFinalQuoteAlerts } from "./final-quote-review.js";
 import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, optOutStateFromMessages, OPT_OUT_RULES_ID, OPT_OUT_RULES_KEY, OPT_OUT_ALL_LEGACY } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
@@ -8811,7 +8812,7 @@ function salesPriceReply(r,language){
     // quantity, unit price, subtotal, discount and total: the customer sees how the total was reached
     const subtotal=disc?money(r.subtotal_minor):null,saved=disc?money(r.discount.amount_minor):null;
     if(disc&&(!subtotal||!saved))return null;
-    return {parts:[ar?`${name} لـ ${qty} قطعة: سعر القطعة ${unit}${disc?`، المجموع ${subtotal}، خصم ${disc} (${saved})، والمبلغ النهائي ${total}.`:` والمجموع ${total}.`}`:`${name} برای ${qty} عدد: هر عدد ${unit}${disc?`، جمع ${subtotal}، ${disc} تخفیف (${saved})، مبلغ نهایی ${total}.`:` و جمعش ${total}.`}`,ar?"أسجله لك؟":"ثبتش کنم؟"],texts:[unit,total,qty,disc,subtotal,saved],offer:true};
+    return {parts:[ar?`${name} لـ ${qty} قطعة: سعر القطعة ${unit}${disc?`، المجموع ${subtotal}، خصم ${disc} (${saved})، والمجموع بعد الخصم ${total}.`:` والمجموع ${total}.`}`:`${name} برای ${qty} عدد: هر عدد ${unit}${disc?`، جمع ${subtotal}، ${disc} تخفیف (${saved})، جمع پس از تخفیف ${total}.`:` و جمعش ${total}.`}`,ar?"أسجله لك؟":"ثبتش کنم؟"],texts:[unit,total,qty,disc,subtotal,saved],offer:true};
   }
   if(r.status==="priced"){
     const unit=money(r.unit_price_minor),moq=r.moq?d(r.moq):null;if(!unit)return null;
@@ -9649,7 +9650,13 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   };
   // An offer is open while the deal's spec AND the approved price behind it are unchanged (re-checked against the price of NOW).
   // (A retry of the very turn that accepted it still sees that acceptance, so it is never decided twice in two ways.)
-  const offerOpen=(dealCandidate?.status==="offered"||(dealCandidate?.status==="accepted"&&dealCandidate.offer?.accepted_in===row.id))&&!!dealCandidate.offer?.offer_hash;
+  // Phase 23: a total or a discounted offer reaches the customer only after the owner released it. Until its reply has really been
+  // sent the offer is not open: nothing can accept it, and asking again waits instead of writing a second draft. (Fails closed.)
+  // (a held reply the owner rejected, or one that failed to send, is no offer any more: asking again prepares a new draft)
+  let offerReleased=false,offerDeclined=false;
+  if(dealCandidate?.status==="offered"&&dealCandidate.offer?.offered_in!==row.id){const shown=dealCandidate.offer?.offered_in?await env.DB.prepare("SELECT status FROM lead_outreach WHERE inbox_message_id=? LIMIT 1").bind(dealCandidate.offer.offered_in).first().catch(()=>null):null;offerReleased=["sent","delivered"].includes(shown?.status);offerDeclined=!offerReleased&&!["draft","pending_approval","approved","sending"].includes(shown?.status);}
+  const offerHeld=dealCandidate?.status==="offered"&&!!dealCandidate.offer?.offer_hash&&!offerReleased&&!offerDeclined;
+  const offerOpen=((dealCandidate?.status==="offered"&&offerReleased)||(dealCandidate?.status==="accepted"&&dealCandidate.offer?.accepted_in===row.id))&&!!dealCandidate.offer?.offer_hash;
   const currentSpec=pricing?.product?salesCandidateSpec({product:{key:pricing.product.key,source:pricing.product.source},quantity:Number.isSafeInteger(pricing.quantity)?pricing.quantity:null,requirements:pricing.requirements||{},market:conversationMarket}):null;
   const currentOfferHash=currentSpec&&pricing.status==="priced"&&Number.isSafeInteger(pricing.quantity)?await salesCandidateHash({spec:currentSpec,price:salesOfferPrice(salesPriceSnapshot(pricing))}):null;
   const offerFresh=offerOpen&&!!currentOfferHash&&currentOfferHash===dealCandidate.offer.offer_hash;
@@ -9838,6 +9845,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(shownModels.length===1&&salesNormal(shownModels[0])!==salesNormal(String(memory.product_interest||""))){
       await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"product_interest",memory_key:"product_interest",value:shownModels[0]}});memory.product_interest=shownModels[0];}
   }
+  if(offerHeld&&dealCandidate.offer.offered_in!==row.id&&(priceReply?.offer||negotiation?.offer)&&currentOfferHash===dealCandidate.offer.offer_hash){priceReply=null;negotiation=null;action="wait_for_owner";waitingOn=null;}
   if(action==="accept_offer")stage="customer_accepted";
   if(action==="answer_price"){salesDraft=priceReply.parts.join(" ");salesTexts=priceReply.texts;}
   // Colour question: ONE answer composed from approved knowledge (+ the approved price when the deal is priced and not yet offered at
@@ -9876,7 +9884,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     let status=newDeal?"draft":dealCandidate?.status||"draft",offer=newDeal?null:dealCandidate?.offer||null;
     if(action==="accept_offer"){status="accepted";offer={...dealCandidate.offer,accepted_in:row.id};}
     // The same offer shown again stays the same offer (no new version for an unchanged deal).
-    else if(priceReply?.offer||negotiation?.offer){if(currentOfferHash&&!(status==="offered"&&offer?.offer_hash===currentOfferHash)){status="offered";offer={offer_hash:currentOfferHash,quantity,price:salesOfferPrice(priceSnapshot),offered_in:row.id};}}
+    else if(priceReply?.offer||negotiation?.offer){if(currentOfferHash&&(offerDeclined||!(status==="offered"&&offer?.offer_hash===currentOfferHash))){status="offered";offer={offer_hash:currentOfferHash,quantity,price:salesOfferPrice(priceSnapshot),offered_in:row.id};}}
     // The deal or its approved price changed since the offer: the old offer can no longer be accepted.
     // An ACCEPTED deal is reopened only by a change to that same product (asking about another product never demotes it).
     // (An accepted deal is never reopened only because its price cannot be determined right now.)
@@ -10065,6 +10073,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // Observability without chain-of-thought: whether the Sales AI ran, model, latency, what it understood, which facts were applied,
   // where the reply came from and why a fallback happened. The send path re-validates an AI reply against the same evidence.
   result.ai_brain=aiInfo;
+  // A reply carrying this deal's total waits for the owner. Only the very figures the owner already released may be shown again.
+  const quoteTotal=(priceReply?.offer?priceReply.texts:negotiation?.offer?negotiation.texts:[])[1]||null,quoteReleased=offerReleased&&!!currentOfferHash&&currentOfferHash===dealCandidate?.offer?.offer_hash;
+  result.final_quote_released=quoteReleased;
+  const dealTotal=pricing?.status==="priced"&&Number.isSafeInteger(pricing.quantity)&&Number.isSafeInteger(pricing.total_minor)?draftFigures(salesMoneyText(pricing.currency,pricing.total_minor,language)):[],draftShown=draftFigures(draft);
+  result.final_quote_hold=!quoteReleased&&!INBOUND_APPROVED_AMOUNT_ACTIONS.has(action)&&((!!quoteTotal&&String(draft||"").includes(quoteTotal))||(dealTotal.length>0&&dealTotal.every(f=>draftShown.includes(f))));
+  if(result.final_quote_hold){const rule=pricing?.discount_rule||null;result.final_quote={market:conversationMarket,product:pricing?.product_name||candidate?.product?.name||null,quantity:Number.isSafeInteger(pricing?.quantity)?pricing.quantity:null,reason:pricing?.discount?"discounted_total":"quantity_total",price:priceSnapshot,rule:rule?{type:rule.type,value:rule.value,min_quantity:rule.min_quantity??null,id:rule.id??null,version:rule.version??null}:null};}
   if(replySource!=="legacy"){result.knowledge_answer_facts=aiEvidenceFacts;result.answer_numbers=[...new Set([...answerNumbers,...aiAllowedNumbers])];}
   // Bounded self-check of the reply (recorded with the decision; it never adds content).
   result.self_check=salesSelfCheck(draft,{action,ownerPending:needsOwner||dealEscalations.length>0||action==="accept_offer"||action==="wait_for_owner"});
@@ -10317,6 +10331,9 @@ const INBOUND_AUTO_SEND_ACTIONS=new Set(["answer_sizes","ask_color_placement","w
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.
+// Amounts of an order the owner already confirmed; every other reply stating a total waits for the owner.
+const INBOUND_APPROVED_AMOUNT_ACTIONS=new Set(["order_status","payment_info"]);
+const INBOUND_TOTAL_WORDING=/(?:جمع|جمعش|مجموع|المجموع|مبلغ|المبلغ|اجمالی|إجمالي|اجمالي|الإجمالي|الكلي|total)[\s:：‌][^.؟?!\n]{0,40}[0-9۰-۹٠-٩]/iu;
 const INBOUND_AUTO_REPLY_HOURLY_LIMIT=40,INBOUND_AUTO_REPLY_BURST_LIMIT=12,INBOUND_AUTO_REPLY_BURST_MS=2*60*1000;
 // A redelivered inbound may complete an undecided outcome only while it is fresh (old drafts are never sent automatically).
 const INBOUND_RESUME_WINDOW_MS=30*60*1000;
@@ -10336,8 +10353,11 @@ async function inboundSendGateReason(env,{row,outreach,recipient}){
   return null;
 }
 async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
+  // Phase 23: totals and discounted offers are never sent automatically (the wording check also covers a reply that lost the mark).
+  if(brain?.final_quote_hold)return "final_quote_owner_approval";
   const gate=await inboundSendGateReason(env,{row,outreach,recipient});if(gate)return gate;
   if(!brain||(brain.needs_owner&&brain.owner_holding_reply!==true))return "owner_required";
+  if((!brain.final_quote_released&&!INBOUND_APPROVED_AMOUNT_ACTIONS.has(brain.next_sales_action)&&INBOUND_TOTAL_WORDING.test(String(outreach.message||""))))return "final_quote_owner_approval";
   // Phase 16.1 (S1): the customer asked about an existing order AND something new in one message → the owner answers both
   if(brain.order_status_also_asked)return "mixed_order_status_and_sales";
   if(brain.post_sale_review)return "post_sale_owner_review";
@@ -10375,6 +10395,13 @@ async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing
   const reason=await inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}),base={outreach_id:outreach.id,inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id};
   if(reason){
     if(reason!=="owner_required")await env.DB.prepare("UPDATE lead_outreach SET error_code=?,error_detail=?,updated_at=? WHERE id=? AND status='draft' AND error_code IS NULL").bind(brain?.needs_owner?"sales_brain_needs_owner":"inbound_auto_send_blocked",brain?.needs_owner?String(brain.needs_owner_reason||reason).slice(0,240):reason,now(),outreach.id).run();
+    // Only the newest held quote of a conversation can be released: the owner never sends two different totals.
+    if(reason==="final_quote_owner_approval"){
+      // (without this record the draft cannot be approved: the freshness check fails closed)
+      try{await recordFinalQuoteReview(env,{outreach,row,quote:brain?.final_quote||null,at:now()});}catch(error){try{await audit(env,"final_quote_review_failed","Held quote could not be recorded for review",{...base,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+      // Only OLDER held quotes of this conversation: a retry of an old message can never reject a newer draft.
+      await env.DB.prepare("UPDATE lead_outreach SET status='rejected',error_detail='final_quote_superseded',updated_at=? WHERE lead_id=? AND conversation_id=? AND id<>? AND created_at<? AND status IN ('draft','pending_approval') AND id IN (SELECT outreach_id FROM final_quote_reviews WHERE lead_id=? AND conversation_id=?)").bind(now(),row.lead_id,row.conversation_id,outreach.id,outreach.created_at,row.lead_id,row.conversation_id).run();
+    }
     try{await audit(env,"inbound_auto_reply_held","Inbound reply held for owner review",{...base,reason});}catch{}
     return {sent:false,reason};
   }
@@ -10387,7 +10414,7 @@ async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing
   return {sent:!!result.ok,status:result.status||null};
 }
 // A held reply (owner-gated, validator-blocked, a would-be repeat or a capped flood) still gets ONE customer-visible message.
-const INBOUND_ACK_REASONS=new Set(["photo_pilot_not_allowed","gallery_market_unknown","gallery_media_mismatch","owner_required","validator_blocked","action_requires_owner_review","draft_not_from_validated_brain","repetitive_reply","auto_send_rate_limited","mixed_order_status_and_sales","post_sale_owner_review"]);
+const INBOUND_ACK_REASONS=new Set(["photo_pilot_not_allowed","gallery_market_unknown","gallery_media_mismatch","owner_required","validator_blocked","action_requires_owner_review","draft_not_from_validated_brain","repetitive_reply","auto_send_rate_limited","mixed_order_status_and_sales","post_sale_owner_review","final_quote_owner_approval"]);
 // Acknowledgements say only that the message arrived and is being handled: no price, number, capability, timing or promise.
 const INBOUND_ACKNOWLEDGEMENTS={
   fa:{pending:["پیامتون رسید؛ بررسی می‌کنم و خبرتون می‌دم.","دریافت شد؛ در حال بررسیه و خبرتون می‌دم.","ممنون، پیامتون رسید؛ به‌زودی خبرتون می‌دم.","حتماً، بررسی می‌کنم و نتیجه رو خبرتون می‌دم."],
@@ -10437,6 +10464,8 @@ async function settleInboundOutcome(env,{row,brain,outreach,recipient,timing={}}
   }
   const visible=outcome.sent?"reply":outcome.acknowledgement?.sent?outcome.acknowledgement.kind==="handoff"?"handoff":"acknowledgement":"none";
   timing.outcome=visible;
+  // After the customer's message: the owner hears about the held reply. Whatever happens here changes nothing for the customer.
+  if(outcome.reason==="final_quote_owner_approval")try{const alert=await notifyFinalQuoteOwner(env,outreach.id);await audit(env,"final_quote_owner_alert","Owner alert for a held quote",{outreach_id:outreach.id,lead_id:row.lead_id,sent:!!alert.sent,reason:alert.reason||null});}catch(error){try{await audit(env,"final_quote_owner_alert_failed","Owner alert could not be completed",{outreach_id:outreach.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   if(outcome.reason!=="auto_send_error")try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound customer message outcome',?,?)").bind("inbound-outcome:"+row.id,"inbound_outcome",JSON.stringify({inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,customer_visible:visible,reason:outcome.reason||null,acknowledgement_id:outcome.acknowledgement?.id||null}),now()).run();}catch{}
   // AUTO-01 shadow: the authority tier is recorded next to what really happened (after it happened; never changes it).
   try{await recordSalesAuthorityShadow(env,{row,brain,outcome,visible});}catch{}
@@ -11960,6 +11989,7 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
 
 // A payment/shipping draft may be sent only while its stored order snapshot remains current.
 async function salesOutreachStillCurrent(env,outreachId){
+  const quote=await finalQuoteFreshness(env,outreachId,{discountRule:market=>salesListDiscountRule(env,market)});if(!quote.current)return quote;
   const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE id LIKE 'sales-draft:%' AND json_valid(details_json) AND json_extract(details_json,'$.outreach_id')=? LIMIT 1").bind(outreachId).first();
   if(!event)return {current:true};let details={};try{details=JSON.parse(event.details_json||"{}")}catch{return {current:false,reason:"invalid_sales_draft_snapshot"};}
   if(!details.order_id)return {current:true};const order=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? LIMIT 1").bind(details.order_id).first();if(!order)return {current:false,reason:"order_missing"};
@@ -13732,6 +13762,8 @@ const WORKER = {
     ctx.waitUntil(isolate("recover_stale_customer_media",()=>recoverStaleCustomerMedia(env,{limit:3})));
     // Bounded order-candidate consistency pass (accepted chat offers without an order candidate); never sends anything.
     ctx.waitUntil(isolate("reconcile_accepted_chat_offers",()=>reconcileAcceptedChatOffers(env,{limit:10})));
+    // Owner alerts for held quotes that are due a bounded retry; never sends to a customer, never repeats a delivered alert.
+    ctx.waitUntil(isolate("retry_final_quote_alerts",()=>retryFinalQuoteAlerts(env,{limit:5})));
     // MEM-02 retention: per-inbox AI results are cleared after their reuse window, rows after 7 days (bounded; live leases kept).
     ctx.waitUntil(isolate("purge_ai_call_flights",()=>purgeAiCallFlights(env)));
     // Independent agent watchdog (Stage 3): own waitUntil + try/catch, reads ops tables and raises alerts; never runs or sends anything.
@@ -14675,6 +14707,12 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         try{return json(await ownerActionCenter(env,q,{leadTestFlagSql,findStalledRevenueItems,canonicalCurrency,leadMarketOf}));}
         catch(e){return json({ok:false,error:"Owner action center is unavailable"},500);}
       }
+      if (u.pathname === "/api/final-quotes" && req.method === "GET") {
+        if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
+        await ensureLeadOutreachStore(env);
+        return json({ ok: true, ...await listFinalQuotes(env) });
+      }
+
       if (u.pathname === "/api/owner-escalations" && req.method === "GET") {
         if (!auth(req, env)) return json({ ok: false, error: "Unauthorized" }, 401);
         await ensureOwnerEscalationStore(env);
@@ -15408,6 +15446,7 @@ Context: ${context}`;
         const b=await req.json().catch(()=>({})),id=String(b.id||"").trim(),message=String(b.message||"").trim();
         if(!id||!message)return json({ok:false,error:"id and message are required"},400);
         if(message.length>4000)return json({ok:false,error:"Draft is too long"},400);
+        if(!(await finalQuoteEditAllowed(env,id,message)))return json({ok:false,error:"ارقام این پاسخ قابل تغییر نیست؛ در صورت نیاز آن را رد کنید",reason:"final_quote_figures_locked"},409);
         const before=(await env.DB.prepare("SELECT message FROM lead_outreach WHERE id=? LIMIT 1").bind(id).first())?.message??null,t=now();
         const result=await env.DB.prepare("UPDATE lead_outreach SET message=?,error_code=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_code END,error_detail=CASE WHEN error_code='sales_brain_needs_owner' THEN NULL ELSE error_detail END,updated_at=? WHERE id=? AND status='draft' AND channel<>?").bind(message,t,id,FIRST_CONTACT_CHANNEL).run();
         if(!result.meta?.changes)return json({ok:false,error:"Only a draft outreach can be edited"},409);
