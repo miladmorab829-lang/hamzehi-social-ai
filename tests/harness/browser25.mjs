@@ -15,6 +15,13 @@ W.d1.db.exec(fs.readFileSync(path.join(REPO,"owner-actions/phase25-delete-system
 for(let i=1;i<=6;i++)dbrun("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",["bl"+i,"فروشگاه آزمایشی "+i,"c"+i,"discovered","normal",'{"target_market":"IRAN"}',T,T]);
 dbrun("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES('bc','مشتری <b>واقعی</b>','c','customer','normal','{}',?,?)",[T,T]);
 await send({id:8101,name:"Web",username:"uweb"},"سلام <img src=x onerror=window.__xss=1>");
+// PHASE 25D: an open escalation with its pending decision, old enough to be set aside
+dbrun("INSERT INTO leads(id,name,contact,stage,priority,notes,created_at,updated_at) VALUES('be','تست','c','negotiation','normal','{}',?,?)",[T,T]);
+dbrun("INSERT INTO inbox_messages(id,platform,lead_id,conversation_id,message,status,created_at,updated_at) VALUES('bem','telegram','be','bec','x','new',?,?)",[T,T]);
+dbrun("INSERT INTO owner_escalations(id,escalation_key,lead_id,conversation_id,channel,source_message_id,sales_brain_event_id,context_summary,unresolved_question,reason_code,decision_required,status,version,created_at,updated_at) VALUES('bes','kbes','be','bec','telegram','bem','sb','c','q','missing_business_knowledge','a','open',1,?,?)",[T,T]);
+dbrun("INSERT INTO owner_decisions(id,status,priority,decision_type,fingerprint,lead_id,conversation_id,owner_escalation_id,question,created_at,updated_at) VALUES('bed','PENDING',20,'ESCALATION_MISSING_BUSINESS_KNOWLEDGE','ESCALATION|bes','be','bec','bes','q',?,?)",[T,T]);
+// PHASE 25G: an old conversation with a paid order, for the context reset
+dbrun("INSERT INTO lead_conversations(id,lead_id,platform,status,created_at,updated_at) VALUES('bec','be','telegram','open',?,?)",[T,T]);
 for(let i=1;i<=3;i++)dbrun("INSERT INTO system_events VALUES(?,?,?,?,?,?)",["ev"+i,"scheduled_step_failed","error","خطای قدیمی "+i,"{}",T]);
 
 const server=http.createServer(async(req,res)=>{try{const chunks=[];for await(const c of req)chunks.push(c);const body=Buffer.concat(chunks);
@@ -90,6 +97,25 @@ for(const [name,w,h,mobile] of [["iphone",390,844,true],["desktop",1280,900,fals
  ok(name+" 16b a customer row has no delete button",await ev("[...document.querySelectorAll('#leadsListItems .row')].some(r=>r.textContent.includes('محافظت‌شده')&&!r.querySelector(\"[data-cl='one']\"))"));
  await go("/dashboard/errors");
  ok(name+" 17 errors list carries the controls",await until("!!document.querySelector(\"#errorsCenterItems [data-cl='selected']\")",10000));
+ await go("/dashboard/cleanup?section=escalations");await until("!!document.querySelector('#clItems .clPick')");
+ ok(name+" 18 the test archive button shows only here, and the open row can be picked",await ev("!document.getElementById('clTestArchive').hidden&&!document.querySelector('#clItems .clPick').disabled"));
+ ok(name+" 18b the ordinary delete stays off for it",await ev("document.querySelector(\"#clItems [data-pg='trash']\").disabled"));
+ await click("#clItems .clPick");await click("#clTestArchive");
+ ok(name+" 18c the sheet says no decision is recorded",await until("document.getElementById('clSheetBox').textContent.includes('تصمیم تجاری ثبت نمی‌شود')"));
+ await ev("document.getElementById('clPhrase').value='بایگانی تست 1 مورد'");await click("#clGo");
+ ok(name+" 18d archived",await until("document.getElementById('clSheetBox').textContent.includes('انجام شد')"));await click("[data-cl='close']");
+ ok(name+" 18e the record is still open with no answer",q("SELECT status s,owner_decision d FROM owner_escalations WHERE id='bes'")[0].s==="open"&&q("SELECT status s FROM owner_decisions WHERE id='bed'")[0].s==="PENDING"&&q("SELECT owner_decision d FROM owner_escalations WHERE id='bes'")[0].d===null);
+ await go("/dashboard/approvals");ok(name+" 18e2 the owner list explains the stopped follow-ups",await until("!!document.getElementById('escArchivedLink')",10000));
+ await go("/dashboard/cleanup?section=escalations&view=trash");await until("!!document.querySelector(\"#clItems [data-pg='restore']\")");await sleep(300);
+ ok(name+" 18e3 the Trash row says it is a test archive",await ev("document.getElementById('clItems').textContent.includes('بایگانی تست')"));await click("#clItems [data-pg='restore']");await until("!!document.getElementById('clGo')");await click("#clGo");
+ ok(name+" 18f restored from the list",await until("document.getElementById('clSheetBox').textContent.includes('انجام شد')"));await click("[data-cl='close']");
+ await go("/dashboard/cleanup?section=escalations");ok(name+" 18f2 it is back in the active list",await until("!!document.querySelector('#clItems .clPick')"));
+ await go("/dashboard/cleanup?section=context");await until("!!document.querySelector(\"#clItems [data-pg='trash']:not([disabled])\")");await sleep(300);await click("#clItems [data-pg='trash']:not([disabled])");
+ ok(name+" 19 the reset sheet says messages and orders stay",await until("document.getElementById('clSheetBox').textContent.includes('فقط زمینه AI بازنشانی می‌شود')"));
+ await ev("document.getElementById('clPhrase').value='بازنشانی گفتگو 1 مورد'");await click("#clGo");ok(name+" 19b reset done",await until("document.getElementById('clSheetBox').textContent.includes('انجام شد')"));await click("[data-cl='close']");
+ ok(name+" 19c marker written, conversation row kept",q("SELECT COUNT(*) n FROM cleanup_trash WHERE section='context' AND record_id='bec' AND state='trashed'")[0].n===1&&q("SELECT COUNT(*) n FROM lead_conversations WHERE id='bec'")[0].n===1);
+ await go("/dashboard/cleanup?section=context&view=trash");await until("!!document.querySelector(\"#clItems [data-pg='restore']\")");await sleep(300);await click("#clItems [data-pg='restore']");await until("!!document.getElementById('clGo')");await click("#clGo");ok(name+" 19d the reset can be undone",await until("document.getElementById('clSheetBox').textContent.includes('انجام شد')"));await click("[data-cl='close']");ok(name+" 19e the marker is closed",q("SELECT COUNT(*) n FROM cleanup_trash WHERE section='context' AND record_id='bec' AND state='trashed'")[0].n===0);
+ ok(name+" 18g nothing left in Trash for it",q("SELECT COUNT(*) n FROM cleanup_trash WHERE state='trashed' AND record_id IN ('bes','bed')")[0].n===0);
 }
 const errs=events.filter(e=>e.method==="Runtime.exceptionThrown").map(e=>e.params?.exceptionDetails?.exception?.description||e.params?.exceptionDetails?.text);
 ok("B9 no script error in the whole run",errs.length===0,errs.slice(0,3));

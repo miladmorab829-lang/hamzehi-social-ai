@@ -2,7 +2,7 @@
 // Owner Decision Center, controlled learning, revenue attribution and AI usage accounting.
 // Code holds engines and safety rules; business knowledge lives in owner-approved, versioned DB rows.
 import { canonicalCurrency, MARKET_CURRENCY, CURRENCY_RULES } from "./autonomy-engine.js";
-import { cleanupHiddenSql } from "./cleanup-center.js";
+import { cleanupHiddenSql, cleanupSetAsideSql } from "./cleanup-center.js";
 import { previewProductSheets, applyProductSheets, ownerChangeHash } from "./catalog-intake.js";
 import { commercialDefaultDiscount, moqPolicy } from "./commercial-policy.js";
 
@@ -608,7 +608,7 @@ export async function listDecisions(env,{status="PENDING",type=null,limit=100}={
   await ensureSalesIntelligenceStore(env);
   const where=[],b=[];if(status&&status!=="ALL"){if(!DECISION_STATUSES.has(status))throw Error("Invalid status");where.push("status=?");b.push(status);}
   if(type){where.push("decision_type=?");b.push(String(type).toUpperCase());}
-  const hidden=await cleanupHiddenSql(env,"decisions","owner_decisions.id");if(hidden)where.push(`(status='PENDING' OR (1=1${hidden}))`);
+  const hidden=await cleanupHiddenSql(env,"decisions","owner_decisions.id");if(hidden)where.push(`(status='PENDING' OR (1=1${hidden}))`);const aside=await cleanupSetAsideSql(env,"decisions","owner_decisions.id");if(aside)where.push("1=1"+aside);
   return (await all(env,`SELECT * FROM owner_decisions ${where.length?"WHERE "+where.join(" AND "):""} ORDER BY CASE status WHEN 'PENDING' THEN 0 ELSE 1 END,priority,created_at DESC LIMIT ?`,...b,Math.min(Number(limit)||100,300)))
     .map(d=>({...d,known:parseJson(d.known_json,{}),missing:parseJson(d.missing_json,[]),conflicting:parseJson(d.conflicting_json,[]),history:parseJson(d.history_json,[]),payload:parseJson(d.payload_json,{}),owner_answer:parseJson(d.owner_answer_json,null)}));
 }
@@ -1074,7 +1074,7 @@ export async function aiUsageSummary(env){
 /* ------------------------------------------------------- money at stake */
 export async function moneyAtStake(env){
   await ensureSalesIntelligenceStore(env);
-  const decisions=await all(env,"SELECT decision_type,COUNT(*) AS n,MIN(priority) AS top_priority FROM owner_decisions WHERE status='PENDING' GROUP BY decision_type ORDER BY top_priority");
+  const decisions=await all(env,`SELECT decision_type,COUNT(*) AS n,MIN(priority) AS top_priority FROM owner_decisions WHERE status='PENDING'${await cleanupSetAsideSql(env,"decisions","owner_decisions.id")} GROUP BY decision_type ORDER BY top_priority`);
   // Phase 12.3: test records (lead notes.data_class 'test' / is_test) never count as real money; they are reported separately.
   const testSql=D.leadTestFlagSql?D.leadTestFlagSql("l"):"0";
   const quotesAll=await all(env,`SELECT x.id,x.lead_id,x.status,x.currency,x.total_minor,x.pricing_mode,x.margin_json,x.updated_at,${testSql} AS test_record FROM lead_quotes x LEFT JOIN leads l ON l.id=x.lead_id WHERE x.status IN ('quote_ready','pending_approval','approved','waiting_for_owner_price','requires_owner_review','draft') ORDER BY x.updated_at DESC LIMIT 50`);

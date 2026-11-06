@@ -8,6 +8,7 @@
 // Completeness (13.1B): every source reads base-P0/P1 rows first, then age-escalated rows, then the rest and counts all matching rows in the same
 // statement (window COUNT), so truncation is measured, never guessed. Coverage is COMPLETE / PARTIAL (a source had more rows than its
 // cap) / UNKNOWN (a source could not be read); counts are exact only when coverage is COMPLETE.
+import { cleanupSetAsideClause } from "./cleanup-center.js";
 
 export const OAC_RULES_VERSION="13.1B";
 const DAY=86400000,SOURCE_LIMIT=200,PAGE_MAX=100,IN_BATCH=90;
@@ -78,6 +79,7 @@ export async function ownerActionCenter(env,query={},deps={}){
   let tables=new Set();
   try{tables=new Set((((await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table'").bind().all()).results)||[]).map(r=>r.name));}catch{tables=null;}
   const missing=need=>tables===null?need:need.filter(t=>!tables.has(t));
+  const setAside=(section,id)=>tables?.has("cleanup_trash")?cleanupSetAsideClause(section,id):"";   // from the catalogue already read: no extra statement
   // read(): urgent rows first, `_total` / `_urgent` = matching rows in the whole source (window COUNT in the same statement)
   const read=async(name,need,sql,args=[])=>{
     const gone=missing(need);if(gone.length){sources[name]={ok:false,count:0,total:null,complete:false,error:"table missing: "+gone.join(",")};return [];}
@@ -93,7 +95,7 @@ export async function ownerActionCenter(env,query={},deps={}){
   // merged item keeps the MORE urgent of the two priorities.
   const escU=`e.reason_code IN (${URGENT_ESCALATIONS}) OR e.created_at<='${ago7}'`;
   const esc=await read("owner_escalations",["owner_escalations","leads"],`SELECT e.id,e.lead_id,e.reason_code,e.status,e.created_at,${classSql} AS classification,${mktSql} AS meta,${win(escU)}
-    FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE e.status='open' ORDER BY CASE WHEN e.reason_code IN (${URGENT_ESCALATIONS}) THEN 0 ELSE 1 END,_u DESC,e.created_at ASC,e.id LIMIT ${SOURCE_LIMIT}`);
+    FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE e.status='open'${setAside("escalations","e.id")} ORDER BY CASE WHEN e.reason_code IN (${URGENT_ESCALATIONS}) THEN 0 ELSE 1 END,_u DESC,e.created_at ASC,e.id LIMIT ${SOURCE_LIMIT}`);
   const escItems=new Map();
   for(const e of esc){const r=escalationRule(e.reason_code);
     escItems.set(e.id,push({key:`escalation:${e.id}`,category:r.category,kind:"escalation",priority:r.priority,reason:String(e.reason_code||""),since:e.created_at,status:e.status,classification:e.classification,market:marketOf(e.meta),
@@ -101,7 +103,7 @@ export async function ownerActionCenter(env,query={},deps={}){
   const decU=`d.decision_type IN (${URGENT_DECISIONS}) OR (d.decision_type NOT IN (${LOW_DECISIONS}) AND d.created_at<='${ago7}')`;
   const dec=await read("owner_decisions",["owner_decisions","leads","lead_orders","lead_quotes"],`SELECT d.id,d.decision_type,d.status,d.market,d.lead_id,d.quote_id,d.order_id,d.owner_escalation_id,d.created_at,${classSql} AS classification,${win(decU)}
     FROM owner_decisions d LEFT JOIN leads l ON l.id=COALESCE(d.lead_id,(SELECT o.lead_id FROM lead_orders o WHERE o.id=d.order_id),(SELECT q.lead_id FROM lead_quotes q WHERE q.id=d.quote_id))
-    WHERE d.status='PENDING' ORDER BY CASE WHEN d.decision_type='PAYMENT_VERIFICATION' THEN 0 WHEN d.decision_type IN (${URGENT_DECISIONS}) THEN 1 ELSE 2 END,_u DESC,d.created_at ASC,d.id LIMIT ${SOURCE_LIMIT}`);
+    WHERE d.status='PENDING'${setAside("decisions","d.id")} ORDER BY CASE WHEN d.decision_type='PAYMENT_VERIFICATION' THEN 0 WHEN d.decision_type IN (${URGENT_DECISIONS}) THEN 1 ELSE 2 END,_u DESC,d.created_at ASC,d.id LIMIT ${SOURCE_LIMIT}`);
   const orderDecisions=new Map();   // order_id → [pending ORDER_CANDIDATE_APPROVAL decisions] (merged into the order item; none dropped)
   const standalone=d=>{const r=decisionRule(d.decision_type);
     push({key:`decision:${d.id}`,category:r.category,kind:"decision",priority:r.priority,reason:d.decision_type,since:d.created_at,status:d.status,classification:d.classification,market:d.market,

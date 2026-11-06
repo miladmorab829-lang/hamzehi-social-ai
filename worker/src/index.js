@@ -21,7 +21,7 @@ import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
 import { ownerChangeHash } from "./catalog-intake.js";
 import { commercialDefaultDiscount, evaluateOrderLines, isUnverifiedConfiguration, marketStandardMoq, statesLessThanQuantity } from "./commercial-policy.js";
-import { cleanupHiddenSql, cleanupRecentlyRestored, cleanupReviveLead, handleCleanup } from "./cleanup-center.js";
+import { CONTEXT_UNKNOWN, cleanupArchivedTestSummary, cleanupContextFrom, cleanupContextFromMessage, cleanupEscalationArchived, cleanupHiddenSql, cleanupLeadContextFrom, cleanupRecentlyRestored, cleanupSetAsideSql, cleanupReviveLead, handleCleanup } from "./cleanup-center.js";
 import { draftFigures, finalQuoteEditAllowed, finalQuoteFreshness, finalQuoteWaiting, listFinalQuotes, notifyFinalQuoteOwner, recordFinalQuoteReview, retryFinalQuoteAlerts } from "./final-quote-review.js";
 import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, optOutStateFromMessages, OPT_OUT_RULES_ID, OPT_OUT_RULES_KEY, OPT_OUT_ALL_LEGACY } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
@@ -7477,7 +7477,8 @@ function customerImageOrdinal(value){
 const CUSTOMER_IMAGE_DEICTIC=/(?:^|[\s،,.؟?!])(?:[اإ][یي]ن|هم[یي]ن|[اإ][یي]نو|هم[یي]نو|[اإ][یي]نا|[اإ][یي]نها|همون|همان|هذا|هذه|هاي|هذي|نفس|نفسه|نفسها)(?=$|[\s‌،,.؟?!:؛;])|\b(?:this|that|it|same|these|those)\b/u;
 const CUSTOMER_IMAGE_MODEL_REFERENCE=/(?:[اإ][یي]ن|هم[یي]ن|همون|همان|هذا|هذه|نفس|this|that|same)\s*(?:مدل|موديل|الموديل|model)/u;
 async function resolveCustomerImageReference(env,row){
-  const since=new Date(Date.parse(row.created_at||now())-CUSTOMER_IMAGE_WINDOW_MS).toISOString(),ready=await customerMediaStoreReady(env);
+  const [ready,from]=await Promise.all([customerMediaStoreReady(env),row.context_from!==undefined?row.context_from:cleanupContextFrom(env,row.conversation_id)]);
+  const windowStart=new Date(Date.parse(row.created_at||now())-CUSTOMER_IMAGE_WINDOW_MS).toISOString(),since=from>windowStart?from:windowStart;
   // Without the (migration-created) customer-media table, the image REFERENCE still works from this same conversation's
   // own customer photos in telegram_media_sources (no analysis/observation): reference only, never visual knowledge.
   const images=((await env.DB.prepare(ready?`SELECT m.id,m.inbox_message_id,m.media_group_id,m.analysis_status,m.observation_json,m.telegram_message_id,i.created_at AS message_created_at
@@ -7495,7 +7496,7 @@ async function resolveCustomerImageReference(env,row){
   if(!CUSTOMER_IMAGE_DEICTIC.test(customerImageText(row.message)))return {...base,status:"none"};
   if(images.length===1)return {...base,status:"resolved",basis:"single_recent_image",media_id:images[0].id};
   // Several images: reuse only a reference the customer already disambiguated in TEXT, with no newer image since then.
-  const active=await env.DB.prepare("SELECT f.value_json,f.source_message_id,i.created_at AS source_created_at FROM conversation_memory_facts f JOIN inbox_messages i ON i.id=f.source_message_id AND i.lead_id=f.lead_id AND i.conversation_id=f.conversation_id WHERE i.status<>'trashed' AND f.lead_id=? AND f.conversation_id=? AND f.memory_key='customer_image_reference' AND f.status='active' LIMIT 1").bind(row.lead_id,row.conversation_id).first();
+  const active=await env.DB.prepare("SELECT f.value_json,f.source_message_id,i.created_at AS source_created_at FROM conversation_memory_facts f JOIN inbox_messages i ON i.id=f.source_message_id AND i.lead_id=f.lead_id AND i.conversation_id=f.conversation_id WHERE i.status<>'trashed' AND i.created_at>? AND f.lead_id=? AND f.conversation_id=? AND f.memory_key='customer_image_reference' AND f.status='active' LIMIT 1").bind(from,row.lead_id,row.conversation_id).first();
   if(active){let mediaId=null;try{mediaId=JSON.parse(active.value_json);}catch{}const fromText=!images.some(x=>x.inbox_message_id===active.source_message_id),newer=images.some(x=>String(x.message_created_at)>String(active.source_created_at));if(fromText&&!newer&&images.some(x=>x.id===mediaId))return {...base,status:"resolved",basis:"prior_customer_disambiguation",media_id:mediaId};}
   return {...base,status:"ambiguous",basis:"multiple_recent_images"};
 }
@@ -7660,7 +7661,7 @@ async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMes
   if(same)return {fact:same,idempotent:true};
   // A weak mention (a city named in passing, not stated as the destination) fills an unknown value but never replaces a known one.
   const currentHidden=current?!!(await env.DB.prepare("SELECT 1 x FROM inbox_messages WHERE id=? AND status='trashed' LIMIT 1").bind(current.source_message_id).first().catch(()=>null)):false;
-  if(fact.weak&&current&&!currentHidden)return {fact:current,idempotent:true,kept_existing:true};
+  if(fact.weak&&current&&!currentHidden&&String(current.created_at)>await cleanupContextFrom(env,conversationId))return {fact:current,idempotent:true,kept_existing:true};
   const t=now(),id="conversation-memory-"+uid(),version=(current?.version||0)+1;
   try{
     const statements=[];
@@ -7685,7 +7686,7 @@ async function captureConversationSalesMemory(env,inboxId,out=null){
   if(!row)return {captured:false,reason:"unlinked"};
   const intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
   // Only a reply that is nothing but a number needs the previous question (one keyed read, skipped for every other message).
-  const lastAction=salesBareQuantity(row.message)!==null?(await env.DB.prepare("SELECT next_action FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_sales_state.last_meaningful_inbox_message_id AND mi.status='trashed') LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null))?.next_action||null:null;
+  const lastAction=salesBareQuantity(row.message)!==null?(await env.DB.prepare("SELECT next_action FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_sales_state.last_meaningful_inbox_message_id AND mi.status='trashed') AND COALESCE(last_meaningful_at,'')>? LIMIT 1").bind(row.conversation_id,row.lead_id,await cleanupContextFrom(env,row.conversation_id)).first().catch(()=>null))?.next_action||null:null;
   const facts=extractConversationMemoryFacts(row.message,intent,row.id,{lastAction}),captured=[];
   // The resolved customer image is a conversation-scoped REFERENCE (media id), never a product fact or visual knowledge.
   let imageReference=null;try{imageReference=await resolveCustomerImageReference(env,row);if(out)out.imageReference=imageReference;}catch{}
@@ -7905,10 +7906,14 @@ function extractQuoteRequestDetails(value) {
 }
 
 async function getNegotiationConversationContext(env,leadId,conversationId) {
-  const inbound=await env.DB.prepare("SELECT id,message,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND status<>'trashed' ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
   // Only what the customer actually received is "what we said": an unsent, rejected or failed draft (an old test reply, a payment
   // request still waiting for the owner) is never conversation context, never a repeat to avoid and never current deal state.
-  const outbound=await env.DB.prepare("SELECT id,message,created_at,status FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status IN ('sent','sending','send_ambiguous') ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId).all();
+  // The rows themselves always stay as send and dedupe evidence; a context boundary only takes them out of what the AI reads.
+  const from=await cleanupContextFrom(env,conversationId);
+  const [inbound,outbound]=await Promise.all([
+    env.DB.prepare("SELECT id,message,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND status<>'trashed' AND created_at>? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId,from).all(),
+    env.DB.prepare("SELECT id,message,created_at,status FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status IN ('sent','sending','send_ambiguous') AND created_at>? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId,from).all()
+  ]);
   return [
     ...(inbound.results||[]).map(x=>({id:x.id,direction:"inbound",message:String(x.message||"").slice(0,1200),created_at:x.created_at})),
     ...(outbound.results||[]).map(x=>({id:x.id,direction:"outbound",message:String(x.message||"").slice(0,1200),created_at:x.created_at,status:x.status}))
@@ -8257,6 +8262,7 @@ async function resolveLinkedOwnerDecision(env,{id,action,scope="CASE_ONLY",answe
   if(!decision?.owner_escalation_id)throw Error("Linked owner decision not found");
   const escalation=await env.DB.prepare("SELECT * FROM owner_escalations WHERE id=? LIMIT 1").bind(decision.owner_escalation_id).first();
   if(!escalation)throw Error("Linked owner escalation not found");
+  if(await cleanupEscalationArchived(env,escalation.id))throw Error("This escalation is archived as test data; restore it before answering");
   const act=String(action||"").toUpperCase(),sc=String(scope||"CASE_ONLY").toUpperCase();
   if(!["APPROVE","REJECT","ANSWER"].includes(act))throw Error("Invalid owner decision action");
   if(!["CASE_ONLY","SAVE_AS_KNOWLEDGE"].includes(sc))throw Error("Linked escalation scope must be CASE_ONLY or SAVE_AS_KNOWLEDGE");
@@ -8272,13 +8278,14 @@ async function resolveLinkedOwnerDecision(env,{id,action,scope="CASE_ONLY",answe
     });
     knowledgeAction="PENDING_P0_7A_REVIEW";resultingRef=`sales_knowledge_change_request:${proposal.id}`;
   }
+  const notSetAside=await cleanupSetAsideSql(env,"escalations","owner_escalations.id");   // re-checked inside both writes: an archive that lands now wins
   const t=now(),decisionStatus=act==="REJECT"?"REJECTED":"RESOLVED",ownerText=String(answer?.owner_decision||note||act).normalize("NFKC").trim().slice(0,2000)||act;
   await env.DB.batch([
     env.DB.prepare(`UPDATE owner_decisions SET status=?,owner_decision=?,owner_answer_json=?,owner_note=?,scope_json=?,knowledge_action=?,resulting_ref=?,resolved_by=?,resolved_at=?,updated_at=?
-      WHERE id=? AND status='PENDING' AND EXISTS(SELECT 1 FROM owner_escalations WHERE id=? AND status='open' AND version=?)`)
+      WHERE id=? AND status='PENDING' AND EXISTS(SELECT 1 FROM owner_escalations WHERE id=? AND status='open' AND version=?${notSetAside})`)
       .bind(decisionStatus,act,JSON.stringify(answer||{}),String(note||"").slice(0,1000)||null,JSON.stringify({scope:sc}),knowledgeAction,resultingRef,actor,t,t,decision.id,escalation.id,escalation.version),
     env.DB.prepare(`UPDATE owner_escalations SET status='resolved',owner_decision=?,owner_note=?,resolved_by=?,resolved_at=?,version=version+1,updated_at=?
-      WHERE id=? AND status='open' AND version=? AND EXISTS(SELECT 1 FROM owner_decisions WHERE id=? AND status=?)`)
+      WHERE id=? AND status='open' AND version=?${notSetAside} AND EXISTS(SELECT 1 FROM owner_decisions WHERE id=? AND status=?)`)
       .bind(ownerText,String(note||"").slice(0,2000)||null,actor,t,t,escalation.id,escalation.version,decision.id,decisionStatus)
   ]);
   const [resolvedDecision,resolvedEscalation]=await Promise.all([
@@ -8927,13 +8934,14 @@ async function salesBackfillAcceptedOrder(env,{leadId,conversationId,candidate,d
 // Bounded consistency pass (cron, every 15 min; no message is ever sent): a PENDING order-candidate approval whose accepted offer has
 // no order candidate gets it, from the snapshot stored on that decision. Historical rows are only added to, never deleted or changed.
 async function reconcileAcceptedChatOffers(env,{limit=10}={}){
-  let pending=[];try{pending=((await env.DB.prepare("SELECT id,lead_id,conversation_id,known_json FROM owner_decisions WHERE decision_type='ORDER_CANDIDATE_APPROVAL' AND status='PENDING' AND (order_id IS NULL OR order_id='') ORDER BY created_at LIMIT ?").bind(limit).all()).results||[]);}catch{return {checked:0,created:0};}
+  let pending=[];try{pending=((await env.DB.prepare("SELECT id,lead_id,conversation_id,known_json,created_at FROM owner_decisions WHERE decision_type='ORDER_CANDIDATE_APPROVAL' AND status='PENDING' AND (order_id IS NULL OR order_id='') ORDER BY created_at LIMIT ?").bind(limit).all()).results||[]);}catch{return {checked:0,created:0};}
   let created=0;
   for(const d of pending){
     try{
       let candidate=null;try{candidate=JSON.parse(d.known_json||"{}").order_candidate||null;}catch{}
       if(!candidate?.offer?.accepted_in||!d.lead_id||!d.conversation_id)continue;
-      const facts=((await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND memory_key IN ('customer_name','destination','selected_colors')").bind(d.lead_id,d.conversation_id).all()).results||[]);
+      const from=await cleanupContextFrom(env,d.conversation_id);if(from&&String(d.created_at||"")<=from)continue;
+      const facts=((await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND memory_key IN ('customer_name','destination','selected_colors') AND created_at>?").bind(d.lead_id,d.conversation_id,from).all()).results||[]);
       const fact=k=>{const f=facts.find(x=>x.memory_key===k);try{const v=f?JSON.parse(f.value_json):null;return typeof v==="string"&&v.trim()?v.trim():null}catch{return null}};
       if(await salesBackfillAcceptedOrder(env,{leadId:d.lead_id,conversationId:d.conversation_id,candidate,destination:fact("destination"),customerName:fact("customer_name"),colors:(()=>{const f=facts.find(x=>x.memory_key==="selected_colors");try{const v=f?JSON.parse(f.value_json):null;return Array.isArray(v)?v.filter(c=>typeof c==="string"):null}catch{return null}})()}))created++;
     }catch(error){try{await audit(env,"chat_order_candidate_failed","Accepted chat offer could not be reconciled as an order candidate",{decision_id:d.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
@@ -9052,7 +9060,7 @@ async function salesPaymentClaimTurn(env,{row,order,language}){
     ?(media?(ar?"وصل إيصال الحوالة الجديدة، راح نتأكد منها ونبلغك.":"رسید واریز جدیدتون دریافت شد؛ بررسی می‌کنم و خبرتون می‌دم."):(ar?"وصلت رسالة الحوالة الجديدة، راح نتأكد منها ونبلغك.":"پیام واریز جدیدتون دریافت شد؛ بررسی می‌کنم و خبرتون می‌دم."))
     :media?(ar?"وصل الإيصال، راح نتأكد من الحوالة ونبلغك.":"رسید دریافت شد؛ واریز رو بررسی می‌کنم و خبرتون می‌دم."):(ar?"وصلت رسالتك، راح نتأكد من الحوالة ونبلغك.":"پیامتون دریافت شد؛ واریز رو بررسی می‌کنم و خبرتون می‌دم.");
   if(seen)return {decision:seen,reply,duplicate:true};
-  const requested=await env.DB.prepare("SELECT id FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status='sent' AND (instr(message,'مبلغ قابل پرداخت')>0 OR instr(message,'المبلغ المطلوب')>0) LIMIT 1").bind(row.lead_id,row.conversation_id).first();
+  const requested=await env.DB.prepare("SELECT id FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status='sent' AND (instr(message,'مبلغ قابل پرداخت')>0 OR instr(message,'المبلغ المطلوب')>0) AND created_at>? LIMIT 1").bind(row.lead_id,row.conversation_id,row.context_from||"").first();
   const signal=paymentClaimSignal(text,{awaitingPayment:true,paymentRequested:!!requested});
   // Negated / future / question / failed payment talk is never a completed-payment claim (with or without an image).
   if(["negated","future","question","failed"].includes(signal.state))return null;
@@ -9136,7 +9144,7 @@ async function salesAiConversationState(env,{row,memory,pricing,dealCandidate,po
   // the last photo(s) the customer actually received in this conversation (approved spec of the newest sent album)
   let lastShown=null;
   try{
-    const r=await env.DB.prepare("SELECT s.product_key,s.product_name,s.model,s.size,s.pieces,s.box_type,s.lid_color,s.middle_color,s.base_color,s.printing,o.id outreach_id FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id JOIN gallery_photo_specs s ON s.visual_media_id=m.visual_media_id AND s.status='approved' WHERE o.conversation_id=? AND o.lead_id=? AND o.status='sent' ORDER BY o.created_at DESC,m.position ASC LIMIT 6").bind(row.conversation_id,row.lead_id).all();
+    const r=await env.DB.prepare("SELECT s.product_key,s.product_name,s.model,s.size,s.pieces,s.box_type,s.lid_color,s.middle_color,s.base_color,s.printing,o.id outreach_id FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id JOIN gallery_photo_specs s ON s.visual_media_id=m.visual_media_id AND s.status='approved' WHERE o.conversation_id=? AND o.lead_id=? AND o.status='sent' AND o.created_at>? ORDER BY o.created_at DESC,m.position ASC LIMIT 6").bind(row.conversation_id,row.lead_id,row.context_from||"").all();
     const rows=(r.results||[]).filter(x=>x.outreach_id===(r.results||[])[0]?.outreach_id);
     if(rows.length){const x=rows[0];lastShown={product_key:txt(x.product_key),product:txt(x.product_name)||txt(x.model),model:txt(x.model),size:txt(x.size,20),structure:txt(x.box_type,40),pieces:x.pieces??null,
       colors:[...new Set(rows.flatMap(y=>[y.lid_color,y.middle_color,y.base_color]).map(c=>txt(c,40)).filter(Boolean))].slice(0,8),printing:txt(x.printing,40),photos:rows.length};}
@@ -9214,11 +9222,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const timed=(stage,work)=>{const s=Date.now();return Promise.resolve(work).then(value=>{timing[stage]=(timing[stage]||0)+Date.now()-s;return value;});};
   await Promise.all([ensureConversationMemoryStore(env),ensureSalesKnowledgeStore(env),ensureQuoteStore(env),ensureOwnerEscalationStore(env)]);
   const preRow=preloaded.row&&preloaded.row.id===inboxId?preloaded.row:null;
-  const [prior,loadedRow]=await Promise.all([
+  const [prior,loadedRow,ctxFrom]=await Promise.all([
     env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind("sales-brain:"+inboxId).first(),
     preRow?null:env.DB.prepare(`SELECT i.*,l.notes AS lead_notes,c.platform AS conversation_platform,c.contact_id
     FROM inbox_messages i JOIN leads l ON l.id=i.lead_id JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id
-    WHERE i.id=? AND i.status<>'trashed' AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first()
+    WHERE i.id=? AND i.status<>'trashed' AND i.lead_id IS NOT NULL AND i.conversation_id IS NOT NULL LIMIT 1`).bind(inboxId).first(),
+    cleanupContextFromMessage(env,inboxId)
   ]);
   const row=preRow||loadedRow;
   if(!row)return {resolved:false,needs_owner:true,needs_owner_reason:"ambiguous_customer_identity",draft_customer_reply:null};
@@ -9226,22 +9235,26 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   timing.brain_setup_ms=Date.now()-started;
   // ---- Wave 1: everything that depends only on this inbound row, loaded concurrently (each was a sequential round trip before).
   const wave1=Date.now();
-  const [context,ownerCaseDecisions,memories,postSaleOrder,loadedImageReference,priorInbox,turnFactRows,openEscalations,salesState,formalQuoteReply]=await Promise.all([
+  row.context_from=ctxFrom;
+  const [context,ownerCaseDecisions,memories,postSaleFound,loadedImageReference,priorInbox,turnFactRows,openEscalations,salesState,formalQuoteReply]=await Promise.all([
     Array.isArray(preloaded.context)?preloaded.context:timed("history_ms",getNegotiationConversationContext(env,row.lead_id,row.conversation_id)),
-    env.DB.prepare("SELECT id,source_message_id,reason_code,owner_decision,resolved_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='resolved' ORDER BY resolved_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[]),
-    timed("memory_load_ms",env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[])),
+    cleanupHiddenSql(env,"escalations","owner_escalations.id").then(hidden=>env.DB.prepare(`SELECT id,source_message_id,reason_code,owner_decision,resolved_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='resolved' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=owner_escalations.source_message_id AND mi.status='trashed') AND created_at>?${hidden} ORDER BY resolved_at DESC LIMIT 10`).bind(row.lead_id,row.conversation_id,ctxFrom).all()).then(r=>r.results||[]),
+    timed("memory_load_ms",env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE lead_id=? AND conversation_id=? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND NOT (memory_key='conversation_summary' AND EXISTS(SELECT 1 FROM inbox_messages mt WHERE mt.conversation_id=conversation_memory_facts.conversation_id AND mt.status='trashed' AND mt.created_at<=conversation_memory_facts.created_at AND mt.updated_at>=conversation_memory_facts.created_at)) AND created_at>? ORDER BY created_at DESC").bind(row.lead_id,row.conversation_id,ctxFrom).all().then(r=>r.results||[])),
     findPostSaleOrder(env,row.lead_id,row.conversation_id),
     preloaded.imageReference?null:timed("image_reference_ms",resolveCustomerImageReference(env,row).catch(()=>null)),
-    env.DB.prepare("SELECT id FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id<>? AND status<>'trashed' AND created_at<=? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,row.id,row.created_at||now()).all().then(r=>r.results||[]),
+    env.DB.prepare("SELECT id FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND id<>? AND status<>'trashed' AND created_at<=? AND created_at>? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,row.id,row.created_at||now(),ctxFrom).all().then(r=>r.results||[]),
     // Facts this turn STATED, each flagged whether it CHANGED (a restated identical value is not new information).
-    env.DB.prepare("SELECT f.fact_type,CASE WHEN p.id IS NULL OR p.value_hash<>f.value_hash THEN 1 ELSE 0 END AS changed FROM conversation_memory_facts f LEFT JOIN conversation_memory_facts p ON p.id=f.supersedes_fact_id WHERE f.lead_id=? AND f.conversation_id=? AND f.source_message_id=?").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
+    env.DB.prepare("SELECT f.fact_type,CASE WHEN p.id IS NULL OR p.value_hash<>f.value_hash OR p.created_at<=? THEN 1 ELSE 0 END AS changed FROM conversation_memory_facts f LEFT JOIN conversation_memory_facts p ON p.id=f.supersedes_fact_id WHERE f.lead_id=? AND f.conversation_id=? AND f.source_message_id=?").bind(ctxFrom,row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
     // One durable owner escalation per open QUESTION (reason): a repeat waits for it; a different owner-only question gets its own.
-    env.DB.prepare("SELECT id,reason_code,source_message_id,created_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) ORDER BY created_at DESC LIMIT 20").bind(row.lead_id,row.conversation_id,row.id).all().then(r=>r.results||[]),
+    // A set-aside test escalation is invisible to the owner, so nothing may wait on it.
+    cleanupSetAsideSql(env,"escalations","owner_escalations.id").then(hidden=>env.DB.prepare(`SELECT id,reason_code,source_message_id,created_at FROM owner_escalations WHERE lead_id=? AND conversation_id=? AND status='open' AND (source_message_id IS NULL OR source_message_id<>?) AND created_at>?${hidden} ORDER BY created_at DESC LIMIT 20`).bind(row.lead_id,row.conversation_id,row.id,ctxFrom).all()).then(r=>r.results||[]),
     // The conversation's ACTIVE reply language (language policy) — one keyed read.
-    env.DB.prepare("SELECT language FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_sales_state.last_meaningful_inbox_message_id AND mi.status='trashed') LIMIT 1").bind(row.conversation_id,row.lead_id).first().catch(()=>null),
+    env.DB.prepare("SELECT language FROM conversation_sales_state WHERE conversation_id=? AND lead_id=? AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_sales_state.last_meaningful_inbox_message_id AND mi.status='trashed') AND COALESCE(last_meaningful_at,'')>? LIMIT 1").bind(row.conversation_id,row.lead_id,ctxFrom).first().catch(()=>null),
     // A Telegram reply to a SENT FORMAL QUOTE belongs to the formal-quote path (recordQuoteDecisionFromInbound) — never to a chat offer.
-    row.reply_to_provider_message_id?env.DB.prepare("SELECT q.id FROM lead_quotes q JOIN lead_outreach o ON o.id=q.outreach_id WHERE q.lead_id=? AND q.conversation_id=? AND q.status IN ('sent','accepted') AND o.channel='telegram' AND o.status='sent' AND o.provider_message_id=? LIMIT 1").bind(row.lead_id,row.conversation_id,String(row.reply_to_provider_message_id)).first().catch(()=>null):null
+    row.reply_to_provider_message_id?env.DB.prepare("SELECT q.id FROM lead_quotes q JOIN lead_outreach o ON o.id=q.outreach_id WHERE q.lead_id=? AND q.conversation_id=? AND q.status IN ('sent','accepted') AND o.channel='telegram' AND o.status='sent' AND o.provider_message_id=? AND q.created_at>? LIMIT 1").bind(row.lead_id,row.conversation_id,String(row.reply_to_provider_message_id),ctxFrom).first().catch(()=>null):null
   ]);
+  // An order from before the boundary is evidence, not conversation context: the AI does not see it and only the owner answers about it.
+  const postSaleOrder=postSaleFound&&String(postSaleFound.created_at)>ctxFrom?postSaleFound:null;
   // Earlier decisions of THIS conversation (which single field was already asked, and how often): one keyed lookup, not one per message.
   const newFactRows=turnFactRows.filter(f=>Number(f.changed)===1);
   // The same keyed lookup also reads the decision that opened each open PRICE escalation (which product it is about), so a wait on
@@ -9280,7 +9293,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // «همون قبلی / مدل قبلی / السابق» → the product discussed BEFORE the current one (from this conversation's own memory history)
   let previousProductNamed=false;
   if(SALES_PREVIOUS_PRODUCT.test(salesNormal(String(row.message||"")))){
-    const hist=((await env.DB.prepare("SELECT value_json FROM conversation_memory_facts WHERE conversation_id=? AND lead_id=? AND memory_key='product_interest' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') ORDER BY created_at DESC").bind(row.conversation_id,row.lead_id).all()).results||[]).map(x=>{try{return JSON.parse(x.value_json);}catch{return null;}}).filter(x=>typeof x==="string"&&x.trim()&&!SALES_PREVIOUS_PRODUCT.test(salesNormal(x)));
+    const hist=((await env.DB.prepare("SELECT value_json FROM conversation_memory_facts WHERE conversation_id=? AND lead_id=? AND memory_key='product_interest' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND created_at>? ORDER BY created_at DESC").bind(row.conversation_id,row.lead_id,ctxFrom).all()).results||[]).map(x=>{try{return JSON.parse(x.value_json);}catch{return null;}}).filter(x=>typeof x==="string"&&x.trim()&&!SALES_PREVIOUS_PRODUCT.test(salesNormal(x)));
     // the products this conversation was PRICED for (the brain's own earlier matches), newest first
     const order=new Map(eventIds.map((id,i)=>[id,i]));
     const priced=[...priorEvents].sort((a,b)=>(order.get(a.id)??0)-(order.get(b.id)??0)).map(e=>{try{const k=JSON.parse(e.details_json||"{}").sales_agent?.product_match?.product_key;return typeof k==="string"&&k.startsWith("list:")?k.slice(5):null;}catch{return null;}}).filter(Boolean);
@@ -9398,7 +9411,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(aiInfo.enabled&&!orderStatusAsked&&!formalQuoteReply&&String(row.message||"").trim()){
     const ctxStarted=Date.now();
     // Durable customer profile (other conversations of THIS lead only): informational context, never copied into the current deal.
-    const profileRows=await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id<>? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND memory_key IN ('customer_name','destination') ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id).all().then(r=>r.results||[]).catch(()=>[]);
+    const profileRows=await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id<>? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND memory_key IN ('customer_name','destination') AND created_at>? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,await cleanupLeadContextFrom(env,row.lead_id)).all().then(r=>r.results||[]).catch(()=>[]);
     const profile={};for(const p of profileRows)if(profile[p.memory_key]===undefined)try{profile[p.memory_key]=JSON.parse(p.value_json);}catch{}
     const lang=language==="Iraqi Arabic"?"ar":"fa";
     const valueText=r=>{const e=r.envelope||{};const v=e.relation?{relation:e.relation.name,members:e.relation.members,allowed:e.value!==false}:e.conditions?.length||e.effect?{when:e.conditions,then:e.effect??e.value}:e.value;return typeof v==="string"?v:JSON.stringify(v);};
@@ -9680,7 +9693,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const acceptedAgain=intent==="accepted"&&!formalQuoteReply&&dealCandidate?.status==="accepted"&&!!dealCandidate.offer?.offer_hash&&!dealChanged&&(!currentOfferHash||currentOfferHash===dealCandidate.offer.offer_hash);
   const answeringPriceQuestion=["clarify_product","ask_attribute"].includes(lastAction)||(lastAction==="answer_price"&&newFacts.includes("requested_quantity"))||(lastAction==="ask_destination"&&!!conversationMarket);
   const galleryOn=await galleryStoreReady(env);
-  if(orderStatusAsked){action="order_status";}
+  // After a reset nothing here can verify an earlier order: the question goes to the owner, never to an automatic status answer.
+  if(ctxFrom&&!postSaleOrder&&(orderStatusExplicit(row.message)||RESET_ORDER_QUESTION.test(resetNorm(row.message).replace(RESET_MOQ_PHRASE," ")))){action="commercial_owner";needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
+  else if(orderStatusAsked){action="order_status";}
   else if(intent==="rejected"){action="acknowledge_rejection";}
   else if(acceptance&&offerFresh){action="accept_offer";}
   // An acceptance without an open offer for exactly this deal first gets that offer (the customer confirms the exact approved price).
@@ -9838,8 +9853,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const roles=Object.fromEntries(Object.entries(custParts).map(([p,c])=>[GALLERY_PART_ROLE[p],c]).filter(([r,c])=>r&&c));
     // «another colour?» → the model / structure / size of the LAST photos shown here, other colours, never a photo already shown
     const otherColour=GALLERY_OTHER_COLOR.test(String(row.message||"").normalize("NFKC"));let lastShown=null,shownIds=[];
-    if(otherColour){shownIds=((await env.DB.prepare("SELECT DISTINCT m.visual_media_id id FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id WHERE o.conversation_id=? AND o.lead_id=?").bind(row.conversation_id,row.lead_id).all()).results||[]).map(x=>x.id);
-      lastShown=await env.DB.prepare("SELECT s.model,s.box_type,s.size FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id JOIN gallery_photo_specs s ON s.visual_media_id=m.visual_media_id AND s.status='approved' WHERE o.conversation_id=? AND o.lead_id=? ORDER BY o.created_at DESC LIMIT 1").bind(row.conversation_id,row.lead_id).first();}
+    if(otherColour){shownIds=((await env.DB.prepare("SELECT DISTINCT m.visual_media_id id FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id WHERE o.conversation_id=? AND o.lead_id=? AND o.created_at>?").bind(row.conversation_id,row.lead_id,ctxFrom).all()).results||[]).map(x=>x.id);
+      lastShown=await env.DB.prepare("SELECT s.model,s.box_type,s.size FROM lead_outreach_media m JOIN lead_outreach o ON o.id=m.outreach_id JOIN gallery_photo_specs s ON s.visual_media_id=m.visual_media_id AND s.status='approved' WHERE o.conversation_id=? AND o.lead_id=? AND o.created_at>? ORDER BY o.created_at DESC LIMIT 1").bind(row.conversation_id,row.lead_id,ctxFrom).first();}
     const found=lastShown?await gallerySearch(env,{market:conversationMarket,base:lastShown.model,size:lastShown.size||null,configuration:lastShown.box_type||null,text:"",parts:{},colors:[],language,exclude:shownIds})
       :await gallerySearch(env,{market:conversationMarket,base,size:req.size||null,configuration:req.configuration||null,text:String(row.message||""),parts:custParts,colors:wantColors,language});
     gallery={...found,market:conversationMarket,base,size:found.wanted?.size||req.size||null,configuration:req.configuration||null,parts:found.wanted?.parts||roles,colors:found.wanted?.colors||wantColors,pieces:found.wanted?.pieces||null};
@@ -10074,7 +10089,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
   const ownerHoldingReply=needsOwner&&validation.valid&&SALES_BRAIN_HOLDING_REASONS.has(needsOwnerReason);
   const nextBestAction=action?.startsWith("ask_")||action==="clarify_product"?"ASK_REQUIRED_FIELD":(action==="answer_moq"||action==="answer_knowledge"||action==="advise_colors")&&!needsOwner?"ANSWER_FROM_KNOWLEDGE":ownerHoldingReply||(needsOwner&&action!=="quote")?"ESCALATE_OWNER":action==="wait_for_owner"||action==="owner_followup"?"WAIT_FOR_OWNER":["visual","order_status","acknowledge_rejection","greet","thanks","continue_conversation","acknowledge_details","order_details","ai_answer"].includes(action)?"SEND_SAFE_INFORMATION":"CONTINUE_NEGOTIATION";
-  const result={lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],pieces:gallery.pieces||null,models:gallery.models||null,requested:gallery.requested||null,items:gallery.items||[],total:gallery.total??(gallery.items||[]).length,miss:gallery.miss||null,name:galleryName||null,language:language,suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_sizes"&&sizeAnswer?[{category:"availability",values:sizeAnswer.values}]:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,owner_topic:needsOwner?ownerTopic:null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_status_also_asked:orderStatusMixed?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status}:null,post_sale_review:postSaleReview,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
+  const result={context_reset:!!ctxFrom,context_from:ctxFrom||null,lead_id:row.lead_id,conversation_id:row.conversation_id,source_message_id:row.id,detected_language:language,current_stage:stage,proposed_next_stage:stage,customer_known_facts:memory,owner_case_decisions:ownerCaseDecisions,missing_required_facts:missing,detected_intents:[intent],next_sales_action:action,color_pending:colorNeedsMarket?{recommend:SALES_COLOR_RECOMMEND.test(String(row.message||""))}:null,color_choice:colorOptions.length?{selected:colorPick.selected,ambiguous:colorPick.ambiguous,special:colorSpecial,unsupported:colorSpecial?colorPick.unsupported:[],remembered:selectedColors}:null,knowledge_facts_used:knowledge.map(x=>({id:x.id,version:x.version})),authoritative_pricing_source:pricedNow&&salesDraft!==null?(pricing.source==="si"?"SI_price_versions":"P0-5_commercial_price_items")+":"+conversationMarket:intent==="asks_price"?("P0-5_"+(String(memory.market||"").toUpperCase()==="ARAB"?"commercial_price_items":"owner_confirmed_quote")):null,selected_verified_visual_ids:visuals.map(x=>x.id),gallery:gallery?{status:gallery.status,market:gallery.market,base:gallery.base,size:gallery.size,configuration:gallery.configuration,parts:gallery.parts||{},colors:gallery.colors||[],pieces:gallery.pieces||null,models:gallery.models||null,requested:gallery.requested||null,items:gallery.items||[],total:gallery.total??(gallery.items||[]).length,miss:gallery.miss||null,name:galleryName||null,language:language,suggestions:gallery.suggestions||[]}:null,missing_detail_facts:detailMissing,prior_sales_actions:priorDecisions.map(x=>x.action),next_best_action:nextBestAction,asked_field:askedField,business_context:{customer_goal:salesBrainCustomerGoal(intent,known),conversation_stage:stage,known_customer_facts:Object.keys(kgContext).filter(k=>!["message","language"].includes(k)),matched_entities:{matched:kgEntities.matched,ambiguous:kgEntities.ambiguous_keys,partial:kgEntities.partial},recognized_context:kgRecognized,applicable_rules:kgEval.applicable.slice(0,8),unresolved_rules:kgEval.unresolved.slice(0,8).map(x=>({id:x.id,concept:x.concept,missing:x.missing})),rule_conflicts:kgEval.conflicts,relations:{matches:kgRelations.matches,unknown:kgRelations.unknown},question_match:kgQuestions.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})),answer_collections:kgAnswer?.kind==="values"?kgAnswerGroups.map(g=>({entity:g.entity,concept:g.concept,ids:g.records.map(r=>r.id)})):[],answer_kind:kgAnswer?.kind||null,visual_references:kgVisualRefs,likely_products:likelyVisualMatches.map(x=>({visual_media_id:x.visual_media_id,model:x.attributes?.model||null,authoritative:false})),missing_required:missing,commercial_authority:{owner_gate:needsOwner,reason:needsOwnerReason,commercial_effects_reach_customer:false},market:conversationMarket,knowledge_markets:knowledgeMarkets,next_best_action:nextBestAction},generic_knowledge_used:kgScope.map(r=>({id:r.id,version:r.version})),knowledge_market:{conversation_market:conversationMarket,source:marketDecision.source,markets_used:knowledgeMarkets},answer_numbers:answerNumbers,knowledge_answer_facts:action==="answer_sizes"&&sizeAnswer?[{category:"availability",values:sizeAnswer.values}]:action==="answer_catalog"?[{category:"availability",values:[...catalogNames,...catalogModels]},...(salesEvidence?.facts||[])]:action==="answer_moq"?[...authorityFacts.filter(f=>f.source==="approved_knowledge"&&f.category==="moq"),...(salesEvidence?.facts||[])]:action==="answer_knowledge"?kgAnswerFacts:action==="advise_colors"?[...colorEvidenceFacts,...(salesEvidence?.facts||[])]:(action==="order_details"||colorSpecial)&&colorEvidenceFacts.length?colorEvidenceFacts:salesEvidence?salesEvidence.facts:[],sales_next_action:salesActionFor(action,{needsOwner,reorder:!!postSaleOrder}),sales_agent:{pricing_status:pricing?.status||null,product_match:pricing?.resolution?{status:pricing.resolution.status,confidence:pricing.resolution.confidence||null,basis:pricing.resolution.basis||null,product_key:pricing.product?.key||null}:null,price_snapshot:priceSnapshot,offer_fresh:offerFresh,acceptance:acceptance,objection:objectionKind,ai_intent:aiIntent,order_candidate:candidate,order_candidate_written:!!candidateWrite,acceptance_decision_id:acceptanceDecision?.id||null},decision_state:{customer_goal:salesBrainCustomerGoal(intent,known),known_facts:Object.keys(known).filter(k=>known[k]),required_fields:requiredFields,required_fields_source:requirements.source,requirement_rule:requirements.rule,strategy_rule:ordered.strategy,missing_required:missing,conversation_stage:stage,blocker:imageAmbiguous&&action==="ask_image_reference"?"ambiguous_image_reference":askedField?`missing_${askedField}`:needsOwner?"owner_authority_required":action==="wait_for_owner"?"waiting_for_owner_decision":null,next_best_action:nextBestAction},owner_holding_reply:ownerHoldingReply,new_facts_this_turn:newFacts,waiting_on_escalation_id:openEscalation?.id||null,owner_topic:needsOwner?ownerTopic:null,customer_image_reference:{status:imageReference.status,basis:imageReference.basis||null,media_id:imageRefId,ordinal:imageReference.ordinal??null,image_count:imageReference.image_count||0},customer_visual_context:customerVisualContext(imageReference,imageRefId),customer_visual_matches:likelyVisualMatches,needs_owner:needsOwner,needs_owner_reason:needsOwnerReason,draft_customer_reply:draft,validation,order_status_also_asked:orderStatusMixed?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status}:null,post_sale_review:postSaleReview,order_reference:orderStatusAsked?{order_id:postSaleOrder.id,order_number:postSaleOrder.order_number,status:postSaleOrder.status,carrier:postSaleOrder.carrier||null,tracking_reference:postSaleOrder.tracking_reference||null}:null,strategy_reference:"approved_negotiation_rules_or_conservative_v1",context_hash:await knowledgeHash(knowledgeCanonical({inbox:row.id,intent,memory,context:context.map(x=>[x.direction,x.provider_message_id??null,x.created_at]),knowledge:knowledge.map(x=>[x.id,x.version]),ownerCaseDecisions:ownerCaseDecisions.map(x=>[x.id,x.resolved_at])})),decision_trace:{scoped_lead_id:row.lead_id,scoped_conversation_id:row.conversation_id,context_message_count:context.length,action,missing,visual_match_count:visuals.length,customer_image_reference_status:imageReference.status,customer_image_count:imageReference.image_count||0}};
   // Observability without chain-of-thought: whether the Sales AI ran, model, latency, what it understood, which facts were applied,
   // where the reply came from and why a fallback happened. The send path re-validates an AI reply against the same evidence.
   result.ai_brain=aiInfo;
@@ -10356,13 +10371,44 @@ async function inboundSendGateReason(env,{row,outreach,recipient}){
   if(row.platform!=="telegram"||row.conversation_platform!=="telegram"||outreach.channel!=="telegram")return "unsupported_channel";
   const chat=normalizeTelegramPrivateChatId(row.provider_conversation_id);
   if(!chat||String(recipient)!==chat||String(row.provider_sender_id||"")!==chat||String(outreach.recipient)!==chat)return "not_private_customer_chat";
+  // covers replies, acknowledgements and albums: a message from before the boundary is history, and an unreadable boundary stops the send
+  const from=await cleanupContextFrom(env,row.conversation_id);
+  if(from===CONTEXT_UNKNOWN)return "conversation_state_unknown";
+  if(from&&String(row.created_at||"")<=from)return "conversation_reset_history";
   return null;
+}
+// After a context reset only listed nonfinancial actions go out alone; everything else stays with the owner by default. A money or order
+// word in either direction also holds it, and so does any number that is not plainly a size, a count of models or colours, or the
+// approved MOQ of an answer_moq reply. Text is normalised first, so Arabic, Persian and Latin spellings and digits match.
+const RESET_SAFE_ACTIONS=new Set(["answer_moq","greet","thanks","welcome","ask_product","ask_quantity","ask_size","ask_color","ask_color_placement","ask_customization","ask_destination","ask_details","ask_image_reference","ask_attribute","clarify_product","answer_catalog","answer_sizes","answer_knowledge","advise_colors","acknowledge_details","continue_conversation","knowledge_owner","ai_answer","visual"]);
+const RESET_FINANCIAL_INTENTS=new Set(["asks_price","asks_moq","asks_discount","quote_requested","accepted","negotiating","price_objection"]);
+const resetNorm=t=>String(t||"").normalize("NFKC").replace(/[يى]/g,"ی").replace(/ك/g,"ک").replace(/[أإآ]/g,"ا").replace(/ة/g,"ه").replace(/\u200c/g," ").toLowerCase();
+const RESET_FINANCIAL_WORDS=/قیمت|چنده|چند\s*(?:تومان|تومن|میشه|می شه|در\s*میاد)|چقدر|هزینه|تخفیف|تومان|تومن|ریال|دلار|دولار|دینار|پول|مبلغ|میلیون|ملیون|پرداخت|واریز|کارت(?!ن)|رسید|فیش|فاکتور|فاتوره|ایصال|حواله|حولت|تحویل|سداد|سفارش|طلب|شحن|ثمن|تکلفه|سعر|خصم|دفع|بکم|شکد|فلوس|هزار|درصد|بیعانه|عربون|ودیعه|حساب|شبا|یورو|درهم|دنانیر|رایگان|مجانی|ببلاش|%|٪|\$|€|(?:^|[\s،,])(?:الف|الاف|بیست|سی|چهل|پنجاه|شصت|هفتاد|هشتاد|نود|صد|دویست|سیصد|پانصد|عشرین|ثلاثین|اربعین|خمسین|ستین|سبعین|ثمانین|تسعین|میه|مئه|مائه|میتین)(?:$|[\s،,.؟?])|(?:^|[^a-z])(?:price|cost|discount|pay|paid|payment|invoice|receipt|order|quote|deposit|iban|percent|free|dollars?|euros?|dinars?|usd|eur|iqd|irr|toman|thousand|hundred|million)(?:$|[^a-z])/u;
+const RESET_ORDER_QUESTION=/سفارش(?!ی)|طلبی|طلبیه|طلبات|شحنتی|شحنه|مرسوله|جنسم|جنسمون|بارم|پیگیری|رهگیری|کی میرسه|کی می رسه|کی میاد|وین وصل|(?:^|[^a-z])(?:track|tracking|parcel|package|delivery|shipment|my order)(?:$|[^a-z])/u;
+const RESET_UNIT="(?:سانتی\\s*متر|سانتیمتر|سانت|سم|cm|mm|میلی\\s*متر|ملم|اینچ|inch(?:es)?)";
+const RESET_DIM="\\d+(?:[.,]\\d+)?\\s*(?:x|×|\\*|در|فی|by)\\s*\\d+(?:[.,]\\d+)?(?:\\s*(?:x|×|\\*|در|فی|by)\\s*\\d+(?:[.,]\\d+)?)?";
+// A bare «100×5» could be a sum, so a dimension needs a unit; only the catalog's own size answer may omit it.
+const RESET_SPEC_NUMBERS=new RegExp(`${RESET_DIM}\\s*${RESET_UNIT}(?![a-z])|\\d+(?:[.,]\\d+)?\\s*${RESET_UNIT}(?![a-z])|\\d+\\s*(?:مدل|رنگ|سایز|طرح|لون|الوان|مودیل|مودیلات|قیاس|قیاسات|models?|colou?rs?|sizes?|designs?)(?![a-z])`,"gu");
+const RESET_CATALOG_SIZES=new RegExp(RESET_DIM,"gu");
+const RESET_MOQ_PHRASE=/حداقل\s*(?:تعداد\s*)?(?:سفارش|خرید)|الحد\s*الادنی(?:\s*(?:للطلب|للطلبیه|للشراء))?|اقل\s*(?:کمیه|عدد)(?:\s*(?:للطلب|للطلبیه|للشراء))?|minimum\s*(?:order|quantity)|moq/gu;
+const RESET_MOQ_NUMBER=/\d+\s*(?:عدد|تا|دانه|قطعه|حبه|pieces?|pcs|units?)?/u;   // one number only: a second one is not the MOQ
+const resetDigits=t=>t.replace(/[۰-۹]/g,d=>"۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٠-٩]/g,d=>"٠١٢٣٤٥٦٧٨٩".indexOf(d));
+export function resetFinancialTurn(row,brain,outreach){
+  const action=brain.next_sales_action,moq=action==="answer_moq";
+  if(!RESET_SAFE_ACTIONS.has(action))return true;
+  if(RESET_FINANCIAL_INTENTS.has(row.category)&&!(moq&&row.category==="asks_moq"))return true;
+  const clean=t=>{const x=resetDigits(resetNorm(t));return moq?x.replace(RESET_MOQ_PHRASE," "):x;};
+  const said=moq?clean(row.message).replace(/چنده|چقدر|شقد|شکد|how many/gu," "):clean(row.message),reply=clean(outreach.message);
+  if(RESET_FINANCIAL_WORDS.test(said)||RESET_FINANCIAL_WORDS.test(reply))return true;
+  const spec=reply.replace(RESET_SPEC_NUMBERS," "),rest=action==="answer_sizes"?spec.replace(RESET_CATALOG_SIZES," "):spec;
+  return /\d/.test(moq?rest.replace(RESET_MOQ_NUMBER," "):rest);
 }
 async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
   // Phase 23: totals and discounted offers are never sent automatically (the wording check also covers a reply that lost the mark).
   if(brain?.final_quote_hold)return "final_quote_owner_approval";
   const gate=await inboundSendGateReason(env,{row,outreach,recipient});if(gate)return gate;
   if(!brain||(brain.needs_owner&&brain.owner_holding_reply!==true))return "owner_required";
+  if(brain.context_reset&&resetFinancialTurn(row,brain,outreach))return "reset_financial_owner";
   if((!brain.final_quote_released&&!INBOUND_APPROVED_AMOUNT_ACTIONS.has(brain.next_sales_action)&&INBOUND_TOTAL_WORDING.test(String(outreach.message||""))))return "final_quote_owner_approval";
   // Phase 16.1 (S1): the customer asked about an existing order AND something new in one message → the owner answers both
   if(brain.order_status_also_asked)return "mixed_order_status_and_sales";
@@ -10384,7 +10430,7 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
   // An open owner decision no longer freezes the whole conversation here: the brain already scoped it (the same issue only ever
   // yields wait_for_owner / a holding reply; commercial content never reaches this point without the owner).
   const [recent,counts]=await Promise.all([
-    env.DB.prepare("SELECT id,message,status,approved_by,created_at FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND id<>? ORDER BY created_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id,outreach.id).all().then(r=>r.results||[]),
+    env.DB.prepare("SELECT id,message,status,approved_by,created_at FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND id<>? AND created_at>? ORDER BY created_at DESC LIMIT 10").bind(row.lead_id,row.conversation_id,outreach.id,brain?.context_from||"").all().then(r=>r.results||[]),
     inboundAutomatedReplyCounts(env,row)
   ]);
   const key=salesBrainClaimText(outreach.message),inboundKey=salesBrainClaimText(row.message);
@@ -10420,7 +10466,7 @@ async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing
   return {sent:!!result.ok,status:result.status||null};
 }
 // A held reply (owner-gated, validator-blocked, a would-be repeat or a capped flood) still gets ONE customer-visible message.
-const INBOUND_ACK_REASONS=new Set(["photo_pilot_not_allowed","gallery_market_unknown","gallery_media_mismatch","owner_required","validator_blocked","action_requires_owner_review","draft_not_from_validated_brain","repetitive_reply","auto_send_rate_limited","mixed_order_status_and_sales","post_sale_owner_review","final_quote_owner_approval"]);
+const INBOUND_ACK_REASONS=new Set(["reset_financial_owner","photo_pilot_not_allowed","gallery_market_unknown","gallery_media_mismatch","owner_required","validator_blocked","action_requires_owner_review","draft_not_from_validated_brain","repetitive_reply","auto_send_rate_limited","mixed_order_status_and_sales","post_sale_owner_review","final_quote_owner_approval"]);
 // Acknowledgements say only that the message arrived and is being handled: no price, number, capability, timing or promise.
 const INBOUND_ACKNOWLEDGEMENTS={
   fa:{pending:["پیامتون رسید؛ بررسی می‌کنم و خبرتون می‌دم.","دریافت شد؛ در حال بررسیه و خبرتون می‌دم.","ممنون، پیامتون رسید؛ به‌زودی خبرتون می‌دم.","حتماً، بررسی می‌کنم و نتیجه رو خبرتون می‌دم."],
@@ -14731,10 +14777,10 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const status=String(u.searchParams.get("status")||"all").trim(),allowed=new Set(["open","resolved","all"]);
         if(!allowed.has(status))return json({ok:false,error:"Invalid escalation status"},400);
         const limit=Math.min(200,Math.max(1,Number(u.searchParams.get("limit")||100)));
-        const hidden=await cleanupHiddenSql(env,"escalations","e.id"),visible=hidden?`(e.status='open' OR (1=1${hidden}))`:"1=1";
-        const sql=status==="all"?`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE ${visible} ORDER BY CASE e.status WHEN 'open' THEN 0 ELSE 1 END,e.created_at DESC LIMIT ?`:`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE e.status=? ORDER BY e.created_at DESC LIMIT ?`;
+        const hidden=await cleanupHiddenSql(env,"escalations","e.id"),visible=(hidden?`(e.status='open' OR (1=1${hidden}))`:"1=1")+await cleanupSetAsideSql(env,"escalations","e.id");
+        const sql=status==="all"?`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE ${visible} ORDER BY CASE e.status WHEN 'open' THEN 0 ELSE 1 END,e.created_at DESC LIMIT ?`:`SELECT e.*,l.name AS lead_name FROM owner_escalations e LEFT JOIN leads l ON l.id=e.lead_id WHERE e.status=? AND ${visible} ORDER BY e.created_at DESC LIMIT ?`;
         const r=status==="all"?await env.DB.prepare(sql).bind(limit).all():await env.DB.prepare(sql).bind(status,limit).all();
-        return json({ok:true,items:r.results||[]});
+        return json({ok:true,items:r.results||[],archived_test:await cleanupArchivedTestSummary(env)});
       }
 
       if (u.pathname === "/api/owner-escalations/resolve" && req.method === "POST") {
@@ -14748,6 +14794,7 @@ if (u.pathname === "/api/video-autopilot/toggle" && req.method === "POST") {
         const existing=await env.DB.prepare("SELECT * FROM owner_escalations WHERE id=? LIMIT 1").bind(id).first();
         if(!existing)return json({ok:false,error:"Owner escalation not found"},404);
         if(existing.status==="resolved")return json({ok:true,escalation:existing,idempotent:true,sending_enabled:false});
+        if(await cleanupEscalationArchived(env,existing.id))return json({ok:false,error:"This escalation is archived as test data; restore it before answering"},409);
         if(existing.version!==version)return json({ok:false,error:"Escalation changed; reload before resolving"},409);
         const linkedDecision=await ensureOwnerDecisionForEscalation(env,existing,{});
         if(!linkedDecision)return json({ok:false,error:"Structured owner decision could not be persisted; retry safely"},409);
@@ -15867,6 +15914,7 @@ async function autoFollowupBlock(env,item,{nowMs,settings}){
   const one=async(sql,...a)=>{try{return !!(await env.DB.prepare(sql).bind(...a).first());}catch{return true;}};
   if(item.market!=="IRAN"&&item.market!=="ARAB")return "market_unknown";
   if(!(await one("SELECT 1 FROM inbox_messages WHERE lead_id=? AND platform='telegram' AND status<>'trashed' LIMIT 1",item.id)))return "no_customer_conversation";   // consent = the customer opened the chat
+  if(await cleanupLeadContextFrom(env,item.id))return "conversation_reset";   // the follow-up writer reads lead history: a reset lead gets none
   if(await cleanupRecentlyRestored(env,item.id,nowMs))return "restored_recently";
   const oo=await leadOptOutState(env,item.id);
   if(oo.opted_out)return "customer_opted_out";
@@ -15874,7 +15922,10 @@ async function autoFollowupBlock(env,item,{nowMs,settings}){
   if(await one("SELECT 1 FROM lead_quotes WHERE lead_id=? LIMIT 1",item.id)||await one("SELECT 1 FROM lead_orders WHERE lead_id=? LIMIT 1",item.id))return "financial_flow_owner";
   if(await one("SELECT 1 FROM lead_outreach WHERE lead_id=? AND status IN ('sending','send_ambiguous') LIMIT 1",item.id))return "send_outcome_unresolved";
   // The customer's matter is with the owner: an automatic nudge would talk over the owner's answer.
-  if(await one("SELECT 1 FROM owner_escalations WHERE lead_id=? AND status='open' LIMIT 1",item.id)||await one("SELECT 1 FROM owner_decisions WHERE lead_id=? AND status='PENDING' LIMIT 1",item.id))return "owner_decision_open";
+  const escAside=await cleanupSetAsideSql(env,"escalations","owner_escalations.id"),decAside=await cleanupSetAsideSql(env,"decisions","owner_decisions.id");
+  if(await one(`SELECT 1 FROM owner_escalations WHERE lead_id=? AND status='open'${escAside} LIMIT 1`,item.id)||await one(`SELECT 1 FROM owner_decisions WHERE lead_id=? AND status='PENDING'${decAside} LIMIT 1`,item.id))return "owner_decision_open";
+  // archived as test: still stops the nudge, under its own reason so the owner can see why
+  if(await one("SELECT 1 FROM owner_escalations WHERE lead_id=? AND status='open' LIMIT 1",item.id)||await one("SELECT 1 FROM owner_decisions WHERE lead_id=? AND status='PENDING' LIMIT 1",item.id))return "archived_test_escalation";
   if(await finalQuoteWaiting(env,item.id).catch(()=>true))return "final_quote_waiting";
   if(!withinContactHours(item.market,settings,nowMs))return "outside_contact_hours";
   if((await marketBackoff(env,"autofu",item.market,nowMs)).skip)return "failure_backoff";

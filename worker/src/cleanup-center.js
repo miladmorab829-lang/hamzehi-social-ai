@@ -11,6 +11,10 @@ const NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 // A live pilot link is revoked only by the owner's reject; deleting around it would leave the link working.
 const pilot = lead => `EXISTS(SELECT 1 FROM lead_campaign_codes pc WHERE pc.lead_id=${lead} AND pc.status='active' AND (pc.expires_at IS NULL OR pc.expires_at>${NOW_SQL}))`;
 const iso = ms => new Date(ms).toISOString();
+// An open escalation the owner set aside as a test artifact: the row stays open and carries no decision, Trash alone holds the mark.
+const archivedEsc = id => `EXISTS(SELECT 1 FROM cleanup_trash ax WHERE ax.section='escalations' AND ax.record_id=${id} AND ax.state='trashed' AND json_extract(ax.prior_json,'$.test_artifact')=1)`;
+const archivedDec = id => `EXISTS(SELECT 1 FROM cleanup_trash ax WHERE ax.section='decisions' AND ax.record_id=${id} AND ax.state='trashed' AND json_extract(ax.prior_json,'$.via_escalation') IS NOT NULL)`;
+const TEST_QUIET_DAYS = 14;
 
 // The dashboard errors view, kept in one place so the view and this section cannot drift apart.
 export const ERROR_EVENTS_SQL = "(severity IN ('warning','error','critical') OR type LIKE '%fail%' OR type LIKE '%error%' OR type LIKE '%timeout%' OR type LIKE '%unavailable%' OR type LIKE '%blocked%' OR type LIKE '%refused%' OR type LIKE '%missing%')";
@@ -20,10 +24,10 @@ export const ERROR_EVENTS_SQL = "(severity IN ('warning','error','critical') OR 
 export const CLEANUP_SECTIONS = Object.freeze({
   inbox: { label: "پیام‌های Inbox", path: "/dashboard/sales", table: "inbox_messages", mode: "inbox", col: "status", value: "trashed", date: "t.created_at",
     active: "t.status<>'trashed'", title: "substr(COALESCE(t.message,''),1,90)", sub: "t.platform", state: "t.status", statuses: ["new", "handled", "pending", "archived"],
-    block: `CASE WHEN EXISTS(SELECT 1 FROM lead_orders o WHERE o.acceptance_inbox_message_id=t.id) THEN 'has_order' WHEN EXISTS(SELECT 1 FROM lead_quotes q WHERE q.inbox_message_id=t.id) THEN 'has_quote' WHEN EXISTS(SELECT 1 FROM owner_escalations e WHERE e.source_message_id=t.id AND e.status='open') THEN 'open_escalation' WHEN EXISTS(SELECT 1 FROM lead_outreach o WHERE o.inbox_message_id=t.id AND o.status IN ('pending_approval','approved','sending','send_ambiguous')) THEN 'open_reply' WHEN t.lead_id IS NOT NULL AND ${held("t.lead_id")} THEN 'final_quote_review' END` },
+    block: `CASE WHEN EXISTS(SELECT 1 FROM lead_orders o WHERE o.acceptance_inbox_message_id=t.id) THEN 'has_order' WHEN EXISTS(SELECT 1 FROM lead_quotes q WHERE q.inbox_message_id=t.id) THEN 'has_quote' WHEN EXISTS(SELECT 1 FROM owner_escalations e WHERE e.source_message_id=t.id AND e.status='open' AND NOT ${archivedEsc("e.id")}) THEN 'open_escalation' WHEN EXISTS(SELECT 1 FROM lead_outreach o WHERE o.inbox_message_id=t.id AND o.status IN ('pending_approval','approved','sending','send_ambiguous')) THEN 'open_reply' WHEN t.lead_id IS NOT NULL AND ${held("t.lead_id")} THEN 'final_quote_review' END` },
   conversations: { label: "گفتگوها", path: "/dashboard/customers", table: "lead_conversations", mode: "conversation", date: "t.updated_at",
     active: "1=1", title: "COALESCE((SELECT l.name FROM leads l WHERE l.id=t.lead_id),'بدون نام')", sub: "t.platform", state: "t.status",
-    block: `CASE WHEN EXISTS(SELECT 1 FROM lead_orders o WHERE o.conversation_id=t.id) THEN 'has_order' WHEN EXISTS(SELECT 1 FROM owner_escalations e WHERE e.conversation_id=t.id AND e.status='open') THEN 'open_escalation' WHEN EXISTS(SELECT 1 FROM owner_decisions d WHERE d.conversation_id=t.id AND d.status='PENDING') THEN 'pending_decision' WHEN EXISTS(SELECT 1 FROM lead_outreach o WHERE o.conversation_id=t.id AND o.status IN ('pending_approval','approved','sending','send_ambiguous')) THEN 'open_reply' WHEN ${held("t.lead_id")} THEN 'final_quote_review' END`,
+    block: `CASE WHEN EXISTS(SELECT 1 FROM lead_orders o WHERE o.conversation_id=t.id) THEN 'has_order' WHEN EXISTS(SELECT 1 FROM lead_quotes q WHERE q.conversation_id=t.id) THEN 'has_quote' WHEN EXISTS(SELECT 1 FROM owner_escalations e WHERE e.conversation_id=t.id AND e.status='open' AND NOT ${archivedEsc("e.id")}) THEN 'open_escalation' WHEN EXISTS(SELECT 1 FROM owner_decisions d WHERE d.conversation_id=t.id AND d.status='PENDING' AND NOT ${archivedDec("d.id")}) THEN 'pending_decision' WHEN EXISTS(SELECT 1 FROM lead_outreach o WHERE o.conversation_id=t.id AND o.status IN ('pending_approval','approved','sending','send_ambiguous')) THEN 'open_reply' WHEN ${held("t.lead_id")} THEN 'final_quote_review' END`,
     bulkBlock: "'needs_explicit_selection'" },
   leads: { label: "مشتریان و لیدها", path: "/dashboard/customers", table: "leads", mode: "lead", col: "stage", value: "archived", date: "t.created_at", markets: true,
     active: "t.stage NOT IN ('archived')", title: "t.name", sub: "t.contact", state: "t.stage", statuses: ["new", "discovered", "qualified", "contacted", "replied", "negotiation", "rejected"],
@@ -63,6 +67,13 @@ export const CLEANUP_SECTIONS = Object.freeze({
   dlq: { label: "صف خطای نهایی (DLQ)", path: "/dashboard/agents", table: "agent_dead_letters", mode: "dlq", date: "t.created_at",
     active: "1=1", title: "t.agent", sub: "substr(COALESCE(t.error_redacted,''),1,90)", state: "CASE WHEN t.resolved_at IS NULL THEN 'open' ELSE 'resolved' END", statuses: [],
     block: "CASE WHEN EXISTS(SELECT 1 FROM autonomy_tasks k WHERE k.id=t.task_id AND k.status IN ('queued','running')) THEN 'job_active' END" },
+  // A context reset: nothing is changed or deleted. The Trash row's time is a boundary; AI and automation read only what came after it.
+  // Named conversations only. Orders and payments stay exactly as they are, so an order-linked conversation can be reset.
+  context: { label: "بازنشانی زمینه گفتگو", path: "/dashboard/customers", table: "lead_conversations", mode: "hide", date: "t.updated_at", idsOnly: true,
+    active: "1=1", title: "COALESCE((SELECT l.name FROM leads l WHERE l.id=t.lead_id),'بدون نام')", sub: "t.platform", state: "t.status", statuses: [],
+    block: `CASE WHEN EXISTS(SELECT 1 FROM lead_outreach o WHERE o.conversation_id=t.id AND o.status IN ('pending_approval','approved','sending','send_ambiguous')) THEN 'open_reply'
+      WHEN ${held("t.lead_id")} THEN 'final_quote_review' WHEN ${pilot("t.lead_id")} THEN 'active_pilot_link'
+      WHEN EXISTS(SELECT 1 FROM inbox_messages i WHERE i.conversation_id=t.id AND i.created_at>strftime('%Y-%m-%dT%H:%M:%fZ','now','-${TEST_QUIET_DAYS} days')) THEN 'recent_customer_activity' END` },
   // Hidden from sales and search through the existing 'inactive' state. The R2 object and Telegram file stay: no purge here.
   gallery: { label: "گالری محصولات", path: "/dashboard/gallery", table: "visual_product_media", mode: "status", col: "candidate_status", value: "inactive", versioned: true, date: "t.created_at",
     active: "t.candidate_status IN ('candidate','verified','rejected')", title: "COALESCE((SELECT g.product_key FROM gallery_photo_specs g WHERE g.visual_media_id=t.id ORDER BY g.version DESC LIMIT 1),t.source_platform)", sub: "t.media_type", state: "t.candidate_status", statuses: ["candidate", "verified", "rejected"],
@@ -71,9 +82,21 @@ export const CLEANUP_SECTIONS = Object.freeze({
     active: "t.source_kind='vault'", title: "COALESCE(substr(t.caption,1,90),t.media_type)", sub: "t.media_type", state: "t.media_type", statuses: [],
     block: "CASE WHEN EXISTS(SELECT 1 FROM content_media c WHERE c.source_id=t.id) THEN 'used_by_content' WHEN EXISTS(SELECT 1 FROM visual_product_media v WHERE v.source_media_id=t.id OR v.source_file_unique_id=t.file_unique_id) THEN 'used_by_gallery' END" },
   escalations: { label: "ارجاع‌های مالک", path: "/dashboard/approvals", table: "owner_escalations", mode: "hide", date: "t.created_at",
-    active: "1=1", title: "t.reason_code", sub: "t.channel", state: "t.status", statuses: ["open", "resolved"], block: "CASE WHEN t.status='open' THEN 'open_escalation' END" },
+    active: "1=1", title: "t.reason_code", sub: "t.channel", state: "t.status", statuses: ["open", "resolved"], block: "CASE WHEN t.status='open' THEN 'open_escalation' END",
+    // Set aside as a test artifact: named records only. Anything with a live commercial link, or a customer still writing, stays with the owner.
+    testBlock: `CASE WHEN t.status<>'open' THEN 'not_open' WHEN t.lead_id IS NULL OR t.conversation_id IS NULL THEN 'no_lead'
+      WHEN NOT EXISTS(SELECT 1 FROM owner_decisions d WHERE d.owner_escalation_id=t.id AND d.status='PENDING') THEN 'no_pending_decision'
+      WHEN EXISTS(SELECT 1 FROM lead_orders o WHERE o.lead_id=t.lead_id AND o.status<>'cancelled') THEN 'live_order'
+      WHEN EXISTS(SELECT 1 FROM lead_orders o WHERE o.acceptance_inbox_message_id=t.source_message_id) THEN 'has_order'
+      WHEN EXISTS(SELECT 1 FROM lead_quotes q WHERE q.lead_id=t.lead_id) THEN 'has_quote'
+      WHEN EXISTS(SELECT 1 FROM owner_decisions d WHERE d.owner_escalation_id=t.id AND d.status='PENDING' AND (COALESCE(d.order_id,'')<>'' OR COALESCE(d.quote_id,'')<>'')) THEN 'commercial_link'
+      WHEN EXISTS(SELECT 1 FROM lead_outreach o WHERE o.lead_id=t.lead_id AND o.status IN ('pending_approval','approved','sending','send_ambiguous')) THEN 'open_reply'
+      WHEN ${held("t.lead_id")} THEN 'final_quote_review' WHEN ${pilot("t.lead_id")} THEN 'active_pilot_link'
+      WHEN EXISTS(SELECT 1 FROM inbox_messages i WHERE i.lead_id=t.lead_id AND i.created_at>strftime('%Y-%m-%dT%H:%M:%fZ','now','-${TEST_QUIET_DAYS} days')) THEN 'recent_customer_activity' END`,
+    restoreBlock: "CASE WHEN json_extract(x.prior_json,'$.test_artifact')=1 AND EXISTS(SELECT 1 FROM inbox_messages i WHERE i.id=t.source_message_id AND i.status='trashed') THEN 'message_in_trash' END" },
   decisions: { label: "تصمیم‌های مالک", path: "/dashboard/actions", table: "owner_decisions", mode: "hide", date: "t.created_at",
-    active: "1=1", title: "t.decision_type", sub: "t.priority", state: "t.status", statuses: ["PENDING", "RESOLVED", "SUPERSEDED"], block: "CASE WHEN t.status='PENDING' THEN 'pending_decision' END" }
+    active: "1=1", title: "t.decision_type", sub: "t.priority", state: "t.status", statuses: ["PENDING", "RESOLVED", "SUPERSEDED"], block: "CASE WHEN t.status='PENDING' THEN 'pending_decision' END",
+    restoreBlock: "CASE WHEN json_extract(x.prior_json,'$.via_escalation') IS NOT NULL THEN 'restore_with_escalation' END" }
 });
 
 // Shown in the dashboard instead of a delete control.
@@ -91,7 +114,7 @@ export const CLEANUP_PROTECTED = Object.freeze([
 ]);
 
 const httpError = (status, error, extra = {}) => Object.assign(new Error(error), { status, extra });
-const blockExpr = (s, scope, purge) => purge ? s.purge.block : (scope === "filter" || scope === "section") && s.bulkBlock ? `COALESCE(${s.block},${s.bulkBlock})` : s.block;
+const blockExpr = (s, scope, purge, test) => test ? s.testBlock : purge ? s.purge.block : (scope === "filter" || scope === "section") && s.bulkBlock ? `COALESCE(${s.block},${s.bulkBlock})` : s.block;
 const notTrashed = key => `NOT EXISTS(SELECT 1 FROM cleanup_trash ct WHERE ct.section='${key}' AND ct.record_id=t.id AND ct.state='trashed')`;
 const stateCol = s => s.stateCol || (s.col ? "t." + s.col : "t.status");
 const rows = async (env, sql, binds = []) => (await env.DB.prepare(sql).bind(...binds).all()).results || [];
@@ -109,6 +132,43 @@ export async function cleanupHiddenSql(env, section, idExpr) {
   if (!CLEANUP_SECTIONS[section] || !/^[a-z_.]+$/.test(idExpr)) return "";
   try { await env.DB.prepare("SELECT 1 FROM cleanup_trash LIMIT 1").first(); } catch { return ""; }
   return ` AND NOT EXISTS(SELECT 1 FROM cleanup_trash ct WHERE ct.section='${section}' AND ct.record_id=${idExpr} AND ct.state='trashed')`;
+}
+
+// Only a deliberate test archive hides an OPEN record. Any other Trash row on a record that is open again leaves it visible and in force.
+const SET_ASIDE = { escalations: ["'$.test_artifact'"], decisions: ["'$.via_escalation'"] };
+export function cleanupSetAsideClause(section, idExpr) {
+  if (!SET_ASIDE[section] || !/^[a-z_.]+$/.test(idExpr)) return "";
+  return ` AND NOT EXISTS(SELECT 1 FROM cleanup_trash ct WHERE ct.section='${section}' AND ct.record_id=${idExpr} AND ct.state='trashed' AND json_extract(ct.prior_json,${SET_ASIDE[section][0]}) IS NOT NULL)`;
+}
+export async function cleanupSetAsideSql(env, section, idExpr) {
+  try { await env.DB.prepare("SELECT 1 FROM cleanup_trash LIMIT 1").first(); } catch { return ""; }
+  return cleanupSetAsideClause(section, idExpr);
+}
+// The context boundary of a conversation: the latest reset or archive. Everything at or before it no longer exists for AI and automation.
+// '' = no boundary. A read that fails hides everything and stops sends (CONTEXT_UNKNOWN sorts after any date); a store that does not
+// exist yet means nothing was ever reset.
+export const CONTEXT_UNKNOWN = "9999";
+const contextRead = async (env, sql, id) => {
+  try { return (await env.DB.prepare(sql).bind(String(id || "")).first())?.m || ""; }
+  catch (e) { return /no such table/i.test(String(e?.message || e)) ? "" : CONTEXT_UNKNOWN; }
+};
+const CONTEXT_ROWS = "FROM cleanup_trash WHERE section IN ('context','conversations') AND state='trashed' AND record_id";
+export const cleanupContextFrom = (env, conversationId) => contextRead(env, `SELECT MAX(deleted_at) m ${CONTEXT_ROWS}=?`, conversationId);
+export const cleanupContextFromMessage = (env, inboxId) => contextRead(env, `SELECT MAX(deleted_at) m ${CONTEXT_ROWS}=(SELECT conversation_id FROM inbox_messages WHERE id=?)`, inboxId);
+export const cleanupLeadContextFrom = (env, leadId) => contextRead(env, `SELECT MAX(deleted_at) m ${CONTEXT_ROWS} IN (SELECT id FROM lead_conversations WHERE lead_id=?)`, leadId);
+// Why a lead's follow-ups are stopped, for the owner: archived test escalations stay open by design.
+export async function cleanupArchivedTestSummary(env) {
+  try {
+    const r = await env.DB.prepare("SELECT COUNT(*) n,COUNT(DISTINCT e.lead_id) leads FROM cleanup_trash ct JOIN owner_escalations e ON e.id=ct.record_id WHERE ct.section='escalations' AND ct.state='trashed' AND json_extract(ct.prior_json,'$.test_artifact')=1").first();
+    // replies a reset held for the owner: without this count they would wait unseen among the drafts
+    const h = await env.DB.prepare("SELECT COUNT(*) n FROM lead_outreach WHERE status='draft' AND error_detail='reset_financial_owner'").first();
+    return { count: Number(r?.n || 0), leads: Number(r?.leads || 0), held: Number(h?.n || 0) };
+  } catch { return { count: 0, leads: 0, held: 0 }; }
+}
+// A set-aside escalation cannot be answered: the owner restores it first, so no decision is ever recorded on a hidden record.
+export async function cleanupEscalationArchived(env, id) {
+  try { return !!(await env.DB.prepare("SELECT 1 x FROM cleanup_trash WHERE section='escalations' AND record_id=? AND state='trashed' AND json_extract(prior_json,'$.test_artifact')=1 LIMIT 1").bind(String(id || "")).first()); }
+  catch { return false; }
 }
 
 function section(key) {
@@ -161,9 +221,9 @@ export async function cleanupItems(env, p, nowMs = Date.now()) {
   const key = String(p.section || ""), s = section(key), view = p.view === "trash" ? "trash" : "active";
   const limit = Math.min(PAGE_MAX, Math.max(1, Number(p.limit) || 50)), offset = Math.max(0, Number(p.offset) || 0);
   const f = filterSql(s, p, nowMs, view === "trash" ? "x.deleted_at" : s.date);
-  const cols = `t.id AS id,${s.title} AS title,${s.sub} AS sub,${s.date} AS at,${s.state} AS state`;
+  const cols = `t.id AS id,${s.title} AS title,${s.sub} AS sub,${s.date} AS at,${s.state} AS state${s.testBlock && view !== "trash" ? `,${s.testBlock} AS test_block` : ""}`;
   const sql = view === "trash"
-    ? `SELECT ${cols},x.deleted_at,${restoreBlockSql(s)} AS block,${s.purge ? purgeBlockSql(s) : "'not_purgeable'"} AS purge_block ${trashFrom(key, s)}${f.sql} ORDER BY x.deleted_at DESC LIMIT ? OFFSET ?`
+    ? `SELECT ${cols},x.deleted_at,json_extract(x.prior_json,'$.test_artifact') AS test_artifact,${restoreBlockSql(s)} AS block,${s.purge ? purgeBlockSql(s) : "'not_purgeable'"} AS purge_block ${trashFrom(key, s)}${f.sql} ORDER BY x.deleted_at DESC LIMIT ? OFFSET ?`
     : `SELECT ${cols},${s.block} AS block ${activeFrom(key, s)}${f.sql} ORDER BY at DESC LIMIT ? OFFSET ?`;
   const total = Number((await env.DB.prepare(`SELECT COUNT(*) n ${view === "trash" ? trashFrom(key, s) : activeFrom(key, s)}${f.sql}`).bind(...f.binds).first())?.n || 0);
   return { ok: true, section: key, view, total, limit, offset, items: await rows(env, sql, [...f.binds, limit, offset]) };
@@ -177,15 +237,15 @@ const normalizePhrase = v => String(v || "").replace(/[۰-۹]/g, d => "۰۱۲۳�
 // What else a delete touches, shown before the owner confirms. Counts only.
 async function impactOf(env, key, action, ids) {
   const out = { impact: {}, warnings: [] };
-  if (!ids.length || !["inbox", "conversations", "outreach", "leads"].includes(key)) return out;
+  if (!ids.length || !["inbox", "conversations", "outreach", "leads", "escalations", "context"].includes(key)) return out;
   const count = async (sqlFor) => { let n = 0; for (const part of chunk(ids, 90)) { const q = part.map(() => "?").join(","); n += Number((await env.DB.prepare(sqlFor(q)).bind(...part).first())?.n || 0); } return n; };
   const scheduled = q => `SELECT COUNT(*) n FROM leads l WHERE json_valid(l.notes) AND json_extract(l.notes,'$.next_followup_at') IS NOT NULL AND l.id IN (${q})`;
   if (key === "inbox") {
     out.impact.drafts = await count(q => `SELECT COUNT(*) n FROM lead_outreach WHERE status='draft' AND inbox_message_id IN (${q})`);
     out.impact.pending_replies = await count(q => `SELECT COUNT(*) n FROM lead_outreach WHERE status IN ('pending_approval','approved','sending','send_ambiguous') AND inbox_message_id IN (${q})`);
     out.impact.memory_facts = await count(q => `SELECT COUNT(*) n FROM conversation_memory_facts WHERE status='active' AND source_message_id IN (${q})`);
-    out.impact.open_escalations = await count(q => `SELECT COUNT(*) n FROM owner_escalations WHERE status='open' AND source_message_id IN (${q})`);
-    out.impact.pending_decisions = await count(q => `SELECT COUNT(*) n FROM owner_decisions d JOIN owner_escalations e ON e.id=d.owner_escalation_id WHERE d.status='PENDING' AND e.source_message_id IN (${q})`);
+    out.impact.open_escalations = await count(q => `SELECT COUNT(*) n FROM owner_escalations e WHERE e.status='open' AND NOT ${archivedEsc("e.id")} AND e.source_message_id IN (${q})`);
+    out.impact.pending_decisions = await count(q => `SELECT COUNT(*) n FROM owner_decisions d JOIN owner_escalations e ON e.id=d.owner_escalation_id WHERE d.status='PENDING' AND NOT ${archivedEsc("e.id")} AND e.source_message_id IN (${q})`);
     out.impact.followups = await count(q => scheduled(`SELECT lead_id FROM inbox_messages WHERE id IN (${q})`));
   } else if (key === "conversations") {
     out.impact.messages = await count(q => `SELECT COUNT(*) n FROM inbox_messages WHERE status<>'trashed' AND conversation_id IN (${q})`);
@@ -194,6 +254,10 @@ async function impactOf(env, key, action, ids) {
     out.impact.followups = await count(q => scheduled(`SELECT lead_id FROM lead_conversations WHERE id IN (${q})`));
   } else if (key === "leads") {
     out.impact.followups = await count(scheduled);
+  } else if (key === "context") {
+    out.impact.memory_facts = await count(q => `SELECT COUNT(*) n FROM conversation_memory_facts WHERE status='active' AND conversation_id IN (${q})`);
+  } else if (key === "escalations") {
+    out.impact.pending_decisions = await count(q => `SELECT COUNT(*) n FROM owner_decisions WHERE status='PENDING' AND owner_escalation_id IN (${q})`);
   } else {
     const unanswered = await count(q => `SELECT COUNT(*) n FROM lead_outreach o JOIN inbox_messages i ON i.id=o.inbox_message_id WHERE o.id IN (${q}) AND NOT EXISTS(SELECT 1 FROM lead_outreach s WHERE s.lead_id=o.lead_id AND s.status IN ('sent','delivered') AND s.created_at>=i.created_at)`);
     if (action === "trash" && unanswered) { out.impact.unanswered = unanswered; out.warnings.push("unanswered_message"); }
@@ -203,7 +267,7 @@ async function impactOf(env, key, action, ids) {
     if (out.impact.memory_facts) out.warnings.push("memory_hidden");
     if (out.impact.followups) out.warnings.push("followup_scheduled");
   }
-  if (action === "restore") out.warnings.push("no_reply_after_restore");
+  if (action === "restore") out.warnings.push(key === "context" ? "context_returns" : "no_reply_after_restore");
   return out;
 }
 
@@ -213,8 +277,11 @@ export async function cleanupPreview(env, b, actor, nowMs = Date.now()) {
   if (!["trash", "restore", "purge"].includes(action)) throw httpError(400, "invalid_action");
   if (!["ids", "page", "filter", "section"].includes(scope)) throw httpError(400, "invalid_scope");
   if (action === "purge" && !s.purge) throw httpError(409, "not_purgeable");
+  const test = b?.test_artifact === true;
+  if (test && !(s.testBlock && action === "trash" && scope === "ids")) throw httpError(400, "test_artifact_not_allowed");
+  if (s.idsOnly && action === "trash" && scope !== "ids") throw httpError(400, "named_records_only");
   const fromAction = action === "trash" ? activeFrom(key, s) : trashFrom(key, s);
-  const block = action === "trash" ? blockExpr(s, scope) : action === "restore" ? restoreBlockSql(s) : purgeBlockSql(s);
+  const block = action === "trash" ? blockExpr(s, scope, false, test) : action === "restore" ? restoreBlockSql(s) : purgeBlockSql(s);
   const select = `SELECT t.id AS id,${s.state} AS state,${block} AS block ${fromAction}`;
   let found = [], f = { sql: "", binds: [], used: {} }, requested = 0;
   if (scope === "ids" || scope === "page") {
@@ -234,23 +301,25 @@ export async function cleanupPreview(env, b, actor, nowMs = Date.now()) {
   const eligible = found.filter(r => r.block === null || r.block === undefined), blocked = {}, byState = {};
   for (const r of found) { if (r.block) blocked[r.block] = (blocked[r.block] || 0) + 1; else byState[r.state] = (byState[r.state] || 0) + 1; }
   const ids = eligible.slice(0, CLEANUP_OP_MAX).map(r => r.id), count = ids.length;
-  const summary = { section: key, label: s.label, action, scope, filter: f.used, requested, eligible: eligible.length, this_run: count, remaining: eligible.length - count, not_available: requested - found.length, blocked, by_state: byState, ...await impactOf(env, key, action, ids) };
+  const summary = { section: key, label: s.label, action, scope, ...(test ? { test_artifact: true } : {}), filter: f.used, requested, eligible: eligible.length, this_run: count, remaining: eligible.length - count, not_available: requested - found.length, blocked, by_state: byState, ...await impactOf(env, key, action, ids) };
   if (!count) return { ok: true, token: null, count: 0, confirm_phrase: null, summary };
-  const needsPhrase = action === "purge" || scope === "filter" || scope === "section" || count >= PHRASE_FROM || ["leads", "conversations"].includes(key);
-  const phrase = needsPhrase ? phraseOf(action, count) : null, token = crypto.randomUUID(), t = iso(nowMs);
+  const reset = key === "context" && action === "trash", needsPhrase = test || reset || action === "purge" || scope === "filter" || scope === "section" || count >= PHRASE_FROM || ["leads", "conversations"].includes(key);
+  const phrase = test ? "بایگانی تست " + count + " مورد" : reset ? "بازنشانی گفتگو " + count + " مورد" : needsPhrase ? phraseOf(action, count) : null, token = crypto.randomUUID(), t = iso(nowMs);
   await env.DB.prepare("INSERT INTO cleanup_ops(id,section,action,scope,filter_json,record_ids_json,summary_json,confirm_phrase,status,created_by,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,'previewed',?,?,?)")
     .bind(token, key, action, scope, JSON.stringify(f.used), JSON.stringify(ids), JSON.stringify(summary), phrase, String(actor), t, iso(nowMs + OP_TTL_MS)).run();
   return { ok: true, token, count, confirm_phrase: phrase, expires_at: iso(nowMs + OP_TTL_MS), summary };
 }
 
-function trashStatements(env, key, s, id, opId, actor, t, scope) {
+function trashStatements(env, key, s, id, opId, actor, t, scope, test) {
   const tid = crypto.randomUUID(), P = (q, ...v) => env.DB.prepare(q).bind(...v);
-  const prior = s.mode === "conversation" ? "json_object('inbox',json((SELECT json_group_array(json_object('id',i.id,'s',i.status)) FROM inbox_messages i WHERE i.conversation_id=t.id AND i.status<>'trashed')),'drafts',json((SELECT json_group_array(o.id) FROM lead_outreach o WHERE o.conversation_id=t.id AND o.status='draft')))"
+  const prior = test ? "json_object('test_artifact',1,'v',t.status,'version',t.version)" : s.mode === "conversation" ? "json_object('inbox',json((SELECT json_group_array(json_object('id',i.id,'s',i.status)) FROM inbox_messages i WHERE i.conversation_id=t.id AND i.status<>'trashed')),'drafts',json((SELECT json_group_array(o.id) FROM lead_outreach o WHERE o.conversation_id=t.id AND o.status='draft')))"
     : s.mode === "inbox" ? "json_object('v',t.status,'drafts',json((SELECT json_group_array(o.id) FROM lead_outreach o WHERE o.inbox_message_id=t.id AND o.status='draft')))"
     : s.mode === "dlq" ? "json_object('open',CASE WHEN t.resolved_at IS NULL THEN 1 ELSE 0 END)"
     : s.col ? `json_object('v',t.${s.col})` : "'{}'";
-  const out = [P(`INSERT OR IGNORE INTO cleanup_trash(id,section,record_id,op_id,prior_json,state,deleted_by,deleted_at) SELECT ?,?,t.id,?,${prior},'trashed',?,? FROM ${s.table} t WHERE t.id=? AND ${s.active} AND ${notTrashed(key)} AND (${blockExpr(s, scope)}) IS NULL`, tid, key, opId, actor, t, id)];
+  const out = [P(`INSERT OR IGNORE INTO cleanup_trash(id,section,record_id,op_id,prior_json,state,deleted_by,deleted_at) SELECT ?,?,t.id,?,${prior},'trashed',?,? FROM ${s.table} t WHERE t.id=? AND ${s.active} AND ${notTrashed(key)} AND (${blockExpr(s, scope, false, test)}) IS NULL`, tid, key, opId, actor, t, id)];
   const guard = "EXISTS(SELECT 1 FROM cleanup_trash c WHERE c.id=?)";
+  // its pending decision goes with it, untouched: still PENDING, no answer recorded. Only this row's restore brings it back.
+  if (test) out.push(P(`INSERT OR IGNORE INTO cleanup_trash(id,section,record_id,op_id,prior_json,state,deleted_by,deleted_at) SELECT lower(hex(randomblob(16))),'decisions',d.id,?,json_object('via_escalation',?),'trashed',?,? FROM owner_decisions d WHERE d.owner_escalation_id=? AND d.status='PENDING' AND ${guard}`, opId, id, actor, t, id, tid));
   if (s.mode === "status" || s.mode === "lead") out.push(P(`UPDATE ${s.table} SET ${s.col}=?,updated_at=?${s.versioned ? ",version=version+1" : ""} WHERE id=? AND ${guard}`, s.value, t, id, tid));
   // a draft never outlives its message: it moves to Trash with it, so it cannot be approved or sent on its own
   else if (s.mode === "inbox") out.push(P(`UPDATE inbox_messages SET status='trashed',updated_at=? WHERE id=? AND ${guard}`, t, id, tid), P(`UPDATE lead_outreach SET status='trashed',updated_at=? WHERE inbox_message_id=? AND status='draft' AND ${guard}`, t, id, tid));
@@ -262,6 +331,7 @@ function restoreStatements(env, key, s, row, actor, t) {
   const P = (q, ...v) => env.DB.prepare(q).bind(...v), prior = JSON.parse(row.prior_json || "{}");
   const out = [P(`UPDATE cleanup_trash SET state='restored',restored_by=?,restored_at=? WHERE id=? AND state='trashed' AND EXISTS(SELECT 1 FROM cleanup_trash x JOIN ${s.table} t ON t.id=x.record_id WHERE x.id=? AND (${restoreBlockSql(s)}) IS NULL)`, actor, t, row.trash_id, row.trash_id)];
   const guard = "EXISTS(SELECT 1 FROM cleanup_trash c WHERE c.id=? AND c.state='restored' AND c.restored_at=?)";
+  if (prior.test_artifact) out.push(P(`UPDATE cleanup_trash SET state='restored',restored_by=?,restored_at=? WHERE section='decisions' AND state='trashed' AND json_extract(prior_json,'$.via_escalation')=? AND ${guard}`, actor, t, row.id, row.trash_id, t));
   if (s.mode === "status" && key === "outreach") {
     // A commercial approval never comes back from Trash: an approved row returns as a draft and needs a fresh approval.
     out.push(P(`UPDATE lead_outreach SET status=?,approved_at=CASE WHEN ?='approved' THEN NULL ELSE approved_at END,approved_by=CASE WHEN ?='approved' THEN NULL ELSE approved_by END,updated_at=? WHERE id=? AND status='trashed' AND ${guard}`, prior.v === "approved" ? "draft" : prior.v, prior.v, prior.v, t, row.id, row.trash_id, t));
@@ -298,7 +368,7 @@ export async function cleanupExecute(env, b, actor, nowMs = Date.now()) {
   try { claimed = await env.DB.prepare("UPDATE cleanup_ops SET status='running',started_at=? WHERE id=? AND status='previewed'").bind(t, token).run(); }
   catch { throw httpError(409, "section_busy"); }
   if (!claimed?.meta?.changes) throw httpError(409, "operation_running");
-  const key = op.section, s = section(key), ids = JSON.parse(op.record_ids_json || "[]"), result = { section: key, action: op.action, scope: op.scope, requested: ids.length, done: 0, skipped: 0 };
+  const key = op.section, s = section(key), ids = JSON.parse(op.record_ids_json || "[]"), test = !!JSON.parse(op.summary_json || "{}").test_artifact, result = { section: key, action: op.action, scope: op.scope, ...(test ? { test_artifact: true } : {}), requested: ids.length, done: 0, skipped: 0 };
   try {
     let trashRows = new Map();
     if (op.action !== "trash") for (const part of chunk(ids, 90)) for (const r of await rows(env, `SELECT id AS trash_id,record_id AS id,prior_json FROM cleanup_trash WHERE section=? AND state='trashed' AND record_id IN (${part.map(() => "?").join(",")})`, [key, ...part])) trashRows.set(r.id, r);
@@ -308,7 +378,7 @@ export async function cleanupExecute(env, b, actor, nowMs = Date.now()) {
         const row = trashRows.get(id);
         if (op.action !== "trash" && !row) { result.skipped++; continue; }
         heads.push(flat.length);
-        flat.push(...(op.action === "trash" ? trashStatements(env, key, s, id, token, String(actor), t, op.scope) : op.action === "restore" ? restoreStatements(env, key, s, row, String(actor), t) : purgeStatements(env, s, row, String(actor), t)));
+        flat.push(...(op.action === "trash" ? trashStatements(env, key, s, id, token, String(actor), t, op.scope, test) : op.action === "restore" ? restoreStatements(env, key, s, row, String(actor), t) : purgeStatements(env, s, row, String(actor), t)));
       }
       if (!flat.length) continue;
       const r = await env.DB.batch(flat);
@@ -345,7 +415,7 @@ export async function cleanupReviveLead(env, leadId, nowMs = Date.now()) {
 export async function cleanupRecentlyRestored(env, leadId, nowMs = Date.now(), days = 7) {
   try {
     const row = await env.DB.prepare(`SELECT 1 x FROM cleanup_trash c WHERE c.state='restored' AND c.restored_by<>'customer_inbound' AND c.restored_at>=? AND (
-      (c.section='leads' AND c.record_id=?) OR (c.section='conversations' AND c.record_id IN (SELECT id FROM lead_conversations WHERE lead_id=?)) OR (c.section='inbox' AND c.record_id IN (SELECT id FROM inbox_messages WHERE lead_id=?))) LIMIT 1`).bind(iso(nowMs - days * 86400000), String(leadId), String(leadId), String(leadId)).first();
+      (c.section='leads' AND c.record_id=?) OR (c.section IN ('conversations','context') AND c.record_id IN (SELECT id FROM lead_conversations WHERE lead_id=?)) OR (c.section='inbox' AND c.record_id IN (SELECT id FROM inbox_messages WHERE lead_id=?))) LIMIT 1`).bind(iso(nowMs - days * 86400000), String(leadId), String(leadId), String(leadId)).first();
     return !!row;
   } catch { return await storeReady(env); }
 }

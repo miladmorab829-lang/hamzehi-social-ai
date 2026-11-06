@@ -146,7 +146,10 @@ export async function listFinalQuotes(env, { limit = 100, verify = false } = {})
   });
   const count = s => items.filter(x => x.state === s).length;
   const open = items.filter(x => ["pending", "unresolved"].includes(x.state));
+  // a held reply that never got a review row cannot be approved; it must still be visible. Older rows beyond the page are counted too.
+  const missing = Number((await env.DB.prepare("SELECT COUNT(*) n FROM lead_outreach o WHERE o.error_detail='final_quote_owner_approval' AND o.status IN ('draft','pending_approval') AND NOT EXISTS(SELECT 1 FROM final_quote_reviews r WHERE r.outreach_id=o.id)").first())?.n || 0);
+  const total = Number((await env.DB.prepare("SELECT COUNT(*) n FROM final_quote_reviews").first())?.n || 0);
   // verify: the panel asks Telegram (getChat reads only); the approval counters do not
   const destination = await ownerAlertDestination(env, { check: verify });
-  return { items, summary: { pending: count("pending"), approved: count("approved"), unresolved: count("unresolved"), rejected: count("rejected"), alerts_not_delivered: open.filter(x => !x.alert_delivered).length }, owner_alert: { configured: destination.ok, reason: destination.reason || null } };
+  return { items, summary: { pending: count("pending"), approved: count("approved"), unresolved: count("unresolved"), rejected: count("rejected"), alerts_not_delivered: open.filter(x => !x.alert_delivered).length, missing_review: missing, not_listed: Math.max(0, total - items.length) }, owner_alert: { configured: destination.ok, reason: destination.reason || null } };
 }
