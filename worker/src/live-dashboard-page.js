@@ -515,9 +515,12 @@ function api(path,opt={}){
  const hit=DASH_GET_CACHE.get(path);if(hit)return hit;
  const p=apiRequest(path,opt).finally(()=>{if(DASH_GET_CACHE.get(path)===p)DASH_GET_CACHE.delete(path)});DASH_GET_CACHE.set(path,p);return p;
 }
+// opt.signal (optional): the caller may cancel, e.g. a list replaced by a newer one; that result is {aborted:true}, never an error.
+// A failure says what kind it was: timeout, network (the browser got no response at all, "Failed to fetch") or an HTTP status.
 async function apiRequest(path,opt={}){
- const controller=new AbortController();
- const timer=setTimeout(()=>controller.abort(),opt.timeoutMs||DASHBOARD_REQUEST_TIMEOUT_MS);
+ const controller=new AbortController(),ext=opt.signal;let timedOut=false;
+ const timer=setTimeout(()=>{timedOut=true;controller.abort()},opt.timeoutMs||DASHBOARD_REQUEST_TIMEOUT_MS);
+ const cancel=()=>controller.abort();if(ext){if(ext.aborted)controller.abort();else ext.addEventListener("abort",cancel,{once:true})}
  try{
   const r=await fetch(path,{...opt,timeoutMs:undefined,signal:controller.signal,headers:{...hdr(),...(opt.headers||{}),...(opt.body?{"Content-Type":"application/json"}:{})}});
   const d=await r.json().catch(()=>null);
@@ -525,10 +528,11 @@ async function apiRequest(path,opt={}){
   if(!r.ok)return {...d,ok:false,error:d.error||("Request failed (HTTP "+r.status+")"),status:r.status};
   return d;
  }catch(e){
-  const timedOut=e?.name==="AbortError"||e?.name==="TimeoutError";
-  return {ok:false,error:timedOut?"Request timed out after 10 seconds":String(e?.message||"Connection request failed")};
+  if(ext&&ext.aborted&&!timedOut)return {ok:false,aborted:true,error:"Request cancelled"};
+  const t=timedOut||e?.name==="AbortError"||e?.name==="TimeoutError";
+  return t?{ok:false,timeout:true,error:"Request timed out after 10 seconds"}:{ok:false,network:true,error:String(e?.message||"Connection request failed")};
  }finally{
-  clearTimeout(timer);
+  clearTimeout(timer);if(ext)ext.removeEventListener("abort",cancel);
  }
 }
 function setCmd(x){$("command").value=x}

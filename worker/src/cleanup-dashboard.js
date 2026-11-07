@@ -34,6 +34,8 @@ export const CLEANUP_SCRIPT = `<style>
 .clBar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0}.clBar .btn{min-height:42px;padding:6px 10px;font-size:12px}
 .clRowCtl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 6px}.clRowCtl .btn{min-height:40px;padding:5px 10px;font-size:12px}.clRowCtl label{display:inline-flex;align-items:center;gap:6px;min-height:40px;font-size:12px;color:var(--muted)}
 .clPick{width:20px;height:20px}.clRowCtl,.clBar .clMore{display:none}body.clManage .clRowCtl{display:flex}body.clManage .clBar .clMore{display:inline-flex}
+#clStatusLine,#clItems{scroll-margin-top:84px}.clFlash{outline:2px solid var(--accent,#2563eb);outline-offset:4px;border-radius:12px;transition:outline-color .6s}
+.clRetry{min-height:36px;padding:4px 12px;font-size:12px;margin-inline-start:6px}.clStale{opacity:.6}.clWaiting{opacity:.45;pointer-events:none}
 .clLock{font-size:11px;color:var(--muted);border:1px solid var(--line2);border-radius:999px;padding:1px 8px}
 #clSheet{position:fixed;inset:0;z-index:9999;background:rgba(17,24,39,.45);display:flex;align-items:flex-end;justify-content:center}
 #clSheet[hidden]{display:none}#clSheetBox{background:#fff;width:100%;max-width:560px;max-height:85vh;overflow:auto;border-radius:16px 16px 0 0;padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom))}
@@ -43,7 +45,7 @@ export const CLEANUP_SCRIPT = `<style>
 </style><script>
 window.CL=(function(){
  const REASON={no_pending_decision:"تصمیم در انتظار ندارد",live_order:"سفارش زنده دارد؛ با بایگانی تست کنار نمی‌رود",commercial_link:"به سفارش یا پیش‌فاکتور وصل است",recent_customer_activity:"مشتری در ۱۴ روز اخیر پیام داده است",no_lead:"به لید مشخصی وصل نیست",not_open:"باز نیست",message_in_trash:"پیام اصلی در سطل زباله است؛ اول آن را بازیابی کنید",restore_with_escalation:"همراه ارجاع خودش بازیابی می‌شود",open_reply:"پاسخ باز یا در حال ارسال دارد",final_quote_review:"قیمت نهایی منتظر مالک است",has_order:"به سفارش وصل است و مدرک سفارش حفظ می‌شود",has_quote:"به پیش‌فاکتور وصل است",open_escalation:"ارجاع باز دارد؛ اول آن را حل کنید",pending_decision:"تصمیم در انتظار دارد؛ اول آن را حل کنید",customer_record:"مشتری واقعی است",open_outreach:"پیام باز دارد؛ اول آن را حذف کنید",active_pilot_link:"لینک فعال دارد؛ اول پیام را رد کنید",linked_history:"سابقه اجرا یا تأیید دارد",needs_explicit_selection:"با مشتری ارتباط دارد؛ فقط با انتخاب تک‌تک قابل حذف است",scheduled_or_published:"زمان‌بندی یا منتشر شده است",outcome_unknown:"نتیجه ارسال نامعلوم است",job_active:"در حال اجراست",open_dead_letter:"مورد باز DLQ دارد",alert_active:"هشدار هنوز فعال است",parent_in_trash:"مورد اصلی آن در سطل زباله است؛ اول آن را بازیابی کنید",schedule_passed:"زمان برنامه گذشته است و بازیابی باعث انتشار فوری می‌شود",changed_since_delete:"بعد از حذف تغییر کرده است",retention_active:"دوره نگهداری تمام نشده است",audit_evidence:"مدرک Audit یا امنیت است",not_purgeable:"حذف دائمی برای این بخش مجاز نیست",used_in_open_message:"در پیام باز استفاده شده است",used_by_content:"در محتوا استفاده شده است",used_by_gallery:"عکس این فایل در گالری است",r2_requires_authorization:"حذف فایل از R2 مجوز جدا لازم دارد"};
- const ERR={named_records_only:"این کار فقط برای گفتگوهای انتخاب‌شده مجاز است.",test_artifact_not_allowed:"بایگانی تست فقط برای ارجاع‌های انتخاب‌شده مجاز است.",migration_required:"سیستم سطل زباله هنوز روی پایگاه داده فعال نشده است.",section_busy:"عملیات دیگری روی این بخش در حال اجراست.",operation_running:"این عملیات قبلاً شروع شده است.",preview_expired:"پیش‌نمایش منقضی شد؛ دوباره تلاش کنید.",confirmation_mismatch:"عبارت تأیید درست نیست.",filter_required:"اول یک فیلتر انتخاب کنید."};
+ const ERR={named_records_only:"این کار فقط برای گفتگوهای انتخاب‌شده مجاز است.",test_artifact_not_allowed:"بایگانی تست فقط برای ارجاع‌های انتخاب‌شده مجاز است.",migration_required:"سیستم سطل زباله هنوز روی پایگاه داده فعال نشده است.",section_busy:"عملیات دیگری روی این بخش در حال اجراست.",operation_failed:"این عملیات کامل نشد. برای ادامه، پیش‌نمایش تازه بگیرید.",operation_running:"این عملیات قبلاً شروع شده است.",preview_expired:"پیش‌نمایش منقضی شد؛ دوباره تلاش کنید.",confirmation_mismatch:"عبارت تأیید درست نیست.",filter_required:"اول یک فیلتر انتخاب کنید."};
  const WARN={context_returns:"با بازیابی، سابقه قدیمی این گفتگو دوباره برای AI فعال می‌شود. چیزی ارسال یا تأیید نمی‌شود.",linked_drafts:"پیش‌نویس‌های این پیام هم به سطل زباله می‌روند و ارسال‌نشدنی می‌شوند.",memory_hidden:"اطلاعات برداشت‌شده از این پیام از حافظه AI کنار می‌رود.",followup_scheduled:"این مشتری پیگیری زمان‌بندی‌شده دارد.",unanswered_message:"پیام مشتری بدون پاسخ می‌ماند. برای پاسخ دادن باید همین پیش‌نویس را بازیابی کنید.",no_reply_after_restore:"بازیابی هیچ پیامی را خودکار ارسال نمی‌کند و پیگیری خودکار این مشتری تا ۷ روز متوقف می‌ماند."};
  const IMPACT={drafts:"پیش‌نویس",pending_replies:"پاسخ در انتظار",open_escalations:"ارجاع باز",pending_decisions:"تصمیم در انتظار",quotes:"پیش‌فاکتور",orders:"سفارش",memory_facts:"اطلاعات حافظه",followups:"پیگیری زمان‌بندی‌شده",messages:"پیام"};
  const ACT={trash:"انتقال به سطل زباله",restore:"بازیابی",purge:"حذف دائمی"},CAP={page:"موارد نمایش‌داده‌شده",ids:"موارد انتخاب‌شده",filter:"نتایج فیلتر فعلی",section:"کل موارد مجاز این بخش"};
@@ -51,6 +53,17 @@ window.CL=(function(){
  const st={busy:false,pending:null,after:null};
  const h=v=>String(v==null?"":v).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
  const fa=e=>ERR[e]||e||"خطا";
+ // A failed request in Persian. Network = the browser got no answer at all ("Failed to fetch"): connection, VPN or a dropped request.
+ function faResp(d){if(!d)return "خطا";if(ERR[d.error])return ERR[d.error];if(d.timeout)return "پاسخ سرور بیش از ۱۰ ثانیه طول کشید.";
+  if(d.network||/failed to fetch|networkerror|load failed/i.test(String(d.error||"")))return "ارتباط با سرور برقرار نشد (Failed to fetch). اتصال اینترنت یا VPN را بررسی کنید.";
+  if(d.status===401)return "ورود مدیر لازم است یا توکن نامعتبر است. توکن را دوباره وارد کنید.";if(d.status===403)return "این کار برای این حساب مجاز نیست.";
+  if(d.status>=500)return "خطای سرور (HTTP "+d.status+"). کمی بعد دوباره تلاش کنید.";return fa(d.error)}
+ const transient=d=>!d.ok&&!d.aborted&&(d.network||d.timeout||d.status===429||d.status>=500);
+ // Reads only (GET): up to 3 attempts on a transient failure. Writes are never sent here, so they are never repeated automatically.
+ async function getJson(path,{signal,onRetry}={}){let d;for(let i=0;i<3;i++){if(i&&onRetry)onRetry(i+1);d=await apiRequest(path,{signal});if(!transient(d))return d;
+   if(i<2)await new Promise(r=>{const t=setTimeout(r,500*(i+1));if(signal)signal.addEventListener("abort",()=>{clearTimeout(t);r()},{once:true})});if(signal&&signal.aborted)return {ok:false,aborted:true}}
+  return {...d,attempts:3}}
+ const retryBtn=k=>" <button class='btn clRetry' type='button' data-retry='"+k+"'>تلاش دوباره</button>";
  function sheet(){let s=document.getElementById("clSheet");if(!s){s=document.createElement("div");s.id="clSheet";s.hidden=true;s.innerHTML="<div id='clSheetBox' role='dialog' aria-modal='true'></div>";document.body.appendChild(s);s.addEventListener("click",e=>{if(e.target===s)close()})}return s}
  function show(html){const s=sheet();document.getElementById("clSheetBox").innerHTML=html;s.hidden=false}
  function close(){st.pending=null;const s=document.getElementById("clSheet");if(s)s.hidden=true}
@@ -61,7 +74,7 @@ window.CL=(function(){
  async function preview(sec,action,scope,ids,filter,after,test){
   if(st.busy)return;st.busy=true;st.after=after||null;show("<div class='hint'>در حال محاسبه اثر حذف…</div>");
   const d=await apiRequest("/api/cleanup/preview",{method:"POST",body:JSON.stringify({section:sec,action,scope,ids,filter,test_artifact:test?true:undefined})});st.busy=false;
-  if(!d.ok){show("<div class='bad'>✕ "+h(fa(d.error))+"</div>"+closeBtn("بستن"));return}
+  if(!d.ok){show("<div class='bad'>✕ "+h(faResp(d))+"</div>"+closeBtn("بستن"));return}
   const m=d.summary,bl=Object.keys(m.blocked||{}).map(k=>"<div class='mini warn'>"+h(m.blocked[k])+" مورد: "+h(REASON[k]||k)+"</div>").join("");
   const imp=Object.keys(m.impact||{}).filter(k=>m.impact[k]).map(k=>h(IMPACT[k]||k)+": "+h(m.impact[k])).join(" · ");
   const warn=(m.warnings||[]).map(k=>"<div class='clWarn'>"+h(WARN[k]||k)+"</div>").join("");
@@ -75,15 +88,15 @@ window.CL=(function(){
  async function go(){
   if(!st.pending||st.busy)return;st.busy=true;const b=document.getElementById("clGo");if(b)b.disabled=true;
   const p=document.getElementById("clPhrase"),sec=st.pending.sec,d=await apiRequest("/api/cleanup/execute",{method:"POST",body:JSON.stringify({token:st.pending.token,confirm:p?p.value:undefined})});st.busy=false;
-  if(!d.ok){if(b)b.disabled=false;document.getElementById("clSheetBox").insertAdjacentHTML("beforeend","<div class='bad mini'>✕ "+h(fa(d.error))+"</div>");return}
+  if(!d.ok){if(b)b.disabled=false;const unknown=d.network||d.timeout;document.getElementById("clSheetBox").insertAdjacentHTML("beforeend","<div class='bad mini'>✕ "+h(faResp(d))+(unknown?" نتیجه این عملیات معلوم نیست و دوباره خودکار ارسال نشد. اگر دوباره تأیید کنید، فقط همین عملیات کامل یا گزارش می‌شود و دو بار اجرا نمی‌شود. اگر پیام «کامل نشد» دیدید، پیش‌نمایش تازه بگیرید.":"")+"</div>");return}
   const r=d.result||{};st.pending=null;show("<div class='ok'>✓ انجام شد: "+h(r.done)+" مورد"+(r.skipped?" · "+h(r.skipped)+" مورد تغییر کرده بود و رد شد":"")+"</div><div class='clTools'>"+closeBtn("بستن")+"</div>");
   const fn=RELOAD[sec];try{if(st.after)await st.after();else if(fn&&typeof window[fn]==="function")await window[fn]()}catch(e){}
  }
  function askScope(sec){const n=picks(sec).length;show("<b>حذف همه موارد مجاز</b><div class='mini'>دامنه را انتخاب کنید. موارد محافظت‌شده در هر حالت حذف نمی‌شوند.</div><div class='clTools'><button class='btn' type='button' data-cl='scopeVisible' data-sec='"+h(sec)+"'>فقط موارد نمایش‌داده‌شده ("+h(n)+")</button><button class='btn' type='button' data-cl='scopeSection' data-sec='"+h(sec)+"'>کل موارد مجاز این بخش</button>"+closeBtn("انصراف")+"</div>")}
  async function openTrash(sec,canPurge){
   show("<div class='hint'>در حال دریافت سطل زباله…</div>");
-  const d=await apiRequest("/api/cleanup/items?"+new URLSearchParams({section:sec,view:"trash",limit:50}).toString());
-  if(!d.ok){show("<div class='bad'>✕ "+h(fa(d.error))+"</div>"+closeBtn("بستن"));return}
+  const d=await getJson("/api/cleanup/items?"+new URLSearchParams({section:sec,view:"trash",limit:50}).toString());
+  if(!d.ok){show("<div class='bad'>✕ "+h(faResp(d))+"</div>"+closeBtn("بستن"));return}
   const rows=(d.items||[]).map(x=>"<div class='row'><b>"+h(x.title||"—")+"</b><div class='mini'>"+h(x.sub||"")+" · حذف: "+h(String(x.deleted_at||"").slice(0,10))+"</div>"+(x.block?"<div class='mini warn'>"+h(REASON[x.block]||x.block)+"</div>":"")+"<div class='clTools'><button class='btn' type='button' data-cl='restore' data-sec='"+h(sec)+"' data-id='"+h(x.id)+"'"+(x.block?" disabled":"")+">بازیابی</button>"+(x.purge_block==="not_purgeable"?"":"<button class='btn' type='button' data-cl='purge' data-sec='"+h(sec)+"' data-id='"+h(x.id)+"'"+(x.purge_block?" disabled":"")+">حذف دائمی</button>")+"</div>"+(x.purge_block&&x.purge_block!=="not_purgeable"?"<div class='mini muted'>"+h(REASON[x.purge_block]||x.purge_block)+"</div>":"")+"</div>").join("");
   show("<b>سطل زباله</b> <span class='mini'>"+h(d.total)+" مورد</span><div class='rows'>"+(rows||"<div class='row muted'>سطل زباله خالی است.</div>")+"</div><div class='clTools'>"+closeBtn("بستن")+"</div>");
  }
@@ -98,40 +111,64 @@ window.CL=(function(){
   else if(a==="restore")preview(sec,"restore","ids",[b.dataset.id]);
   else if(a==="purge")preview(sec,"purge","ids",[b.dataset.id]);});
  document.addEventListener("change",e=>{const t=e.target;if(t.dataset&&t.dataset.cl==="all")picks(t.dataset.sec).forEach(x=>{x.checked=t.checked})});
- return {rowCtl,bar,preview,REASON,ERR,fa,openTrash};
+ return {rowCtl,bar,preview,REASON,ERR,fa,faResp,getJson,retryBtn,openTrash};
 })();
 </script>`;
 
 // The Cleanup page itself: filters, paging and the test-data view. Only on /dashboard/cleanup.
 export const CLEANUP_PAGE_SCRIPT = `<script>
 (function(){
- const st={sections:[],items:[],offset:0,limit:50,total:0};
+ const st={sections:[],items:[],offset:0,limit:50,total:0,seq:0,ctrl:null,shown:"",loading:""};
  const E=id=>document.getElementById(id),cur=()=>st.sections.find(s=>s.key===E("clSection").value),view=()=>E("clView").value;
  const LIVE=["alert_active","job_active","open_dead_letter"],OPS=["errors","tasks","alerts","retry","dlq"];
  function filter(){const f={};if(E("clOlder").value)f.older_than_days=Number(E("clOlder").value);if(E("clStatus").value)f.status=E("clStatus").value;if(!E("clMarket").hidden&&E("clMarket").value)f.market=E("clMarket").value;return f}
  function renderStatus(){const s=cur();E("clStatus").innerHTML='<option value="">همه وضعیت‌ها</option>'+((s&&s.statuses)||[]).map(x=>'<option value="'+esc(x)+'">'+esc(x)+'</option>').join("");E("clMarket").hidden=!(s&&s.markets)}
  function controls(){const t=view()==="trash";E("clSelected").textContent=t?"بازیابی انتخاب‌شده‌ها":"حذف انتخاب‌شده‌ها";E("clDeleteAll").textContent=t?"بازیابی همه":"حذف همه";E("clTestArchive").hidden=t||cur()?.key!=="escalations"}
+ const listKey=()=>{const s=cur();return s?[s.key,view(),st.offset,JSON.stringify(filter())].join("|"):""};
+ // A newer request cancels the older one, and an answer that is no longer the newest is dropped, so a slow reply for the previous
+ // section can never replace the current one. While another view loads, the rows on screen are faded and not clickable. On failure
+ // the last list stays only if it belongs to this same view; a list of another section is never left on screen under the wrong
+ // section name, because its buttons would act on the selected section.
  async function loadList(){
-  const s=cur();if(!s)return;controls();E("clAll").checked=false;E("clStatusLine").textContent="در انتظار دریافت…";
-  const d=await apiRequest("/api/cleanup/items?"+new URLSearchParams({section:s.key,view:view(),limit:st.limit,offset:st.offset,...filter()}).toString());
-  if(!d.ok){E("clStatusLine").innerHTML="<span class='bad'>✕ "+esc(CL.fa(d.error))+"</span>";E("clItems").innerHTML="";return}
+  const s=cur();if(!s)return false;controls();E("clAll").checked=false;
+  const key=listKey(),my=++st.seq;if(st.ctrl)st.ctrl.abort();const ctrl=new AbortController();st.ctrl=ctrl;st.loading=key;
+  E("clStatusLine").textContent="در حال دریافت "+s.label+"…";E("clItems").setAttribute("aria-busy","true");if(st.shown!==key){E("clItems").classList.add("clWaiting");document.querySelectorAll(".clPick[data-sec='page']").forEach(x=>{x.checked=false})}
+  const d=await CL.getJson("/api/cleanup/items?"+new URLSearchParams({section:s.key,view:view(),limit:st.limit,offset:st.offset,...filter()}).toString(),{signal:ctrl.signal,onRetry:n=>{if(my===st.seq)E("clStatusLine").textContent="در حال دریافت "+s.label+"… (تلاش "+n+" از ۳)"}});
+  if(my!==st.seq)return false;st.loading="";st.ctrl=null;E("clItems").removeAttribute("aria-busy");E("clItems").classList.remove("clWaiting");
+  if(!d.ok){if(d.aborted)return false;const keep=st.shown===key&&E("clItems").innerHTML!=="";
+   E("clStatusLine").innerHTML="<span class='bad'>✕ "+esc(CL.faResp(d))+"</span>"+(keep?" <span class='mini muted'>فهرست قبلی همین بخش نمایش داده می‌شود.</span>":"")+CL.retryBtn("list");
+   if(keep)E("clItems").classList.add("clStale");else{E("clItems").innerHTML="";st.shown="";st.items=[];st.total=0;E("clPrev").disabled=true;E("clNext").disabled=true}return false}
+  E("clItems").classList.remove("clStale");st.shown=key;
   st.items=d.items||[];st.total=d.total||0;
   E("clStatusLine").textContent=s.label+" · "+(view()==="trash"?"سطل زباله":"فعال")+" · "+st.total+" مورد · نمایش "+(st.total?st.offset+1:0)+" تا "+(st.offset+st.items.length);
   E("clItems").innerHTML=st.items.length?st.items.map(rowHtml).join(""):"<div class='row muted'>موردی نیست.</div>";
-  E("clPrev").disabled=st.offset<=0;E("clNext").disabled=st.offset+st.items.length>=st.total;
+  E("clPrev").disabled=st.offset<=0;E("clNext").disabled=st.offset+st.items.length>=st.total;return true;
  }
+ // "مشاهده بخش": select the section, show it at once with its loading state, and mark it when its records are on screen.
+ // A second click while it loads, or on the list already shown, sends no new request.
+ async function openSection(sec,b){
+  if(!st.sections.some(s=>s.key===sec))return;
+  const same=E("clSection").value===sec&&view()==="active"&&st.offset===0;
+  if(same&&st.loading===listKey()){flash();return}
+  E("clSection").value=sec;E("clView").value="active";renderStatus();st.offset=0;
+  E("clStatusLine").scrollIntoView({behavior:"smooth",block:"start"});
+  if(same&&st.shown===listKey()){flash();return}
+  if(b)b.disabled=true;const ok=await loadList();if(b)b.disabled=false;if(ok)flash();
+ }
+ function flash(){const x=E("clItems");x.classList.add("clFlash");E("clStatusLine").setAttribute("tabindex","-1");E("clStatusLine").focus({preventScroll:true});setTimeout(()=>x.classList.remove("clFlash"),1600)}
  function rowHtml(x){
   const t=view()==="trash",blocked=!!x.block,live=LIVE.includes(x.block)||x.state==="open",setAside=!t&&x.block==="open_escalation"&&cur().key==="escalations"&&!x.test_block;
   const acts=t?"<button class='btn' data-pg='restore' data-id='"+esc(x.id)+"'"+(blocked?" disabled":"")+">بازیابی</button>"+(cur().purge?"<button class='btn' data-pg='purge' data-id='"+esc(x.id)+"'"+(x.purge_block?" disabled":"")+">حذف دائمی</button>":""):"<button class='btn' data-pg='trash' data-id='"+esc(x.id)+"'"+(blocked?" disabled":"")+">حذف</button>";
   const why=t&&x.test_artifact?"<div class='mini warn'>بایگانی تست: تصمیمی ثبت نشده و پیام پیگیری خودکار این لید متوقف است. برای رسیدگی، بازیابی کنید.</div>":x.test_block?"<div class='warn mini'>"+esc(CL.REASON[x.test_block]||x.test_block)+"</div>":setAside?"<div class='mini muted'>فقط با «بایگانی تست» قابل انتخاب است.</div>":blocked?"<div class='warn mini'>"+esc(CL.REASON[x.block]||x.block)+"</div>":(t&&x.purge_block&&cur().purge?"<div class='muted mini'>"+esc(CL.REASON[x.purge_block]||x.purge_block)+"</div>":"");
   return "<div class='row'><label style='display:flex;gap:8px;align-items:flex-start'><input type='checkbox' class='clPick' data-sec='page' value='"+esc(x.id)+"'"+(blocked&&!setAside?" disabled":"")+"><span><b>"+esc(x.title||"—")+"</b>"+(OPS.includes(cur().key)?" <span class='clKind"+(live?" live":"")+"'>"+(live?"فعال":"تاریخی")+"</span>":"")+"<div class='mini muted'>"+esc(x.sub||"")+" · "+esc(x.state||"")+" · "+esc(String(x.at||"").slice(0,10))+"</div>"+why+"</span></label><div class='clTools'>"+acts+"</div></div>";
  }
- const picked=()=>Array.from(document.querySelectorAll(".clPick[data-sec='page']:checked")).map(x=>x.value);
+ const waiting=()=>E("clItems").classList.contains("clWaiting");
+ const picked=()=>waiting()?[]:Array.from(document.querySelectorAll(".clPick[data-sec='page']:checked")).map(x=>x.value);
  const after=async()=>{await loadOverview();await loadList()};
  const pv=(a,sc,ids,f)=>CL.preview(cur().key,a,sc,ids,f,after);
  async function loadTest(){
   const p=E("clTestPanel");p.hidden=false;p.innerHTML="<div class='hint'>در حال بررسی…</div>";
-  const d=await apiRequest("/api/cleanup/test-candidates");if(!d.ok){p.innerHTML="<span class='bad'>✕ "+esc(CL.fa(d.error))+"</span>";return}
+  const d=await CL.getJson("/api/cleanup/test-candidates");if(!d.ok){p.innerHTML="<span class='bad'>✕ "+esc(CL.faResp(d))+"</span>"+CL.retryBtn("test");return}
   const SIG={programming_prompt:"متن برنامه‌نویسی در پیام",explicit_test_wording:"عبارت تست در پیام",owner_named_test_customer:"مشتری آزمایشی اعلام‌شده توسط مالک"};
   const G={no_sender_or_conversation:"پیام بدون فرستنده و گفتگو",failed_over_7_days_ago:"Task شکست‌خورده قدیمی‌تر از ۷ روز"};
   p.innerHTML="<h3 style='font-size:14px;margin:14px 0 6px'>نامزدهای داده آزمایشی</h3><div class='hint'>هیچ موردی خودکار حذف نمی‌شود. هر مورد را خودتان انتخاب کنید.</div><div class='rows'>"
@@ -139,8 +176,8 @@ export const CLEANUP_PAGE_SCRIPT = `<script>
    +((d.groups||[]).map(g=>"<div class='row'>"+esc(G[g.reason]||g.reason)+": <b>"+esc(g.count)+"</b> <button class='btn' data-open='"+esc(g.section)+"'>مشاهده بخش</button></div>").join(""))+"</div>";
  }
  async function loadOverview(){
-  const d=await apiRequest("/api/cleanup/sections");
-  if(!d.ok){E("clStatusLine").innerHTML="<span class='bad'>✕ "+esc(d.error||"خطا")+"</span>";return false}
+  const d=await CL.getJson("/api/cleanup/sections");
+  if(!d.ok){E("clStatusLine").innerHTML="<span class='bad'>✕ "+esc(CL.faResp(d))+"</span>"+CL.retryBtn("all");return false}
   const q=new URLSearchParams(location.search),keep=E("clSection").value||q.get("section");st.sections=d.sections||[];
   E("clSection").innerHTML=st.sections.map(s=>"<option value='"+esc(s.key)+"'>"+esc(s.label)+(s.active===null?"":" ("+esc(s.active)+" · سطل زباله "+esc(s.trash)+")")+"</option>").join("");if(keep&&st.sections.some(s=>s.key===keep))E("clSection").value=keep;
   E("clProtected").innerHTML=(d.protected||[]).map(p=>"<div class='row'><b>"+esc(p.label)+"</b><div class='mini muted'>"+esc(p.reason)+"</div></div>").join("");
@@ -152,14 +189,15 @@ export const CLEANUP_PAGE_SCRIPT = `<script>
   E("clAll").addEventListener("change",e=>document.querySelectorAll(".clPick[data-sec='page']:not(:disabled)").forEach(x=>{x.checked=e.target.checked}));
   E("clPrev").addEventListener("click",()=>{st.offset=Math.max(0,st.offset-st.limit);loadList()});E("clNext").addEventListener("click",()=>{st.offset+=st.limit;loadList()});
   E("clSelected").addEventListener("click",()=>{const ids=picked();if(ids.length)pv(view()==="trash"?"restore":"trash","ids",ids)});
-  E("clDeleteAll").addEventListener("click",()=>{const sc=E("clScope").value,a=view()==="trash"?"restore":"trash";if(sc==="page")pv(a,"page",st.items.filter(x=>!x.block).map(x=>x.id));else pv(a,sc,undefined,sc==="filter"?filter():undefined)});
+  E("clDeleteAll").addEventListener("click",()=>{if(waiting())return;const sc=E("clScope").value;if(sc==="page"&&st.shown!==listKey())return;const a=view()==="trash"?"restore":"trash";if(sc==="page")pv(a,"page",st.items.filter(x=>!x.block).map(x=>x.id));else pv(a,sc,undefined,sc==="filter"?filter():undefined)});
   E("clOldErrors").addEventListener("click",async()=>{E("clSection").value="errors";E("clView").value="active";E("clOlder").value="30";renderStatus();st.offset=0;await loadList();pv("trash","filter",undefined,{older_than_days:30})});
   E("clTest").addEventListener("click",loadTest);
   E("clTestArchive").addEventListener("click",()=>{const ids=picked();if(ids.length)CL.preview("escalations","trash","ids",ids,undefined,after,true)});
   E("cleanupPanel").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;
-   if(b.dataset.pg)pv(b.dataset.pg,"ids",[b.dataset.id]);
+   if(b.dataset.pg){if(!waiting())pv(b.dataset.pg,"ids",[b.dataset.id]);}
    else if(b.dataset.testLead)CL.preview("leads","trash","ids",[b.dataset.testLead],undefined,after);
-   else if(b.dataset.open){E("clSection").value=b.dataset.open;renderStatus();st.offset=0;loadList()}});
+   else if(b.dataset.open)openSection(b.dataset.open,b);
+   else if(b.dataset.retry==="list")loadList();else if(b.dataset.retry==="test")loadTest();else if(b.dataset.retry==="all")window.loadCleanup();});
  }
  window.loadCleanup=async function(){if(!st.bound){st.bound=true;bind()}if(await loadOverview()){const v=new URLSearchParams(location.search).get("view");if(v==="trash")E("clView").value="trash";renderStatus();await loadList()}};
 })();
