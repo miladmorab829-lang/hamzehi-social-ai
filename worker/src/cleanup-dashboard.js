@@ -144,16 +144,44 @@ export const CLEANUP_PAGE_SCRIPT = `<script>
   E("clItems").innerHTML=st.items.length?st.items.map(rowHtml).join(""):"<div class='row muted'>موردی نیست.</div>";
   E("clPrev").disabled=st.offset<=0;E("clNext").disabled=st.offset+st.items.length>=st.total;return true;
  }
- // "مشاهده بخش": select the section, show it at once with its loading state, and mark it when its records are on screen.
- // A second click while it loads, or on the list already shown, sends no new request.
+ // Bring the list header just below the sticky app bar. A single smooth scroll is not enough: Safari/WebKit (iPhone, in-app
+ // browsers) stops a running smooth scroll when the page content changes, which is exactly what loading the list does, and some
+ // browsers ignore smooth scrolling. So each reveal is watched until the page stops moving; if the header is then still not on
+ // screen it is put there at once. Scrolling again after the rows are drawn makes the final position independent of the load.
+ // The watch ends as soon as the page has settled with the header on screen, so the owner is free to scroll from then on. A touch,
+ // key or pointer press (e.g. grabbing the scroll bar) cancels it, and so does a wheel input after the first 1.2 s. Earlier wheel
+ // input is the momentum of the scroll that brought the button on screen: it also stops a smooth scroll in Chrome, so it must not
+ // cancel the watch.
+ const rv={seq:0,bound:false,t:0,w:0};
+ const barBottom=()=>{const b=document.querySelector(".appbar");if(!b)return 0;const p=getComputedStyle(b).position;return p==="sticky"||p==="fixed"?Math.max(0,b.getBoundingClientRect().bottom):0};
+ const listTop=()=>Math.max(0,Math.round(scrollY+E("clStatusLine").getBoundingClientRect().top-barBottom()-8));
+ const listOnScreen=()=>{const t=E("clStatusLine").getBoundingClientRect().top,b=barBottom();return t>=b-2&&t<=Math.max(b+48,innerHeight*0.45)};
+ const atEnd=()=>scrollY>=document.documentElement.scrollHeight-innerHeight-2;
+ function revealList(){
+  if(!rv.bound){rv.bound=true;const stop=()=>{rv.seq++};["touchstart","keydown","pointerdown"].forEach(t=>addEventListener(t,stop,{passive:true}));
+   addEventListener("wheel",()=>{rv.w=performance.now();if(rv.w-rv.t>1200)stop()},{passive:true})}
+  const my=++rv.seq,top=listTop(),t0=performance.now();rv.t=t0;
+  if(Math.abs(top-scrollY)>2)scrollTo({top,left:scrollX,behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});
+  // settled = the page has not moved for 6 frames and no wheel input came in the last 200 ms. Settled with the header on screen,
+  // or at the end of the page with the header further down: done. Settled anywhere else: put the header there at once. At most 3 s.
+  let last=NaN,still=0;
+  const tick=()=>{if(my!==rv.seq)return;const n=performance.now(),y=scrollY;still=Math.abs(y-last)<1?still+1:0;last=y;
+   const settled=still>=6&&n-rv.w>200,end=n-t0>3000;
+   if((settled||end)&&(listOnScreen()||(atEnd()&&listTop()>scrollY)))return;
+   if(settled||end){scrollTo({top:listTop(),left:scrollX,behavior:"auto"});still=0;last=NaN;if(end)return}
+   requestAnimationFrame(tick)};
+  requestAnimationFrame(tick);
+ }
+ // "مشاهده بخش": select the section, bring its list on screen at once with its loading state, load it, bring it on screen again
+ // once its rows are drawn, and mark it. A second click while it loads, or on the list already shown, sends no new request.
  async function openSection(sec,b){
   if(!st.sections.some(s=>s.key===sec))return;
   const same=E("clSection").value===sec&&view()==="active"&&st.offset===0;
-  if(same&&st.loading===listKey()){flash();return}
+  if(same&&st.loading===listKey()){revealList();flash();return}
   E("clSection").value=sec;E("clView").value="active";renderStatus();st.offset=0;
-  E("clStatusLine").scrollIntoView({behavior:"smooth",block:"start"});
+  revealList();
   if(same&&st.shown===listKey()){flash();return}
-  if(b)b.disabled=true;const ok=await loadList();if(b)b.disabled=false;if(ok)flash();
+  if(b)b.disabled=true;const ok=await loadList();if(b)b.disabled=false;revealList();if(ok)flash();
  }
  function flash(){const x=E("clItems");x.classList.add("clFlash");E("clStatusLine").setAttribute("tabindex","-1");E("clStatusLine").focus({preventScroll:true});setTimeout(()=>x.classList.remove("clFlash"),1600)}
  function rowHtml(x){
