@@ -142,6 +142,9 @@ await send(P.u,"STOP");dbrun("UPDATE inbox_messages SET created_at=? WHERE lead_
 // timeline: our earlier reply (15.6 d) → their STOP (15.2 d) → our automatic follow-up (15 d); the bot's own acknowledgement of the STOP is
 // removed so the follow-up count is not exhausted — the next follow-up is DUE and only the runner's opt-out check can stop it
 dbrun("DELETE FROM lead_outreach WHERE lead_id=? AND status='sent' AND id<>? AND COALESCE(approved_by,'')<>?",[P.lid,"prev-"+P.lid,AM.AUTO_POLICY_ACTOR]);
+// Phase 26: the STOP itself is no longer answered automatically — its draft is HELD (customer_opted_out); removed the same way
+const heldP=dbrun("DELETE FROM lead_outreach WHERE lead_id=? AND status='draft' AND error_detail='customer_opted_out'",[P.lid]).changes;
+ok("R4z Phase 26: the inbound reply to the STOP was held, not sent",heldP===1,heldP);
 age(P.lid,15);dbrun("UPDATE lead_outreach SET sent_at=?,approved_at=?,created_at=? WHERE id=?",[ago(15.6),ago(15.6),ago(15.6),"prev-"+P.lid]);
 const before=autoRows(P.lid).length,r2=await run(due+60000);
 dbrun("INSERT INTO lead_outreach(id,lead_id,channel,recipient,message,language,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",["own-P",P.lid,"telegram",String(P.u.id),"سلام","Persian","pending_approval",ago(0),ago(0)]);

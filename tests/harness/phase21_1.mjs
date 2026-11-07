@@ -38,6 +38,10 @@ const A=await customer("Customer Iran","سلام، جعبه جواهر می‌خ
 const B=await customer("Customer OptOut","سلام",'iran');await send(B.u,"لطفاً دیگه پیام ندید");dbrun("UPDATE inbox_messages SET created_at=? WHERE lead_id=?",[ago(16),B.lid]);
 // (any bot acknowledgement is moved back too, so B's follow-up is DUE and only the runner's own opt-out check can stop it)
 dbrun("UPDATE lead_outreach SET sent_at=?,approved_at=?,created_at=?,updated_at=? WHERE lead_id=? AND status='sent'",[ago(15),ago(15),ago(15),ago(15),B.lid]);
+// Phase 26: the stop request itself is no longer answered automatically — its draft is HELD (customer_opted_out). That held draft is
+// removed here so the follow-up stays DUE and R2b still proves the runner's own opt-out check.
+const heldB=dbrun("DELETE FROM lead_outreach WHERE lead_id=? AND status='draft' AND error_detail='customer_opted_out'",[B.lid]).changes;
+ok("R0 Phase 26: the inbound reply to the stop request was held, not sent",heldB===1&&q("SELECT COUNT(*) n FROM lead_outreach WHERE lead_id=? AND approved_by IN ('inbound_auto_policy','inbound_ack_policy')",[B.lid])[0].n===0,heldB);
 const C=await customer("Customer NoMarket","hello",null);
 const D=await customer("Customer Quote","سلام","iran");dbrun("INSERT INTO lead_quotes(id,lead_id,conversation_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",["qq-1",D.lid,"conv-x","requested",ago(15),ago(15)]);
 const E=await customer("Customer OldDraft","سلام","iran");dbrun("INSERT INTO lead_outreach(id,lead_id,channel,recipient,message,language,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",["old-draft-E",E.lid,"telegram","x","old text","Persian","draft",ago(2),ago(2)]);

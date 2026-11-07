@@ -10371,6 +10371,12 @@ async function inboundSendGateReason(env,{row,outreach,recipient}){
   if(row.platform!=="telegram"||row.conversation_platform!=="telegram"||outreach.channel!=="telegram")return "unsupported_channel";
   const chat=normalizeTelegramPrivateChatId(row.provider_conversation_id);
   if(!chat||String(recipient)!==chat||String(row.provider_sender_id||"")!==chat||String(outreach.recipient)!==chat)return "not_private_customer_chat";
+  // Phase 26: the customer's stop request (Phase 21.1 rules, same sender across leads) also stops every AUTOMATIC inbound message —
+  // reply, acknowledgement, album. A possible request, an unreadable or truncated history, or no linked lead holds it for the owner.
+  if(!row.lead_id)return "opt_out_state_unknown";
+  const optOut=await leadOptOutState(env,row.lead_id);
+  if(optOut.opted_out)return "customer_opted_out";
+  if(optOut.review)return "opt_out_needs_review";
   // covers replies, acknowledgements and albums: a message from before the boundary is history, and an unreadable boundary stops the send
   const from=await cleanupContextFrom(env,row.conversation_id);
   if(from===CONTEXT_UNKNOWN)return "conversation_state_unknown";
