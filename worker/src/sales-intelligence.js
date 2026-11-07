@@ -1037,12 +1037,14 @@ export async function rebuildRevenueAttribution(env){
   const removed=await env.DB.prepare(`DELETE FROM revenue_attribution WHERE order_id IN (SELECT o.id FROM lead_orders o LEFT JOIN leads l ON l.id=o.lead_id WHERE ${notRevenue})`).run();
   return {rebuilt:n,excluded_removed:Number(removed?.meta?.changes)||0};
 }
+// A snapshot row written before its lead was marked as test stays out of the reports without waiting for a rebuild.
+const attributionReal=a=>`NOT EXISTS(SELECT 1 FROM leads tl WHERE tl.id=${a}.lead_id AND ${D.leadTestFlagSql?D.leadTestFlagSql("tl"):"0"}=1)`;
 export async function revenueBreakdown(env,dimension){
   if(!ATTRIBUTION_DIMENSIONS.has(dimension))throw Error("Unsupported dimension");
   return (await all(env,`SELECT ${dimension} AS bucket,currency,COUNT(*) AS orders,SUM(CASE WHEN order_status IN ('paid','shipped','fulfilled') THEN 1 ELSE 0 END) AS paid_orders,
       SUM(paid_minor) AS paid_minor,SUM(total_minor) AS total_minor,SUM(discount_minor) AS discount_minor,SUM(CASE WHEN profit_minor IS NOT NULL THEN profit_minor END) AS profit_minor,
       SUM(CASE WHEN profit_minor IS NOT NULL THEN 1 ELSE 0 END) AS profit_known_orders,SUM(CASE WHEN repeat_index>0 THEN 1 ELSE 0 END) AS repeat_orders
-    FROM revenue_attribution GROUP BY ${dimension},currency ORDER BY currency,paid_minor DESC`))
+    FROM revenue_attribution WHERE ${attributionReal("revenue_attribution")} GROUP BY ${dimension},currency ORDER BY currency,paid_minor DESC`))
     .map(r=>({...r,legacy_currency:!CURRENCY_RULES[r.currency]}));
 }
 
@@ -1139,7 +1141,7 @@ export async function handleSalesIntelligence(req,env,u){
     if(p[0]==="money-at-stake")return json({ok:true,...await moneyAtStake(env)});
     if(p[0]==="intelligence"&&req.method==="POST"){const r=await rebuildRevenueAttribution(env);await auditSafe(env,"revenue_attribution_rebuilt","Owner rebuilt the revenue snapshot from recorded orders and payments",{rebuilt:r.rebuilt});return json({ok:true,...r});}
     if(p[0]==="intelligence")return json({ok:true,dimension:u.searchParams.get("dimension")||"market",items:await revenueBreakdown(env,u.searchParams.get("dimension")||"market")});
-    if(p[0]==="corrections")return json({ok:true,items:await all(env,`SELECT c.change_kind,c.market,c.request_class,c.product_key,COUNT(*) AS n,SUM(CASE WHEN EXISTS(SELECT 1 FROM revenue_attribution a WHERE a.lead_id=c.lead_id AND a.order_status IN ('paid','shipped','fulfilled')) THEN 1 ELSE 0 END) AS led_to_paid
+    if(p[0]==="corrections")return json({ok:true,items:await all(env,`SELECT c.change_kind,c.market,c.request_class,c.product_key,COUNT(*) AS n,SUM(CASE WHEN EXISTS(SELECT 1 FROM revenue_attribution a WHERE a.lead_id=c.lead_id AND a.order_status IN ('paid','shipped','fulfilled') AND ${attributionReal("a")}) THEN 1 ELSE 0 END) AS led_to_paid
         FROM draft_corrections c GROUP BY c.change_kind,c.market,c.request_class,c.product_key ORDER BY n DESC LIMIT 100`)});
     if(p[0]==="ai-usage")return json({ok:true,items:await aiUsageSummary(env)});
     if(p[0]==="ai-route")return json({ok:true,...await routeAiTask(env,String(u.searchParams.get("task")||""))});

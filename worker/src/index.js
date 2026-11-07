@@ -17,7 +17,7 @@ import { leadQualification, qualificationCounts, tierCounts, ownSiteCandidate, g
 import { discoverySettings, ingestDatasetCandidates, verifyDatasetSite, latinDigits, DATASET_ATTRIBUTION } from "./dataset-discovery.js";
 import { phase17Overview } from "./phase17-dashboard-metrics.js";
 import { marketBackoff, recordMarketFailure, clearMarketFailure } from "./market-isolation.js";
-import { scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE_STAGES, PIPELINE_SIDE_STATES } from "./lead-scoring.js";
+import { isTestLead, leadTestFlagSql, scoreLeadCached, revenueSummary, SCORE_WEIGHTS, SCORE_VERSION, PIPELINE_STAGES, PIPELINE_SIDE_STATES } from "./lead-scoring.js";
 import { conversionPlan, conversionSummary, buildConversionDraft, CONVERSION_VERSION, FOLLOWUP_RULES, DRAFT_MODES } from "./sales-conversion.js";
 import { ownerChangeHash } from "./catalog-intake.js";
 import { commercialDefaultDiscount, evaluateOrderLines, isUnverifiedConfiguration, marketStandardMoq, statesLessThanQuantity } from "./commercial-policy.js";
@@ -10903,8 +10903,6 @@ async function reverseOrderPayment(env,body,actor="authenticated_owner"){
 // 'test' or notes.is_test true) is reported as such and never drafted; no other heuristic is used.
 const REVENUE_FOLLOWUP_DAYS=Object.freeze({quote_no_reply:3,order_unpaid:2,balance_open:3,reorder:30});
 const REVENUE_MARKET_LANGUAGE=Object.freeze({IRAN:"Persian",ARAB:"Iraqi Arabic"});
-// Phase 12.3: test-lead detection that never parses a malformed notes value (a non-JSON value is "not test", flagged separately).
-const leadTestFlagSql=a=>`COALESCE(CASE WHEN ${a}.notes IS NULL OR TRIM(${a}.notes)='' OR NOT json_valid(${a}.notes) THEN 0 ELSE (json_extract(${a}.notes,'$.data_class')='test' OR json_extract(${a}.notes,'$.is_test') IN (1,'true')) END,0)`;
 const leadNotesInvalidSql=a=>`COALESCE(${a}.notes IS NOT NULL AND TRIM(${a}.notes)<>'' AND NOT json_valid(${a}.notes),0)`;
 // New follow-up drafts consider only records whose anchor date is within this lookback (detection for reports is not limited).
 const REVENUE_FOLLOWUP_LOOKBACK_DAYS=90;
@@ -11688,8 +11686,9 @@ async function leadFunnelReport(env){
     FROM leads l`).all()).results||[];
   const zero=()=>Object.fromEntries(FUNNEL_STEPS.map(s=>[s,0]));
   const furthest=zero(),reached=zero(),evidence={contacted:0,replied:0,preliminary_interest:0,negotiated:0,quoted:0,ordered:0,paid:0},bySource={},byMarket={},crm={},mismatch={negotiation_without_priced_offer:0,contacted_stage_without_delivery_or_reply:0,customer_without_payment:0};
-  let withIdentity=0;
+  let withIdentity=0,testLeads=0;
   for(const r of rows){
+    if(isTestLead(parseLeadNotes(r))){testLeads++;continue;}   // a test record is no part of the real funnel; its records stay as they are
     const f=k=>Number(r[k]||0)>0,quoted=f("formal_quote")||f("chat_offer_order")||f("chat_offer_sent");
     const negotiated=f("replied")&&quoted&&(f("interest")||f("chat_offer_order")||f("ordered"));
     const ev={contacted:f("contacted"),replied:f("replied"),negotiated,quoted,ordered:f("ordered"),paid:f("paid")};
@@ -11705,8 +11704,8 @@ async function leadFunnelReport(env){
     if(["customer","converted"].includes(r.stage)&&!ev.paid)mismatch.customer_without_payment++;
     if(Number(r.identities||0)>0)withIdentity++;
   }
-  const total=rows.length,sum=Object.values(furthest).reduce((a,b)=>a+b,0);
-  return {ok:true,generated_at:now(),total_leads:total,steps:FUNNEL_STEPS,reached,furthest,evidence,by_source:bySource,by_market:byMarket,crm_stage_counts:crm,stage_without_evidence:mismatch,
+  const total=rows.length-testLeads,sum=Object.values(furthest).reduce((a,b)=>a+b,0);
+  return {ok:true,generated_at:now(),total_leads:total,test_records:{leads:testLeads},steps:FUNNEL_STEPS,reached,furthest,evidence,by_source:bySource,by_market:byMarket,crm_stage_counts:crm,stage_without_evidence:mismatch,
     identities:{leads_with_identity:withIdentity,leads_without_identity:total-withIdentity},reconciled:sum===total,
     definitions:{contacted:"a delivered outbound (Telegram sent or an owner-confirmed manual first contact)",replied:"an inbound message linked to the lead",negotiated:"an inbound reply after a recorded priced offer",preliminary_interest:"price/MOQ/shipping questions without a priced offer",quoted:"a sent/accepted quote, a chat-offer order, or a chat offer followed by a sent reply",ordered:"an owner-confirmed order (not a candidate, not cancelled)",paid:"a recorded payment"}};
 }
@@ -12551,12 +12550,15 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
   const all=leads.map(l=>{const m=parseLeadNotes(l),a={...(act.get(l.id)||{}),duplicate_of:dups.get(l.id)||null,strict_activity:true},p=leadQualification(l,m,contacts.get(l.id)||[],a);
     return {lead:l,p,s:scoreLeadCached(p,l,m,a,{nowMs})};});
   if(id)return all[0]?{ok:true,item:salesLeadView(all[0].lead,all[0].p,all[0].s)}:{ok:false,error:"Lead not found",statusCode:404};
-  const revenue=revenueSummary(all.map(x=>({market:x.p.market,contact_status:x.p.contact.status,score:x.s.score,pipeline:x.s.pipeline})));
+  // Business metrics count real records only. Money from test leads is reported on its own, next to the real figures.
+  const real=all.filter(x=>!x.s.score.test_record);
+  const revenue=revenueSummary(real.map(x=>({market:x.p.market,contact_status:x.p.contact.status,score:x.s.score,pipeline:x.s.pipeline})));
   const markets={};
   for(const mk of ADS_MARKET_IDS){
-    const xs=all.filter(x=>x.p.market===mk),cur=ADS_MARKETS[mk].currency,os=xs.map(x=>act.get(x.lead.id)||{});
-    const ord=have.has("lead_orders")?await env.DB.prepare("SELECT COUNT(*) n,COALESCE(SUM(total_minor),0) total FROM lead_orders WHERE market=? AND currency=? AND status NOT IN ('cancelled','order_candidate')").bind(mk,cur).first():null;
-    const paid=have.has("lead_order_payments")&&have.has("lead_orders")?await env.DB.prepare("SELECT COALESCE(SUM(p.amount_minor),0) total FROM lead_order_payments p JOIN lead_orders o ON o.id=p.order_id WHERE o.market=? AND p.currency=?").bind(mk,cur).first():null;
+    const xs=real.filter(x=>x.p.market===mk),cur=ADS_MARKETS[mk].currency,os=xs.map(x=>act.get(x.lead.id)||{});
+    const money=async test=>({ord:have.has("lead_orders")?await env.DB.prepare(`SELECT COUNT(*) n,COALESCE(SUM(o.total_minor),0) total FROM lead_orders o LEFT JOIN leads l ON l.id=o.lead_id WHERE o.market=? AND o.currency=? AND o.status NOT IN ('cancelled','order_candidate') AND ${leadTestFlagSql("l")}=?`).bind(mk,cur,test).first():null,
+      paid:have.has("lead_order_payments")&&have.has("lead_orders")?await env.DB.prepare(`SELECT COALESCE(SUM(p.amount_minor),0) total FROM lead_order_payments p JOIN lead_orders o ON o.id=p.order_id LEFT JOIN leads l ON l.id=o.lead_id WHERE o.market=? AND p.currency=? AND ${leadTestFlagSql("l")}=?`).bind(mk,cur,test).first():null});
+    const {ord,paid}=await money(0),testMoney=await money(1);
     const by=k=>xs.reduce((a,x)=>{const v=String(parseLeadNotes(x.lead)[k]||"unknown").slice(0,60);a[v]=a[v]||{total:0,verified:0,sales_ready:0};a[v].total++;if(x.p.identity.status==="IDENTITY_VERIFIED")a[v].verified++;if(x.p.state==="SALES_READY")a[v].sales_ready++;return a;},{});
     markets[mk]={currency:cur,leads:xs.length,leads_excluding_provisional:xs.filter(x=>x.p.state!=="PLACE_DISCOVERED").length,provisional_discoveries:xs.filter(x=>x.p.state==="PLACE_DISCOVERED").length,
       independently_verified:xs.filter(x=>SALES_VERIFIED_STATES.has(x.p.state)).length,
@@ -12568,6 +12570,7 @@ async function salesIntelligence(env,{market=null,tier=null,limit=50,offset=0,id
       replies:os.filter(a=>a.replied).length,quote_requests:os.filter(a=>a.quote_requested).length,quotes_approved_or_sent:os.filter(a=>a.quoted).length,
       orders:ord?Number(ord.n):0,order_value_minor:ord?Number(ord.total):0,payments_received_minor:paid?Number(paid.total):0,
       outstanding_minor:Math.max(0,(ord?Number(ord.total):0)-(paid?Number(paid.total):0)),
+      test_records:{leads:all.filter(x=>x.p.market===mk).length-xs.length,orders:testMoney.ord?Number(testMoney.ord.n):0,order_value_minor:testMoney.ord?Number(testMoney.ord.total):0,payments_recorded_minor:testMoney.paid?Number(testMoney.paid.total):0},
       reply_rate:(()=>{const sent=os.filter(a=>["sent","delivered"].includes(a.outreach_status)).length;return sent?Math.round(os.filter(a=>a.replied).length/sent*100):null;})(),
       by_source:by("source"),by_city:by("city"),revenue:revenue[mk]};
   }
@@ -12743,16 +12746,17 @@ async function leadOverview(env) {
   }));
   const stages = {};
   const priorities = { high: 0, normal: 0, low: 0 };
-  for (const x of items) { stages[x.stage || "new"] = (stages[x.stage || "new"] || 0) + 1; if (priorities[x.priority] !== undefined) priorities[x.priority]++; }
+  const real = items.filter(x => !isTestLead(x.meta));
+  for (const x of real) { stages[x.stage || "new"] = (stages[x.stage || "new"] || 0) + 1; if (priorities[x.priority] !== undefined) priorities[x.priority]++; }
   const nowMs = Date.now();
   const followups = items.filter(x => x.meta.next_followup_at && Date.parse(x.meta.next_followup_at) <= nowMs && !["converted","customer","rejected","archived"].includes(x.stage));
   const hot = items.filter(x => x.score >= 70 && !["converted","customer","rejected","archived"].includes(x.stage)).slice(0, 20);
-  const converted = items.filter(x => ["converted","customer"].includes(x.stage)).length;
-  const contacted = items.filter(x => ["contacted","replied","negotiation","converted","customer"].includes(x.stage)).length;
+  const converted = real.filter(x => ["converted","customer"].includes(x.stage)).length;
+  const contacted = real.filter(x => ["contacted","replied","negotiation","converted","customer"].includes(x.stage)).length;
   // Phase 17 (validated candidate): per-market summary — IRAN / ARAB / UNKNOWN never mixed; provisional IDs never count as sales-ready.
-  const marketSummary = phase17Overview(items.map(x => ({ market: x.qualification.market, qualification: { state: x.qualification.state },
+  const marketSummary = phase17Overview(real.map(x => ({ market: x.qualification.market, qualification: { state: x.qualification.state },
     identityVerified: x.qualification.identity?.status === "IDENTITY_VERIFIED", contactVerified: x.qualification.contact?.status === "CONTACT_VERIFIED" })));
-  return { total: items.length, stages, priorities, qualification: qualificationCounts(items.map(x => x.qualification.state)), tiers: tierCounts(items.map(x => x.qualification.tier)), market_summary: marketSummary, hot, followups, converted, contacted, conversion_rate: contacted ? Math.round(converted / contacted * 100) : 0, items };
+  return { total: real.length, test_records: { leads: items.length - real.length }, stages, priorities, qualification: qualificationCounts(real.map(x => x.qualification.state)), tiers: tierCounts(real.map(x => x.qualification.tier)), market_summary: marketSummary, hot, followups, converted, contacted, conversion_rate: contacted ? Math.round(converted / contacted * 100) : 0, items };
 }
 
 
@@ -15037,7 +15041,7 @@ if(!localDomain&&!countryPattern.test(relevanceText)) continue;
       if (u.pathname === "/api/ads/intelligence" && req.method === "GET") {
         if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
         const rows=await env.DB.prepare("SELECT * FROM leads ORDER BY updated_at DESC LIMIT 500").all();
-        const scored=(rows.results||[]).map(lead=>{const i=leadIntelligence(lead);return {id:lead.id,name:lead.name,stage:lead.stage,priority:lead.priority,score:i.score,factors:i.factors,action:i.action,type:i.type,ad_opportunity:i.ad_opportunity,contact_url:i.contact_url,domain:i.domain,updated_at:lead.updated_at};});
+        const scored=(rows.results||[]).filter(lead=>!isTestLead(parseLeadNotes(lead))).map(lead=>{const i=leadIntelligence(lead);return {id:lead.id,name:lead.name,stage:lead.stage,priority:lead.priority,score:i.score,factors:i.factors,action:i.action,type:i.type,ad_opportunity:i.ad_opportunity,contact_url:i.contact_url,domain:i.domain,updated_at:lead.updated_at};});
         const active=scored.filter(x=>!['customer','converted','rejected','archived'].includes(x.stage));
         const actions=active.filter(x=>x.action!=='Ø¨Ø±Ø±Ø³Û Lead').slice(0,20);
         const domains={}; for(const x of scored)if(x.domain)domains[x.domain]=(domains[x.domain]||0)+1;
@@ -15156,7 +15160,7 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
           if(x.priority==="high") hot++;
           if(x.stage==="negotiation") negotiation++;
           if(m.next_followup_at || m.followup_at) followups++;
-          if(x.stage==="customer"||x.stage==="converted") customers++;
+          if((x.stage==="customer"||x.stage==="converted")&&!isTestLead(m)) customers++;
         }
         const tgt=adsTargetCity(cfg.city),mk=await adsMarketsStatus(env);
         return json({ok:true,enabled:Object.values(mk.markets).some(x=>x.enabled),markets:mk.markets,global_runs_per_day:mk.global_runs_per_day,legacy_config_active:false,target:{valid:!!tgt,market:tgt?.market||null,city:tgt?.city||null,reason:tgt?null:"ads_target_city_required"},config:{type:cfg.type||"all",city:cfg.city||"",extra:cfg.extra||""},updated_at:cfgRow?.updated_at||null,source_site:"https://www.hamzehibox.com",targets:["gold","watch","fashion_jewelry"],metrics:{found,hot,negotiation,followups,customers,ad_targets:ads},mode:"autopilot",external_send:"authorized_channel_only"});
@@ -15209,8 +15213,9 @@ if (u.pathname === "/api/crm/lead-discovery" && req.method === "POST") {
           if(updated.startsWith(today)) foundToday++;
           if(Number(m.score||0)>=70 || lead.priority==="high") hot++;
           if(lead.stage==="negotiation") negotiation++;
-          if(lead.stage==="customer"||lead.stage==="converted") customers++;
-          if(m.ad_target){adTargets++;const mk=leadMarketOf(m);byMarket[mk]=byMarket[mk]||{ad_targets:0,customers:0};byMarket[mk].ad_targets++;if(lead.stage==="customer"||lead.stage==="converted")byMarket[mk].customers++;}
+          const realCustomer=(lead.stage==="customer"||lead.stage==="converted")&&!isTestLead(m);
+          if(realCustomer) customers++;
+          if(m.ad_target){adTargets++;const mk=leadMarketOf(m);byMarket[mk]=byMarket[mk]||{ad_targets:0,customers:0};byMarket[mk].ad_targets++;if(realCustomer)byMarket[mk].customers++;}
           if(m.ad_opportunity || m.contact_url) opportunities++;
           const at=m.next_followup_at||m.followup_at; if(at && Date.parse(at)<=Date.now() && !["customer","converted","rejected","archived"].includes(lead.stage)) due++;
           if(items.length<12 && m.ad_target) items.push({id:lead.id,name:lead.name,stage:lead.stage,market:leadMarketOf(m),score:Number(m.score||0),type:m.type||null,url:m.url||lead.contact,contact_url:m.contact_url||null,ad_opportunity:!!(m.ad_opportunity||m.contact_url),followup_draft:m.followup_draft||null});
@@ -15610,7 +15615,7 @@ Context: ${context}`;
       }
       if (u.pathname === "/api/orders" && req.method === "GET") {
         if(!auth(req,env))return json({ok:false,error:"Unauthorized"},401);await ensureOrderStore(env);
-        const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,q.status AS quote_status,
+        const r=await env.DB.prepare(`SELECT o.*,l.name AS lead_name,q.status AS quote_status,${leadTestFlagSql("l")} AS test_record,
             (SELECT COALESCE(SUM(p.amount_minor),0) FROM lead_order_payments p WHERE p.order_id=o.id) AS paid_minor
           FROM lead_orders o JOIN leads l ON l.id=o.lead_id LEFT JOIN lead_quotes q ON q.id=o.quote_id
           ORDER BY o.created_at DESC LIMIT 200`).all();

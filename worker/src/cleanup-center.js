@@ -153,9 +153,13 @@ const contextRead = async (env, sql, id) => {
   catch (e) { return /no such table/i.test(String(e?.message || e)) ? "" : CONTEXT_UNKNOWN; }
 };
 const CONTEXT_ROWS = "FROM cleanup_trash WHERE section IN ('context','conversations') AND state='trashed' AND record_id";
-export const cleanupContextFrom = (env, conversationId) => contextRead(env, `SELECT MAX(deleted_at) m ${CONTEXT_ROWS}=?`, conversationId);
-export const cleanupContextFromMessage = (env, inboxId) => contextRead(env, `SELECT MAX(deleted_at) m ${CONTEXT_ROWS}=(SELECT conversation_id FROM inbox_messages WHERE id=?)`, inboxId);
-export const cleanupLeadContextFrom = (env, leadId) => contextRead(env, `SELECT MAX(deleted_at) m ${CONTEXT_ROWS} IN (SELECT id FROM lead_conversations WHERE lead_id=?)`, leadId);
+// An owner-confirmed test order is a boundary too, from the moment of the classification: its lead's earlier context is test data.
+// Only this named record counts. A lead that merely carries the old test flag has no boundary.
+const TEST_ORDER_FROM = "CASE WHEN json_valid(l.notes) THEN CASE WHEN json_extract(l.notes,'$.data_class')='test' THEN json_extract(l.notes,'$.test_order_classification.confirmed_at') END END";
+const contextFrom = (rows, leadWhere) => `WITH k(id) AS (SELECT ?) SELECT MAX(m) m FROM (SELECT deleted_at m ${rows} UNION ALL SELECT ${TEST_ORDER_FROM} m FROM leads l WHERE ${leadWhere})`;
+export const cleanupContextFrom = (env, conversationId) => contextRead(env, contextFrom(`${CONTEXT_ROWS}=(SELECT id FROM k)`, "l.id=(SELECT lead_id FROM lead_conversations WHERE id=(SELECT id FROM k))"), conversationId);
+export const cleanupContextFromMessage = (env, inboxId) => contextRead(env, contextFrom(`${CONTEXT_ROWS}=(SELECT conversation_id FROM inbox_messages WHERE id=(SELECT id FROM k))`, "l.id=(SELECT lead_id FROM lead_conversations WHERE id=(SELECT conversation_id FROM inbox_messages WHERE id=(SELECT id FROM k)))"), inboxId);
+export const cleanupLeadContextFrom = (env, leadId) => contextRead(env, contextFrom(`${CONTEXT_ROWS} IN (SELECT id FROM lead_conversations WHERE lead_id=(SELECT id FROM k))`, "l.id=(SELECT id FROM k)"), leadId);
 // Why a lead's follow-ups are stopped, for the owner: archived test escalations stay open by design.
 export async function cleanupArchivedTestSummary(env) {
   try {

@@ -180,6 +180,8 @@ export function clearScoreCache() { CACHE.clear(); }
 function deepFreeze(o) { if (o && typeof o === "object" && !Object.isFrozen(o)) { Object.freeze(o); for (const v of Object.values(o)) deepFreeze(v); } return o; }
 // A lead the CRM marks as test data (notes.data_class = "test" or notes.is_test), the same convention as the revenue follow-ups.
 export const isTestLead = meta => meta?.data_class === "test" || meta?.is_test === true || meta?.is_test === 1 || meta?.is_test === "true";
+// Phase 12.3: test-lead detection that never parses a malformed notes value (a non-JSON value is "not test", flagged separately).
+export const leadTestFlagSql = a => `COALESCE(CASE WHEN ${a}.notes IS NULL OR TRIM(${a}.notes)='' OR NOT json_valid(${a}.notes) THEN 0 ELSE (json_extract(${a}.notes,'$.data_class')='test' OR json_extract(${a}.notes,'$.is_test') IN (1,'true')) END,0)`;
 
 // Per-market summary from scored items [{market, score:{band,…}, pipeline:{stage,side_state}, contact_status}] — counts only, real records.
 export function revenueSummary(items = []) {

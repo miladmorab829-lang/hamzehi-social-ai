@@ -1,4 +1,5 @@
 import { runAgentGraph, autonomyActionCapability, autonomyTaskDedupKey, autonomyDailyQuota, AUTONOMY_DAILY_QUOTAS, AUTONOMY_UNIT_COST, AUTONOMY_PROVIDER, autonomyBudgets, ORCHESTRATOR_VERSION, redact, safeErrorText } from "./agent-orchestrator.js";
+import { leadTestFlagSql } from "./lead-scoring.js";
 import { recordRun, approvalForTask, requestApproval, consumeApproval, decideApproval, acknowledgeAlert, resolveDeadLetter, opsOverview, cancelObsoleteApprovals } from "./agent-ops-store.js";
 import { bearerMatches } from "./secure-compare.js";
 import { cleanupHiddenSql } from "./cleanup-center.js";
@@ -259,10 +260,11 @@ export const MARKET_CURRENCY={IRAN:"TOMAN",ARAB:"USD"};
 const CURRENCY_ALIASES={TOMAN:"TOMAN",TOMANS:"TOMAN",IRT:"TOMAN","تومان":"TOMAN","تومن":"TOMAN",USD:"USD","US$":"USD","$":"USD","دلار":"USD","دولار":"USD"};
 export function canonicalCurrency(value){const raw=String(value??"").normalize("NFKC").trim();if(!raw)return null;return CURRENCY_ALIASES[raw]||CURRENCY_ALIASES[raw.toUpperCase()]||raw.toUpperCase().slice(0,12);}
 async function revenue(env){
- const r=await env.DB.prepare("SELECT stage,COUNT(*) n FROM leads GROUP BY stage").all(),f={};
+ const real=`${leadTestFlagSql("leads")}=0`;
+ const r=await env.DB.prepare(`SELECT stage,COUNT(*) n FROM leads WHERE ${real} GROUP BY stage`).all(),f={};
  for(const x of r.results||[])f[x.stage]=Number(x.n||0);
- const o=await env.DB.prepare("SELECT COUNT(*) n FROM leads WHERE stage IN ('qualified','contacted','replied','negotiation')").first();
- const c=await env.DB.prepare("SELECT COUNT(*) n FROM leads WHERE stage IN ('customer','converted')").first();
+ const o=await env.DB.prepare(`SELECT COUNT(*) n FROM leads WHERE stage IN ('qualified','contacted','replied','negotiation') AND ${real}`).first();
+ const c=await env.DB.prepare(`SELECT COUNT(*) n FROM leads WHERE stage IN ('customer','converted') AND ${real}`).first();
  return {ok:true,funnel:f,opportunities:Number(o?.n||0),conversions:Number(c?.n||0),money:{status:"not_available",reason:"No verified revenue amount field is present in the current data model"}};
 }
 async function executeTask(env,req,t){
