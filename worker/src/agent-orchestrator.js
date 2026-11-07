@@ -71,6 +71,7 @@ export const TASK_STATES=Object.freeze(["succeeded","failed","timed_out","skippe
 // accepted; a redaction failure yields a placeholder instead of the raw text.
 const REDACTIONS=[
   [/Bearer\s+[A-Za-z0-9._~+\/=-]+/gi,"Bearer [REDACTED]"],
+  [/\bKey\s+[A-Za-z0-9._~+\/=:-]{8,}/g,"Key [REDACTED]"],
   [/\b(?:Authorization|Cookie|Set-Cookie)\s*:\s*[^\n]+/gi,"[REDACTED_HEADER]"],
   [/\bbot\d{6,12}:[A-Za-z0-9_-]{30,}/g,"bot[REDACTED]"],
   [/\b\d{6,12}:[A-Za-z0-9_-]{30,}\b/g,"[REDACTED_BOT_TOKEN]"],

@@ -26,6 +26,7 @@ import { draftFigures, finalQuoteEditAllowed, finalQuoteFreshness, finalQuoteWai
 import { AUTO_MESSAGING_KEY, AUTO_POLICY_ACTOR, autoMessagingSettings, withinContactHours, optOutStateFromMessages, OPT_OUT_RULES_ID, OPT_OUT_RULES_KEY, OPT_OUT_ALL_LEGACY } from "./auto-sales-messaging.js";
 import { placesBudgetSettings, placesBudgetStatus, reservePlacesRequest, finishPlacesRequest, placesIdsOnlySearch, placesMapsUrl, placesMarketBlocked, webSearchCoolingDown, startWebSearchCooldown } from "./places-budget.js";
 import { ownerActionCenter } from "./owner-action-center.js";
+import { videoTrialPreview, videoTrialExecute, videoTrialStatus, videoTrialRedeliver, pollVideoTrial, approvedVideoSources, videoTrialHiddenSql } from "./video-trial.js";
 const H = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store"
@@ -1073,7 +1074,7 @@ async function authorizedMarketingMedia(env,contentId){
   const vaults=[vaultChatId(env),videoVaultChatId(env)].map(norm).filter(Boolean);
   for(const r of rows){
     if(!['telegram','telegram_ai'].includes(String(r.source_type)))return {ok:false,reason:'unsupported_media_source'};
-    const s=await env.DB.prepare("SELECT chat_id,chat_username,source_kind FROM telegram_media_sources WHERE id=?"+await cleanupHiddenSql(env,"vault","telegram_media_sources.id")).bind(String(r.source_id)).first();
+    const s=await env.DB.prepare("SELECT chat_id,chat_username,source_kind FROM telegram_media_sources WHERE id=?"+await cleanupHiddenSql(env,"vault","telegram_media_sources.id")+await videoTrialHiddenSql(env,"telegram_media_sources.id")).bind(String(r.source_id)).first();
     if(!s)return {ok:false,reason:'unknown_media_origin'};
     if(s.source_kind!=='vault')return {ok:false,reason:'not_vault_media'};
     if(/^\d+$/.test(String(s.chat_id||'').trim()))return {ok:false,reason:'private_chat_media'};
@@ -1511,7 +1512,7 @@ async function autoAttachTelegramMedia(env, contentId){
 
   const rows = await env.DB.prepare(
     "SELECT * FROM telegram_media_sources " +
-    "WHERE source_kind='vault'" + await cleanupHiddenSql(env,"vault","telegram_media_sources.id") + " " +
+    "WHERE source_kind='vault'" + await cleanupHiddenSql(env,"vault","telegram_media_sources.id") + await videoTrialHiddenSql(env,"telegram_media_sources.id") + " " +
     "ORDER BY created_at DESC LIMIT 100"
   ).all();
 
@@ -13824,6 +13825,8 @@ const WORKER = {
     ctx.waitUntil(isolate("purge_ai_call_flights",()=>purgeAiCallFlights(env)));
     // Independent agent watchdog (Stage 3): own waitUntil + try/catch, reads ops tables and raises alerts; never runs or sends anything.
     ctx.waitUntil(isolate("watchdog",()=>runWatchdog(env)));
+    // Trial video clips the owner already started: poll and deliver to the private video vault only. Never submits a clip.
+    ctx.waitUntil(isolate("video_trial_poll",()=>pollVideoTrial(env,{vaultChatId:mediaVaultChatId(env,"video"),audit})));
     if (!(await gateOpen())) return;
     ctx.waitUntil((async()=>{
         const chain=[["website_growth_store",()=>ensureWebsiteGrowthStore(env)],["auto_pilot_cycle",()=>runAutoPilotCycle(env,"scheduled")],
@@ -14097,6 +14100,20 @@ const WORKER = {
     return json({ ok:false, error:e.message||"Photo Autopilot failed" },500);
   }
 }
+   // Owner-approved trial video clips (Wan 2.6 Flash via fal.ai). Admin auth on every route; a paid clip needs preview + typed phrase.
+   if (u.pathname.startsWith("/api/video-trial/")) {
+     if (!auth(req, env)) return json({ok:false,error:"Unauthorized"},401);
+     try {
+       if (u.pathname === "/api/video-trial/status" && req.method === "GET") return json(await videoTrialStatus(env));
+       await ensureMediaVaultStore(env);const hiddenSql=await cleanupHiddenSql(env,"vault","m.id");
+       if (u.pathname === "/api/video-trial/sources" && req.method === "GET") return json({ok:true,items:(await approvedVideoSources(env,{hiddenSql})).map(x=>({id:x.id,caption:String(x.caption||"").slice(0,120),created_at:x.created_at,preview_url:mediaProxyUrl(x.id)}))});
+       const b=req.method==="POST"?await req.json().catch(()=>null):null;
+       if (u.pathname === "/api/video-trial/preview" && req.method === "POST") return json(await videoTrialPreview(env,{source_media_id:b?.source_media_id,actor:"admin",hiddenSql}));
+       if (u.pathname === "/api/video-trial/execute" && req.method === "POST") return json(await videoTrialExecute(env,{token:b?.token,confirm:b?.confirm,hiddenSql,audit}));
+       if (u.pathname === "/api/video-trial/redeliver" && req.method === "POST") return json(await videoTrialRedeliver(env,{clip_id:b?.clip_id}));
+       return json({ok:false,error:"Not found"},404);
+     } catch (e) { return json(e?.payload||{ok:false,error:sanitizeOperationalError(e?.message||e)},e?.httpStatus||500); }
+   }
    if (u.pathname === "/api/photo-autopilot/status" && req.method === "GET") {
   if (!auth(req, env)) return json({ ok:false, error:"Unauthorized" }, 401);
 

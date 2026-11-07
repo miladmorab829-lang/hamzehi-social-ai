@@ -18,7 +18,9 @@ export const REQUIRED_SECRETS=Object.freeze(["ADMIN_TOKEN","ANTHROPIC_API_KEY","
 export const RETIRED_SECRETS=Object.freeze(["KLING_API_KEY"]);
 
 // Set by the owner when wanted; a version without it still runs (held quotes then stay on the dashboard, with no owner alert).
-export const OPTIONAL_SECRETS=Object.freeze(["OWNER_TELEGRAM_CHAT_ID"]);
+export const OPTIONAL_SECRETS=Object.freeze(["OWNER_TELEGRAM_CHAT_ID","FAL_KEY"]);
+// Never plain vars: a key in wrangler.toml would be readable, and a video provider var would switch on recurring weekly video.
+export const FORBIDDEN_VARS=Object.freeze(["FAL_KEY","WEEKLY_VIDEO_PROVIDER"]);
 
 // Minimal reader for the parts of worker/wrangler.toml this check needs: [vars] strings, the D1 id, the R2 bucket, the AI binding.
 export function expectedFromToml(text){
@@ -34,6 +36,7 @@ export function expectedFromToml(text){
 // Pure check of `wrangler versions view --json` output. Returns {ok, failures[], summary}.
 export function checkVersion(v,expected,{requiredSecrets=REQUIRED_SECRETS,requireTagSuffix="-orch-on"}={}){
   const f=[],b=v?.resources?.bindings||[],by=n=>b.find(x=>x.name===n);
+  for(const n of FORBIDDEN_VARS){if(Object.prototype.hasOwnProperty.call(expected.vars,n))f.push(`${n} must not be set in worker/wrangler.toml`);const x=by(n);if(x&&x.type==="plain_text")f.push(`${n} must not be a plain-text variable`);}
   if(!v?.id)f.push("version not found");
   const tag=v?.annotations?.["workers/tag"]||null;
   if(!tag)f.push("version has no tag (automatic builds are never activated directly)");
