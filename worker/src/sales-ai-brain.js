@@ -239,6 +239,8 @@ function gateNumberMentions(text){
   const t=gateNorm(text).replace(/(\d+)\s*(?:x|×|\*|در)\s*(\d+)/g," $1 dim $2 dim ").replace(/(\d)[,٬](?=\d{3}(?!\d))/g,"$1");
   const w=t.split(/[^\p{L}\p{N}.]+/u).map(x=>x.replace(/^\.+|\.+$/g,"")).filter(Boolean),out=[];
   for(let i=0;i<w.length;i++){
+    // «می‌ده» / «نمی‌ده» (gives) is a verb: the ZWNJ became a space above, so a number WORD right after «می»/«نمی» is not a number
+    if(GATE_NUMBER_WORDS.has(w[i])&&(w[i-1]==="می"||w[i-1]==="نمی"))continue;
     let total=0,current=0,used=0,spoken=false,mult=false,j=i;
     for(;j<w.length;j++){
       const x=w[j];
