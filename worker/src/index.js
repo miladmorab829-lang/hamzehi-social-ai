@@ -10406,7 +10406,10 @@ export function resetFinancialTurn(row,brain,outreach){
   const clean=t=>{const x=resetDigits(resetNorm(t));return moq?x.replace(RESET_MOQ_PHRASE," "):x;};
   const said=moq?clean(row.message).replace(/چنده|چقدر|شقد|شکد|how many/gu," "):clean(row.message),reply=clean(outreach.message);
   if(RESET_FINANCIAL_WORDS.test(said)||RESET_FINANCIAL_WORDS.test(reply))return true;
-  const spec=reply.replace(RESET_SPEC_NUMBERS," "),rest=action==="answer_sizes"?spec.replace(RESET_CATALOG_SIZES," "):spec;
+  // a unitless size such as «(۶x۶)» is a catalog size when every side is a small number the brain grounded in approved data
+  const grounded=new Set((brain.answer_numbers||[]).filter(n=>Number.isFinite(n)&&n>0&&n<100).map(Number));
+  const groundedSize=d=>/\d[.,]\d{3}(?!\d)/.test(d)?d:(d.match(/\d+(?:[.,]\d+)?/g)||[]).every(n=>grounded.has(Number(n.replace(",","."))))?" ":d;
+  const spec=reply.replace(RESET_SPEC_NUMBERS," "),rest=action==="answer_sizes"?spec.replace(RESET_CATALOG_SIZES," "):spec.replace(RESET_CATALOG_SIZES,groundedSize);
   return /\d/.test(moq?rest.replace(RESET_MOQ_NUMBER," "):rest);
 }
 async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
