@@ -8560,12 +8560,32 @@ function salesCatalogSizeAnswer(pricing,text,language){
 }
 const SALES_PLAIN_WORDS=new Set(["ساده","معمولی","معمولیش","عادی","عادي","العادي","العاديه","العادية","عاديه","عادية","بسيط","البسيط"].map(w=>salesNormal(w)));
 const salesDistinctiveWords=c=>salesVariantTokens(c).filter(t=>!/^[0-9]+$/.test(t)&&!GALLERY_PIECE_WORDS.has(t));
+// Construction families (drawer) as the catalogs write them: a model of another family is never matched by a shared word («کج», «مائلة»).
+const SALES_STRUCTURE_FAMILY_WORDS=[...new Set(["کشویی","جرّارة"].map(w=>salesVariantTokens(w)[0]).filter(Boolean))];
 function salesPickVariant(p,texts){
   let pool=p.variants;const newest=[...(texts||[])].reverse(),dims=s=>ownerDims(s).size;
-  if(new Set(pool.map(v=>dims(v.size||"")||v.size)).size>1){
-    for(const text of newest){const size=dims(text);if(size){const hit=pool.filter(v=>(dims(v.size||"")||v.size)===size);if(hit.length){pool=hit;break;}}}
-    if(new Set(pool.map(v=>dims(v.size||"")||v.size)).size>1)return {missing:{key:"size",label:"سایز",question_fa:"کدوم سایز رو می‌خواید؟ ("+[...new Set(pool.map(v=>v.size))].join("، ")+")",question_ar:"أي قياس تريد؟ ("+[...new Set(pool.map(v=>v.size))].join("، ")+")",values:[...new Set(pool.map(v=>v.size))]}};
+  // A price belongs to ONE identity: product + exact dimensions + model. The newest size stated since the customer last named THIS
+  // product decides; a size this product is not sold in is asked about (with the approved sizes), never priced as another size — also
+  // when only one size exists. Older sizes (an earlier product, the stored deal) count only when they fit, as before.
+  // Same box: «5x5» of «5x5x4», «16x13» of «13x16»; «5x7» is not «5x7.5».
+  const nums=s=>{const d=dims(s||"");return d?d.split(" ")[0].replace(/٫/g,".").split("x").map(Number):null;};
+  const fits=(want,have)=>!!want&&!!have&&want.length<=have.length&&(want.every((x,i)=>x===have[i])||(want.length===2&&want[0]===have[1]&&want[1]===have[0]));
+  const sizeQuestion=()=>{const v=[...new Set(pool.map(x=>x.size).filter(Boolean))];return {missing:{key:"size",label:"سایز",question_fa:"کدوم سایز رو می‌خواید؟ ("+v.join("، ")+")",question_ar:"أي قياس تريد؟ ("+v.join("، ")+")",values:v}};};
+  if(pool.some(v=>v.size)){
+    const names=[p.name,...(p.terms||[])].filter(Boolean),anchor=newest.findIndex(t=>names.some(n=>salesVariantPhraseIn(t,n)));
+    // (product known only from memory, never named in these texts: every stated size counts — «6x8» said earlier is not dropped;
+    // a size stated in an older message that names THIS product also counts — «آویز 5x7» then «آویز 1000 تا» is still 5x7)
+    // A box is never over 200 on a side («500 در 3 رنگ» is a quantity, not a size); «5x7,5» (decimal comma) is not read as 5x7: asked.
+    const sized=t=>{const n=nums(t);return !!n&&n.every(x=>Number.isFinite(x)&&x>0&&x<=200);},named=t=>names.some(n=>salesVariantPhraseIn(t,n));
+    const stated=newest.slice(0,anchor>=0?anchor+1:newest.length).find(sized)||newest.find(t=>sized(t)&&named(t));
+    if(stated){if(/[0-9]\s*(?:x|×|\*|در)\s*[0-9]+[,،][0-9]/u.test(ownerAscii(stated)))return sizeQuestion();
+      const want=nums(stated),hit=pool.filter(v=>fits(want,nums(v.size)));if(!hit.length)return sizeQuestion();pool=hit;}
+    else for(const text of newest){const hit=sized(text)?pool.filter(v=>fits(nums(text),nums(v.size))):[];if(hit.length){pool=hit;break;}}
   }
+  if(new Set(pool.map(v=>dims(v.size||"")||v.size)).size>1)return sizeQuestion();
+  // (a label the owner said is not a real model stays priced in the list, but is never offered as a choice)
+  const configQuestion=()=>{const configs=[...new Set(pool.map(v=>v.configuration))].filter(c=>!isUnverifiedConfiguration(c));
+    return {missing:{key:"configuration",label:"مدل",question_fa:"کدوم مدل رو می‌خواید؟ ("+configs.join("، ")+")",question_ar:"أي موديل تريد؟ ("+configs.join("، ")+")",values:configs}};};
   // The customer named a model EXACTLY (the most specific configuration the owner ever listed for this product): that model, or —
   // when its price is not active — «no active price» (never the nearest other model: «3 تکه کج» is not «3 تکه»).
   const allConfigs=[...new Set([...(p.allConfigurations||[]),...pool.map(v=>v.configuration)])];
@@ -8574,17 +8594,25 @@ function salesPickVariant(p,texts){
     if(!hits.length){
       // not the whole configuration: its distinctive words alone («کج», «کشویی», «مايل»), or «ساده» for the plain one
       const words=salesVariantTokens(salesColloquialFold(text));
-      const byWords=allConfigs.filter(c=>{const d=salesDistinctiveWords(c);return d.length&&d.every(t=>salesWordIn(words,t));});
+      let byWords=allConfigs.filter(c=>{const d=salesDistinctiveWords(c);return d.length&&d.every(t=>salesWordIn(words,t));});
+      // A construction family the customer named («کشویی», «جرّارة») must be part of the matched model: «کشویی کج» is never «3 تکه کج».
+      // When no model of this product (and size) carries that family, the named model is not offered here: no other model's price.
+      const family=SALES_STRUCTURE_FAMILY_WORDS.filter(f=>salesWordIn(words,f));
+      if(family.length&&byWords.length){
+        const withFamily=byWords.filter(c=>family.every(f=>salesDistinctiveWords(c).some(t=>salesTokenLike(t,f))));
+        if(!withFamily.length)return {unavailable:{configuration:[...family,...salesDistinctiveWords(byWords[0])].join(" ")}};
+        byWords=withFamily;
+      }
       const plain=words.some(w=>salesMorphStems(w).some(x=>SALES_PLAIN_WORDS.has(x)))?allConfigs.filter(c=>!salesDistinctiveWords(c).length):[];
       hits=byWords.length?byWords:plain.length===1?plain:[];
     }
     if(!hits.length)continue;
     const longest=Math.max(...hits.map(c=>salesVariantTokens(c).length)),best=hits.filter(c=>salesVariantTokens(c).length===longest);
-    if(best.length!==1)break;
+    if(best.length!==1)return configQuestion();
     const active=pool.find(v=>salesNormal(v.configuration)===salesNormal(best[0]));
     if(active)return {variant:active};
-    if(!p.variants.some(v=>salesNormal(v.configuration)===salesNormal(best[0])))return {unavailable:{configuration:best[0]}};
-    break;
+    // the named model is not sold in this product + size (it may exist in another size): no price of another model or size
+    return {unavailable:{configuration:best[0]}};
   }
   // Only ONE active variant left: it is the answer only if the customer did not name a different piece count (a deactivated or
   // missing model is never silently replaced by another model's price).
@@ -8596,9 +8624,7 @@ function salesPickVariant(p,texts){
     if(best.length===1)return {variant:best[0]};
     break;
   }
-  // (a label the owner said is not a real model stays priced in the list, but is never offered as a choice)
-  const configs=[...new Set(pool.map(v=>v.configuration))].filter(c=>!isUnverifiedConfiguration(c));
-  return {missing:{key:"configuration",label:"مدل",question_fa:"کدوم مدل رو می‌خواید؟ ("+configs.join("، ")+")",question_ar:"أي موديل تريد؟ ("+configs.join("، ")+")",values:configs}};
+  return configQuestion();
 }
 // The market's owner-approved discount rule: the business setting discount_rule (ARAB: 10% from 1001 pieces), else the Phase 23 policy
 // (IRAN: 10% from 1,000 of the same size). One rule per market, so two discounts can never stack.
