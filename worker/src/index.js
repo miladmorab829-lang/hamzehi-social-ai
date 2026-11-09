@@ -7996,6 +7996,12 @@ const SALES_WELCOME_AR="هلا وغلا بيك 🌷 وياك HAMZEHI BOX للع�
 const SALES_BRAIN_NATURAL_ACTIONS=new Set(["greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","ask_product","ask_quantity","ask_size","ask_customization","ask_destination","ask_color","answer_moq","price_owner","commercial_owner","moq_owner","wait_for_owner","owner_followup"]);
 const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","commercial_owner_review_required","approved_moq_missing","approved_knowledge_missing"]);
 // A bare follow-up about a pending answer ("any news?", "خبری نشد؟", "شنو صار؟", "؟"): no new detail, no question of its own.
+// Owner rule 2026-11-09: a customer's question about tax or any extra charge on the listed boxes and sizes is answered «نه.» / «لا.»
+// and nothing more. Shipping, a custom / out-of-list product, a message that also states quantities or sizes, and an existing order
+// are not this question: they keep their own path (no new terms are invented).
+const SALES_EXTRA_COST_Q=/(?:مالیات|تکس|(?<![\p{L}])tax(?:es)?(?![\p{L}])|ضريب[ةه]|هزینه[^.؟!?\n]{0,12}(?:اضاف|دیگه[‌\s]?ای|دیگری|جانبی|پنهان)|(?:كلف[ةه]|كلفه|رسوم|مصاريف|تكاليف|فلوس)[^.؟!?\n]{0,12}(?:إضافي|اضافي|زايد|ثاني|اخرى|أخرى)|(?:extra|hidden|additional)\s+(?:cost|fee|charge)s?)/iu;
+const SALES_EXTRA_COST_NOT=/(?:ارسال|حمل|پست|تیپاکس|باربری|کرایه|شحن|توصيل|shipping|delivery|سفارشی|اختصاصی|مخصوص|طرح\s*خاص|سایز\s*خاص|خارج\s*از|تفصيل|custom|bespoke|[0-9۰-۹٠-٩]|قیمت|چقدر|چند|چنده|بکم|بچم|بكم|شكد|شگد|سعر|اسعار|أسعار|how\s+much|price)/iu;
+function salesExtraCostQuestion(text){const t=String(text||"").normalize("NFKC");return SALES_EXTRA_COST_Q.test(t)&&!SALES_EXTRA_COST_NOT.test(t);}
 const SALES_BRAIN_STATUS_PING=/(?:خبر(?:ی)?\s*(?:نشد|شد|هست|ندارید|نداری)|چی\s*شد|چه\s*شد|نتیجه\s*(?:چی|چه|شد)|پیگیری|منتظر(?:م|یم|\s*هستم)|هنوز\s*(?:خبری|جوابی)|جواب(?:ی)?\s*(?:ندادی|ندادید|نیومد|نشد)|شنو\s*صار|شصار|[أا]ي\s*خبر|في\s*خبر|ماكو\s*خبر|ننتظر|بانتظار|\bany\s+(?:update|news)\b|\bstill\s+waiting\b|\bwhat\s+happened\b|\bfollowing\s+up\b|^\s*(?:update|news)\s*[?؟]*\s*$|^\s*[?؟]+\s*$)/iu;
 const SALES_BRAIN_FACT_LABELS={product_interest:["مدل","الموديل"],requested_quantity:["تعداد","العدد"],requested_size:["سایز","القياس"],printing:["نوع چاپ","نوع الطباعة"],branding:["لوگو","الشعار"],destination:["مقصد","الوجهة"],exterior_color:["رنگ","اللون"],interior_color:["رنگ","اللون"]};
 // "Still checking" phrasings (first = the original). A follow-up while the owner decides gets one of these, never the exact text of
@@ -9288,7 +9294,7 @@ export function salesAiFirstFor(setting,row){
 }
 // AI-FIRST: actions whose reply stays the deterministic one (order acceptance, quotes, order status, photo albums), and actions an
 // AI reply after a context reset still may not carry (money, payment, order, owner terms).
-const SALES_AI_FIRST_DET_ONLY=["accept_offer","accepted","order_status","quote","visual","clarify_photo_or_order"];
+const SALES_AI_FIRST_DET_ONLY=["answer_extra_cost","accept_offer","accepted","order_status","quote","visual","clarify_photo_or_order"];
 const SALES_AI_FIRST_HOLD_ACTIONS=new Set(["accept_offer","accepted","quote","order_status","payment_info","payment_claim_owner","payment_claim_unmatched","payment_terms_owner","answer_price","negotiate","handle_objection","price_owner","commercial_owner","moq_owner"]);
 // Without Claude's reading, colour words in a question / comparison / hypothesis / negation are not a choice.
 const SALES_COLOR_NOT_A_CHOICE=/[?؟]|(?:^|\s)(?:یا|بهتره|بهتر\s*است|کدوم|کدام|اگه|اگر|نمی\s*خوام|نمیخوام|نه|لو|او|أو|احسن|أحسن|افضل|أفضل|شنو|ما\s*اريد|ما\s*أريد)(?=\s|$|[،,.!])/u;
@@ -9364,6 +9370,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   let orderStatusAsked=!!postSaleOrder&&!orderStatusMixed&&(statusExplicit||(postSaleOrder.status!=="fulfilled"&&intent==="asks_shipping"&&!salesSignal&&!customerCountry(row.message)&&!salesDestinationCountry(row.message)));
   // …and a message of a customer with an OPEN order that is neither (e.g. «باشه», «شماره کارت رو بفرستید») keeps the owner review it
   // always had: the sales path drafts it, the owner sends it (Approval Gate not loosened for paying customers).
+  const extraCostAsked=!postSaleOrder&&!orderStatusAsked&&salesExtraCostQuestion(row.message);
   let postSaleReview=!!postSaleOrder&&postSaleOrder.status!=="fulfilled"&&!statusExplicit&&!salesSignal&&!orderStatusAsked;let stage=orderStatusAsked?`order_${postSaleOrder.status}`:salesBrainStage(intent,memory);
   const marketClause=` AND market IN (${knowledgeMarkets.map(()=>"?").join(",")})`;
   // «همون قبلی / مدل قبلی / السابق» → the product discussed BEFORE the current one (from this conversation's own memory history)
@@ -9397,7 +9404,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // Bounded AI understanding: ONE optional call (SALES_AI_UNDERSTANDING=on), only for a text turn nothing deterministic understood
   // (no intent, no new fact, no image, not a follow-up ping or a short agreement); it runs alongside wave 2 and can only pick an intent.
   const factsThisTurn=newFactRows.map(f=>f.fact_type).filter(t=>!["customer_message","customer_question","unresolved_question","objection","customer_image_reference"].includes(t));
-  const aiUnderstanding=intent==="other"&&!orderStatusAsked&&!currentImage&&!factsThisTurn.length&&salesTokens(row.message).length>=3&&!SALES_BRAIN_STATUS_PING.test(String(row.message||"").normalize("NFKC"))&&!salesWeakAcceptance(row.message)?salesAiIntent(env,{message:row.message,history:[...earlierInbound].reverse(),language}):null;
+  const aiUnderstanding=intent==="other"&&!orderStatusAsked&&!extraCostAsked&&!currentImage&&!factsThisTurn.length&&salesTokens(row.message).length>=3&&!SALES_BRAIN_STATUS_PING.test(String(row.message||"").normalize("NFKC"))&&!salesWeakAcceptance(row.message)?salesAiIntent(env,{message:row.message,history:[...earlierInbound].reverse(),language}):null;
   // ---- Sales agent pricing pass (read-only, concurrent with wave 2): only for a turn about the deal — a price/discount/acceptance
   // signal, an open order candidate or a known product. Without an established market nothing is priced (market isolation); the
   // catalog is only checked for existence so the agent can ask the destination once instead of escalating blind.
@@ -9487,7 +9494,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // Claude's validated reply leads the conversation. Every safety gate runs in every mode.
   const aiFirstSetting=await salesAiFirstSetting(env),aiFirst=salesAiFirstFor(aiFirstSetting,row),aiFirstOn=aiFirst==="on",aiFirstShadow=aiFirst==="shadow";
   let ai=null,aiAllowedNumbers=[];const aiInfo={enabled:salesAiEnabled(env),used:false,ai_first:aiFirst},aiChanged={};
-  if(aiInfo.enabled&&!orderStatusAsked&&!formalQuoteReply&&String(row.message||"").trim()){
+  if(aiInfo.enabled&&!orderStatusAsked&&!extraCostAsked&&!formalQuoteReply&&String(row.message||"").trim()){
     const ctxStarted=Date.now();
     // Durable customer profile (other conversations of THIS lead only): informational context, never copied into the current deal.
     const profileRows=await env.DB.prepare("SELECT memory_key,value_json FROM conversation_memory_facts WHERE lead_id=? AND conversation_id<>? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages mi WHERE mi.id=conversation_memory_facts.source_message_id AND mi.status='trashed') AND memory_key IN ('customer_name','destination') AND created_at>? ORDER BY created_at DESC LIMIT 4").bind(row.lead_id,row.conversation_id,await cleanupLeadContextFrom(env,row.lead_id)).all().then(r=>r.results||[]).catch(()=>[]);
@@ -9807,6 +9814,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const aiReadsNoOrder=aiFirstOn&&!!ai?.interpretation&&!["order","order_status","payment","acceptance"].includes(ai.interpretation.primary_intent)&&!ai.requests.some(r=>["order_status","payment","acceptance"].includes(r));
   if(ctxFrom&&!postSaleOrder&&(orderStatusExplicit(row.message)||(RESET_ORDER_QUESTION.test(resetNorm(row.message).replace(RESET_MOQ_PHRASE," "))&&!aiReadsNoOrder))){action="commercial_owner";needsOwner=true;needsOwnerReason="commercial_owner_review_required";}
   else if(orderStatusAsked){action="order_status";}
+  else if(extraCostAsked){action="answer_extra_cost";}
   else if(intent==="rejected"){action="acknowledge_rejection";}
   else if(acceptance&&offerFresh){action="accept_offer";}
   // An acceptance without an open offer for exactly this deal first gets that offer (the customer confirms the exact approved price).
@@ -10058,7 +10066,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(sizeAnswer)authorityFacts.push({category:"availability",values:sizeAnswer.values});
   if(gallery)authorityFacts.push({category:"availability",values:[galleryName,gallery.base,gallery.requested,...(gallery.models||[]),...(gallery.colors||[]),...Object.values(gallery.parts||{}),...(gallery.suggestions||[]),...(gallery.items||[]).map(x=>x.label)].filter(Boolean)});
   if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&salesDraft!==null&&!salesDraft.includes(approvedPrinting))salesDraft=`تمام، سجلت نوع الطباعة: ${approvedPrinting}. `+salesDraft;
-  let draft=salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])].filter(k=>!((printingPick.unknown||printingSpecial)&&/^printing/.test(k))&&!(ribbonAsked&&/ribbon/.test(k))),moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&!String(draft).includes(approvedPrinting)&&String(draft).includes("سجلت نوع الطباعة"))draft=String(draft).replace("سجلت نوع الطباعة","سجلت نوع الطباعة: "+approvedPrinting);
+  let draft=action==="answer_extra_cost"?(language==="Iraqi Arabic"?"لا.":"نه."):salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])].filter(k=>!((printingPick.unknown||printingSpecial)&&/^printing/.test(k))&&!(ribbonAsked&&/ribbon/.test(k))),moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&!String(draft).includes(approvedPrinting)&&String(draft).includes("سجلت نوع الطباعة"))draft=String(draft).replace("سجلت نوع الطباعة","سجلت نوع الطباعة: "+approvedPrinting);
   if(printingRecorded&&approvedPrinting&&action==="answer_price"&&recentReplies.some(x=>salesBrainClaimText(x)===salesBrainClaimText(draft))){action="order_details";draft=language==="Iraqi Arabic"?`تمام، سجلت نوع الطباعة: ${approvedPrinting}.`:`ممنون، نوع چاپ ${approvedPrinting} ثبت شد.`;}timing.decision_ms=Date.now()-decisionStarted;const validatorStarted=Date.now();let validation=validateSalesBrainDraft(orderStatusAsked?maskOrderIdentifiers(draft,postSaleOrder):draft,{allowedNumbers:orderStatusAsked?[]:action==="visual"&&gallery?galleryAllowedNumbers(gallery):action==="answer_sizes"?answerNumbers:[],authoritativeFacts:action==="answer_knowledge"?kgAnswerFacts:salesEvidence?[...authorityFacts,...salesEvidence.facts]:authorityFacts,markets:knowledgeMarkets});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   // ---- AI-FIRST REPLY. The Sales AI's reply is what the customer gets when it passes the deterministic gate; the authoritative
   // commercial segment of the deterministic decision (approved price / terms / owner holding) is inserted at {{COMMERCIAL}}.
@@ -10067,7 +10075,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // answered from approved knowledge. Anything that fails validation → the deterministic reply (and why is recorded).
   let replySource="legacy";const aiEvidenceFacts=[],needsOwnerPreAi=needsOwner;
   if(ai&&ai.reply){
-    const DET_ONLY=["accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","clarify_photo_or_order","answer_sizes","ask_color_placement","ask_image_reference","answer_catalog","welcome"];
+    const DET_ONLY=["answer_extra_cost","accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","clarify_photo_or_order","answer_sizes","ask_color_placement","ask_image_reference","answer_catalog","welcome"];
     const SEGMENT=["answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner"];
     // (a below-MOQ answer is exact: minimum, requested quantity, owner review; the model never rewords it)
     if(aiFirstShadow&&DET_ONLY.includes(action)&&!SALES_AI_FIRST_DET_ONLY.includes(action))aiInfo.ai_first_shadow={...(aiInfo.ai_first_shadow||{}),det_only_released:action};
@@ -10480,7 +10488,7 @@ async function salesAuthorityShadowReport(env,limit=100){
   const count=k=>rows.reduce((m,r)=>(m[r[k]]=(m[r[k]]||0)+1,m),{});
   return {items:rows,summary:{total:rows.length,by_tier:count("tier"),by_capability:count("capability"),by_target:count("target_policy"),held_today_autonomous_in_target:rows.filter(r=>r.divergence).length},live_enabled:false};
 }
-const INBOUND_AUTO_SEND_ACTIONS=new Set(["answer_sizes","ask_color_placement","welcome","answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
+const INBOUND_AUTO_SEND_ACTIONS=new Set(["answer_extra_cost","answer_sizes","ask_color_placement","welcome","answer_catalog","ask_product","ask_quantity","ask_size","ask_color","answer_moq","answer_knowledge","ask_customization","ask_destination","ask_details","ask_image_reference","price_discovery","wait_for_owner","price_owner","commercial_owner","moq_owner","answer_price","negotiate","handle_objection","accept_offer","clarify_product","ask_attribute","greet","thanks","continue_conversation","acknowledge_details","knowledge_owner","order_details","advise_colors","ai_answer","payment_terms_owner","payment_claim_owner","payment_info"]);
 // Loop protection rests on the echo guard and on these limits for AUTOMATED messages per conversation (auto-sent replies and
 // acknowledgements together). A natural multi-turn negotiation stays far below them; a runaway loop or flood hits them and is
 // handed to the owner with ONE acknowledgement per hour instead of a reply per message.

@@ -401,6 +401,9 @@ export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[]}=
   // invented: they reach the customer only through the deterministic segment ({{COMMERCIAL}}).
   if(/(?:ارسال|تحویل|آماده|تولید|توصيل|يوصل|الشحن|التسليم|يجهز|جاهز|delivery|ship|ready)[^.؟!?]{0,20}(?<![\p{L}])(?:روز|ساعت|هفته|ماه|يوم|أيام|أسبوع|ساعة|شهر|day|week|hour|month)(?:ه|ی|ها|s)?(?![\p{L}])|(?<![\p{L}])(?:روز|ساعت|هفته|ماه|يوم|أيام|أسبوع|ساعة|شهر|day|week|hour|month)(?:ه|ی|ها|s)?(?![\p{L}])[^.؟!?]{0,20}(?:ارسال|تحویل|آماده|تولید|توصيل|يوصل|الشحن|التسليم|يجهز|جاهز|delivery|ship|ready)|(?:در\s*حال\s*تولید|تولید\s*شد|ارسال\s*شد|تحویل\s*شد|پرداخت\s*شد|قيد\s*الإنتاج|تم\s*الشحن|تم\s*التسليم|تم\s*الدفع|shipped|delivered|in\s+production)/iu.test(text))issues.push("delivery_or_status_claim");
   if(/(?:ارسال|حمل|پست|تیپاکس|باربری|شحن|توصيل|shipping)\s*(?:رایگان|مجانی|مجاني|free|داریم|نداریم|انجام|می[‌\s]?کنیم|میشه|می[‌\s]?شه)/iu.test(text))issues.push("shipping_claim");
+  // the same claim in other words: «ارسال هم … رایگانه», «ارسالش رایگانه», «رایگان ارسال می‌کنیم», «الشحن علينا ومجاني», «free shipping»
+  // (shipping cost is not included and is confirmed separately — the model never states it)
+  else if(/(?:ارسال|حمل|پست|تیپاکس|باربری|شحن|توصيل|shipping|delivery)[^.؟!?\n]{0,30}(?:رایگان|مجان|ببلاش|بلاش|free)|(?:رایگان|مجان|ببلاش|free)[^.؟!?\n]{0,15}(?:ارسال|حمل|پست|شحن|توصيل|shipping|delivery)|(?:شحن|توصيل)[^.؟!?\n]{0,12}علينا/iu.test(text))issues.push("shipping_claim");
   if(/(?:پیش[‌\s]?پرداخت|بیعانه|کارت\s*به\s*کارت|قسطی|اقساط|عربون|دفعة\s*مقدمة|الدفع\s*(?:عند|مقدم|بالأقساط)|deposit|installment)/iu.test(termsText))issues.push("payment_claim");
   // Credit / pay-after-delivery / a payment schedule in the AI's own words is an unapproved payment term (relays excepted).
   if(SALES_AI_PAY_LATER.test(termsText)||SALES_AI_CHEQUE.test(termsText)||SALES_AI_INSTALMENT.test(termsText))issues.push("payment_claim");
