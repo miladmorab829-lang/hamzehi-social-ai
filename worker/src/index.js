@@ -12988,6 +12988,10 @@ function validateAdsInput(body){
 const ADS_PRICE_NEWS=/سعر\s*(?:ال)?(?:ذهب|غرام|اونصة|أونصة|ليرة)|أسعار|اسعار|عيار\s*\d{2}|بورصة|لحظة\s*بلحظة|تحديث\s*لحظي|أخبار|الأخبار|اخبار|خبرگزاری|قیمت\s*(?:لحظه|روز|طلا|سکه|دلار|ارز|انس|مثقال|گرم)|نرخ\s*(?:طلا|سکه|ارز|دلار)|بورس|تحلیل\s*بازار|بازار\s*(?:طلا|ارز|سکه)|gold\s*(?:price|rate)s?|price\s*(?:today|live)|live\s*(?:rates?|prices?)|spot\s*price|per\s*(?:gram|ounce)|forex|stock\s*market|\bnews\b|exchange\s*rate/i;
 const ADS_AGGREGATOR=/digikala|okala|jetamooz|amazon|torob|snapp|basalam|divar|sheypoor|emalls|olx|opensooq|dubizzle|alibaba|aliexpress|ebay|etsy|wikipedia|youtube|facebook\.com|instagram\.com|linkedin|yellow\s*pages|yellowpages|directory|دایرکتوری|نیازمندی|آگهی|دليل\s*(?:ال)?(?:شركات|محلات)|إعلانات\s*مبوبة|marketplace|فروشگاه اینترنتی|خرید آنلاین/i;
 const ADS_FOREIGN_COUNTRY=/السعودية|سعودي|مصر|المصري|الإمارات|الامارات|دبي|سلطنة\s*عمان|في\s*عمان|الكويت|قطر|البحرين|الأردن|الاردن|تركيا|ترکیه|عربستان|امارات|افغانستان|کابل|saudi|egypt|\buae\b|dubai|oman|kuwait|qatar|bahrain|jordan|turkey|afghanistan|kabul/i;
+// Adult / gambling pages are dropped. Whole English words only («Essex», «adulthood» are not), and no «جنس»: on Persian / Arabic shop
+// pages it is an ordinary product field («جنس: طلا» material, «الجنس: نسائي» gender), which made real jewellery shops count as spam.
+// Real adult words stay (سکس، پورن، «جنسی» but not «جنسیت» gender / «جنسية» nationality / «الجنسين»).
+const ADS_SPAM_PATTERN=/(?<![a-z])(?:porn|porno|xxx|sex|adult|camgirl|escort|casino|betting)(?![a-z])|قمار|شرط‌بندی|مراهنات|إباحية|اباحية|مواعدة|سکس|سكس|پورن|بورنو|جنسی(?![تن])|جنسي(?![ةهن])/i;
 const ADS_FOREIGN_TLD=/\.(?:sa|eg|ae|om|kw|qa|bh|jo|tr|af)$/i;
 // Local phone numbers (after Persian/Arabic digits are mapped to ASCII): Iran +98 / 0098 / 09xx mobile / 0xx landline; Iraq +964 / 00964 / 07xx.
 const ADS_IR_PHONE=/(?:\+98|0098|\b09\d{2}[\s-]?\d{3}[\s-]?\d{4}\b|\b0\d{2,3}[\s-]?\d{3,4}[\s-]?\d{4}\b)/;
@@ -13003,11 +13007,14 @@ function adsTargetQualifies({title="",url="",plain="",target=null}={}){
   if(ADS_AGGREGATOR.test(head))return {ok:false,reason:"aggregator"};
   if(ADS_FOREIGN_COUNTRY.test(head)||ADS_FOREIGN_TLD.test(host))return {ok:false,reason:"foreign_country"};
   const iraq=target.market==="ARAB",localTld=iraq?/\.iq$/i.test(host):/\.ir$/i.test(host);
-  const phoneHit=(iraq?ADS_IQ_PHONE:ADS_IR_PHONE).test(adsAsciiDigits(body));
+  // A shop's phone and city usually sit in the page footer, past the first 6,000 characters: the local phone and the city are looked
+  // for in the whole fetched page (the strict combinations below are unchanged; buyer and price checks still use the page head).
+  const fullBody=String(plain||"").slice(0,100000);
+  const phoneHit=(iraq?ADS_IQ_PHONE:ADS_IR_PHONE).test(adsAsciiDigits(fullBody));
   // Local shop pages rarely spell out "Iran"/"Iraq". The target city counts as country evidence only when it is reliable: named in
   // the title/domain/path, or on a page carrying a local phone number. The two markets' city lists are disjoint and foreign pages
   // were rejected above, so a city mentioned in passing (no local phone, not in the title) is still not enough.
-  const normAll=adsNormalizeText(all),cityHit=target.names.some(n=>normAll.includes(adsNormalizeText(n)));
+  const normAll=adsNormalizeText(`${head} ${fullBody}`),cityHit=target.names.some(n=>normAll.includes(adsNormalizeText(n)));
   const cityInHead=target.names.some(n=>adsNormalizeText(head).includes(adsNormalizeText(n)));
   const countryWord=(iraq?/العراق|عراق|iraq|\+964/i:/ایران|iran|\+98/i).test(all);
   const countryEvidence=localTld?"local_domain":countryWord?"country_word":cityHit&&cityInHead?"city_in_title":cityHit&&phoneHit?"city_and_local_phone":null;
@@ -13201,10 +13208,12 @@ const localLanguagePattern=groupType.endsWith("_ar")
 const localDomain=groupType.endsWith("_ar")
   ? /\.iq$/i.test(uu.hostname)
   : /\.ir$/i.test(uu.hostname);
-const spamPattern=/porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
+const spamPattern=ADS_SPAM_PATTERN;
 if(spamPattern.test(relevanceText)){drop("spam");continue;}
 const verdict=adsTargetQualifies({title,url:safeHref,plain,target});
-if(!verdict.ok){summary.rejected++;summary.rejected_reasons[verdict.reason]=(summary.rejected_reasons[verdict.reason]||0)+1;continue;}
+if(!verdict.ok){summary.rejected++;summary.rejected_reasons[verdict.reason]=(summary.rejected_reasons[verdict.reason]||0)+1;
+  // a few examples per run (public host + reason only) so a wrong rejection can be checked later; no page text, no contact data
+  if((summary.rejected_samples||(summary.rejected_samples=[])).length<8)summary.rejected_samples.push({host:uu.hostname,reason:verdict.reason});continue;}
 if(!localDomain && !countryPattern.test(relevanceText) && !localLanguagePattern.test(relevanceText)){drop("no_local_signal");continue;}
           const businessSignal=/فروشگاه|فروشنده|فروشی|طلافروشی|زرگری|جواهرفروشی|گالری|عطرفروشی|عطر فروشی|عطر و ادکلن|ساعت فروشی|ساعت مچی|بدلیجات|بدلی فروشی|محل ذهب|محل عطور|محل ساعات|مجوهرات|صياغة|صائغ|عطور|ساعات|اكسسوارات|shop|store|jewelry|jewellery|goldsmith|perfume|parfum|fragrance|watch shop|watch store|accessories/i;
 
@@ -13280,7 +13289,7 @@ const contactPath=/\/contact(?:-us)?\/?|\/advertis(?:ing)?\/?|\/media[-_]?kit\/?
       }catch{}
     }
   }
-  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,market:target.market,found:summary.found,rejected:summary.rejected,rejected_reasons:summary.rejected_reasons,drafted:summary.drafted,errors:summary.errors,ai_usage:summary.ai||null,started,
+  await audit(env,"ad_autopilot_run","Advertising autopilot completed discovery, qualification and negotiation preparation",{source_site:sourceSite,city,market:target.market,found:summary.found,rejected:summary.rejected,rejected_reasons:summary.rejected_reasons,rejected_samples:summary.rejected_samples||[],drafted:summary.drafted,errors:summary.errors,ai_usage:summary.ai||null,started,
     // Discovery evidence: links each search provider returned, candidate sites evaluated, and new vs. updated CRM leads.
     candidates:summary.candidates||0,dropped:summary.dropped,new_leads:summary.new_leads,updated:summary.updated,
     places:summary.places||null,
@@ -13692,8 +13701,7 @@ summary.discovery_diagnostics.push({
           const businessPattern=
             /فروشگاه|فروشنده|فروشی|طلافروشی|زرگری|جواهرفروشی|گالری|عطرفروشی|عطر فروشی|ساعت فروشی|بدلیجات|بدلی فروشی|محل ذهب|محل عطور|محل ساعات|مجوهرات|صياغة|صائغ|عطور|ساعات|اكسسوارات|shop|store|jewelry|jewellery|goldsmith|perfume|parfum|fragrance|watch|accessories/i;
 
-          const spamPattern=
-            /porn|porno|xxx|sex|adult|camgirl|escort|casino|betting|قمار|شرط‌بندی|مراهنات|إباحية|جنس|مواعدة/i;
+          const spamPattern=ADS_SPAM_PATTERN;
 
           const marketplacePattern=
             /digikala|okala|jetamooz|amazon|torob|snapp|basalam|marketplace|فروشگاه اینترنتی|فروشگاه آنلاین|خرید آنلاین|فروش آنلاین/i;
@@ -16248,4 +16256,4 @@ async function catalogReadiness(env){
   return {products,iran_prices:iran,iraq_prices:arab,verified_photos:photos,complete:missing.length===0,missing};
 }
 
-export { runAutoSalesMessaging };
+export { runAutoSalesMessaging, adsTargetQualifies, ADS_SPAM_PATTERN };

@@ -30,6 +30,7 @@ export function placesBudgetSettings(env={}){
     idsOnlyVerifiedFree:String(env.ADS_PLACES_IDS_ONLY_BILLING_VERIFIED||"").toLowerCase()==="true",
     adsEnabled:String(env.ADS_PLACES_DISCOVERY||"").toLowerCase()==="on"};
 }
+export function placesCityCooldownDays(env={}){const d=Number(env.ADS_PLACES_CITY_COOLDOWN_DAYS);return Number.isFinite(d)&&d>=0&&d<=60?Math.floor(d):7;}
 // Cost reserved for one request of a SKU (conservative for IDs-only until billing has been verified by the owner).
 export function placesReserveMicros(sku,settings){
   const list=PLACES_SKU_MICROS[sku];if(list==null)throw new Error("unknown Places SKU "+sku);
@@ -51,7 +52,7 @@ export async function placesBudgetStatus(env,nowMs=Date.now()){
 }
 // Atomic reservation before one potentially billable request. Today's allowance spreads what is left of the month over the days left,
 // so the budget cannot be spent in the first days. Returns {reserved,id} or {reserved:false,reason:"monthly_budget"|"daily_allowance"}.
-export async function reservePlacesRequest(env,{sku,purpose,market=null,nowMs=Date.now()}={}){
+export async function reservePlacesRequest(env,{sku,purpose,market=null,city=null,nowMs=Date.now()}={}){
   if(placesMarketBlocked(market))return {reserved:false,reason:"market_blocked"};
   const st=placesBudgetSettings(env),cost=placesReserveMicros(sku,st),m=monthStartIso(nowMs),day=dayStartIso(nowMs);
   const before=Number((await env.DB.prepare("SELECT COALESCE(SUM(CAST(json_extract(details_json,'$.reserved_micros') AS INTEGER)),0) s FROM system_events WHERE type='places_reserved' AND created_at>=? AND created_at<?").bind(m,day).first())?.s||0);
@@ -59,7 +60,7 @@ export async function reservePlacesRequest(env,{sku,purpose,market=null,nowMs=Da
   if(cost>0&&left<cost)return {reserved:false,reason:"monthly_budget"};
   const allowance=cost>0?Math.max(1,Math.floor(left/cost/daysLeftInMonth(nowMs))):1e6;
   const id=crypto.randomUUID(),t=new Date(nowMs).toISOString();
-  const details=JSON.stringify({sku,reserved_micros:cost,list_micros:PLACES_SKU_MICROS[sku],purpose:String(purpose||"").slice(0,40),market,month:m.slice(0,7)});
+  const details=JSON.stringify({sku,reserved_micros:cost,list_micros:PLACES_SKU_MICROS[sku],purpose:String(purpose||"").slice(0,40),market,...(city?{city:String(city).slice(0,60)}:{}),month:m.slice(0,7)});
   const r=await env.DB.prepare("INSERT INTO system_events(id,type,severity,message,details_json,created_at) SELECT ?,'places_reserved','info','Google Places request reserved (monthly budget)',?,? "
     +"WHERE (SELECT COALESCE(SUM(CAST(json_extract(details_json,'$.reserved_micros') AS INTEGER)),0) FROM system_events WHERE type='places_reserved' AND created_at>=?)+?<=? "
     +"AND (SELECT COUNT(*) FROM system_events WHERE type='places_reserved' AND created_at>=?)<?")
@@ -105,7 +106,15 @@ export async function placesIdsOnlySearch(env,{market,city,purpose="ads_discover
   if(placesMarketBlocked(market)||!normalizeAdsMarket(market))return {ok:false,reason:placesMarketBlocked(market)?"market_blocked":"market_unknown",blocked:true,policy:PLACES_BLOCKED_MARKETS.IRAN,place_ids:[]};
   if(!env.GOOGLE_PLACES_API_KEY)return {ok:false,reason:"not_configured",place_ids:[]};
   const body=placesIdsOnlyRequest({market,city});if(!body)return {ok:false,reason:"city_bounds_missing",place_ids:[]};
-  const slot=await reservePlacesRequest(env,{sku:"ids_only",purpose,market});
+  // The same city query returns the same places: a city answered successfully within the cooldown is not searched again (no new IDs,
+  // budget kept). ADS_PLACES_CITY_COOLDOWN_DAYS (default 7, 0 = off). Earlier reservations without a city never block.
+  const coolDays=placesCityCooldownDays(env);
+  if(coolDays>0){
+    const since=new Date(Date.now()-coolDays*86400000).toISOString();
+    const recent=await env.DB.prepare("SELECT 1 x FROM system_events WHERE type='places_reserved' AND created_at>=? AND json_extract(details_json,'$.market')=? AND json_extract(details_json,'$.city')=? AND json_extract(details_json,'$.status')=200 LIMIT 1").bind(since,normalizeAdsMarket(market),city).first().catch(()=>null);
+    if(recent)return {ok:false,reason:"city_recently_searched",cooldown_days:coolDays,place_ids:[]};
+  }
+  const slot=await reservePlacesRequest(env,{sku:"ids_only",purpose,market,city});
   if(!slot.reserved)return {ok:false,reason:slot.reason,budget_limited:true,place_ids:[]};
   let r;
   try{r=await fetchImpl("https://places.googleapis.com/v1/places:searchText",{method:"POST",headers:{"Content-Type":"application/json","X-Goog-Api-Key":env.GOOGLE_PLACES_API_KEY,"X-Goog-FieldMask":"places.id"},body:JSON.stringify(body),signal:AbortSignal.timeout(timeoutMs)});}

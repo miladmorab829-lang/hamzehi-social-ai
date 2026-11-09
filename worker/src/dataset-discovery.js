@@ -271,6 +271,16 @@ export async function ingestDatasetCandidates(env, { settings = discoverySetting
     if (!ids.length) { skip("no_domain_identity"); continue; }
     const known = await env.DB.prepare(`SELECT lead_id FROM lead_identities WHERE identity_key IN (${ids.map(() => "?").join(",")}) LIMIT 1`).bind(...ids.map(x => x.identity_key)).first().catch(() => null);
     if (known) { skip("identity_exists"); continue; }
+    // The same business under another website (the datasets sometimes list a mall, reseller or old page): the exact same name in the same
+    // market is already a lead → skipped. Two known, different cities are two branches, so they are kept apart.
+    const nm = String(c.name || "").normalize("NFKC").trim().toLowerCase();
+    if (nm) {
+      // the city is compared both as the dataset wrote it («Baghdad») and as the canonical market city («بغداد»)
+      const rawCity = c.city || null, cityKey = resolveMarketCity(c.city, c.market) || rawCity;
+      const same = await env.DB.prepare("SELECT id FROM leads WHERE lower(trim(name))=? AND json_extract(notes,'$.target_market')=? AND (? IS NULL OR COALESCE(json_extract(notes,'$.city'),json_extract(notes,'$.dataset_claims.city')) IS NULL OR json_extract(notes,'$.city') IN (?,?) OR lower(trim(json_extract(notes,'$.dataset_claims.city'))) IN (lower(trim(?)),?)) LIMIT 1")
+        .bind(nm, c.market, rawCity, cityKey, rawCity, rawCity, cityKey).first().catch(() => null);
+      if (same) { skip("name_exists"); continue; }
+    }
     const saved = await helpers.upsert(env, { name: c.name || c.host, contact: c.url, stage: "discovered", priority: "low", source: "dataset_discovery", meta });
     if (saved?.conflict) { skip("identity_conflict"); continue; }
     if (saved?.created) out.created[c.market]++; else skip("not_created");
