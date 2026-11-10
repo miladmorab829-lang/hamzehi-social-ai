@@ -1,0 +1,67 @@
+[
+  {
+    "reply": "سلام! مدل‌های جعبه‌هامون ایناست: 2 تکه، 3 تکه، 3 تکه کج، کشویی بگ‌دار، کشویی روبان‌دار و کشویی کج (برای نیم سرویس 13x16 مدل‌های 2 تکه، 3 تکه، 3 تکه کج و کشویی بگ‌دار موجوده). مثلاً در کشویی بگ‌دار علاوه بر چاپ طلاکوب، نقره‌کوب یا مشکی‌کوب روی درب و بدنهٔ میانی، روی بگِ لایهٔ بیرونی هم می‌شه طرح، اطلاعات یا پترن چاپ کرد. برای دیدن ظاهر و تفاوت مدل‌ها از نزدیک، سری به https://www.hamzehibox.com بزنید و هر کدوم رو پسندیدید اسم یا عکسش رو همین‌جا بفرستید.",
+    "interpretation": {
+      "primary_intent": "product_info",
+      "product_key": null,
+      "reference": "none",
+      "requested_size": null,
+      "requested_color": [],
+      "requested_structure": null,
+      "requested_printing": null,
+      "quantity": null,
+      "ambiguity": "none",
+      "confidence": "high"
+    },
+    "requests": [
+      "greeting",
+      "product_info"
+    ]
+  },
+  {
+    "reply": "بله، برای جعبه انگشتر رنگ سبز سلفون و سبز تیفانی سلفون داریم 🌿 جعبه انگشتر در دو سایز موجوده:\n• انگشتر بزرگ 6x6: مدل‌های 3 تکه، 3 تکه کج، کشویی بگ‌دار، کشویی روبان‌دار و کشویی کج\n• انگشتر کوچک 5x5: مدل‌های 2 تکه، 3 تکه، 3 تکه کج و کشویی کج\nکدوم سایز به انگشترهاتون نزدیک‌تره؟",
+    "interpretation": {
+      "primary_intent": "product_info",
+      "product_key": null,
+      "reference": "none",
+      "requested_size": null,
+      "requested_color": [
+        "سبز سلفون",
+        "سبز تیفانی سلفون"
+      ],
+      "requested_structure": null,
+      "requested_printing": null,
+      "quantity": null,
+      "ambiguity": "product",
+      "confidence": "high"
+    },
+    "requests": [
+      "colors_available",
+      "product_info",
+      "size"
+    ]
+  },
+  {
+    "reply": "بله، برای جعبه انگشتر دو رنگ سبز داریم: سبز سلفون و سبز تیفانی سلفون (رنگ بیرون و داخل جعبه رو هم می‌تونید جدا انتخاب کنید). سایزها و مدل‌ها:\n• انگشتر بزرگ 6x6: 3 تکه، 3 تکه کج، کشویی بگ‌دار، کشویی روبان‌دار، کشویی کج\n• انگشتر کوچک 5x5: 2 تکه، 3 تکه، 3 تکه کج، کشویی کج\nکدوم سایز به کارتون نزدیک‌تره؟",
+    "interpretation": {
+      "primary_intent": "product_info",
+      "product_key": null,
+      "reference": "none",
+      "requested_size": null,
+      "requested_color": [
+        "سبز سلفون",
+        "سبز تیفانی سلفون"
+      ],
+      "requested_structure": null,
+      "requested_printing": null,
+      "quantity": null,
+      "ambiguity": "product",
+      "confidence": "high"
+    },
+    "requests": [
+      "colors_available",
+      "product_info",
+      "size"
+    ]
+  }
+]

@@ -1,0 +1,227 @@
+[
+  {
+    "id": "knowledge-fact-owner-telegram-20261109-06",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "included_services_lid_spec",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"چاپ درب\",\"طلاکوب\",\"نقره‌کوب\",\"مشکی‌کوب\",\"لوگو\"],\"kind\":\"capability\",\"labels\":{\"fa\":\"چاپ رایگان روی درب\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"چاپ روی درب جعبه به انتخاب مشتری طلاکوب، نقره‌کوب یا مشکی‌کوب است و رایگان انجام می‌شود.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-owner-telegram-20261109-07",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "included_services_lid_spec",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"طباعة الغطاء\",\"ذهبية\",\"فضية\",\"سوداء\",\"الشعار\"],\"kind\":\"capability\",\"labels\":{\"ar\":\"طباعة الغطاء المجانية\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"طباعة غطاء العلبة مجانية؛ يختار الزبون الطباعة الذهبية أو الفضية أو السوداء.\"}",
+    "market": "ARAB",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-owner-telegram-20261109-08",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "lid_contact_layout",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"زیر لوگو\",\"آدرس\",\"تلفن\",\"اینستاگرام\",\"خوانایی\"],\"kind\":\"capability\",\"labels\":{\"fa\":\"اطلاعات زیر لوگوی درب\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"زیر لوگوی روی درب می‌توان آدرس، شماره تلفن و آدرس اینستاگرام را درج کرد، به شرط فضای کافی و حفظ ظاهر و خوانایی طرح.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-owner-telegram-20261109-09",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "lid_contact_layout",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"تحت الشعار\",\"العنوان\",\"الهاتف\",\"إنستغرام\",\"وضوح\"],\"kind\":\"capability\",\"labels\":{\"ar\":\"معلومات التواصل تحت الشعار\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"يمكن إضافة العنوان ورقم الهاتف وحساب إنستغرام تحت شعار الغطاء إذا توفرت مساحة كافية مع الحفاظ على شكل التصميم ووضوحه.\"}",
+    "market": "ARAB",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-owner-telegram-20261109-10",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "bag_drawer_print_surfaces",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"کشویی بگ‌دار\",\"بدنه میانی\",\"بگ\",\"پترن\",\"چاپ\"],\"kind\":\"capability\",\"labels\":{\"fa\":\"محل‌های چاپ کشویی بگ‌دار\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"در کشویی بگ‌دار، چاپ طلاکوب، نقره‌کوب یا مشکی‌کوب روی درب و بدنهٔ میانی و چاپ طرح، اطلاعات یا پترن روی بگِ لایهٔ بیرونی امکان‌پذیر است.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-owner-telegram-20261109-11",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "bag_drawer_print_surfaces",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"جرارة مع كيس\",\"الغطاء\",\"الجسم الأوسط\",\"الكيس\",\"طباعة\"],\"kind\":\"capability\",\"labels\":{\"ar\":\"مواضع الطباعة للجرارة مع كيس\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"للعلبة الجرارة مع كيس: طباعة ذهبية أو فضية أو سوداء على الغطاء والجسم الأوسط، وطباعة تصميم أو معلومات أو نقش متكرر على الكيس الخارجي.\"}",
+    "market": "ARAB",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-owner-telegram-20261109-12",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "color_selection_website",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"انتخاب رنگ\",\"رنگ\",\"مدل\",\"سایت\",\"تلگرام\"],\"kind\":\"rule\",\"labels\":{\"fa\":\"راهنمای انتخاب رنگ از سایت\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"اگر پاسخ دقیق درباره رنگ نداری، مشتری را به https://www.hamzehibox.com بفرست تا رنگ و مدل را انتخاب کند و نام یا تصویر انتخابش را در تلگرام بفرستد.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-owner-telegram-20261109-13",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "color_selection_website",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"لون\",\"اختيار اللون\",\"الموديل\",\"الموقع\",\"تلغرام\"],\"kind\":\"rule\",\"labels\":{\"ar\":\"اختيار اللون من الموقع\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"إذا لم تعرف جواب اللون بدقة، وجّه الزبون إلى https://www.hamzehibox.com لاختيار اللون والموديل، ثم يرسل اسم أو صورة اختياره في تلغرام.\"}",
+    "market": "ARAB",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-1ce903dc44bd3ce041e4-01",
+    "domain": "knowledge",
+    "entity_key": "۳ تکه",
+    "attribute": "default_recommended_color_combination",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"جعبه ۳ تکه\",\"ترکیب رنگ پیشنهادی\",\"قسمت بالا\",\"قسمت وسط\",\"قسمت پایین\"],\"kind\":\"rule\",\"labels\":{\"fa\":\"ترکیب رنگ پیشنهادی پیش‌فرض\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"پیشنهاد پیش‌فرض این است که قسمت بالا و پایین یک رنگ باشند و قسمت وسط رنگ دیگری از رنگ‌های موجود باشد.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-1ce903dc44bd3ce041e4-02",
+    "domain": "knowledge",
+    "entity_key": "۳ تکه",
+    "attribute": "customer_color_selection",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"انتخاب رنگ توسط مشتری\",\"رنگ بالا\",\"رنگ وسط\",\"رنگ پایین\",\"رنگ‌های موجود\"],\"kind\":\"capability\",\"labels\":{\"fa\":\"انتخاب رنگ توسط مشتری\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"مشتری می‌تواند رنگ قسمت بالا، وسط و پایین را خودش از بین رنگ‌های موجود انتخاب کند.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-1ce903dc44bd3ce041e4-03",
+    "domain": "knowledge",
+    "entity_key": "۳ تکه",
+    "attribute": "allowed_combination",
+    "value_json": "{\"commercial\":false,\"conditions\":[{\"field\":\"message\",\"op\":\"contains\",\"value\":\"درخواست مشتری\"}],\"keywords\":[\"سه رنگ متفاوت\",\"رنگ‌های متفاوت\",\"درخواست مشتری\",\"جعبه ۳ تکه\"],\"kind\":\"relation\",\"labels\":{\"fa\":\"امکان انتخاب سه رنگ متفاوت\"},\"priority\":50,\"relation\":{\"members\":{\"bottom\":\"رنگ متفاوت\",\"middle\":\"رنگ متفاوت\",\"top\":\"رنگ متفاوت\"},\"name\":\"allowed_combination\"},\"schema\":\"hamzehi.knowledge.v1\",\"value\":true}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-1ce903dc44bd3ce041e4-04",
+    "domain": "knowledge",
+    "entity_key": "۳ تکه",
+    "attribute": "unapproved_color_status",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"رنگ خارج از فهرست\",\"تأیید مالک\",\"موجود بودن رنگ\",\"قابل تولید بودن رنگ\"],\"kind\":\"prohibition\",\"labels\":{\"fa\":\"رنگ خارج از فهرست بدون تأیید مالک\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"رنگ خارج از فهرست رنگ‌های موجود، بدون تأیید مالک، موجود یا قابل تولید فرض نشود.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-1ce903dc44bd3ce041e4-05",
+    "domain": "knowledge",
+    "entity_key": "۳ تکه",
+    "attribute": "default_combination_is_not_production_constraint",
+    "value_json": "{\"commercial\":true,\"conditions\":[],\"keywords\":[\"محدودیت تولید\",\"پیشنهاد پیش‌فرض\",\"ترکیب رنگ\"],\"kind\":\"rule\",\"labels\":{\"fa\":\"پیشنهاد پیش‌فرض محدودیت تولید نیست\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"ترکیب پیشنهادی پیش‌فرض فقط پیشنهاد است و محدودیت تولید نیست.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-98997e7556517e250335-01",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "included_services",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"الطباعة\",\"التصميم\",\"الكليشة\",\"كليشة\",\"مجانية\",\"مجاني\",\"بفلوس\",\"كلفة\",\"ضمن السعر\",\"سعر العلبة\"],\"kind\":\"capability\",\"labels\":{\"ar\":\"الطباعة القياسية والتصميم وصنع الكليشة ضمن سعر العلبة\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"الطباعة القياسية والتصميم وصنع الكليشة مشمولة بسعر العلبة بدون كلفة إضافية.\"}",
+    "market": "ARAB",
+    "version": 3
+  },
+  {
+    "id": "knowledge-fact-teach-c19a49d1618982f43fbc-01",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "included_services",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"چاپ\",\"طراحی\",\"کلیشه\",\"ساخت کلیشه\",\"چاپ رایگان\",\"کلیشه رایگان\",\"هزینه چاپ\",\"هزینه کلیشه\"],\"kind\":\"capability\",\"labels\":{\"fa\":\"چاپ، طراحی و ساخت کلیشه رایگان (ایران)\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"هزینه چاپ، طراحی و ساخت کلیشه رایگان است.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-01",
+    "domain": "knowledge",
+    "entity_key": "مدل ۲ تکه",
+    "attribute": "independent_sections",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"مدل ۲ تکه\",\"رویه\",\"کف\",\"بخش مستقل\"],\"kind\":\"fact\",\"labels\":{\"en\":\"Independent sections of 2-piece model\",\"fa\":\"بخش‌های مستقل مدل ۲ تکه\"},\"multi\":true,\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"رویه\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-05",
+    "domain": "knowledge",
+    "entity_key": "مدل ۳ تکه",
+    "attribute": "independent_sections",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"مدل ۳ تکه\",\"بالا\",\"وسط\",\"پایین\",\"بخش مستقل\"],\"kind\":\"fact\",\"labels\":{\"en\":\"Independent sections of 3-piece model\",\"fa\":\"بخش‌های مستقل مدل ۳ تکه\"},\"multi\":true,\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"پایین\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-07",
+    "domain": "knowledge",
+    "entity_key": "مدل کشویی",
+    "attribute": "independent_sections",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"مدل کشویی\",\"بیرونی\",\"داخل\",\"بخش مستقل\"],\"kind\":\"fact\",\"labels\":{\"en\":\"Independent sections of sliding model\",\"fa\":\"بخش‌های مستقل مدل کشویی\"},\"multi\":true,\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"داخل\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-08",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "section_color_source",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"رنگ استاندارد\",\"رنگ موجود\",\"رنگ تأییدشده\",\"انتخاب رنگ بخش\"],\"kind\":\"constraint\",\"labels\":{\"en\":\"Section color source\",\"fa\":\"منبع رنگ هر بخش\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"رنگ هر بخش فقط از رنگ‌های استاندارد موجود و تأییدشده انتخاب می‌شود.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-09",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "independent_section_color_selection",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"انتخاب جداگانه رنگ\",\"رنگ هر بخش\",\"انتخاب رنگ مشتری\"],\"kind\":\"capability\",\"labels\":{\"en\":\"Independent color selection for each section\",\"fa\":\"انتخاب جداگانه رنگ هر بخش\"},\"multi\":true,\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"مشتری می‌تواند رنگ هر بخش را جداگانه انتخاب کند.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-10",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "ai_color_suggestion_rule",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"پیشنهاد رنگ توسط AI\",\"رنگ موجود\",\"رنگ استاندارد\"],\"kind\":\"rule\",\"labels\":{\"en\":\"AI color suggestion rule\",\"fa\":\"قاعده پیشنهاد رنگ توسط هوش مصنوعی\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"AI فقط از رنگ‌های موجود پیشنهاد می‌دهد.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-11",
+    "domain": "knowledge",
+    "entity_key": "مدل ۳ تکه",
+    "attribute": "recommended_color_combination",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"ترکیب پیشنهادی رنگ\",\"بالا و پایین یک‌رنگ\",\"وسط رنگ دیگر\",\"مدل ۳ تکه\"],\"kind\":\"relation\",\"labels\":{\"en\":\"Recommended color combination for 3-piece model\",\"fa\":\"ترکیب رنگ پیشنهادی مدل ۳ تکه\"},\"priority\":50,\"relation\":{\"members\":{\"بالا\":\"یک‌رنگ\",\"وسط\":\"رنگ دیگر\",\"پایین\":\"یک‌رنگ\"},\"name\":\"recommended_combination\"},\"schema\":\"hamzehi.knowledge.v1\",\"value\":true}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-12",
+    "domain": "knowledge",
+    "entity_key": "مدل ۳ تکه",
+    "attribute": "recommended_combination_is_optional",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"ترکیب اجباری نیست\",\"ترکیب پیشنهادی\",\"انتخاب رنگ مدل ۳ تکه\"],\"kind\":\"rule\",\"labels\":{\"en\":\"Recommended combination is optional\",\"fa\":\"اختیاری بودن ترکیب پیشنهادی\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"ترکیب پیشنهادی «بالا و پایین یک‌رنگ + وسط رنگ دیگر» اجباری نیست.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-13",
+    "domain": "knowledge",
+    "entity_key": "global",
+    "attribute": "owner_approval_for_out_of_list_color",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"رنگ خارج از فهرست\",\"تأیید مالک\",\"رنگ سفارشی\"],\"kind\":\"constraint\",\"labels\":{\"en\":\"Owner approval for colors outside the available list\",\"fa\":\"نیاز به تأیید مالک برای رنگ خارج از فهرست\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"رنگ خارج از فهرست موجود نیازمند تأیید مالک است.\"}",
+    "market": "IRAN",
+    "version": 1
+  },
+  {
+    "id": "knowledge-fact-teach-d86ac9bc9e597ac3c176-01",
+    "domain": "knowledge",
+    "entity_key": "انگشتر کوچک",
+    "attribute": "allowed_combination",
+    "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"انگشتر کوچک\",\"رنگ مشکی\",\"روبان طلایی\",\"ترکیب رنگ\",\"مجاز\"],\"kind\":\"relation\",\"labels\":{\"fa\":\"برای مدل انگشتر کوچک، رنگ مشکی فقط با روبان طلایی مجاز است\"},\"priority\":50,\"relation\":{\"members\":{\"color\":\"مشکی\",\"ribbon_color\":\"طلایی\"},\"name\":\"allowed_combination\",\"only_with\":[\"ribbon_color\"]},\"schema\":\"hamzehi.knowledge.v1\",\"value\":true}",
+    "market": "IRAN",
+    "version": 1
+  }
+]

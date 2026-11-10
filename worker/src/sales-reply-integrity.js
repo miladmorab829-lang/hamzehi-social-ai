@@ -37,7 +37,16 @@ export function catalogClaimIssue(text,catalog=[],selectedKey=null){
   const chosen=anchors.filter(a=>!anchors.some(b=>b!==a&&b.at<=a.at&&b.end>=a.end&&(b.end-b.at>a.end-a.at))).sort((a,b)=>a.at-b.at);
   if(!chosen.length){if(/^(?:اگه|اگر|اگ|لو|إذا|if)(?=$|\s)/iu.test(s.trim()))continue;const c=names.find(c=>c.key===selectedKey);if(c)chosen.push({at:0,end:0,c});}
   for(let n=0;n<chosen.length;n++){
-   const a=chosen[n],part=s.slice(n===0?0:a.at,chosen[n+1]?.at??s.length),spec=typedSpecifications(part),dims=spec.dimensions;
+   const a=chosen[n],end=chosen[n+1]?.at??s.length;
+   let start=n===0?0:a.at;
+   // A bullet or parenthetical product clause with ITS OWN model list does not inherit the preceding list's last model.
+   // Retain preposed dimensions ("12x12 for small ring") and clauses without their own model list for tuple validation.
+   if(n===0){const boundary=Math.max(s.lastIndexOf('•',a.at),s.lastIndexOf('(',a.at)),tail=s.slice(a.end,end),prefix=s.slice(0,boundary);
+    const list=allModels.slice().sort((a,b)=>b.length-a.length).reduce((p,m)=>({text:p.text.replaceAll(m,' '),count:p.count+Number(p.text.includes(m))}),{text:prefix,count:0});
+    const bare=list.text.split(/\s+/u).filter(w=>!['و','یا','او','أو','and','or'].includes(w)).join('').replace(/[،:;\[\]]/gu,'');
+    if(boundary>=0&&list.count>1&&!bare&&allModels.some(m=>tail.includes(m)))start=boundary;
+   }
+   const part=s.slice(start,end),spec=typedSpecifications(part),dims=spec.dimensions;
    let variants=a.c.variants;
    if(dims.length){if(!dims.every(d=>variants.some(v=>dimensionKey(v.size)===d)))return 'catalog_size_mismatch';variants=variants.filter(v=>dims.includes(dimensionKey(v.size)));}
    const spans=[...part.matchAll(/\d+\s*تکه(?:\s+کج)?/gu)].map(m=>({at:m.index,end:m.index+m[0].length,value:m[0]}));

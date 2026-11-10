@@ -8119,7 +8119,7 @@ function salesBrainFactCategory(domain,attribute){
   if(/deposit|payment|commercial/.test(key))return "payment";if(/production|delivery/.test(key))return "production";
   if(/shipping|destination/.test(key))return "shipping";if(/color/.test(key))return "color";
   if(/size/.test(key))return "size";if(/material/.test(key))return "material";
-  if(/printing|foil|logo|brand|configuration|capability/.test(key))return "capability";
+  if(/printing|print_surfaces|foil|logo|brand|configuration|capability/.test(key))return "capability";
   return "availability";
 }
 function salesBrainAuthoritativeFacts({knowledge=[],pricingFacts=[],customerFacts=[],visualFacts=[],ownerFacts=[]}={}){
@@ -9543,11 +9543,19 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // Informational comparisons need the facts of every product explicitly named NOW. This scope does not select a priced
     // product, write a deal, expand colour permissions or change the deterministic rule/relation scope.
     const aiMentioned=salesMentionedEntities(kgRecords,[row.message],{allowMultiple:true});
-    const aiEntities=aiMentioned.length>1?aiMentioned:kgEntities.matched;
-    const aiScope=aiMentioned.length>1?kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||aiMentioned.includes(r.entity_key)):kgScope;
+    const modelIdentity=s=>replyKey(s).replace(/^مدل\s+/u,'').replace(/دو\s*تکه/gu,'2 تکه').replace(/سه\s*تکه/gu,'3 تکه');
+    const constructionNames=[...new Set((pricing?.catalog_summary||[]).flatMap(c=>c.models||[]).map(modelIdentity))];
+    const modelComparison=/تفاوت|فرق|مقایسه|compar|differ/iu.test(row.message)&&
+      (serviceCatalogQuestion(row.message)||/تکه|کشویی|جرار|piece|drawer/iu.test(row.message));
+    const constructionEntities=modelComparison?[...new Set(kgRecords.map(r=>r.entity_key).filter(k=>{
+      const key=modelIdentity(k);return constructionNames.includes(key)||key==='کشویی'&&constructionNames.some(n=>n.startsWith(key+' '));
+    }))]:[];
+    // A general construction comparison has no named product. Current explicit entities outrank an older deal's family.
+    const aiEntities=modelComparison&&constructionEntities.length?[...new Set([...aiMentioned,...constructionEntities])]:aiMentioned.length?aiMentioned:kgEntities.matched;
+    const aiScope=modelComparison||aiMentioned.length?kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||aiEntities.includes(r.entity_key)):kgScope;
     const aiRelevant=new Set(matchKnowledgeQuestion(row.message,aiScope,{entities:aiEntities}).flatMap(g=>g.records.map(r=>r.id)));
     const aiKnowledge=aiScope.filter(r=>r.concept!=="exterior_colors"&&!knowledgeIsCommercial(r.concept,r.envelope))
-      .sort((a,b)=>Number(aiRelevant.has(b.id))-Number(aiRelevant.has(a.id)));
+      .sort((a,b)=>Number(modelComparison&&constructionEntities.includes(b.entity_key))-Number(modelComparison&&constructionEntities.includes(a.entity_key))||Number(aiRelevant.has(b.id))-Number(aiRelevant.has(a.id)));
     const knowledgeCtx=aiKnowledge.map(r=>({id:r.id,version:r.version,topic:r.envelope?.labels?.[lang]||r.concept,about:r.entity_key,value:valueText(r)}));
     if(approvedInformation)knowledgeCtx.unshift({topic:'approved_information',about:conversationMarket,value:approvedInformation.text});
     const dealCtx=promptCandidate?{product:promptCandidate.product?.name||null,model:promptCandidate.requirements?.configuration||null,size:promptCandidate.requirements?.size||null,quantity:promptCandidate.quantity??null,status:promptCandidate.status,quantity_scope:promptCandidate.quantity_provenance?.role||null,order_registered:!!promptCandidate.order_id}:null;
@@ -10294,7 +10302,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // Keep transaction and pricing actions authoritative. The payment-specific routes below still run unchanged.
   const protectedServiceAction=['policy_constraint','answer_price','negotiate','handle_objection','price_owner','moq_owner','accept_offer','accepted','quote','order_status','acknowledge_rejection'].includes(action)||(action==='wait_for_owner'&&['unsupported_price','unauthorized_discount','unusual_commercial_terms','unclear_moq'].includes(waitingOn));
   if(serviceTurn&&!protectedServiceAction){
-    const incompleteCatalog=catalogAsk&&catalogNames.length&&!catalogNames.some(n=>draft.includes(n));
+    const validModelComparison=/تفاوت|فرق|مقایسه|compar|differ/iu.test(catalogQuestion)&&/^ai/.test(replySource)&&validation?.valid===true;
+    const incompleteCatalog=catalogAsk&&catalogNames.length&&!validModelComparison&&!catalogNames.some(n=>draft.includes(n));
     if(serviceMarketQuestion||incompleteCatalog||needsOwner||ai?.owner_escalation_needed||serviceFollowupPromise(draft)||['knowledge_owner','commercial_owner','owner_followup'].includes(action)){
       if(serviceMarketQuestion){action='ask_destination';askedField='destination';draft=salesDraft;}
       else if(catalogAsk&&catalogNames.length){action='answer_catalog';askedField=null;draft=language==='Iraqi Arabic'?`الموديلات في قائمتنا: ${catalogNames.join('، ')}.${catalogModels.length?' الأنواع: '+catalogModels.join('، ')+'.':''} أي موديل تفضّل؟`:`برای ${halfSetAsked?'نیم‌ست':'جعبه'}، گزینه‌های فهرست فعلی: ${catalogNames.join('، ')}.${catalogModels.length?' مدل‌ها: '+catalogModels.join('، ')+'.':''} کدام مدل را می‌پسندید؟`;}
