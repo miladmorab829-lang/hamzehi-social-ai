@@ -8556,6 +8556,81 @@ function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memo
   }
   return {status:"none"};
 }
+
+// Phase48: informational construction identities only. Never used to select a priced variant or write customer facts.
+const salesComparisonKey=v=>salesVariantTokens(String(v||'').replace(/(دو|سه)[\s\u200c]*(تیکه|تکه)/gu,'$1 $2').replace(/روبان/gu,'ربان')).filter(w=>w!=='مدل').join(' ');
+const salesComparisonCue=v=>/تفاوت|فرق|مقایسه|compar|differ|توضیح|تضویح|شرح|اشرح/iu.test(v);
+const salesComparisonFollowup=v=>/(?:دیگه|دیگر|بقیه|باقی|الباقی|الاخر|الثانی)/u.test(salesNormal(v))&&/(?:مدل|نوع|اثنین|اثنین|دومدل|اون|هذ)/u.test(salesNormal(v));
+function salesComparisonMentions(text,names,{typos=false}={}){
+  const words=salesComparisonKey(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean),hits=[];
+  const edit=(a,b)=>a===b||(a.startsWith('و')&&salesVariantTokens(a.slice(1)).join(' ')===b)?0:typos&&a.length>=3&&b.length>=3&&(salesEditDistanceAtMostOne(a,b)||a.length===b.length&&[...a].some((_,i)=>i<a.length-1&&a.slice(0,i)+a[i+1]+a[i]+a.slice(i+2)===b))?1:99;
+  for(const name of names){const ts=salesComparisonKey(name).split(' ');for(let i=0;i+ts.length<=words.length;i++){const cost=ts.reduce((n,t,k)=>n+edit(words[i+k],t),0);if(cost<=(typos?2:0))hits.push({name,start:i,end:i+ts.length,cost});}}
+  return [...new Set(hits.filter(h=>!hits.some(o=>o!==h&&o.start<=h.start&&o.end>=h.end&&(o.end-o.start>h.end-h.start||o.cost<h.cost))&&!hits.some(o=>o.name!==h.name&&o.start===h.start&&o.end===h.end&&o.cost===h.cost)).map(h=>h.name))];
+}
+
+function salesComparisonCoverage(text,names,records=[],universe=names){
+  const covered=new Set(),gaps=new Set();
+  for(const section of String(text||'').split(/[\n•]/u)){
+    let scope=null;
+    for(const clause of splitSalesReply(section)){
+    const mentioned=salesComparisonMentions(clause,universe),found=mentioned.filter(n=>names.includes(n));
+    if(mentioned.length&&!found.length){scope=null;continue;}
+    if(found.length>1){scope=null;continue;}
+    if(found.length===1)scope=found[0];
+    if(!scope)continue;
+    const name=scope,normal=salesNormal(clause);
+    const gap=/(?:اطلاعات|شرح|جزئیات|مکانیزم|توضیح|تفاصیل|معلومات).*(?:ندارم|نیست|ناقص|کافی ندار|کامل ندار|مو واضح|مو کامله|ما عندی)/u.test(normal);
+    const ignore=new Set([...salesVariantTokens(name),'از','به','در','را','این','است','دارد','می','شود','برای','مدل','جعبه','موجود','اطلاعات','مشتری','تواند','خودش','انتخاب','کند','میتواند','امکان','پذیر','اطلاعاتش','فهرست','سایت','تأییدشده','ثبت']);
+    const words=new Set(salesVariantTokens(clause));
+    const grounded=records.filter(r=>salesComparisonRecordModels(r,[name],universe).length).some(r=>{
+      const e=r.envelope;if(!['fact','capability','availability'].includes(e?.kind)||e.conditions?.length||e.effect||e.relation||typeof e.value!=='string'||knowledgeIsCommercial(r.concept,e))return false;
+      const terms=[...new Set(salesVariantTokens(e.value).filter(t=>t.length>=3&&!ignore.has(t)))];
+      return terms.length>0&&terms.filter(t=>words.has(t)).length>=Math.min(3,terms.length);
+    });
+    if(gap||grounded){covered.add(name);if(gap)gaps.add(name);}
+    }
+  }
+  return {addressed_models:[...covered],missing_detail_models:[...gaps],unanswered_models:names.filter(n=>!covered.has(n))};
+}
+function salesComparisonRecordModels(r,names,universe=names){
+  const key=salesComparisonKey(r.entity_key);
+  return names.filter(n=>salesComparisonKey(n)===key||key==='کشویی'&&salesComparisonKey(n).startsWith('کشویی ')||
+    knowledgeText(r.entity_key)==='global'&&salesComparisonMentions(String(r.envelope?.value||''),universe).includes(n));
+}
+async function salesComparisonContext(env,{row,market,catalog,financial,records=[]}){
+  if(financial||!market)return null;
+  const names=[...new Map(catalog.flatMap(c=>c.models||[]).map(n=>[salesComparisonKey(n),n])).values()];
+  const requested=salesComparisonMentions(row.message,names,{typos:true});
+  if(requested.length>=2&&salesComparisonCue(row.message))return {requested_models:requested,source_message_id:row.id,market,followup:false};
+  if(!salesComparisonFollowup(row.message)||requested.length)return null;
+  const currentWords=new Set(salesTokens(row.message));
+  if(/(?:سوال|سؤال|موضوع)\s*(?:دیگه|دیگر|جدید)/u.test(salesNormal(row.message))||catalog.some(c=>salesTokens(c.product).filter(w=>w.length>=3&&!GALLERY_GENERIC.has(w)).some(w=>currentWords.has(w))))return null;
+  // Reconstruct only from scoped, non-trashed, post-reset inbound rows and their confirmed SENT replies.
+  // Existing decision metadata records requests; an unsent/ambiguous draft never establishes coverage.
+  const history=(await env.DB.prepare("SELECT i.id,i.message,e.details_json,o.id outreach_id,o.message sent_reply FROM inbox_messages i LEFT JOIN system_events e ON e.id='sales-brain:'||i.id LEFT JOIN lead_outreach o ON o.inbox_message_id=i.id AND o.lead_id=i.lead_id AND o.conversation_id=i.conversation_id AND o.status='sent' WHERE i.lead_id=? AND i.conversation_id=? AND i.id<>? AND i.status<>'trashed' AND i.created_at>? AND i.created_at<=? ORDER BY i.created_at DESC LIMIT 12").bind(row.lead_id,row.conversation_id,row.id,row.context_from||'',row.created_at).all()).results||[];
+
+  const sentReplies=[];
+  for(const h of history){
+    let d;try{d=JSON.parse(h.details_json||'null');}catch{}
+    if(d?.knowledge_market?.conversation_market!==market)return null;
+    if(h.outreach_id)sentReplies.push({id:h.outreach_id,text:h.sent_reply});
+    const all=salesComparisonMentions(h.message,names,{typos:true});
+    if(all.length>=2&&salesComparisonCue(h.message)){
+      const covered=new Set(),gaps=new Set();
+      for(const reply of sentReplies){const c=salesComparisonCoverage(reply.text,all,records,names);for(const n of c.addressed_models)if(!covered.has(n)){covered.add(n);if(c.missing_detail_models.includes(n))gaps.add(n);}}
+      const remaining=all.filter(n=>!covered.has(n)),pending=remaining.length?remaining:[...gaps];
+      if(!pending.length)return null;
+      const countWords=salesNormal(row.message).replace(/(دو|سه|چهار|پنج|شش)(مدل)/gu,'$1 $2');
+      const count=countWords.match(/(?:^|\s)(دو|سه|چهار|پنج|شش|[2-6])\s*(?:تا\s*)?مدل/u);
+      const expected=count?Number(SALES_NUMBER_WORDS.get(count[1])||count[1]):null;
+      return {requested_models:expected&&expected!==pending.length?[]:pending,unresolved_models:pending,original_models:all,source_message_id:h.id,sent_outreach_ids:sentReplies.map(r=>r.id),market,followup:true,clarification_needed:!!expected&&expected!==pending.length,previous_coverage:{addressed_models:[...covered],missing_detail_models:[...gaps],unanswered_models:remaining}};
+    }
+    const courtesy=/^(?:ممنون|مرسی|باشه|سپاس|متشکرم|شکرا|شکراً|تمام|تسلم)[\s.!،؟]*$/u.test(salesNormal(h.message));
+    if(!salesComparisonFollowup(h.message)&&!courtesy&&!d?.ai_brain?.comparison?.followup)return null;
+  }
+  return null;
+}
+
 // The variant of a grouped list product the customer means: the size (when the product has several) and the configuration, read from
 // their messages, newest first. A configuration counts only as the WHOLE owner phrase («۳ تکه کج», not «۳ تکه» inside it); the longest
 // phrase wins; spoken numbers and «تیکه» are read like digits and «تکه». Nothing determinable → the one missing choice is asked.
@@ -9532,7 +9607,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const informationRequest=aiFirstOn&&!orderStatusAsked&&!orderStatusMixed&&!formalQuoteReply?approvedServiceRequest(resumeService||row.message):null;
   let approvedInformation=await loadApprovedGuidance(env,{market:conversationMarket,request:informationRequest}).catch(()=>null);
   let turnPolicy=planSalesTurn({enabled:aiFirstOn}),meaning=null;
-  let ai=null,aiAllowedNumbers=[],aiServiceReply=null,currentSelection=null,aiKnowledgeEvidenceRecords=[];const aiInfo={enabled:salesAiEnabled(env),used:false,ai_first:aiFirst},aiChanged={};
+  let ai=null,aiAllowedNumbers=[],aiServiceReply=null,currentSelection=null,aiKnowledgeEvidenceRecords=[],comparisonPlan=null;const aiInfo={enabled:salesAiEnabled(env),used:false,ai_first:aiFirst},aiChanged={};
   if(aiInfo.enabled&&!orderStatusAsked&&!extraCostAsked&&(!formalQuoteReply||aiFirstOn)&&String(row.message||"").trim()){
     const ctxStarted=Date.now();
     // Durable customer profile (other conversations of THIS lead only): informational context, never copied into the current deal.
@@ -9543,9 +9618,10 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // Informational comparisons need the facts of every product explicitly named NOW. This scope does not select a priced
     // product, write a deal, expand colour permissions or change the deterministic rule/relation scope.
     const aiMentioned=salesMentionedEntities(kgRecords,[row.message],{allowMultiple:true});
-    const modelIdentity=s=>replyKey(s).replace(/^مدل\s+/u,'').replace(/دو\s*تکه/gu,'2 تکه').replace(/سه\s*تکه/gu,'3 تکه');
+    comparisonPlan=await salesComparisonContext(env,{row,market:conversationMarket,catalog:pricing?.catalog_summary||[],records:kgRecords,financial:financialTurn||!serviceTurn});
+    const modelIdentity=salesComparisonKey;
     const constructionNames=[...new Set((pricing?.catalog_summary||[]).flatMap(c=>c.models||[]).map(modelIdentity))];
-    const modelComparison=/تفاوت|فرق|مقایسه|compar|differ/iu.test(row.message)&&
+    const modelComparison=!!comparisonPlan||/تفاوت|فرق|مقایسه|compar|differ/iu.test(row.message)&&
       (serviceCatalogQuestion(row.message)||/تکه|کشویی|جرار|piece|drawer/iu.test(row.message));
     const constructionEntities=modelComparison?[...new Set(kgRecords.map(r=>r.entity_key).filter(k=>{
       const key=modelIdentity(k);return constructionNames.includes(key)||key==='کشویی'&&constructionNames.some(n=>n.startsWith(key+' '));
@@ -9560,6 +9636,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     if(approvedInformation)knowledgeCtx.unshift({topic:'approved_information',about:conversationMarket,value:approvedInformation.text});
     const dealCtx=promptCandidate?{product:promptCandidate.product?.name||null,model:promptCandidate.requirements?.configuration||null,size:promptCandidate.requirements?.size||null,quantity:promptCandidate.quantity??null,status:promptCandidate.status,quantity_scope:promptCandidate.quantity_provenance?.role||null,order_registered:!!promptCandidate.order_id}:null;
     const aiState=await salesAiConversationState(env,{row,memory,pricing,dealCandidate:promptCandidate,postSaleOrder,priorEvents,priorInbox,lastDecision,knownQuantity:quantityValid?knownQuantity:null});
+    if(comparisonPlan)aiState.comparison=comparisonPlan;
     const stillNeeded=dealCandidate?.status==="accepted"?[!memory.customer_name&&"customer_name",!memory.destination&&"destination",colorOptions.length&&!(Array.isArray(memory.selected_colors)&&memory.selected_colors.length)&&"colors"].filter(Boolean):[];
     const input=buildSalesAiInput({market:conversationMarket,language,
       customer:{name:memory.customer_name||null,destination:memory.destination||null,earlier_profile:Object.keys(profile).length?profile:null},
@@ -9570,7 +9647,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       knowledge:knowledgeCtx,pending:dealEscalations.map(e=>e.reason_code),stillNeeded,
       summary:conversationSummary?.text||null,summaryRequested:context.length>=12,
       recent:context.filter(x=>x.id!==row.id).map(x=>({from:x.direction==="inbound"?"customer":"assistant",text:x.message})),
-      message:row.message},{onKnowledgeSelection:selection=>{aiInfo.knowledge_context={...selection,market:conversationMarket,comparison_entities:aiMentioned.length>1?aiMentioned.length:0};const sentIds=new Set(selection.selected.map(k=>k.id).filter(Boolean));aiKnowledgeEvidenceRecords=aiKnowledge.filter(r=>sentIds.has(r.id));}});
+      message:row.message},{onKnowledgeSelection:selection=>{aiInfo.knowledge_context={...selection,market:conversationMarket,comparison_entities:comparisonPlan?.requested_models.length||(aiMentioned.length>1?aiMentioned.length:0),construction_entities:constructionEntities};const sentIds=new Set(selection.selected.map(k=>k.id).filter(Boolean));aiKnowledgeEvidenceRecords=aiKnowledge.filter(r=>sentIds.has(r.id));}});
     timing.ai_context_ms=Date.now()-ctxStarted;
     const aiProvider=salesAiProvider(env),aiRequested=salesAiModel(env);
     const res=input===null?{ok:false,model:aiRequested,ms:0,error:"context_budget_exceeded"}:await salesAiSingleFlight(env,{key:"inbox:"+row.id+":sales_brain",row,provider:aiProvider,requestedModel:aiRequested,leaseMs:salesAiTimeoutMs(env)+10000,call:()=>callSalesAi(env,{instructions:salesAiPolicy(language,{aiFirst:aiFirstOn||aiFirstShadow}),input})});
@@ -10454,6 +10531,29 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     }
   }
   if(turnPolicy?.closed_payment_scope||turnPolicy&&action==='policy_constraint')replySource='ai_policy_fallback';
+
+  // Phase48: preserve valid natural prose; complete only omitted informational model sections from selected approved facts.
+  // This is the existing knowledge renderer, not a second provider call or a model-specific answer template.
+  if(comparisonPlan&&serviceTurn&&!protectedServiceAction&&!turnPolicy?.payment_stage&&!turnPolicy?.may_handoff&&!needsOwner&&!/payment|order|accept|quote|owner/u.test(action)&&validation?.valid){
+    const beforeCoverage=salesComparisonCoverage(draft,comparisonPlan.requested_models,aiKnowledgeEvidenceRecords,(pricing?.catalog_summary||[]).flatMap(c=>c.models||[])),missing=beforeCoverage.unanswered_models;
+    const selected=aiKnowledgeEvidenceRecords.filter(r=>['fact','capability','availability'].includes(r.envelope.kind)&&!r.envelope.conditions?.length&&!r.envelope.effect&&!r.envelope.relation&&r.envelope.value!==false&&!knowledgeIsCommercial(r.concept,r.envelope));
+    const extra=missing.map(name=>{
+      const records=selected.filter(r=>salesComparisonRecordModels(r,[name],(pricing?.catalog_summary||[]).flatMap(c=>c.models||[])).length);
+      const groups=[...new Set(records.map(r=>r.concept))].map(concept=>({concept,entity:name,records:records.filter(r=>r.concept===concept)}));
+      const facts=composeKnowledgeAnswers(groups,language);
+      const gap=language==='Iraqi Arabic'?'تفاصيل آلية هذا الموديل مو كاملة بالمعلومات المعتمدة عندي.':'شرح کامل مکانیزم این مدل در اطلاعات تأییدشده فعلی کامل نیست.';
+      const hasMechanism=records.some(r=>/mechanism|opening|construction_description|مکانیزم/u.test(r.concept));
+      return '• '+name+': '+[facts,!hasMechanism&&gap].filter(Boolean).join(' ');
+    });
+    if(extra.length||comparisonPlan.clarification_needed){
+      const composed=comparisonPlan.clarification_needed?(language==='Iraqi Arabic'?'أي موديلات تقصد بالتحديد؟':'دقیقاً کدام مدل‌ها را می‌گویید؟'):[...(comparisonPlan.followup&&!beforeCoverage.addressed_models.length?[]:[draft]),...extra].join('\n');
+      const facts=salesBrainAuthoritativeFacts({knowledge:selected.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))});
+      const checked=validateReplyParts(guidanceUsed?maskApprovedGuidance(composed,guidanceUsed):composed,replyParts,validateSalesBrainDraft,{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:[...authorityFacts,...aiEvidenceFacts,...facts],markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key||null});
+      if(checked.valid){draft=composed;validation=checked;aiEvidenceFacts.push(...facts);replySource='ai_service_policy';aiInfo.comparison_repair={missing_models:missing};}
+    }
+    aiInfo.comparison={...comparisonPlan,...salesComparisonCoverage(draft,comparisonPlan.requested_models,aiKnowledgeEvidenceRecords,(pricing?.catalog_summary||[]).flatMap(c=>c.models||[]))};
+  }
+
   aiInfo.reply_source=replySource;
   // AI-02 observability: «called» / «used» stay as before; these say whether the provider was reached, answered, and whether its
   // reply actually reached the draft (and if not, why) — without any customer text.
