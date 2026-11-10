@@ -141,9 +141,9 @@ const W=await world();
  const n=await turn(W,u,"ممكن تنزلها 30% زيادة؟",A("أفهمك، راح أراجع الطلب ويا الإدارة وأرجعلك.",{requests:["discount"],escalate:"unapproved_terms"}));
  ok("S21 an extra discount is never granted automatically (owner exception)",!n.texts.some(t=>/30%|٣٠٪|30٪/.test(t)&&/خصم|تخفيض/.test(t)&&/موافق|تم/.test(t))&&(n.brain?.needs_owner===true||n.outcome?.customer_visible!=="reply"||/راجع|الإدارة/.test(n.texts.join(" "))),[n.action,n.outcome,n.texts]);}
 
-// 22 unknown product / configuration: no invented availability, owner escalation
+// 22 unknown product / configuration: no invented availability or nonfinancial owner handoff
 {const u=await customer(W);const r=await turn(W,u,"جعبه چوبی با حکاکی لیزری دارید؟",A("این مورد رو باید از همکارم بپرسم و نتیجه رو بهتون می‌گم.",{requests:["customization"],escalate:"unknown_capability"}));
- ok("S22 an unknown product is never claimed available; it goes to the owner",!r.texts.some(t=>/بله.*داریم/.test(t))&&r.brain?.needs_owner===true,[r.brain?.needs_owner,r.texts]);}
+ ok("S22 an unknown product gets a clarification without invented availability or a false owner followup",r.brain?.needs_owner===false&&r.outcome?.customer_visible==="reply"&&r.texts.some(t=>/[؟?]/.test(t))&&!r.texts.some(t=>/بله.*داریم|همکار|مالک|نتیجه.*می.گم|بررسی می.کنم/.test(t)),[r.brain?.needs_owner,r.outcome,r.texts]);}
 
 // 23 Claude provider failure: the customer is still handled, the reason is recorded, nothing commercial is invented
 {const u=await customer(W);Object.assign(W.AI,{status:"http500"});const r=await turn(W,u,"سلام، رنگ‌های جعبه انگشتر چیه؟");Object.assign(W.AI,{status:null});SA.resetSalesAiCooldown();

@@ -1,0 +1,526 @@
+[
+  {
+    "message": "نمی سوریس کج چنده؟",
+    "decision": {
+      "semantics": {
+        "mode": "quote",
+        "quantity_role": "none",
+        "deal_reference": "new",
+        "repeat_requested": false
+      },
+      "requests": [
+        "price"
+      ],
+      "interpretation": {
+        "primary_intent": "price",
+        "product_key": "list:نیم سرویس",
+        "reference": "none",
+        "requested_size": "13x16",
+        "requested_color": [],
+        "requested_structure": "3 تکه کج",
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "structure",
+        "confidence": "medium"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "نیم سرویس",
+        "model": "3 تکه کج",
+        "size": "13x16",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و گفته فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد کرد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ (۲ تکه، ۳ تکه، ۳ تکه کج) پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. «دو تیکه کج» وجود ندارد؛ مشتری قیمت سرویس ۳ تکه کج را خواست. اکنون قیمت نیم سرویس کج (۱۳x۱۶، احتمالاً مدل ۳ تکه کج) را می‌پرسد.",
+      "reply": "نیم سرویس سایز ۱۳x۱۶ هست و مدل ۳ تکه کج رو هم داره 😊 {{COMMERCIAL}}",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "معمپلی میخوام",
+    "decision": {
+      "semantics": {
+        "mode": "uncertain",
+        "quantity_role": "none",
+        "deal_reference": "uncertain",
+        "repeat_requested": false
+      },
+      "requests": [
+        "product_info",
+        "other"
+      ],
+      "interpretation": {
+        "primary_intent": "other",
+        "product_key": null,
+        "reference": "none",
+        "requested_size": null,
+        "requested_color": [],
+        "requested_structure": null,
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "product",
+        "confidence": "low"
+      },
+      "facts": {
+        "quantity": null,
+        "product": null,
+        "model": null,
+        "size": null,
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [
+        "منظور مشتری از «معمپلی»"
+      ],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و گفته فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد کرد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ (۲ تکه، ۳ تکه، ۳ تکه کج) پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. «دو تیکه کج» وجود ندارد؛ مشتری قیمت سرویس ۳ تکه کج را خواست. سپس قیمت نیم سرویس کج (۱۳x۱۶، مدل ۳ تکه کج) را پرسید. اکنون پیام نامفهوم «معمپلی میخوام» فرستاده و منظورش در حال روشن‌شدن است.",
+      "reply": "ببخشید، منظورتون از «معمپلی» رو متوجه نشدم 🙏 می‌شه یه کم بیشتر توضیح بدید یا اسم محصول رو دوباره بنویسید؟ اگه منظورتون قیمت نیم سرویس ۳ تکه کج بود، بگید تا براتون بگم.",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "نه نیم سرویس دوتیکه که همون معمولیه،قیمتش چنده؟",
+    "decision": {
+      "semantics": {
+        "mode": "quote",
+        "quantity_role": "none",
+        "deal_reference": "none",
+        "repeat_requested": false
+      },
+      "requests": [
+        "price",
+        "correction"
+      ],
+      "interpretation": {
+        "primary_intent": "price",
+        "product_key": "list:نیم سرویس",
+        "reference": "current",
+        "requested_size": "13x16",
+        "requested_color": [],
+        "requested_structure": "2 تکه",
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "نیم سرویس",
+        "model": "2 تکه",
+        "size": "13x16",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و گفته فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد کرد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. «دو تیکه کج» وجود ندارد؛ قیمت سرویس ۳ تکه کج را خواست. سپس درباره نیم سرویس ۱۳x۱۶ پرسید. «معمپلی» یعنی معمولی؛ مشتری قیمت نیم سرویس ۲ تکه (معمولی) سایز ۱۳x۱۶ را خواست.",
+      "reply": "آهان، منظورتون نیم سرویس ۲ تکه معمولی با سایز ۱۳x۱۶ بود 😊 {{COMMERCIAL}}",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "قیمت نمی سرویس دوتیکه چنده؟",
+    "decision": {
+      "semantics": {
+        "mode": "quote",
+        "quantity_role": "none",
+        "deal_reference": "current",
+        "repeat_requested": false
+      },
+      "requests": [
+        "price"
+      ],
+      "interpretation": {
+        "primary_intent": "price",
+        "product_key": "list:نیم سرویس",
+        "reference": "previous",
+        "requested_size": "13x16",
+        "requested_color": [],
+        "requested_structure": "2 تکه",
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "نیم سرویس",
+        "model": "2 تکه",
+        "size": "13x16",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و گفته فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد کرد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. «دو تیکه کج» وجود ندارد؛ قیمت سرویس ۳ تکه کج را خواست. سپس درباره نیم سرویس ۱۳x۱۶ پرسید و چند بار قیمت نیم سرویس ۲ تکه (معمولی) سایز ۱۳x۱۶ را خواست؛ قیمت آن اعلام می‌شود.",
+      "reply": "ببخشید که دیر متوجه شدم 🙏 قیمت نیم سرویس ۲ تکه سایز ۱۳x۱۶:\n{{COMMERCIAL}}",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "عجب نیم سرویس دوتیکه مگه ندارید؟",
+    "decision": {
+      "semantics": {
+        "mode": "quote",
+        "quantity_role": "none",
+        "deal_reference": "current",
+        "repeat_requested": false
+      },
+      "requests": [
+        "product_info",
+        "price"
+      ],
+      "interpretation": {
+        "primary_intent": "price",
+        "product_key": "list:نیم سرویس",
+        "reference": "current",
+        "requested_size": "13x16",
+        "requested_color": [],
+        "requested_structure": "2 تکه",
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "نیم سرویس",
+        "model": "2 تکه",
+        "size": "13x16",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و گفته فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد کرد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. «دو تیکه کج» وجود ندارد؛ قیمت سرویس ۳ تکه کج را خواست. سپس درباره نیم سرویس ۱۳x۱۶ پرسید و چند بار قیمت نیم سرویس ۲ تکه (معمولی) را خواست که پاسخ درستی نگرفت؛ با گلایه دوباره پرسید و تأیید شد این مدل موجود است و قیمتش اعلام می‌شود.",
+      "reply": "ببخشید بابت سردرگمی 🙏 بله، نیم سرویس ۲ تکه (همون مدل معمولی) سایز ۱۳x۱۶ رو داریم. {{COMMERCIAL}}",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "چرا اولش نفهمیدی من چی گفتم؟",
+    "decision": {
+      "semantics": {
+        "mode": "browse",
+        "quantity_role": "none",
+        "deal_reference": "current",
+        "repeat_requested": false
+      },
+      "requests": [
+        "other"
+      ],
+      "interpretation": {
+        "primary_intent": "other",
+        "product_key": "list:نیم سرویس",
+        "reference": "current",
+        "requested_size": null,
+        "requested_color": [],
+        "requested_structure": null,
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": null,
+        "model": null,
+        "size": null,
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و گفته فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد کرد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. قیمت سرویس ۳ تکه کج را خواست. سپس چند بار قیمت نیم سرویس ۲ تکه (معمولی) ۱۳x۱۶ را پرسید که پس از سوءتفاهم اعلام شد. مشتری از دیر فهمیده شدن منظورش گلایه کرد و عذرخواهی شد.",
+      "reply": "حق با شماست، ببخشید 🙏 «معمولی» و نوشتار «نمی سرویس» رو اولش درست تشخیص ندادم و باعث شد چند بار تکرار کنید. از این به بعد حواسم بیشتر هست؛ اگه سؤال دیگه‌ای درباره نیم سرویس ۲ تکه دارید، در خدمتم.",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "مدل کشویی ایا سرویس ۲۰ در۲۰ داره؟",
+    "decision": {
+      "semantics": {
+        "mode": "browse",
+        "quantity_role": "none",
+        "deal_reference": "none",
+        "repeat_requested": false
+      },
+      "requests": [
+        "product_info"
+      ],
+      "interpretation": {
+        "primary_intent": "product_info",
+        "product_key": "list:سرویس",
+        "reference": "current",
+        "requested_size": "20x20",
+        "requested_color": [],
+        "requested_structure": null,
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "سرویس",
+        "model": null,
+        "size": "20x20",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. قیمت سرویس ۳ تکه کج را خواست. قیمت نیم سرویس ۲ تکه ۱۳x۱۶ پس از سوءتفاهم اعلام شد و بابت آن عذرخواهی شد. سپس پرسید آیا سرویس ۲۰x۲۰ مدل کشویی دارد؛ پاسخ: نه، فقط ۲ تکه، ۳ تکه و ۳ تکه کج.",
+      "reply": "نه، سرویس ۲۰x۲۰ مدل کشویی نداره و فقط در مدل‌های ۲ تکه، ۳ تکه و ۳ تکه کج موجوده. اگه مدل کشویی براتون مهمه، نیم سرویس ۱۳x۱۶ مدل کشویی بگ‌دار رو داره.",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "نه خوده سرویس ۲۰ در۲۰ ایا کشویی ربان دار هست یا موجود ندارید؟",
+    "decision": {
+      "semantics": {
+        "mode": "browse",
+        "quantity_role": "none",
+        "deal_reference": "none",
+        "repeat_requested": false
+      },
+      "requests": [
+        "product_info"
+      ],
+      "interpretation": {
+        "primary_intent": "product_info",
+        "product_key": "list:سرویس",
+        "reference": "current",
+        "requested_size": "20x20",
+        "requested_color": [],
+        "requested_structure": "کشویی روبان‌دار",
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "سرویس",
+        "model": null,
+        "size": "20x20",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. قیمت سرویس ۳ تکه کج را خواست. قیمت نیم سرویس ۲ تکه ۱۳x۱۶ پس از سوءتفاهم اعلام شد و عذرخواهی شد. پرسید آیا خود سرویس ۲۰x۲۰ مدل کشویی روبان‌دار دارد؛ پاسخ: نه، سرویس ۲۰x۲۰ فقط در مدل‌های ۲ تکه، ۳ تکه و ۳ تکه کج است؛ کشویی روبان‌دار در نیم ست‌ها، آویز و دستبند کشیده هست.",
+      "reply": "نه، خود سرویس ۲۰x۲۰ مدل کشویی روبان‌دار نداره و فقط به صورت ۲ تکه، ۳ تکه و ۳ تکه کج ساخته می‌شه. اگه کشویی روبان‌دار براتون مهمه، این مدل رو در نیم ست‌ها، آویز و دستبند کشیده داریم؛ کدوم براتون جذاب‌تره؟",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "کشویی بگ دار نیم سرویس چنده؟",
+    "decision": {
+      "semantics": {
+        "mode": "quote",
+        "quantity_role": "none",
+        "deal_reference": "current",
+        "repeat_requested": false
+      },
+      "requests": [
+        "price"
+      ],
+      "interpretation": {
+        "primary_intent": "price",
+        "product_key": "list:نیم سرویس",
+        "reference": "current",
+        "requested_size": "13x16",
+        "requested_color": [],
+        "requested_structure": "کشویی بگ‌دار",
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "نیم سرویس",
+        "model": "کشویی بگ‌دار",
+        "size": "13x16",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. قیمت نیم سرویس ۲ تکه ۱۳x۱۶ پس از سوءتفاهم اعلام شد. پرسید سرویس ۲۰x۲۰ کشویی روبان‌دار دارد؛ پاسخ: نه، فقط ۲ تکه، ۳ تکه و ۳ تکه کج. حالا قیمت نیم سرویس کشویی بگ‌دار ۱۳x۱۶ را پرسید.",
+      "reply": "نیم سرویس مدل کشویی بگ‌دار سایز ۱۳x۱۶: {{COMMERCIAL}}",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "عجب چیو‌نگرفتی؟",
+    "decision": {
+      "semantics": {
+        "mode": "quote",
+        "quantity_role": "none",
+        "deal_reference": "current",
+        "repeat_requested": false
+      },
+      "requests": [
+        "price",
+        "other"
+      ],
+      "interpretation": {
+        "primary_intent": "price",
+        "product_key": "list:نیم سرویس",
+        "reference": "current",
+        "requested_size": "13x16",
+        "requested_color": [],
+        "requested_structure": "کشویی بگ‌دار",
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "نیم سرویس",
+        "model": "کشویی بگ‌دار",
+        "size": "13x16",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. قیمت نیم سرویس ۲ تکه ۱۳x۱۶ پس از سوءتفاهم اعلام شد. سرویس ۲۰x۲۰ کشویی روبان‌دار ندارد (فقط ۲ تکه، ۳ تکه، ۳ تکه کج). قیمت نیم سرویس کشویی بگ‌دار ۱۳x۱۶ را پرسید؛ دستیار به اشتباه گفت متوجه نشده و مشتری اعتراض کرد؛ عذرخواهی شد و قیمت اعلام می‌شود.",
+      "reply": "حق با شماست، ببخشید 🙏 سؤالتون کاملاً واضح بود. قیمت نیم سرویس کشویی بگ‌دار سایز ۱۳x۱۶: {{COMMERCIAL}}",
+      "reply_colors": []
+    }
+  },
+  {
+    "message": "چرا هنگ‌کردی؟",
+    "decision": {
+      "semantics": {
+        "mode": "quote",
+        "quantity_role": "none",
+        "deal_reference": "current",
+        "repeat_requested": false
+      },
+      "requests": [
+        "price",
+        "other"
+      ],
+      "interpretation": {
+        "primary_intent": "price",
+        "product_key": "list:نیم سرویس",
+        "reference": "current",
+        "requested_size": "13x16",
+        "requested_color": [],
+        "requested_structure": "کشویی بگ‌دار",
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": "نیم سرویس",
+        "model": "کشویی بگ‌دار",
+        "size": "13x16",
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [],
+      "summary_update": "مشتری از تهران برای مشاوره آمده و فعلاً قصد سفارش ندارد. انگشتر بزرگ ۶x۶ پیشنهاد شد؛ مشکی سلفون را رد و سبز سلفون را برگزید. درباره سرویس ۲۰x۲۰ پرسید؛ بنفش در فهرست نیست و سایت معرفی شد. قیمت نیم سرویس ۲ تکه ۱۳x۱۶ اعلام شد. سرویس ۲۰x۲۰ کشویی روبان‌دار ندارد (فقط ۲ تکه، ۳ تکه، ۳ تکه کج). مشتری قیمت نیم سرویس کشویی بگ‌دار ۱۳x۱۶ را پرسید؛ دستیار دو بار به اشتباه گفت متوجه نشده و مشتری اعتراض کرد؛ عذرخواهی شد و قیمت اعلام می‌شود.",
+      "reply": "حق با شماست، ببخشید که دوباره معطل شدید 🙏 قیمت نیم سرویس کشویی بگ‌دار سایز ۱۳x۱۶: {{COMMERCIAL}}",
+      "reply_colors": []
+    }
+  }
+]

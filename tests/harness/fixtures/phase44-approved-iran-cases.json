@@ -1,0 +1,712 @@
+{
+  "source_sha256": "fa466e19edefb38ceabb7bd062a7b8acc595a4c96e336c263d090cd17cda6e4c",
+  "cases": [
+    {
+      "case_id": "r1c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر کوچک",
+      "size": "5x5",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 63000,
+      "applied_row_ids": [
+        "c6c3a77a-cda0-4088-a12e-969d6be8bdd9"
+      ]
+    },
+    {
+      "case_id": "r1c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر کوچک",
+      "size": "5x5",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 72000,
+      "applied_row_ids": [
+        "933fde44-633d-41e2-ad65-7218987daa87"
+      ]
+    },
+    {
+      "case_id": "r1c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر کوچک",
+      "size": "5x5",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 72000,
+      "applied_row_ids": [
+        "1426459b-246c-4359-ad29-f8bf90ffbaf2"
+      ]
+    },
+    {
+      "case_id": "r1c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر کوچک",
+      "size": "5x5",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": null,
+      "applied_row_ids": []
+    },
+    {
+      "case_id": "r1c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر کوچک",
+      "size": "5x5",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": 79000,
+      "applied_row_ids": [
+        "67fa9c0a-d6a3-4700-a5ee-f6cf0fce2abf"
+      ]
+    },
+    {
+      "case_id": "r1c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر کوچک",
+      "size": "5x5",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": null,
+      "applied_row_ids": []
+    },
+    {
+      "case_id": "r2c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر بزرگ",
+      "size": "6x6",
+      "configuration": "2 تکه",
+      "expected_unit_minor": null,
+      "applied_row_ids": []
+    },
+    {
+      "case_id": "r2c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر بزرگ",
+      "size": "6x6",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 79000,
+      "applied_row_ids": [
+        "02cb7d4b-d0e6-4857-a499-6cd0e02a3d41"
+      ]
+    },
+    {
+      "case_id": "r2c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر بزرگ",
+      "size": "6x6",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 79000,
+      "applied_row_ids": [
+        "dd35b831-b37c-4961-a9a0-9241091e0984"
+      ]
+    },
+    {
+      "case_id": "r2c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر بزرگ",
+      "size": "6x6",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": 95000,
+      "applied_row_ids": [
+        "c7452909-e081-4443-aac6-f986cd13092e"
+      ]
+    },
+    {
+      "case_id": "r2c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر بزرگ",
+      "size": "6x6",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": 84000,
+      "applied_row_ids": [
+        "913eba25-00de-4d80-a9c5-a5286e6edd0b"
+      ]
+    },
+    {
+      "case_id": "r2c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "انگشتر بزرگ",
+      "size": "6x6",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": 120000,
+      "applied_row_ids": [
+        "ea88befe-dbd3-418d-a13f-469b4fb2cf70"
+      ]
+    },
+    {
+      "case_id": "r3c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "آویز",
+      "size": "5x7.5",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 68000,
+      "applied_row_ids": [
+        "e26865cc-15cf-4c9d-afd2-1160603f41e7"
+      ]
+    },
+    {
+      "case_id": "r3c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "آویز",
+      "size": "5x7.5",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 79000,
+      "applied_row_ids": [
+        "7ca46d39-d4d6-4fcb-a185-2ab82ff55586"
+      ]
+    },
+    {
+      "case_id": "r3c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "آویز",
+      "size": "5x7.5",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 79000,
+      "applied_row_ids": [
+        "98258f31-fda5-42c9-a9c6-c0723d3b3d34"
+      ]
+    },
+    {
+      "case_id": "r3c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "آویز",
+      "size": "5x7.5",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": 95000,
+      "applied_row_ids": [
+        "90b7ee94-53b4-4ae8-a8b5-957be01fdd9f"
+      ]
+    },
+    {
+      "case_id": "r3c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "آویز",
+      "size": "5x7.5",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": 84000,
+      "applied_row_ids": [
+        "30b478ab-5df4-4978-aec8-370b0ff22021"
+      ]
+    },
+    {
+      "case_id": "r3c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "آویز",
+      "size": "5x7.5",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": 120000,
+      "applied_row_ids": [
+        "c9308cdd-fae4-4ca2-a94f-68e22462bdbd"
+      ]
+    },
+    {
+      "case_id": "r4c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست کوچک",
+      "size": "7x9",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 71000,
+      "applied_row_ids": [
+        "45ff6a3a-33c2-4378-a1b2-d2f203e5c50b"
+      ]
+    },
+    {
+      "case_id": "r4c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست کوچک",
+      "size": "7x9",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 87000,
+      "applied_row_ids": [
+        "e9bde0af-4afb-4d4d-aa85-f0183bcaa9eb"
+      ]
+    },
+    {
+      "case_id": "r4c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست کوچک",
+      "size": "7x9",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 87000,
+      "applied_row_ids": [
+        "6e945088-2af0-4a8f-a0ef-c31273301e8c"
+      ]
+    },
+    {
+      "case_id": "r4c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست کوچک",
+      "size": "7x9",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": 108000,
+      "applied_row_ids": [
+        "40457253-0a56-436d-affe-e2db5f58c558"
+      ]
+    },
+    {
+      "case_id": "r4c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست کوچک",
+      "size": "7x9",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": 96000,
+      "applied_row_ids": [
+        "6291afc7-7c4d-4c74-a382-db5cfaf2e8cd"
+      ]
+    },
+    {
+      "case_id": "r4c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست کوچک",
+      "size": "7x9",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": 130000,
+      "applied_row_ids": [
+        "8aaca54f-15b6-4227-ad52-9b0eb1663405"
+      ]
+    },
+    {
+      "case_id": "r5c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست بزرگ",
+      "size": "8x11",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 90000,
+      "applied_row_ids": [
+        "4046a29c-2737-476f-a853-4c39607364fd"
+      ]
+    },
+    {
+      "case_id": "r5c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست بزرگ",
+      "size": "8x11",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 98000,
+      "applied_row_ids": [
+        "17be16cc-5560-4b2b-ac9e-62341a64c48f"
+      ]
+    },
+    {
+      "case_id": "r5c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست بزرگ",
+      "size": "8x11",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 98000,
+      "applied_row_ids": [
+        "719c00ea-3702-412e-a4fa-92c3cbc73957"
+      ]
+    },
+    {
+      "case_id": "r5c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست بزرگ",
+      "size": "8x11",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": 125000,
+      "applied_row_ids": [
+        "5073db4d-db36-4e13-a518-fd0c7154ad55"
+      ]
+    },
+    {
+      "case_id": "r5c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست بزرگ",
+      "size": "8x11",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": 115000,
+      "applied_row_ids": [
+        "775ea23c-c53e-49c3-a391-e82e9f815f2b"
+      ]
+    },
+    {
+      "case_id": "r5c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست بزرگ",
+      "size": "8x11",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": 140000,
+      "applied_row_ids": [
+        "4fa8d2f8-5f33-4fd2-a19d-e890447459d5"
+      ]
+    },
+    {
+      "case_id": "r6c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "ساعتی بالشت‌دار",
+      "size": "8x8",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 90000,
+      "applied_row_ids": [
+        "7d238d66-4fae-49da-ad13-fb4ddda98449"
+      ]
+    },
+    {
+      "case_id": "r6c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "ساعتی بالشت‌دار",
+      "size": "8x8",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 98000,
+      "applied_row_ids": [
+        "57103c13-4ea1-4108-a224-bd107535a876"
+      ]
+    },
+    {
+      "case_id": "r6c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "ساعتی بالشت‌دار",
+      "size": "8x8",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 98000,
+      "applied_row_ids": [
+        "6ac75acb-653e-49fb-a0e9-e81cbd8ae6ac"
+      ]
+    },
+    {
+      "case_id": "r6c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "ساعتی بالشت‌دار",
+      "size": "8x8",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": 125000,
+      "applied_row_ids": [
+        "ce72b618-af95-4a6c-ace6-3948b8d3cb73"
+      ]
+    },
+    {
+      "case_id": "r6c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "ساعتی بالشت‌دار",
+      "size": "8x8",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": 115000,
+      "applied_row_ids": [
+        "043667ef-510c-441a-a692-f96059fb9564"
+      ]
+    },
+    {
+      "case_id": "r6c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "ساعتی بالشت‌دار",
+      "size": "8x8",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": 140000,
+      "applied_row_ids": [
+        "5ee5aeb5-5ed9-4933-a111-a781cd1cf97e"
+      ]
+    },
+    {
+      "case_id": "r7c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "دستبند کشیده",
+      "size": "5x22",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 90000,
+      "applied_row_ids": [
+        "1bb3c7d3-f888-460f-a424-94ab41ae0f80"
+      ]
+    },
+    {
+      "case_id": "r7c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "دستبند کشیده",
+      "size": "5x22",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 98000,
+      "applied_row_ids": [
+        "27830bdb-0771-4f13-a97d-9d42284fd07a"
+      ]
+    },
+    {
+      "case_id": "r7c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "دستبند کشیده",
+      "size": "5x22",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 98000,
+      "applied_row_ids": [
+        "4562ef08-c767-457e-aeb2-21d97ee9b2dc"
+      ]
+    },
+    {
+      "case_id": "r7c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "دستبند کشیده",
+      "size": "5x22",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": 125000,
+      "applied_row_ids": [
+        "49ef7411-a432-42d4-a29d-1bf17a8cd08a"
+      ]
+    },
+    {
+      "case_id": "r7c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "دستبند کشیده",
+      "size": "5x22",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": 115000,
+      "applied_row_ids": [
+        "e654c004-ba28-4509-a318-14ee106ecff2"
+      ]
+    },
+    {
+      "case_id": "r7c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "دستبند کشیده",
+      "size": "5x22",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": 140000,
+      "applied_row_ids": [
+        "6e296265-461b-44c0-ae70-c4ae236d17e8"
+      ]
+    },
+    {
+      "case_id": "r8c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست مربع",
+      "size": "8x8",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 90000,
+      "applied_row_ids": [
+        "4137d4bc-7021-4a62-af29-a4bf118de861"
+      ]
+    },
+    {
+      "case_id": "r8c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست مربع",
+      "size": "8x8",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 98000,
+      "applied_row_ids": [
+        "b8f935df-9639-47b0-a7ca-6f1bad2e2ff6"
+      ]
+    },
+    {
+      "case_id": "r8c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست مربع",
+      "size": "8x8",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 98000,
+      "applied_row_ids": [
+        "343db4d2-98cc-4377-a944-9c1963859737"
+      ]
+    },
+    {
+      "case_id": "r8c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست مربع",
+      "size": "8x8",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": 125000,
+      "applied_row_ids": [
+        "52265a94-bab7-433f-a508-8f8d6692f9a7"
+      ]
+    },
+    {
+      "case_id": "r8c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست مربع",
+      "size": "8x8",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": 115000,
+      "applied_row_ids": [
+        "c1683a79-1aa3-4509-ac17-8588dc9deb97"
+      ]
+    },
+    {
+      "case_id": "r8c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم ست مربع",
+      "size": "8x8",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": 140000,
+      "applied_row_ids": [
+        "8c7fb31f-b22a-4369-a276-cd0c3e35580e"
+      ]
+    },
+    {
+      "case_id": "r9c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم سرویس",
+      "size": "13x16",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 110000,
+      "applied_row_ids": [
+        "684056c3-f9d4-4b80-8333-8eab59d234b5"
+      ]
+    },
+    {
+      "case_id": "r9c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم سرویس",
+      "size": "13x16",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 120000,
+      "applied_row_ids": [
+        "2af95f8a-de53-44de-a506-d6f0faff6b69"
+      ]
+    },
+    {
+      "case_id": "r9c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم سرویس",
+      "size": "13x16",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 120000,
+      "applied_row_ids": [
+        "77553331-b2cf-49d7-ae28-7895bbff04e0"
+      ]
+    },
+    {
+      "case_id": "r9c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم سرویس",
+      "size": "13x16",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": null,
+      "applied_row_ids": []
+    },
+    {
+      "case_id": "r9c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم سرویس",
+      "size": "13x16",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": null,
+      "applied_row_ids": []
+    },
+    {
+      "case_id": "r9c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "نیم سرویس",
+      "size": "13x16",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": 185000,
+      "applied_row_ids": [
+        "eb8370d2-642b-4937-aa43-de2ac291c304"
+      ]
+    },
+    {
+      "case_id": "r10c1",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "سرویس",
+      "size": "20x20",
+      "configuration": "2 تکه",
+      "expected_unit_minor": 120000,
+      "applied_row_ids": [
+        "6c5e7ed3-5b47-494f-a3fe-cdfef85b1b47",
+        "e6fe272a-f32f-493a-aa85-69436f77529d"
+      ]
+    },
+    {
+      "case_id": "r10c2",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "سرویس",
+      "size": "20x20",
+      "configuration": "3 تکه",
+      "expected_unit_minor": 145000,
+      "applied_row_ids": [
+        "4a692a89-fecb-4c9e-a050-7dd4f630db3e",
+        "6f6b6c0a-14a4-4cad-af1b-e3b482cd2e73"
+      ]
+    },
+    {
+      "case_id": "r10c3",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "سرویس",
+      "size": "20x20",
+      "configuration": "3 تکه کج",
+      "expected_unit_minor": 145000,
+      "applied_row_ids": [
+        "8a6c6d8e-540d-458a-a01c-a1fa61a21eeb",
+        "33b6c877-dd73-4fe8-a736-c3d0caeebf31"
+      ]
+    },
+    {
+      "case_id": "r10c4",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "سرویس",
+      "size": "20x20",
+      "configuration": "کشویی روبان‌دار",
+      "expected_unit_minor": null,
+      "applied_row_ids": []
+    },
+    {
+      "case_id": "r10c5",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "سرویس",
+      "size": "20x20",
+      "configuration": "کشویی کج",
+      "expected_unit_minor": null,
+      "applied_row_ids": []
+    },
+    {
+      "case_id": "r10c6",
+      "market": "IRAN",
+      "currency": "TOMAN",
+      "product": "سرویس",
+      "size": "20x20",
+      "configuration": "کشویی بگ‌دار",
+      "expected_unit_minor": null,
+      "applied_row_ids": []
+    }
+  ]
+}

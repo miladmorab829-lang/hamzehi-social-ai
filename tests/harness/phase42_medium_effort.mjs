@@ -1,0 +1,52 @@
+// Request-contract and real-time deadline tests with recording in-process mocks; no paid model or customer contact.
+import fs from 'node:fs';import {makeWorld,reporter} from './harness.mjs';
+import {salesAiTimeoutMs,callSalesAi,resetSalesAiCooldown} from '../../worker/src/sales-ai-brain.js';
+const {ok,done}=reporter('phase42_medium_effort');
+const config=fs.readFileSync(new URL('../../worker/wrangler.toml',import.meta.url),'utf8');
+const setting=name=>new RegExp('^'+name+' = "([^"]+)"','m').exec(config)?.[1];
+const envConfig=Object.fromEntries(['SALES_AI_EFFORT','SALES_AI_TIMEOUT_MS','ANTHROPIC_MODEL','SALES_AI_PROVIDER'].map(k=>[k,setting(k)]));
+ok('Explicit medium effort is paired with the existing Anthropic model',envConfig.SALES_AI_EFFORT==='medium'&&envConfig.ANTHROPIC_MODEL==='claude-opus-5-5'&&envConfig.SALES_AI_PROVIDER==='anthropic');
+ok('Twenty-second requested deadline actually survives the gateway clamp',salesAiTimeoutMs(envConfig)===20000);
+ok('Deadline remains bounded against bad configuration',salesAiTimeoutMs({SALES_AI_TIMEOUT_MS:'60000'})===20000&&salesAiTimeoutMs({SALES_AI_TIMEOUT_MS:'0'})===1000);
+ok('Existing smaller and unset timeouts remain unchanged',salesAiTimeoutMs({SALES_AI_TIMEOUT_MS:'15000'})===15000&&salesAiTimeoutMs({})===8000);
+const W=await makeWorld({aiBrain:'on',extraEnv:{...envConfig,PUBLIC_WORKER_BASE_URL:'https://w.test',AUTONOMY_ORCHESTRATOR:'on'}});
+W.d1.db.exec(fs.readFileSync(new URL('../../owner-actions/agent-orchestrator-stage2b/02-migration-draft.sql',import.meta.url),'utf8'));
+for(const p of ['/api/quotes','/api/si/knowledge/product','/api/owner-escalations','/api/leads/outreach','/api/content/pipeline'])await W.call(p,null,'GET');await W.call('/api/sales-ai-first',{mode:'on'});
+const data=JSON.parse(fs.readFileSync(new URL('./fixtures/phase41-catalog.json',import.meta.url),'utf8'));
+for(const [table,rows]of [['commercial_price_items',data.items],['business_settings',data.settings]])for(const row of rows){const k=Object.keys(row);W.dbrun(`INSERT INTO ${table}(${k.join(',')}) VALUES(${k.map(()=>'?').join(',')})`,Object.values(row));}
+const original=JSON.parse(fs.readFileSync(new URL('./fixtures/phase41-dialogue.json',import.meta.url),'utf8'));
+const u={id:884300001,name:'TEST',username:'medium42'};
+const greeting=structuredClone(original[2].decision);greeting.reply='سلام، چه کمکی از دستم برمیاد؟';greeting.requests=['greeting'];greeting.semantics={mode:'browse',quantity_role:'none',deal_reference:'none',repeat_requested:false};greeting.interpretation={...greeting.interpretation,primary_intent:'greeting',product_key:null,requested_size:null,requested_structure:null};greeting.facts={...greeting.facts,product:null,model:null,size:null};
+W.AI.script.set('سلام',()=>greeting);await W.send(u,'سلام');W.setMarket(u,'iran');
+const priceText='نیم سرویس دوتکه معمولی چنده؟';W.AI.script.set(priceText,()=>structuredClone(original[2].decision));
+const snapshot=()=>JSON.stringify(['commercial_price_items','business_settings','lead_orders','lead_order_payments'].map(t=>W.q(`SELECT * FROM ${t} ORDER BY id`)));
+const before=snapshot(),requests=W.AI.requests.length,tg=W.tg.length;W.AI.delay=16050;
+const inFlight=W.send(u,priceText);
+while(W.AI.requests.length===requests)await new Promise(r=>setTimeout(r,10));
+const row=W.q('SELECT * FROM inbox_messages WHERE provider_sender_id=? AND message=? ORDER BY created_at DESC LIMIT 1',[String(u.id),priceText])[0];
+const lease=W.q("SELECT created_at,lease_until FROM ai_call_flights WHERE inbox_message_id=? AND purpose='sales_brain'",[row.id])[0];
+ok('Model lease includes the upgraded deadline plus a margin',Date.parse(lease.lease_until)-Date.parse(lease.created_at)>=29000);
+await W.post({update_id:99042,message:{message_id:Number(row.external_id.split(':').at(-1)),date:Math.floor(Date.now()/1000),from:{id:u.id,is_bot:false,first_name:u.name,username:u.username},chat:{id:u.id,type:'private'},text:priceText}});
+const result=await inFlight,body=W.AI.requests[requests]?.body;
+const sent=W.tg.slice(tg).filter(x=>x.method==='sendMessage').map(x=>JSON.parse(x.body)).filter(x=>String(x.chat_id)===String(u.id));
+ok('A response taking more than the old fifteen-second limit still reaches the customer',result.outcome?.customer_visible==='reply'&&sent.length===1&&sent[0].text.includes('۱۱۰٬۰۰۰'),{outcome:result.outcome,ms:result.brain?.ai_brain?.ms});
+ok('Actual Anthropic request contains medium and the unchanged schema/model/token cap',body?.output_config?.effort==='medium'&&body?.model==='claude-opus-5-5'&&body?.max_tokens===8000&&body?.output_config?.format?.type==='json_schema');
+ok('Concurrent redelivery during a slow model call does not call or send twice',W.AI.requests.length===requests+1&&sent.length===1);
+
+W.AI.delay=21000;const timedText='قیمت همین نیم سرویس دوتکه رو دوباره بگو';W.AI.script.set(timedText,()=>structuredClone(original[3].decision));
+const timedCalls=W.AI.requests.length,timedTelegram=W.tg.length,at=Date.now(),timed=await W.send(u,timedText),elapsed=Date.now()-at;
+const timedSent=W.tg.slice(timedTelegram).filter(x=>x.method==='sendMessage').map(x=>JSON.parse(x.body)).filter(x=>String(x.chat_id)===String(u.id));
+ok('A hung provider is aborted and gets a visible bounded recovery',timed.brain?.ai_brain?.error==='provider_timeout'&&['reply','acknowledgement','handoff'].includes(timed.outcome?.customer_visible)&&timedSent.length===1&&!!timedSent[0].text&&elapsed>=19000&&elapsed<27000,{error:timed.brain?.ai_brain?.error,outcome:timed.outcome,elapsed,sends:timedSent.length});
+ok('Timeout never silently retries or switches the provider/model',W.AI.requests.length===timedCalls+1&&W.AI.requests.at(-1).body.model==='claude-opus-5-5');
+ok('Provider timeout leaves no running lock or nonpayment owner case',W.q("SELECT count(*) n FROM ai_call_flights WHERE inbox_message_id=? AND status='running'",[timed.row.id])[0].n===0&&W.q('SELECT count(*) n FROM owner_escalations')[0].n===0);
+W.AI.delay=0;const nextText='حالا قیمت نیم سرویس کشویی بگ دار رو بگو';W.AI.script.set(nextText,()=>structuredClone(original[8].decision));const resumed=await W.send(u,nextText);
+ok('Next question works after provider recovery',resumed.outcome?.customer_visible==='reply'&&resumed.brain?.ai_brain?.provider_succeeded===true,resumed.outcome);
+const requestStart=W.AI.requests.length;const lowEnv={...W.env};delete lowEnv.SALES_AI_EFFORT;resetSalesAiCooldown();
+await callSalesAi(lowEnv,{instructions:'fixture',input:'CONTEXT:\n'+JSON.stringify({message:'سلام'})});
+ok('An explicitly unconfigured environment retains the previous low default',W.AI.requests[requestStart]?.body.output_config.effort==='low');
+const recordedFetch=globalThis.fetch;let bodyCalls=0,stalledBody;
+try{globalThis.fetch=async(url,options)=>{if(url!=='https://api.anthropic.com/v1/messages')throw Error('Unexpected test destination');bodyCalls++;return {ok:true,json:()=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Object.assign(new Error('test body stalled'),{name:'AbortError'})),{once:true}))};};stalledBody=await callSalesAi(W.env,{instructions:'fixture',input:'fixture',timeoutMs:1000});}finally{globalThis.fetch=recordedFetch;}
+ok('A provider sending headers but stalling its response body is also aborted once',bodyCalls===1&&stalledBody?.error==='provider_timeout');
+ok('Prices, settings, orders and payments are unchanged',snapshot()===before);
+ok('No real external calls',W.offNet().length===0,W.offNet());
+process.exitCode=done()?1:0;

@@ -32,7 +32,7 @@ const W2=await makeWorld({aiBrain:"on",extraEnv:{PUBLIC_WORKER_BASE_URL:"https:/
 ok("O0 AI-FIRST ON",on.body?.setting?.mode==="on");
 const INTERP={primary_intent:"other",product_key:null,reference:"none",requested_size:null,requested_color:[],requested_structure:null,requested_printing:null,quantity:null,ambiguity:"none",confidence:"high"};
 const out=u=>W2.tg.filter(x=>x.method==="sendMessage"&&String(x.body).includes(String(u.id))).map(x=>JSON.parse(x.body).text);
-const say=async(u,msg,reply,requests=[])=>{let ctx=null;W2.AI.script.set(msg,c=>{ctx=c;return {requests,reply,reply_colors:[],interpretation:INTERP,facts:{colors:[],color_parts:[],unknown_colors:[],color_statement:"none",negated_colors:[]}};});
+const say=async(u,msg,reply,requests=[])=>{let ctx=null;W2.AI.script.set(msg,c=>{ctx=c;return {requests,reply,reply_colors:[],interpretation:INTERP,semantics:{mode:'browse',quantity_role:'none',deal_reference:'none',repeat_requested:false},facts:{colors:[],color_parts:[],unknown_colors:[],color_statement:"none",negated_colors:[]}};});
   const k=W2.AI.requests.length,b=out(u).length;const r=await W2.send(u,msg);return {r,sent:out(u).slice(b),called:W2.AI.requests.slice(k).some(x=>x.body?.messages),ctx:ctx?JSON.stringify({...ctx,message:undefined,recent:undefined}):""};};
 {const u=await user(W2,"iran");const a=await say(u,"مالیات داره؟","مالیات و هزینه‌های جانبی بسته به سفارش فرق داره، بررسی می‌کنم.");
  ok("E5 AI-FIRST ON, Persian: Telegram receives exactly «نه.» and Claude is not asked for this question",a.sent.length===1&&a.sent[0]==="نه."&&!a.called,[a.sent,a.called]);}
@@ -40,10 +40,10 @@ const say=async(u,msg,reply,requests=[])=>{let ctx=null;W2.AI.script.set(msg,c=>
  ok("E6 AI-FIRST ON, Arabic: Telegram receives exactly «لا.»",a.sent.length===1&&a.sent[0]==="لا."&&!a.called,[a.sent,a.called]);}
 {const u=await user(W2,"iran");await say(u,"دیگه پیام نده","باشه.");const a=await say(u,"مالیات داره؟","");
  ok("E7 an opted-out customer gets nothing, not even «نه.»",a.sent.length===0,a.sent);}
-{const u=await user(W2,"iran");const a=await say(u,"چاپ و طراحی و کلیشه هزینه داره؟","چاپ، طراحی و ساخت کلیشه رایگانه.");
+{const u=await user(W2,"iran");const a=await say(u,"چاپ و طراحی و کلیشه هزینه داره؟","{{INFORMATION}}",['printing']);
  ok("KN1 Iran: the approved fact (printing, design, cliché) is in Claude's context and Claude's reply is sent",a.ctx.includes(IRAN_FACT)&&!a.ctx.includes(ARAB_FACT)&&a.sent.some(s=>s.includes("رایگان")),[a.sent]);}
-{const u=await user(W2,"iraq");const a=await say(u,"التصميم والكليشة بفلوس؟","التصميم والكليشة ضمن سعر العلبة بدون كلفة إضافية.");
- ok("KN2 Iraq: design + cliché fact is in Claude's context (never the Iran fact) and Claude's reply is sent",a.ctx.includes(ARAB_FACT)&&!a.ctx.includes(IRAN_FACT)&&a.sent.some(s=>s.includes("الكليشة")),[a.sent]);}
+{const u=await user(W2,"iraq");const a=await say(u,"التصميم والكليشة بفلوس؟","{{INFORMATION}}",['printing']);
+ ok("KN2 Iraq: design + cliché fact is in Claude's context (never the Iran fact) and Claude's reply is sent",a.ctx.includes(ARAB_FACT)&&!a.ctx.includes(IRAN_FACT)&&a.sent.some(s=>s.includes("الكليشة")),[a.sent,a.r.action,a.r.brain?.ai_brain?.fallback,a.r.brain?.ai_brain?.repaired,a.r.brain?.validation]);}
 for(const [mk,q,rep] of [["iran","ارسال هم رایگانه؟","بله، ارسال هم برای شما کاملاً رایگانه."],["iran","ارسالش چی؟","ارسالش هم رایگانه."],["iran","ارسال؟","رایگان ارسال می‌کنیم."],["iraq","الشحن مجاني؟","نعم الشحن علينا ومجاني."],["iran","free shipping?","Yes, free shipping for you."]]){
   const u=await user(W2,mk);const a=await say(u,q,rep,["shipping"]);ok(`K4 Claude's «${rep}» never reaches Telegram; the customer still gets the safe reply`,!a.sent.some(s=>s.includes(rep))&&a.sent.length===1&&a.sent[0].trim().length>0,a.sent);}
 {const u=await user(W2,"iran");const rep="مشکی سلفون کلاسیک‌تر و رسمی‌تره، سرمه‌ای سلفون آرام‌تر و خاص‌تر.";const a=await say(u,"مشکی سلفون بهتره یا سرمه‌ای سلفون؟",rep);

@@ -445,7 +445,7 @@ async function addCaseOverride(env,requestId,mutate){
   const o=parseJson(r.case_overrides_json,{});mutate(o);await env.DB.prepare("UPDATE sales_requests SET case_overrides_json=?,updated_at=? WHERE id=?").bind(JSON.stringify(o),now(),requestId).run();
 }
 // Each resolution kind applies the owner's answer either to the current case only or as a new versioned knowledge row.
-async function applyResolution(env,decision,{action,scope,answer,actor,approval=null}){
+async function applyResolution(env,decision,{action,scope,answer,actor,approval=null,note=""}){
   const {request,payload}=await resolutionContext(env,decision),save=scope!=="CASE_ONLY",kind=payload.resolution||"record",result={knowledge_action:save?scope:"CASE_ONLY",resulting_ref:null};
   const saveOpts={actor,decisionId:decision.id,expectExisting:scope==="UPDATE_EXISTING",approval};
   if(action==="REJECT"){
@@ -516,8 +516,8 @@ async function applyResolution(env,decision,{action,scope,answer,actor,approval=
     const paidBefore=Number(await D.orderPaidMinor(env,order.id))||0,outstanding=Number(order.total_minor)-paidBefore;
     const paymentKind=String(answer.payment_kind||(amount===outstanding?"full":paidBefore===0?"deposit":"partial"));
     const reference=String(answer.reference||payload.transaction_reference||`payment-verification:${decision.id}`).trim().slice(0,200);
-    const recorded=await D.recordOrderPayment(env,{order_id:order.id,payment_kind:paymentKind,method,amount_minor:amount,currency:order.currency,reference,received_at:answer.received_at||null,notes:`Owner-verified customer payment claim (decision ${decision.id})`},actor);
-    return {...result,knowledge_action:"PAYMENT_RECORDED",resulting_ref:`payment:${recorded.payment?.id||""}`};
+    const recorded=await D.recordOrderPayment(env,{order_id:order.id,payment_kind:paymentKind,method,amount_minor:amount,currency:order.currency,reference,received_at:answer.received_at||null,notes:`Owner-verified customer payment claim (decision ${decision.id})`},actor,{id:decision.id,updated_at:decision.updated_at,payload_json:decision.payload_json,action,scope,answer,note});
+    return {...result,knowledge_action:"PAYMENT_RECORDED",resulting_ref:`payment:${recorded.payment?.id||""}`,decision_resolved:recorded.decision_resolved===true};
   }
   return {...result,knowledge_action:save?"RECORDED":"CASE_ONLY"};
 }
@@ -569,9 +569,9 @@ export async function resolveDecision(env,{id,action,scope="CASE_ONLY",answer={}
     if(!preview_hash||preview_hash!==plan.preview_hash)throw Error(STALE_PREVIEW);
     approval={method:"owner_decision",ref:plan.preview_hash};
   }
-  const effect=await applyResolution(env,decision,{action:act,scope:sc,answer:answer||{},actor,approval});
+  const effect=await applyResolution(env,decision,{action:act,scope:sc,answer:answer||{},actor,approval,note});
   const status=act==="REJECT"?"REJECTED":"RESOLVED",t=now();
-  const changed=await env.DB.prepare(`UPDATE owner_decisions SET status=?,owner_decision=?,owner_answer_json=?,owner_note=?,scope_json=?,knowledge_action=?,resulting_ref=?,resolved_by=?,resolved_at=?,updated_at=? WHERE id=? AND status='PENDING'`)
+  const changed=effect.decision_resolved?{meta:{changes:1}}:await env.DB.prepare(`UPDATE owner_decisions SET status=?,owner_decision=?,owner_answer_json=?,owner_note=?,scope_json=?,knowledge_action=?,resulting_ref=?,resolved_by=?,resolved_at=?,updated_at=? WHERE id=? AND status='PENDING'`)
     .bind(status,act,JSON.stringify(answer||{}),String(note||"").slice(0,1000)||null,JSON.stringify({scope:sc}),effect.knowledge_action,effect.resulting_ref,String(actor).slice(0,120),t,t,id).run();
   if(!changed.meta?.changes)throw Error("Decision resolution conflict");
   await auditSafe(env,"owner_decision_resolved","Owner resolved decision",{decision_id:id,decision_type:decision.decision_type,action:act,scope:sc,knowledge_action:effect.knowledge_action,resulting_ref:effect.resulting_ref});
