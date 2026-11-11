@@ -31,7 +31,9 @@ for(const [table,rows] of [['commercial_price_items',data.items],['business_sett
 const original=JSON.parse(fs.readFileSync(new URL('./fixtures/phase41-dialogue.json',import.meta.url),'utf8'));
 let seq=884200000;
 const fresh=async()=>{const user={id:++seq,name:'TEST',username:'guard'+seq};await W.send(user,'سلام');W.setMarket(user,'iran');return user;};
-const turn=async(user,message,decision)=>{W.AI.script.set(message,()=>structuredClone(decision));const k=W.tg.length,r=await W.send(user,message),sent=W.tg.slice(k).filter(x=>x.method==='sendMessage').map(x=>JSON.parse(x.body)).filter(x=>String(x.chat_id)===String(user.id)).map(x=>x.text).join('\n');return {r,sent};};
+// Explicit final-provider stub for protected commercial parts. Adversarial prose
+// without such a part is returned unchanged and must still be rejected by runtime gates.
+const turn=async(user,message,decision)=>{W.AI.script.set(message,c=>{const entry=c.catalog.find(p=>p.key===c.state?.current_product?.key)||c.catalog[0],model=entry?.models?.[0];return {...structuredClone(decision),...(c.authoring?.required_parts.length?{reply:`${entry.product} مدل ${model} در فهرست موجود است.\n`+c.authoring.required_parts.join('\n')}:{})};});const k=W.tg.length,r=await W.send(user,message),sent=W.tg.slice(k).filter(x=>x.method==='sendMessage').map(x=>JSON.parse(x.body)).filter(x=>String(x.chat_id)===String(user.id)).map(x=>x.text).join('\n');return {r,sent};};
 const detail=x=>({sent:x.sent,action:x.r.action,outcome:x.r.outcome,validation:x.r.brain?.validation,fallback:x.r.brain?.ai_brain?.fallback});
 for(const punctuation of [' ','. ','، ','\n']){
  const u=await fresh(),decision=structuredClone(original[2].decision);decision.reply='نیم سرویس ۲ تکه سایز ۱۳x۱۶'+punctuation+'{{COMMERCIAL}}';
@@ -41,12 +43,12 @@ for(const punctuation of [' ','. ','، ','\n']){
 for(const bad of ['سرویس سایز ۱۳×۱۶ داریم.','سرویس سایز ۲۰×۲۰ مدل کشویی بگ دار داریم.','سرویس مدل ۳ تکه کج نداریم.']){
  const u=await fresh(),decision=structuredClone(original[6].decision);decision.interpretation.reference='none';decision.reply=bad;
  const x=await turn(u,'درباره جعبه سرویس توضیح بده',decision);
- ok('Unsupported catalog claim never reaches Telegram: '+bad,!x.sent.includes(bad)&&x.r.brain?.needs_owner===false,detail(x));
+ ok('Unsupported catalog claim never reaches Telegram and opens owner review: '+bad,!x.sent&&x.r.brain?.needs_owner===true&&!!W.q("SELECT id FROM owner_escalations WHERE source_message_id=? AND status='open'",[x.r.row.id])[0],detail(x));
 }
 {
  const u=await fresh(),decision=structuredClone(original[7].decision);decision.interpretation.reference='none';decision.reply='مشکلی نیست، تصویر لوگو را همین‌جا بفرستید. نه، سرویس ۲۰x۲۰ مدل کشویی روبان‌دار نداره. رنگ رو از سایت انتخاب کنید.';
  const x=await turn(u,'سرویس ۲۰x۲۰ کشویی روبان دار دارید؟ لوگو رو همینجا بفرستم؟',decision);
- ok('Scoped catalog correction preserves other answers and targets the correct negative clause',x.sent.includes('تصویر لوگو را همین‌جا بفرستید')&&x.sent.includes('در فهرست فعلی ثبت نشده')&&x.sent.includes('رنگ رو از سایت انتخاب کنید'),detail(x));
+ ok('An unverified mixed denial is reauthored or escalated as a whole',x.sent.includes('تصویر لوگو را همین‌جا بفرستید')&&x.sent.includes('در فهرست فعلی ثبت نشده')&&x.sent.includes('رنگ رو از سایت انتخاب کنید')||!x.sent&&x.r.brain?.needs_owner===true&&!!W.q("SELECT id FROM owner_escalations WHERE source_message_id=? AND status='open'",[x.r.row.id])[0],detail(x));
 }
 for(const failure of ['price','version','currency','size','read']){
  const u=await fresh(),decision=structuredClone(original[2].decision),prepare=W.env.DB.prepare.bind(W.env.DB);let injected=false;

@@ -1,8 +1,11 @@
 import { planSalesTurn, policyAllowsOwner, trustedQuantityProjection, policyClarification, commercialLimitReply } from './sales-turn-policy.js';
-import { typedSpecifications, validateReplyParts, catalogVariantAnswer, catalogClaimIssue, replyKey, dimensionKey } from './sales-reply-integrity.js';
+import { AI_REPLY_SOURCES, hasAiAuthorship, hasSubstantiveAiReply, replyAuthoringPolicy, replyAuthoringInput, protectedReplyProse, informationalEntities, modelMentions, conversationRequestPlan, conversationReplyCoverage } from './sales-conversation-author.js';
+import {claimEntities, factAppliesToEntity, productAssertionIssue, protectedContextIssue, isExclusiveKnowledgeGap} from './sales-factual-grounding.js';
+import {ribbonAuthoringContract} from './optional-ribbon-authoring.js';
+import { typedSpecifications, catalogSpecificationText, validateReplyParts, catalogVariantAnswer, catalogClaimIssue, replyKey, dimensionKey } from './sales-reply-integrity.js';
 import { approvedGuidanceRequest, approvedServiceRequest, serviceRibbonPrintQuestion, INFORMATION_SLOT, serviceFinancialQuestion, serviceFollowupPromise, serviceCatalogQuestion, unverifiedServiceDetail, loadApprovedGuidance, maskApprovedGuidance, approvedGuidanceCurrent } from "./approved-sales-guidance.js";
 import {validateRibbonFee, RIBBON_MODEL, ribbonModelKey, loadRibbonFee, ribbonFinancialMix} from './optional-ribbon-fee.js';
-import { splitSalesReply, serviceCompanionParts, serviceQuestionField } from './sales-reply-composition.js';
+import { splitSalesReply, serviceQuestionField } from './sales-reply-composition.js';
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, reserveAdsAutopilotRun, adsGlobalRunCap, reserveCrmFollowupRun, crmFollowupCap, adsDraftDailyCap, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
 import { ADS_MARKET_IDS, ADS_MARKETS, ADS_TARGET_CITIES, adsNormalizeText, adsTargetCity, adsMarketKey, adsCityOptions, normalizeAdsMarket, leadMarketOf, readAdsMarketConfigs, adsMarketReadiness, validateAdsMarketUpdate, adsCityForRun } from "./ads-markets.js";
@@ -2466,7 +2469,7 @@ async function telegramBotUpload(env,method,form){
   if(!env.TELEGRAM_BOT_TOKEN)throw Error('Telegram bot token missing');
   let r;try{r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,{method:'POST',body:form,signal:AbortSignal.timeout(30000)});}catch(error){error.telegramOutcome='ambiguous';throw error;}
   let d;try{d=await r.json();}catch{const error=Error(`Telegram ${method} returned an unreadable response`);error.telegramOutcome='ambiguous';error.httpStatus=r.status;throw error;}
-  if(!r.ok||d?.ok===false){const error=Error(d?.description||`Telegram ${method} failed`);error.telegramOutcome='rejected';error.httpStatus=r.status;throw error;}
+  if(!r.ok||d?.ok===false){const error=Error(d?.description||`Telegram ${method} failed`);error.telegramOutcome=r.status>=500?'ambiguous':'rejected';error.httpStatus=r.status;throw error;}
   if(d?.ok!==true||!d.result){const error=Error(`Telegram ${method} returned an unverifiable response`);error.telegramOutcome='ambiguous';error.httpStatus=r.status;throw error;}
   return d.result;
 }
@@ -2549,7 +2552,7 @@ async function telegramBotCall(env,method,body){
   let d;
   try { d=await r.json(); }
   catch { const error=Error(`Telegram ${method} returned an unreadable response`);error.telegramOutcome='ambiguous';error.httpStatus=r.status;throw error; }
-  if(!r.ok||d?.ok===false){const error=Error(d?.description||`Telegram ${method} failed`);error.telegramOutcome='rejected';error.httpStatus=r.status;throw error;}
+  if(!r.ok||d?.ok===false){const error=Error(d?.description||`Telegram ${method} failed`);error.telegramOutcome=r.status>=500?'ambiguous':'rejected';error.httpStatus=r.status;throw error;}
   if(d?.ok!==true||!d.result){const error=Error(`Telegram ${method} returned an unverifiable response`);error.telegramOutcome='ambiguous';error.httpStatus=r.status;throw error;}
   return d.result;
 }
@@ -7655,16 +7658,21 @@ function extractConversationMemoryFacts(message,intent,inboxId,{lastAction=null,
   const arabicQuestion=/[؟?]|(?<![\p{L}])(?:شنو|شكد|بيش|بكم|هل|لو|ليش|شلون|اكو|يصير|تكدرون)(?![\p{L}])/u.test(text);
   const noPrinting=SALES_NO_PRINTING.test(text);   // Phase 14
   if(noPrinting)add("printing","none");
-  const printing=noPrinting?null:text.match(/(?:printing|print|چاپ|فویل)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1]||(arabicQuestion?null:text.match(/(?<![\p{L}])طباعة(?![\p{L}])\s*[:：=-]?\s*([^\n،,؛;؟?]{1,180})/u)?.[1])||text.match(/(طلاکوب|نقره[‌\s]?کوب|gold\s*foil|silver\s*foil|تذهيب|طباعة\s*ذهبية)/iu)?.[1];
+  const printingQuestion=aiFirst&&(/مقایسه|تفاوت|از نظر|فرق|عيدلي|عیدلی|ما أريد أطلب|نمی[‌ ]?دم/u.test(text)||SALES_COLOR_NOT_A_CHOICE.test(text));
+  const printing=noPrinting||printingQuestion?null:text.match(/(?:printing|print|چاپ|فویل)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1]||(arabicQuestion?null:text.match(/(?<![\p{L}])طباعة(?![\p{L}])\s*[:：=-]?\s*([^\n،,؛;؟?]{1,180})/u)?.[1])||text.match(/(طلاکوب|نقره[‌\s]?کوب|gold\s*foil|silver\s*foil|تذهيب|طباعة\s*ذهبية)/iu)?.[1];
   if(printing)add("printing",printing);
-  const branding=text.match(/(?:branding|logo|برندینگ|لوگو|شعار)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
+  const branding=aiFirst&&(printingQuestion||arabicQuestion)?null:text.match(/(?:branding|logo|برندینگ|لوگو|شعار)\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1];
   if(branding)add("branding",branding);
   if(intent==="objection_price")add("objection",text,`objection:${inboxId}`);
   if(["asks_price","asks_moq","asks_shipping","quote_requested"].includes(intent)||/[?؟]$/.test(text))add("customer_question",text,`customer_question:${inboxId}`);
   if(["asks_price","asks_moq","asks_shipping","quote_requested","negotiating"].includes(intent))add("unresolved_question",text,`unresolved_question:${inboxId}`);
   return facts;
 }
-async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMessageId,fact}){
+// Compare source arrival order, never model completion / memory write time.
+// rowid breaks equal-millisecond ingress ties within this existing inbox table.
+const NEWER_CONVERSATION_INBOUND_SQL="SELECT newer.id FROM inbox_messages newer JOIN inbox_messages origin ON origin.id=? WHERE newer.lead_id=origin.lead_id AND newer.conversation_id=origin.conversation_id AND newer.status<>'trashed' AND (newer.created_at>origin.created_at OR (newer.created_at=origin.created_at AND newer.rowid>origin.rowid)) LIMIT 1";
+async function newerConversationInbound(env,id){return (await env.DB.prepare(NEWER_CONVERSATION_INBOUND_SQL).bind(id).first())?.id||null;}
+export async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMessageId,fact,contentionAttempt=0}){
   const valueJson=knowledgeCanonical(fact.value),valueHash=await knowledgeHash(valueJson);
   const [same,current]=await Promise.all([
     env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND source_message_id=? AND memory_key=? AND value_hash=? LIMIT 1").bind(conversationId,sourceMessageId,fact.memory_key,valueHash).first(),
@@ -7677,8 +7685,8 @@ async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMes
   const t=now(),id="conversation-memory-"+uid(),version=(current?.version||0)+1;
   try{
     const statements=[];
-    if(current)statements.push(env.DB.prepare("UPDATE conversation_memory_facts SET status='superseded',updated_at=? WHERE id=? AND version=? AND status='active'").bind(t,current.id,current.version));
-    statements.push(env.DB.prepare("INSERT INTO conversation_memory_facts(id,lead_id,conversation_id,memory_key,fact_type,value_json,value_hash,source_message_id,status,version,supersedes_fact_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'active',?,?,?,?)").bind(id,leadId,conversationId,fact.memory_key,fact.fact_type,valueJson,valueHash,sourceMessageId,version,current?.id||null,t,t));
+    if(current)statements.push(env.DB.prepare("UPDATE conversation_memory_facts SET status='superseded',updated_at=? WHERE id=? AND version=? AND status='active' AND NOT EXISTS(SELECT 1 FROM inbox_messages prior JOIN inbox_messages incoming ON incoming.id=? WHERE prior.id=conversation_memory_facts.source_message_id AND prior.status<>'trashed' AND (prior.created_at>incoming.created_at OR (prior.created_at=incoming.created_at AND prior.rowid>incoming.rowid)))").bind(t,current.id,current.version,sourceMessageId));
+    statements.push(env.DB.prepare("INSERT INTO conversation_memory_facts(id,lead_id,conversation_id,memory_key,fact_type,value_json,value_hash,source_message_id,status,version,supersedes_fact_id,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?, 'active',?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM conversation_memory_facts WHERE conversation_id=? AND memory_key=? AND status='active')").bind(id,leadId,conversationId,fact.memory_key,fact.fact_type,valueJson,valueHash,sourceMessageId,version,current?.id||null,t,t,conversationId,fact.memory_key));
     await env.DB.batch(statements);
   }catch(error){
     const raced=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND source_message_id=? AND memory_key=? AND value_hash=? LIMIT 1").bind(conversationId,sourceMessageId,fact.memory_key,valueHash).first();
@@ -7686,7 +7694,15 @@ async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMes
     throw error;
   }
   const stored=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1").bind(id,leadId,conversationId).first();
-  if(!stored)throw Error("Conversation memory persistence failed");
+  if(!stored){
+    const winner=await env.DB.prepare("SELECT * FROM conversation_memory_facts WHERE conversation_id=? AND memory_key=? AND status='active' LIMIT 1").bind(conversationId,fact.memory_key).first();
+    if(winner){
+      const incomingNewer=await env.DB.prepare("SELECT incoming.id FROM inbox_messages incoming JOIN inbox_messages prior ON prior.id=? WHERE incoming.id=? AND (incoming.created_at>prior.created_at OR (incoming.created_at=prior.created_at AND incoming.rowid>prior.rowid)) LIMIT 1").bind(winner.source_message_id,sourceMessageId).first();
+      if(incomingNewer&&contentionAttempt<2)return upsertConversationMemoryFact(env,{leadId,conversationId,sourceMessageId,fact,contentionAttempt:contentionAttempt+1});
+      return {fact:winner,idempotent:true,kept_existing:true};
+    }
+    throw Error("Conversation memory persistence failed");
+  }
   return {fact:stored,idempotent:false};
 }
 // out (optional): receives the resolved customer-image reference, so the Sales Brain of the same turn does not resolve it again.
@@ -7694,7 +7710,7 @@ async function upsertConversationMemoryFact(env,{leadId,conversationId,sourceMes
 // («چه مدل ها جعبه هایی دارید؟» is a question about the range, never a product called «ها جعبه هایی دارید؟»).
 function salesProductLabelValue(text){
   const v=String(text||"").match(/(?<![\p{L}])(?:product|model|محصول|مدل|(?:ال)?(?:منتج|موديل))(?![\p{L}])\s*[:：=-]?\s*([^\n،,؛;]{1,180})/iu)?.[1]?.trim();
-  if(!v||/[?؟]\s*$/.test(v)||/^(?:ها|های|هایی)(?![\p{L}])/u.test(v))return null;
+  if(!v||/[?؟]/.test(v)||/^(?:ها|های|هایی|رو|را|دوباره)(?![\p{L}])/u.test(v))return null;
   return v;
 }
 async function captureConversationSalesMemory(env,inboxId,out=null){
@@ -7932,7 +7948,7 @@ async function getNegotiationConversationContext(env,leadId,conversationId) {
   const from=await cleanupContextFrom(env,conversationId);
   const [inbound,outbound]=await Promise.all([
     env.DB.prepare("SELECT id,message,created_at FROM inbox_messages WHERE lead_id=? AND conversation_id=? AND status<>'trashed' AND created_at>? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId,from).all(),
-    env.DB.prepare("SELECT id,message,created_at,status FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status IN ('sent','sending','send_ambiguous') AND created_at>? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId,from).all()
+    env.DB.prepare("SELECT id,message,created_at,status FROM lead_outreach WHERE lead_id=? AND conversation_id=? AND status IN ('sent','delivered') AND created_at>? ORDER BY created_at DESC LIMIT 8").bind(leadId,conversationId,from).all()
   ]);
   return [
     ...(inbound.results||[]).map(x=>({id:x.id,direction:"inbound",message:String(x.message||"").slice(0,1200),created_at:x.created_at})),
@@ -8126,7 +8142,7 @@ function salesBrainFactCategory(domain,attribute){
   if(/deposit|payment|commercial/.test(key))return "payment";if(/production|delivery/.test(key))return "production";
   if(/shipping|destination/.test(key))return "shipping";if(/color/.test(key))return "color";
   if(/size/.test(key))return "size";if(/material/.test(key))return "material";
-  if(/printing|print_surfaces|foil|logo|brand|configuration|capability/.test(key))return "capability";
+  if(/printing|print_surfaces|foil|logo|brand|configuration|capability|lid_contact_layout/.test(key))return "capability";
   return "availability";
 }
 function salesBrainAuthoritativeFacts({knowledge=[],pricingFacts=[],customerFacts=[],visualFacts=[],ownerFacts=[]}={}){
@@ -8134,29 +8150,36 @@ function salesBrainAuthoritativeFacts({knowledge=[],pricingFacts=[],customerFact
   const add=(source,category,parts,scope)=>{const values=parts.flatMap(x=>salesBrainFactValues(x)).map(salesBrainClaimText).filter(Boolean);if(values.length)facts.push({source,category,values,...scope});};
   // A customer-facing knowledge record keeps its collection (one product's concept) and market, so the validator can accept one
   // sentence listing several approved members of the same collection (see validateSalesBrainDraft). Other typed facts are unchanged.
-  for(const fact of knowledge||[]){let value=null;try{value=JSON.parse(fact.value_json)}catch{continue;}add("approved_knowledge",salesBrainFactCategory(fact.domain,fact.attribute),[fact.entity_key,fact.attribute,value],fact.domain===KNOWLEDGE_DOMAIN&&fact.market&&fact.entity_key&&fact.attribute?{collection:salesBrainClaimText(fact.entity_key)+"|"+fact.attribute,market:fact.market}:undefined);}
+  for(const fact of knowledge||[]){let value=null;try{value=JSON.parse(fact.value_json)}catch{continue;}add("approved_knowledge",salesBrainFactCategory(fact.domain,fact.attribute),[fact.entity_key,fact.attribute,value],{entity_key:fact.entity_key||'global',market:fact.market,...(fact.domain===KNOWLEDGE_DOMAIN&&fact.market&&fact.entity_key&&fact.attribute?{collection:salesBrainClaimText(fact.entity_key)+"|"+fact.attribute}:{})});}
   for(const fact of pricingFacts||[])add("authoritative_pricing",fact.category||"price",[fact.value,fact.currency,fact.product]);
   for(const fact of customerFacts||[])add("customer_stated",fact.category||"customer",[fact.value]);
   for(const fact of visualFacts||[])if(fact?.verified_real_product)add("verified_visual",fact.category||"availability",[fact.model,fact.category_name,fact.attributes]);
   for(const fact of ownerFacts||[])if(fact?.explicit===true)add("owner_resolution",fact.category||"commercial",[fact.value]);
   return facts;
 }
-function salesBrainPhraseIncluded(value,phrase){const source=` ${salesBrainClaimText(value)} `,target=salesBrainClaimText(phrase);return !!target&&source.includes(` ${target} `);}
+function salesBrainPhraseIncluded(value,phrase){
+  const source=salesBrainClaimText(value),target=salesBrainClaimText(phrase);
+  // The Arabic definite article is grammatical, not a different printing fact
+  // (الشعار / شعار). Preserve token boundaries and all existing category checks.
+  const article=text=>text.replace(/(?<!\p{L})ال(?=\p{Script=Arabic}{4,}(?!\p{L}))/gu,'');
+  return !!target&&(` ${source} `.includes(` ${target} `)||` ${article(source)} `.includes(` ${article(target)} `));
+}
 function salesBrainClaimFactsSupport(claim,facts){
   const compatible={availability:new Set(["availability","color","size","material","capability","shipping"]),color:new Set(["color"]),size:new Set(["size"]),material:new Set(["material"]),capability:new Set(["capability"]),moq:new Set(["moq"]),price:new Set(["price"]),discount:new Set(["discount"]),payment:new Set(["payment"]),production:new Set(["production"]),shipping:new Set(["shipping"])};
   return (facts||[]).some(f=>compatible[claim.category]?.has(f.category)&&(!claim.values?.length||claim.values.every(value=>f.values.some(actual=>salesBrainPhraseIncluded(actual,value)||salesBrainPhraseIncluded(value,actual)))));
 }
-function salesBrainBusinessClaims(text){
+function salesBrainBusinessClaims(text,config={}){
+  const {catalog=[]}=config;
   const claimTerms={product:/(?:\b(?:model|product|box|case|collection)\b|مدل|محصول|جعبه|علبة|موديل|منتج)/iu,color:/(?:\b(?:navy|blue|red|green|black|white|cream|gold|silver|burgundy|interior|exterior|colour|color)\b|رنگ|سرمه[‌ای ]|قرمز|داخلی|خارجی|لون|كحلي|أحمر|داخلي|خارجي)/iu,material:/(?:\b(?:leather|wood|metal|velvet|cardboard|paper|material)\b|چرم|چوب|فلز|مخمل|مقوا|جنس|جلد|خشب|معدن|مادة)/iu,size:/(?:\b(?:size|dimension|dimensions|measurement|compatible)\b|اندازه|ابعاد|سایز|مقاس|أبعاد)/iu,printing:/(?:\b(?:foil|foiling|stamp(?:ing)?|printing|print|logo|branding)\b|چاپ|طلاکوب|فویل|لوگو|برند|فويل|طباعة|شعار)/iu,capability:/(?:\b(?:custom(?:ization| configuration)?|configuration|capability|option)\b|سفارشی|شخصی[‌ ]سازی|پیکربندی|قابلیت|تخصیص|تخصيص|مخصص|إمكانية)/iu,moq:/(?:\b(?:moq|minimum order|minimum quantity|quantity restriction|pieces)\b|حداقل سفارش|حداقل تعداد|موک|تعداد|الحد الأدنى|كمية)/iu,price:/(?:\b(?:price|unit price|total price|currency)\b|قیمت|سعر|ارز)/iu,discount:/(?:\b(?:discount|percentage)\b|تخفیف|درصد|خصم|نسبة)/iu,payment:/(?:\b(?:deposit|payment|bank transfer|cash|payment terms|commercial terms)\b|بیعانه|ودیعه|پرداخت|انتقال بانکی|شرایط پرداخت|عربون|دفع|(?:ال)?تحويل (?:ال)?بنكي|نقد|شروط الدفع)/iu,production:/(?:\b(?:production|manufacture|completion|production time|production date)\b|تولید|زمان تولید|تاریخ تولید|انتاج|تصنيع|مدة الإنتاج)/iu,shipping:/(?:\b(?:shipping|ship|delivery|air|ground|courier|baghdad|destination)\b|ارسال|تحویل|هوایی|زمینی|بغداد|شحن|توصيل|جوي|بري)/iu},phrases={material:/(?:leather|wood|metal|velvet|cardboard|paper|چرم|چوب|فلز|مخمل|مقوا|جلد|خشب|معدن|مادة)/giu,color:/(?:navy|blue|red|green|black|white|cream|gold|silver|burgundy|interior|exterior|سرمه(?:[‌ ]?ای)?|قرمز|داخلی|خارجی|كحلي|أحمر|داخلي|خارجي)/giu,printing:/(?:foil(?:ing)?|stamp(?:ing)?|printing|logo|branding|چاپ|طلاکوب|فویل|لوگو|فويل|طباعة|شعار)/giu,capability:/(?:custom(?:ization| configuration)?|configuration|سفارشی|شخصی[‌ ]سازی|پیکربندی|تخصیص|تخصيص|مخصص)/giu,shipping:/(?:air|ground|courier|baghdad|هوایی|زمینی|بغداد|(?:ال)?جوي|(?:ال)?بري)/giu,payment:/(?:bank transfer|cash|انتقال بانکی|نقد|(?:ال)?تحويل (?:ال)?بنكي)/giu},question=/[؟?]$|^(?:do|what|would|how|are you|can you|آیا|چه|کدام|چند|میشه|می‌شود|ممکن است|هل|شنو|كم|ممكن)/iu,safeRequest=/(?:لطفاً|لطفا).*(?:بفرمایید|ارسال کنید|مشخص کنید)|(?:يرجى|يرجي).*(?:حددوا|ارسلوا|توضحون)/iu,explicitAssertion=/\b(?:is|are|made of|supports?|available|can|we ship|we accept|takes?|costs?|give|offer|deliver(?:y)?|complete)\b|(?:ساخته شده|پشتیبانی می‌کند|موجود|می‌توانیم|ارسال می‌دهیم|انجام می‌دهیم|می‌پذیریم|طول می‌کشد|هزینه|ارائه می‌دهیم|تحویل می‌دهیم|ممکن(?: است)?|انجام\s*می[‌\s]?دیم|انجام\s*میدیم|می[‌\s]?دیم|میدیم|داریم|می[‌\s]?زنیم|میزنیم|می[‌\s]?تونیم|میتونیم|می[‌\s]?شه|میشه|امکانش\s*(?:هست|هم\s*هست)|امکان\s*داره|می[‌\s]?فرستیم|میفرستیم|می[‌\s]?کنیم|میکنیم)|(?:مصنوع من|يدعم|متوفر|يمكن|ممكنة|نوفر|نقبل|يستغرق|تكلفة|نسلم|نسوي|نكدر|نگدر|نقدر|عدنا|اكو|يصير|نطبع|نوصل|نسويها)/iu;
   const claims=[];
   // A dot BETWEEN digits is part of a decimal. All other sentence punctuation still separates assertions,
   // including a question immediately adjoining an assertion without whitespace.
   for(const sentence of String(text||"").match(/(?:[^.!؟?]|(?<=[0-9۰-۹٠-٩])\.(?=[0-9۰-۹٠-٩]))+[.!؟?]?/gu)||[]){
-    if(question.test(sentence)||safeRequest.test(sentence))continue;
-    const typed=typedSpecifications(sentence);
+    if(question.test(sentence)||safeRequest.test(sentence)||isExclusiveKnowledgeGap(sentence))continue;
+    const typed=typedSpecifications(catalogSpecificationText(sentence,catalog)),entities=claimEntities(sentence,{facts:config.authoritativeFacts||[],catalog,selectedProductKey:config.selectedProductKey});
     if(typed.invalid){claims.push({category:'invalid_numeric_role',values:[]});continue;}
-    if(typed.dimensions.length)claims.push({category:'size',values:typed.dimensions});
-    if(typed.components.length)claims.push({category:'product',values:typed.components.map(v=>v.match(/\d+/)?.[0]).filter(Boolean)});
+    if(typed.dimensions.length)claims.push({category:'size',values:typed.dimensions,entities});
+    if(typed.components.length)claims.push({category:'product',values:typed.components.map(v=>v.match(/\d+/)?.[0]).filter(Boolean),entities});
     const matched=Object.entries(claimTerms).filter(([,pattern])=>pattern.test(sentence)).map(([category])=>category),categories=matched.some(category=>category!=="product")?matched.filter(category=>category!=="product"):matched,numbers=typed.scalar.match(/[0-9۰-۹٠-٩]+/g)||[];
     for(const category of categories){
       const numeric=["moq","price","discount","production","shipping"].includes(category)&&numbers.length>0;
@@ -8167,7 +8190,7 @@ function salesBrainBusinessClaims(text){
       if(category==="size"){for(const value of typed.dimensions)add(value);}else if(numbers.length&&category!=="color"){for(const value of numbers)add(value);}
       for(const value of sentence.match(phrases[category]||/$(?!)/g)||[])add(value);
       const availability=sentence.match(/(.+?)\s+(?:is|are)\s+available\b|(.+?)\s+(?:موجود(?:\s+است|ه|باشد)?|متوفر(?:ة|ين)?)(?:\b|$)/iu);if(availability&&["product","color","size","material","printing","capability","shipping"].includes(category))add(availability[1]||availability[2]);
-      claims.push({category,values});
+      claims.push({category,values,entities});
     }
   }
   return claims;
@@ -8182,23 +8205,27 @@ export function validateSalesBrainDraft(draft,options=[]){
   const catalogIssue=catalogClaimIssue(text,config.catalog,config.selectedProductKey);if(catalogIssue)return {valid:false,reason:catalogIssue};
   // When the answer's markets are given, evidence of any other market is never used.
   const markets=Array.isArray(config.markets)&&config.markets.length?new Set(config.markets):null,facts=(config.authoritativeFacts||[]).filter(f=>!markets||!f.market||markets.has(f.market));
+  const description=productAssertionIssue(text,{...config,authoritativeFacts:facts});if(!description.valid)return description;
   const allowedNumbers=[...(config.allowedNumbers||[]),...facts.flatMap(f=>(f.values||[]).flatMap(v=>[...String(v).matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0])))).filter(Number.isSafeInteger)],numbers=[...text.matchAll(/[0-9۰-۹٠-٩]+/g)].map(x=>knowledgeCommandNumber(x[0]));
   const unsupportedNumbers=[...new Set(numbers.filter(n=>n===null||!allowedNumbers.includes(n)))];
   if(unsupportedNumbers.length)return {valid:false,reason:"unsupported_numeric_claim",unsupported_numbers:unsupportedNumbers};
   const compatible={product:new Set(["availability"]),color:new Set(["color"]),size:new Set(["size"]),material:new Set(["material"]),printing:new Set(["capability"]),capability:new Set(["capability"]),moq:new Set(["moq"]),price:new Set(["price"]),discount:new Set(["discount"]),payment:new Set(["payment"]),production:new Set(["production"]),shipping:new Set(["shipping"])};
-  const units=facts.map(f=>({category:f.category,values:f.values||[]})),collections=new Map();
+  const units=facts.map(f=>({...f,values:f.values||[]})),collections=new Map();
   for(const f of facts)if(f.collection&&f.market&&SALES_BRAIN_COLLECTION_CATEGORIES.has(f.category)){
     const key=f.category+"\u0000"+f.collection,byMarket=collections.get(key)||collections.set(key,new Map()).get(key);
     (byMarket.get(f.market)||byMarket.set(f.market,[]).get(f.market)).push(...(f.values||[]));
   }
-  for(const [key,byMarket] of collections){const category=key.split("\u0000")[0],shared=byMarket.get("GLOBAL")||[];for(const [market,values] of byMarket)units.push({category,values:market==="GLOBAL"?values:[...values,...shared]});}
+  for(const [key,byMarket] of collections){const [category,collection]=key.split("\u0000"),shared=byMarket.get("GLOBAL")||[];for(const [market,values] of byMarket)units.push({category,collection,entity_key:collection.split('|')[0],values:market==="GLOBAL"?values:[...values,...shared]});}
   const missing=(claim,unit)=>(claim.values||[]).filter(value=>!unit.values.some(actual=>salesBrainPhraseIncluded(actual,value)||salesBrainPhraseIncluded(value,actual)));
   // Blocked: only the claims no fact and no collection supports, each with only the values its closest evidence lacks.
   const unsupported=[];
-  for(const claim of salesBrainBusinessClaims(text)){
-    const gaps=units.filter(u=>compatible[claim.category]?.has(u.category)).map(u=>missing(claim,u)).sort((a,b)=>a.length-b.length);
-    if(gaps.length&&!gaps[0].length)continue;
-    unsupported.push({category:claim.category,values:gaps.length?gaps[0]:claim.values||[]});
+  for(const claim of salesBrainBusinessClaims(text,{...config,authoritativeFacts:facts})){
+    const scoped=['material','printing','capability'].includes(claim.category),subjects=scoped&&claim.entities.length?claim.entities:[null];
+    for(const subject of subjects){
+      const gaps=units.filter(u=>compatible[claim.category]?.has(u.category)&&(!scoped||factAppliesToEntity(u,subject,{catalog:config.catalog||[],facts}))).map(u=>missing(claim,u)).sort((a,b)=>a.length-b.length);
+      if(gaps.length&&!gaps[0].length)continue;
+      unsupported.push({category:claim.category,values:gaps.length?gaps[0]:claim.values||[]});
+    }
   }
   if(unsupported.length)return {valid:false,reason:"unsupported_factual_claim",claim_category:unsupported[0].category,unsupported_values:unsupported[0].values,unsupported_claims:unsupported};
   return {valid:true};
@@ -8335,7 +8362,7 @@ async function resolveLinkedOwnerDecision(env,{id,action,scope="CASE_ONLY",answe
 }
 async function ensureOwnerEscalationFromBrain(env,row,brain){
   if(!brain?.needs_owner||!row)return null;
-  if(brain.ai_first==="on"&&!policyAllowsOwner(brain)&&brain.needs_owner_reason!=="ambiguous_customer_identity")return null;
+  if(brain.ai_first==="on"&&!policyAllowsOwner(brain)&&brain.turn_policy?.reply_failure!==true&&brain.needs_owner_reason!=="ambiguous_customer_identity")return null;
   const reason=ownerEscalationReason(brain),linked=!!row.lead_id&&!!row.conversation_id;
   // Only identity ambiguity may exist without a deterministic customer link.
   if((reason!=="ambiguous_customer_identity"&&!linked)||(reason==="ambiguous_customer_identity"&&linked===false&&!String(row.id||brain.source_message_id||"").trim()))return null;
@@ -8566,13 +8593,13 @@ function salesResolvePricedProduct(catalog,{message,candidate,memoryProduct,memo
 
 // Phase48: informational construction identities only. Never used to select a priced variant or write customer facts.
 const salesComparisonKey=v=>salesVariantTokens(String(v||'').replace(/(دو|سه)[\s\u200c]*(تیکه|تکه)/gu,'$1 $2').replace(/روبان/gu,'ربان')).filter(w=>w!=='مدل').join(' ');
-const salesComparisonCue=v=>/تفاوت|فرق|مقایسه|compar|differ|توضیح|تضویح|شرح|اشرح/iu.test(v);
-const salesComparisonFollowup=v=>/(?:دیگه|دیگر|بقیه|باقی|الباقی|الاخر|الثانی)/u.test(salesNormal(v))&&/(?:مدل|نوع|اثنین|اثنین|دومدل|اون|هذ)/u.test(salesNormal(v));
+const salesComparisonCue=v=>/تفاوت|فرق|مقایسه|قارن|compar|differ|توضیح|تضویح|شرح|اشرح|بهتر|مناسب\s*تر|احسن|أحسن|افضل|أفضل|better/iu.test(v);
+const salesComparisonFollowup=v=>/(?:دیگه|دیگر|بقیه|باقی|الباقی|الاخر|الثانی|همین|همون|دوباره|عید|اعید|هالمودیلین|هذول)/u.test(salesNormal(v))&&/(?:مدل|مودیل|نوع|اثنین|دومدل|اون|هذ)/u.test(salesNormal(v));
 function salesComparisonMentions(text,names,{typos=false}={}){
   const words=salesComparisonKey(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean),hits=[];
   const edit=(a,b)=>a===b||(a.startsWith('و')&&salesVariantTokens(a.slice(1)).join(' ')===b)?0:typos&&a.length>=3&&b.length>=3&&(salesEditDistanceAtMostOne(a,b)||a.length===b.length&&[...a].some((_,i)=>i<a.length-1&&a.slice(0,i)+a[i+1]+a[i]+a.slice(i+2)===b))?1:99;
   for(const name of names){const ts=salesComparisonKey(name).split(' ');for(let i=0;i+ts.length<=words.length;i++){const cost=ts.reduce((n,t,k)=>n+edit(words[i+k],t),0);if(cost<=(typos?2:0))hits.push({name,start:i,end:i+ts.length,cost});}}
-  return [...new Set(hits.filter(h=>!hits.some(o=>o!==h&&o.start<=h.start&&o.end>=h.end&&(o.end-o.start>h.end-h.start||o.cost<h.cost))&&!hits.some(o=>o.name!==h.name&&o.start===h.start&&o.end===h.end&&o.cost===h.cost)).map(h=>h.name))];
+  return [...new Set([...hits.filter(h=>!hits.some(o=>o!==h&&o.start<=h.start&&o.end>=h.end&&(o.end-o.start>h.end-h.start||o.cost<h.cost))&&!hits.some(o=>o.name!==h.name&&o.start===h.start&&o.end===h.end&&o.cost===h.cost)).map(h=>h.name),...modelMentions(text,names)])];
 }
 
 function salesComparisonCoverage(text,names,records=[],universe=names){
@@ -8582,11 +8609,16 @@ function salesComparisonCoverage(text,names,records=[],universe=names){
     for(const clause of splitSalesReply(section)){
     const mentioned=salesComparisonMentions(clause,universe),found=mentioned.filter(n=>names.includes(n));
     if(mentioned.length&&!found.length){scope=null;continue;}
-    if(found.length>1){scope=null;continue;}
+    if(found.length>1){
+      // A truthful shared limitation can cover several named models; their
+      // full prose still passes the ordinary scoped factual validator.
+      if(/(?:اطلاعات|شرح|جزئیات|مکانیزم|توضیح|تفاصیل|معلومات).*(?:ندارم|نیست|ناقص|کافی ندار|کامل ندار|مو واضح|مو کامله|ما عندی)|ما عندی.{0,18}(?:تفاصیل|معلومات|شرح)/u.test(salesNormal(clause)))for(const name of found){covered.add(name);gaps.add(name);}
+      scope=null;continue;
+    }
     if(found.length===1)scope=found[0];
     if(!scope)continue;
     const name=scope,normal=salesNormal(clause);
-    const gap=/(?:اطلاعات|شرح|جزئیات|مکانیزم|توضیح|تفاصیل|معلومات).*(?:ندارم|نیست|ناقص|کافی ندار|کامل ندار|مو واضح|مو کامله|ما عندی)/u.test(normal);
+    const gap=/(?:اطلاعات|شرح|جزئیات|مکانیزم|توضیح|تفاصیل|معلومات).*(?:ندارم|نیست|ناقص|کافی ندار|کامل ندار|مو واضح|مو کامله|ما عندی)|ما عندی.{0,18}(?:تفاصیل|معلومات|شرح)/u.test(normal);
     const ignore=new Set([...salesVariantTokens(name),'از','به','در','را','این','است','دارد','می','شود','برای','مدل','جعبه','موجود','اطلاعات','مشتری','تواند','خودش','انتخاب','کند','میتواند','امکان','پذیر','اطلاعاتش','فهرست','سایت','تأییدشده','ثبت']);
     const words=new Set(salesVariantTokens(clause));
     const grounded=records.filter(r=>salesComparisonRecordModels(r,[name],universe).length).some(r=>{
@@ -8623,13 +8655,14 @@ async function salesComparisonContext(env,{row,market,catalog,financial,records=
     if(h.outreach_id)sentReplies.push({id:h.outreach_id,text:h.sent_reply});
     const all=salesComparisonMentions(h.message,names,{typos:true});
     if(all.length>=2&&salesComparisonCue(h.message)){
+      const countWords=salesNormal(row.message).replace(/(دو|سه|چهار|پنج|شش)(مدل)/gu,'$1 $2');
+      const count=countWords.match(/(?:^|\s)(دو|سه|چهار|پنج|شش|[2-6])\s*(?:تا\s*)?مدل/u);
+      const expected=count?Number(SALES_NUMBER_WORDS.get(count[1])||count[1]):/مودیلین/u.test(countWords)?2:null;
+      if(/دوباره|بار دیگه|عید|اعید|کرر|مره ثانیه|مرة ثانية/u.test(salesNormal(row.message)))return {requested_models:expected&&expected!==all.length?[]:all,source_message_id:h.id,market,followup:true,repeat_requested:true,clarification_needed:!!expected&&expected!==all.length};
       const covered=new Set(),gaps=new Set();
       for(const reply of sentReplies){const c=salesComparisonCoverage(reply.text,all,records,names);for(const n of c.addressed_models)if(!covered.has(n)){covered.add(n);if(c.missing_detail_models.includes(n))gaps.add(n);}}
       const remaining=all.filter(n=>!covered.has(n)),pending=remaining.length?remaining:[...gaps];
       if(!pending.length)return null;
-      const countWords=salesNormal(row.message).replace(/(دو|سه|چهار|پنج|شش)(مدل)/gu,'$1 $2');
-      const count=countWords.match(/(?:^|\s)(دو|سه|چهار|پنج|شش|[2-6])\s*(?:تا\s*)?مدل/u);
-      const expected=count?Number(SALES_NUMBER_WORDS.get(count[1])||count[1]):null;
       return {requested_models:expected&&expected!==pending.length?[]:pending,unresolved_models:pending,original_models:all,source_message_id:h.id,sent_outreach_ids:sentReplies.map(r=>r.id),market,followup:true,clarification_needed:!!expected&&expected!==pending.length,previous_coverage:{addressed_models:[...covered],missing_detail_models:[...gaps],unanswered_models:remaining}};
     }
     const courtesy=/^(?:ممنون|مرسی|باشه|سپاس|متشکرم|شکرا|شکراً|تمام|تسلم)[\s.!،؟]*$/u.test(salesNormal(h.message));
@@ -9456,7 +9489,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const qSource=memories.find(f=>f.memory_key==='requested_quantity')?.source_message_id;
     let qDecision=null;
     if(qSource){try{qDecision=JSON.parse((await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind('sales-brain:'+qSource).first())?.details_json||'null');}catch{}}
-    quantityProjection=trustedQuantityProjection({memory,candidate:storedCandidate,sourceId:qSource,sourceDecision:qDecision});
+    let scopeMeta={};try{scopeMeta=parseLeadNotes({notes:row.lead_notes})||{};}catch{}
+    const scopeMarket=determineQuoteMarket({ownerMarket:scopeMeta.market,leadCountry:scopeMeta.country||memory.customer_country,destination:salesDestinationCountry(memory.destination)||memory.destination}).market;
+    quantityProjection=trustedQuantityProjection({memory,candidate:storedCandidate,sourceId:qSource,sourceDecision:qDecision,market:['IRAN','ARAB'].includes(scopeMarket)?scopeMarket:null});
     memory=quantityProjection.memory;storedCandidate=quantityProjection.candidate;
   }
   let intent=NEGOTIATION_INTENTS.has(row.category)?row.category:classifyNegotiationIntent(row.message);
@@ -9561,13 +9596,13 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(aiUnderstanding){const ai=await aiUnderstanding;timing.ai_understanding_called=!!ai?.called;timing.ai_understanding_ms=Date.now()-wave2;if(ai?.intent&&ai.intent!=="other"){aiIntent=ai.intent;intent=ai.intent;stage=salesBrainStage(intent,memory);}}
   // An approved catalog product the customer named (in any language or with a typo) is a known product, like a captured product name.
   let pricing=pricingWork?await pricingWork:null;if(pricing?.product)known.product_or_model=true;
-  const promptScopeChanged=aiFirstOn&&!!dealCandidate?.product?.key&&!!pricing?.product&&pricing.product.key!==dealCandidate.product.key;
+  const promptScopeChanged=aiFirstOn&&!!pricing?.product&&((!!dealCandidate?.product?.key&&pricing.product.key!==dealCandidate.product.key)||!!quantityProjection?.quantity&&!!quantityProjection.source_product_key&&quantityProjection.source_product_key!==pricing.product.key);
   if(promptScopeChanged){
     for(const key of SALES_DEAL_SCOPED_KEYS)delete memory[key];
     knownQuantity=undefined;quantityValid=false;known.quantity=false;known.size=false;known.color=false;known.customization=false;
     const p=pricing.product;
     const fresh=await (p.source==='si'?siApprovedPrice(env,{market:conversationMarket,productKey:p.key,texts:[row.message],quantity:null}).then(r=>({...r,source:'si'})):salesListDiscountRule(env,conversationMarket).then(rule=>salesListPrice(p,conversationMarket,null,{texts:[row.message],discountRule:rule}))).catch(()=>null);
-    if(fresh)pricing={...fresh,product:p,resolution:pricing.resolution,catalog_summary:pricing.catalog_summary,product_keys:pricing.product_keys};
+    pricing={...(fresh||{status:'unavailable',quantity:null}),product:p,resolution:pricing.resolution,catalog_summary:pricing.catalog_summary,product_keys:pricing.product_keys};
   }
   const promptCandidate=promptScopeChanged?null:dealCandidate;
   const requirements=resolveSalesRequirements(requirementRules,productKeys);
@@ -9614,7 +9649,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const informationRequest=aiFirstOn&&!orderStatusAsked&&!orderStatusMixed&&!formalQuoteReply?approvedServiceRequest(resumeService||row.message):null;
   let approvedInformation=await loadApprovedGuidance(env,{market:conversationMarket,request:informationRequest}).catch(()=>null);
   let turnPolicy=planSalesTurn({enabled:aiFirstOn}),meaning=null;
-  let ai=null,aiAllowedNumbers=[],aiServiceReply=null,currentSelection=null,aiKnowledgeEvidenceRecords=[],comparisonPlan=null;const aiInfo={enabled:salesAiEnabled(env),used:false,ai_first:aiFirst},aiChanged={};
+  const requestPlan=aiFirstOn?conversationRequestPlan(row.message,pricing?.catalog_summary||[]):null;
+  let ai=null,aiAllowedNumbers=[],currentSelection=null,aiKnowledgeEvidenceRecords=[],comparisonPlan=null,authorContext=null;const aiInfo={enabled:salesAiEnabled(env),used:false,ai_first:aiFirst,request_plan:requestPlan},aiChanged={};
   if(aiInfo.enabled&&!orderStatusAsked&&!extraCostAsked&&(!formalQuoteReply||aiFirstOn)&&String(row.message||"").trim()){
     const ctxStarted=Date.now();
     // Durable customer profile (other conversations of THIS lead only): informational context, never copied into the current deal.
@@ -9624,37 +9660,41 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     const valueText=r=>{const e=r.envelope||{};const v=e.relation?{relation:e.relation.name,members:e.relation.members,allowed:e.value!==false}:e.conditions?.length||e.effect?{when:e.conditions,then:e.effect??e.value}:e.value;return typeof v==="string"?v:JSON.stringify(v);};
     // Informational comparisons need the facts of every product explicitly named NOW. This scope does not select a priced
     // product, write a deal, expand colour permissions or change the deterministic rule/relation scope.
-    const aiMentioned=salesMentionedEntities(kgRecords,[row.message],{allowMultiple:true});
+    const aiMentioned=[...new Set([...salesMentionedEntities(kgRecords,[row.message],{allowMultiple:true}),...informationalEntities(kgRecords,row.message,pricing?.catalog_summary||[])])];
     comparisonPlan=await salesComparisonContext(env,{row,market:conversationMarket,catalog:pricing?.catalog_summary||[],records:kgRecords,financial:financialTurn||!serviceTurn});
     const modelIdentity=salesComparisonKey;
     const constructionNames=[...new Set((pricing?.catalog_summary||[]).flatMap(c=>c.models||[]).map(modelIdentity))];
-    const modelComparison=!!comparisonPlan||/تفاوت|فرق|مقایسه|compar|differ/iu.test(row.message)&&
+    const modelComparison=!!comparisonPlan||!!requestPlan?.asks_recommendation||/تفاوت|فرق|مقایسه|compar|differ/iu.test(row.message)&&
       (serviceCatalogQuestion(row.message)||/تکه|کشویی|جرار|piece|drawer/iu.test(row.message));
     const constructionEntities=modelComparison?[...new Set(kgRecords.map(r=>r.entity_key).filter(k=>{
       const key=modelIdentity(k);return constructionNames.includes(key)||key==='کشویی'&&constructionNames.some(n=>n.startsWith(key+' '));
     }))]:[];
     // A general construction comparison has no named product. Current explicit entities outrank an older deal's family.
-    const aiEntities=modelComparison&&constructionEntities.length?[...new Set([...aiMentioned,...constructionEntities])]:aiMentioned.length?aiMentioned:kgEntities.matched;
-    const aiScope=modelComparison||aiMentioned.length?kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||aiEntities.includes(r.entity_key)):kgScope;
+    const aiEntities=modelComparison&&constructionEntities.length?[...new Set([...aiMentioned,...constructionEntities])]:aiMentioned.length?aiMentioned:requestPlan?.fresh_topic?[]:kgEntities.matched;
+    const aiScope=modelComparison||aiMentioned.length||requestPlan?.fresh_topic?kgRecords.filter(r=>knowledgeText(r.entity_key)==="global"||aiEntities.includes(r.entity_key)):kgScope;
     const aiRelevant=new Set(matchKnowledgeQuestion(row.message,aiScope,{entities:aiEntities}).flatMap(g=>g.records.map(r=>r.id)));
     const aiKnowledge=aiScope.filter(r=>r.concept!=="exterior_colors"&&!knowledgeIsCommercial(r.concept,r.envelope))
       .sort((a,b)=>Number(modelComparison&&constructionEntities.includes(b.entity_key))-Number(modelComparison&&constructionEntities.includes(a.entity_key))||Number(aiRelevant.has(b.id))-Number(aiRelevant.has(a.id)));
     const knowledgeCtx=aiKnowledge.map(r=>({id:r.id,version:r.version,topic:r.envelope?.labels?.[lang]||r.concept,about:r.entity_key,value:valueText(r)}));
     if(approvedInformation)knowledgeCtx.unshift({topic:'approved_information',about:conversationMarket,value:approvedInformation.text});
-    const dealCtx=promptCandidate?{product:promptCandidate.product?.name||null,model:promptCandidate.requirements?.configuration||null,size:promptCandidate.requirements?.size||null,quantity:promptCandidate.quantity??null,status:promptCandidate.status,quantity_scope:promptCandidate.quantity_provenance?.role||null,order_registered:!!promptCandidate.order_id}:null;
+    const informationalComparison=!!comparisonPlan?.requested_models?.length&&!turnPolicy?.payment_stage;
+    const isolatedAdvice=requestPlan?.construction_only||informationalComparison;
+    const dealCtx=promptCandidate&&!isolatedAdvice?{product:promptCandidate.product?.name||null,model:promptCandidate.requirements?.configuration||null,size:promptCandidate.requirements?.size||null,quantity:promptCandidate.quantity??null,status:promptCandidate.status,quantity_scope:promptCandidate.quantity_provenance?.role||null,order_registered:!!promptCandidate.order_id}:null;
     const aiState=await salesAiConversationState(env,{row,memory,pricing,dealCandidate:promptCandidate,postSaleOrder,priorEvents,priorInbox,lastDecision,knownQuantity:quantityValid?knownQuantity:null});
     if(comparisonPlan)aiState.comparison=comparisonPlan;
+    if(requestPlan){aiState.request=requestPlan;if(isolatedAdvice){Object.assign(aiState,{current_product:null,previous_product:null,priced_products:[],last_shown:null,model:null,size:null,structure:null,quantity:null,colors:[],color_parts:null,printing:null,order:null,current_topic:requestPlan.topic||null});}}
     const stillNeeded=dealCandidate?.status==="accepted"?[!memory.customer_name&&"customer_name",!memory.destination&&"destination",colorOptions.length&&!(Array.isArray(memory.selected_colors)&&memory.selected_colors.length)&&"colors"].filter(Boolean):[];
     const input=buildSalesAiInput({market:conversationMarket,language,
       customer:{name:memory.customer_name||null,destination:memory.destination||null,earlier_profile:Object.keys(profile).length?profile:null},
       deal:dealCtx,
-      commercial:pricing?{status:pricing.status,product:pricing.product_name||pricing.product?.name||null,quantity:Number.isSafeInteger(pricing.quantity)?pricing.quantity:null,needs:pricing.status==="missing_attribute"?{choice:pricing.attribute?.key||null,options:pricing.attribute?.values||[]}:null}:null,
-      catalog:pricing?.catalog_summary||[],productKeys:pricing?.product_keys||[],state:aiState,
-      colors:colorOptions.length?{approved:colorOptions,parts:colorStructure?colorStructure.parts[lang]:Object.fromEntries(SALES_COLOR_STRUCTURES.map(s=>[s.key,s.parts[lang]])),suggestion:colorStructure?.key==="three_piece"?"often top and bottom the same colour, middle different (only a suggestion)":null,chosen:Array.isArray(memory.selected_colors)?memory.selected_colors:[],chosen_parts:memory.color_parts||null}:null,
+      commercial:pricing&&!isolatedAdvice?{status:pricing.status,product:pricing.product_name||pricing.product?.name||null,quantity:Number.isSafeInteger(pricing.quantity)?pricing.quantity:null,needs:pricing.status==="missing_attribute"?{choice:pricing.attribute?.key||null,options:pricing.attribute?.values||[]}:null}:null,
+      catalog:requestPlan?.construction_only?[]:pricing?.catalog_summary||[],productKeys:requestPlan?.construction_only?[]:pricing?.product_keys||[],state:aiState,
+      colors:colorOptions.length?{approved:colorOptions,parts:colorStructure&&!isolatedAdvice?colorStructure.parts[lang]:Object.fromEntries(SALES_COLOR_STRUCTURES.map(s=>[s.key,s.parts[lang]])),suggestion:!isolatedAdvice&&colorStructure?.key==="three_piece"?"often top and bottom the same colour, middle different (only a suggestion)":null,chosen:!isolatedAdvice&&Array.isArray(memory.selected_colors)?memory.selected_colors:[],chosen_parts:!isolatedAdvice?memory.color_parts||null:null}:null,
       knowledge:knowledgeCtx,pending:dealEscalations.map(e=>e.reason_code),stillNeeded,
       summary:conversationSummary?.text||null,summaryRequested:context.length>=12,
       recent:context.filter(x=>x.id!==row.id).map(x=>({from:x.direction==="inbound"?"customer":"assistant",text:x.message})),
       message:row.message},{onKnowledgeSelection:selection=>{aiInfo.knowledge_context={...selection,market:conversationMarket,comparison_entities:comparisonPlan?.requested_models.length||(aiMentioned.length>1?aiMentioned.length:0),construction_entities:constructionEntities};const sentIds=new Set(selection.selected.map(k=>k.id).filter(Boolean));aiKnowledgeEvidenceRecords=aiKnowledge.filter(r=>sentIds.has(r.id));}});
+    if(input){const built=JSON.parse(input.replace(/^CONTEXT:\s*/,''));authorContext={recent:built.recent,customer:built.customer,state:built.state,summary:built.summary};}
     timing.ai_context_ms=Date.now()-ctxStarted;
     const aiProvider=salesAiProvider(env),aiRequested=salesAiModel(env);
     const res=input===null?{ok:false,model:aiRequested,ms:0,error:"context_budget_exceeded"}:await salesAiSingleFlight(env,{key:"inbox:"+row.id+":sales_brain",row,provider:aiProvider,requestedModel:aiRequested,leaseMs:salesAiTimeoutMs(env)+10000,call:()=>callSalesAi(env,{instructions:salesAiPolicy(language,{aiFirst:aiFirstOn||aiFirstShadow}),input})});
@@ -9669,7 +9709,6 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       // discount, MOQ, shipping, payment, delivery/status, order confirmation), numbers the conversation never contained, colours
       // that are not approved — or no reply at all — is discarded WHOLE: neither its facts nor its reading steer anything.
       const d=res.decision,digits=v=>[...String(v??"").matchAll(/[0-9۰-۹٠-٩]+/g)].map(m=>knowledgeCommandNumber(m[0])).filter(Number.isSafeInteger);
-      aiServiceReply=d.reply;
       aiAllowedNumbers=[...new Set([knownQuantity,dealCandidate?.quantity,...digits(row.message),...digits(memory.product_interest),...digits(memory.requested_size),...digits(JSON.stringify(pricing?.catalog_summary||[])),...digits(dealCandidate?.product?.name),...digits(JSON.stringify(dealCandidate?.requirements||{})),...salesAiGroundedNumbers(input)].filter(Number.isFinite))];
       const prefTerms=[...salesAiPreferenceTerms(input),...printingOptions];
       const issues=salesAiProseIssues(approvedInformation?maskApprovedGuidance(d.reply,approvedInformation):d.reply,{allowedNumbers:aiAllowedNumbers,preferenceTerms:prefTerms});
@@ -9685,6 +9724,18 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     }
   }
   if(aiFirstOn&&meaning&&!ai)ai={...meaning,reply:''};
+  const independentOwnerEvent=!!postSaleOrder&&['confirmed','partially_paid'].includes(postSaleOrder.status)||turnPolicy?.payment_stage||['quote','accept','order_support'].includes(turnPolicy?.mode)||meaning?.requests?.some(request=>['payment','acceptance','order_status'].includes(request))||paymentClaimSignal(String(row.message||''),{awaitingPayment:true,paymentRequested:true}).claim||!!salesPaymentTermsRequest(row.message,{paymentContext:true});
+  const supersededBy=aiFirstOn&&!independentOwnerEvent?await newerConversationInbound(env,row.id):null;
+  if(supersededBy){
+    // Preserve an independent explicit name, but never replay an old deal or
+    // payment action after a newer customer turn. Other captured facts already
+    // use the source-ordered memory upsert above.
+    const name=aiInfo.used&&typeof ai?.facts?.customer_name==='string'?ai.facts.customer_name.trim():null;
+    if(name&&name.length<=40&&!/[0-9۰-۹٠-٩@#]/u.test(name)&&salesBrainPhraseIncluded(row.message,name))await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:'customer_name',memory_key:'customer_name',value:name}});
+    const result={ai_first:'on',source_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,superseded_inbound:true,superseded_by:supersededBy,next_sales_action:'superseded_inbound',needs_owner:false,draft_customer_reply:null,validation:{valid:false,reason:'superseded_inbound'},ai_brain:{...aiInfo,authorship:{verified:false,contract_version:2}}};
+    await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Older inbound retired after newer customer turn',?,?)").bind('sales-brain:'+row.id,'sales_brain_decision',JSON.stringify(result),now()).run();
+    return result;
+  }
   if(turnPolicy){
     aiInfo.turn_policy=turnPolicy;aiInfo.legacy_quantity_masked=!!quantityProjection?.masked;
     // Fresh semantic intent replaces the old keyword category, including when prose was rejected.
@@ -9746,6 +9797,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       const s=Date.now();
       const repriced=await salesPricing(env,{market:conversationMarket,message:[row.message,described].filter(Boolean).join(" "),history:[...earlierInbound,imageCategory].filter(Boolean),chronological:[...dealVariant,...[...earlierInbound].reverse(),row.message,...(described?[described]:[])],memoryProduct:f.product||model,memorySource:f.product?null:modelSource,candidate:turnPolicy?.deal_reference==="new"?null:dealCandidate,quantity:quantityValid?knownQuantity:null,productNamedNow:!!f.product,language,validatedProductKey:interpreted?.product_key||null}).catch(()=>null);
       timing.ai_repricing_ms=Date.now()-s;
+      if(!repriced?.product)pricing=repriced||{status:'unavailable',quantity:null,catalog_summary:pricing?.catalog_summary||[],product_keys:pricing?.product_keys||[]};
       if(repriced&&repriced.product){pricing=repriced;known.product_or_model=true;
         if(f.product&&["current_message","validated_interpretation"].includes(repriced.resolution?.basis)&&repriced.product.name&&repriced.product.name!==memory.product_interest){await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"product_interest",memory_key:"product_interest",value:repriced.product.name}});aiChanged.product=true;applied.push("product");}}
     }
@@ -9776,7 +9828,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // (and without the previous deal's variant).
     const p=pricing.product,selection=currentSelection?.product_key===p.key?currentSelection:null,texts=[row.message,...(selection?[selection.size,selection.configuration].filter(Boolean):[])];
     const fresh=await (p.source==="si"?siApprovedPrice(env,{market:conversationMarket,productKey:p.key,texts,quantity:quantityValid?knownQuantity:null}).then(r=>({...r,source:"si"})):salesListDiscountRule(env,conversationMarket).then(rule=>salesListPrice(p,conversationMarket,quantityValid?knownQuantity:null,{texts,discountRule:rule}))).catch(()=>null);
-    if(fresh)pricing={...fresh,resolution:pricing.resolution,product:p,catalog_summary:pricing.catalog_summary,product_keys:pricing.product_keys};
+    pricing={...(fresh||{status:'unavailable',quantity:null}),resolution:pricing.resolution,product:p,catalog_summary:pricing.catalog_summary,product_keys:pricing.product_keys};
   }
   if(turnPolicy?.quantity_source){turnPolicy.quantity_source.market=conversationMarket;turnPolicy.quantity_source.product_key=pricing?.product?.key||null;}
   const contextColors=colorPick.selected.length?colorPick.selected:Array.isArray(memory.selected_colors)?memory.selected_colors:[];
@@ -10315,15 +10367,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // commercial segment of the deterministic decision (approved price / terms / owner holding) is inserted at {{COMMERCIAL}}.
   // Acceptance, order status and quotes stay fully deterministic. Escalations the deterministic layer requires (no approved price,
   // an owner rule, discount/terms, a non-standard colour) are kept; a soft holding or a stale wait is replaced only when the AI
-  // answered from approved knowledge. Anything that fails validation → the deterministic reply (and why is recorded).
+  // answered from approved knowledge. The final authorship gate below holds any response
+  // that cannot be drafted and verified by the authorized model.
   if(approvedInformation&&!postSaleReview&&!orderStatusAsked&&!['accept_offer','accepted','quote','order_status','answer_extra_cost'].includes(action))guidanceUsed=approvedInformation;
-  let replySource="legacy",replyParts=[],catalogAnswer=null;const aiEvidenceFacts=[],needsOwnerPreAi=needsOwner;
-  if(turnPolicy?.mode==='browse'&&turnPolicy.primary_intent==='product_info'&&aiInfo.interpretation_valid){
-    catalogAnswer=catalogVariantAnswer({catalog:pricing?.catalog_summary||[],key:aiInfo.interpretation?.product_key,size:aiInfo.interpretation?.requested_size,structure:meaning?.interpretation?.requested_structure,message:row.message,language});
-    if(catalogAnswer&&ai){const sentences=splitSalesReply(ai.reply),entry=pricing.catalog_summary.find(c=>c.key===catalogAnswer.product),at=sentences.findIndex(s=>(replyKey(s).includes(replyKey(entry.product))||typedSpecifications(s).dimensions.includes(dimensionKey(catalogAnswer.size)))&&replyKey(s).includes(replyKey(catalogAnswer.query))&&/ندار|نیست|^نه[، ]|مو\s|غير متوفر/u.test(s));if(at>=0){sentences[at]=catalogAnswer.text;ai={...ai,reply:sentences.join(' ')};}else catalogAnswer=null;}
-  }
+  let replySource="legacy",replyParts=[];const aiEvidenceFacts=[],needsOwnerPreAi=needsOwner;
   if(ai&&ai.reply){
-    if(turnPolicy)ai={...ai,reply:splitSalesReply(ai.reply.replaceAll(INFORMATION_SLOT,INFORMATION_SLOT+'\n')).filter(p=>{const field=serviceQuestionField(p);return !(field==='model'&&known.product_or_model||field==='quantity'&&(quantityValid||turnPolicy.mode==='browse')||field==='destination'&&memory.destination||field==='market'&&conversationMarket);}).join(' ')};
+    if(turnPolicy){const originalParts=splitSalesReply(ai.reply.replaceAll(INFORMATION_SLOT,INFORMATION_SLOT+'\n')),kept=originalParts.filter(p=>{const field=serviceQuestionField(p);return !(field==='model'&&known.product_or_model||field==='quantity'&&(quantityValid||turnPolicy.mode==='browse')||field==='destination'&&memory.destination||field==='market'&&conversationMarket);});if(kept.length!==originalParts.length){aiInfo.repaired={stage:'question_filter',dropped:originalParts.length-kept.length};ai={...ai,reply:kept.join(' ')};}}
     const DET_ONLY=["payment_ready_owner","answer_extra_cost","accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","clarify_photo_or_order","answer_sizes","ask_color_placement","ask_image_reference","answer_catalog","welcome"];
     const SEGMENT=["policy_discount","policy_terms","policy_limit","answer_moq_limit","answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner"];
     // (a below-MOQ answer is exact: minimum, requested quantity, owner review; the model never rewords it)
@@ -10348,7 +10397,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         const newOffer=candidate?.status==="offered"&&candidate.offer?.offered_in===row.id;
         const useSegment=!!segment&&(commercialAsked||newOffer||(needsOwner&&SEGMENT.includes(action)));
         if(segment&&!useSegment){segment=null;if(SEGMENT.includes(action)||action==="advise_colors"){action="ai_answer";askedField=null;}}
-        const composeWith=p=>{let text=(segment?(p.includes(SALES_AI_COMMERCIAL_SLOT)?p.replace(SALES_AI_COMMERCIAL_SLOT,segment):(turnPolicy&&["ask_attribute","clarify_product"].includes(action)&&/[?؟]/u.test(p)?p:p+" "+segment)):p.split(SALES_AI_COMMERCIAL_SLOT).join(''));if(guidanceUsed)text=text.includes(INFORMATION_SLOT)?text.replace(INFORMATION_SLOT,guidanceUsed.text):text.includes(guidanceUsed.text)?text:text+'\n'+guidanceUsed.text;return text.split(INFORMATION_SLOT).join('').replace(/[ \t]{2,}/g,' ').trim();};
+        const composeWith=p=>{let text=(segment?(p.includes(SALES_AI_COMMERCIAL_SLOT)?p.replace(SALES_AI_COMMERCIAL_SLOT,segment):(turnPolicy&&["ask_attribute","clarify_product"].includes(action)&&/[?؟]/u.test(p)?p:p+" "+segment)):p.split(SALES_AI_COMMERCIAL_SLOT).join(''));if(guidanceUsed)text=text.includes(INFORMATION_SLOT)?text.replace(INFORMATION_SLOT,guidanceUsed.text):text.includes(guidanceUsed.text)||aiFirstOn?text:text+'\n'+guidanceUsed.text;return text.split(INFORMATION_SLOT).join('').replace(/[ \t]{2,}/g,' ').trim();};
         let composed=composeWith(prose);
         // Price-engine evidence is never lent to model prose; each exact segment keeps its own provenance.
         aiEvidenceFacts.push(...authorityFacts,...colorEvidenceFacts,...printingEvidenceFacts,
@@ -10356,7 +10405,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         // AI-FIRST: the approved catalog of this market that Claude was given (products, models, sizes) is evidence for its answer too.
         if(aiFirstOn)for(const c of (pricing?.catalog_summary||[]))aiEvidenceFacts.push(...salesMemoryAnswerEvidence({product:c.product,models:c.models||[],sizes:c.sizes||[],market:conversationMarket}));
         const vOpts={allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:aiEvidenceFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key};
-        const parts=[...(segment&&composed.includes(segment)?[{kind:'commercial',text:segment,facts:[...authorityFacts,...(salesEvidence?.facts||[])]}]:[]),...(catalogAnswer?[{kind:'catalog',text:catalogAnswer.text,facts:catalogAnswer.facts}]:[])];
+        const parts=segment&&composed.includes(segment)?[{kind:'commercial',text:segment,facts:[...authorityFacts,...(salesEvidence?.facts||[])]}]:[];
         const validateComposed=text=>validateReplyParts(guidanceUsed?maskApprovedGuidance(text,guidanceUsed):text,parts,validateSalesBrainDraft,vOpts);
         let v=validateComposed(composed);
         // AI-FIRST: an unsupported claim removes only its sentence (the engine segment is never touched); the rest is re-validated.
@@ -10385,50 +10434,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // (a deterministic reply that carries authoritative commercial information is kept; the escalation is added to it)
     if(replySource==="legacy"&&!["answer_price","negotiate","handle_objection","answer_moq","ask_attribute","price_owner","commercial_owner","moq_owner","advise_colors","order_details"].includes(action)){action="knowledge_owner";askedField=null;draft=salesBrainNaturalDraft("knowledge_owner",language,{avoid:recentReplies});validation=validateSalesBrainDraft(draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});aiInfo.escalation_only=true;}
   }
-  // Owner policy: ordinary product/service uncertainty is answered or clarified here, never turned into a financial approval.
-  // Keep transaction and pricing actions authoritative. The payment-specific routes below still run unchanged.
-  const protectedServiceAction=['policy_constraint','answer_price','negotiate','handle_objection','price_owner','moq_owner','accept_offer','accepted','quote','order_status','acknowledge_rejection'].includes(action)||(action==='wait_for_owner'&&['unsupported_price','unauthorized_discount','unusual_commercial_terms','unclear_moq'].includes(waitingOn));
-  if(serviceTurn&&!protectedServiceAction){
-    const validModelComparison=/تفاوت|فرق|مقایسه|compar|differ/iu.test(catalogQuestion)&&/^ai/.test(replySource)&&validation?.valid===true;
-    const incompleteCatalog=catalogAsk&&catalogNames.length&&!validModelComparison&&!catalogNames.some(n=>draft.includes(n));
-    if(serviceMarketQuestion||incompleteCatalog||needsOwner||ai?.owner_escalation_needed||serviceFollowupPromise(draft)||['knowledge_owner','commercial_owner','owner_followup'].includes(action)){
-      if(serviceMarketQuestion){action='ask_destination';askedField='destination';draft=salesDraft;}
-      else if(catalogAsk&&catalogNames.length){action='answer_catalog';askedField=null;draft=language==='Iraqi Arabic'?`الموديلات في قائمتنا: ${catalogNames.join('، ')}.${catalogModels.length?' الأنواع: '+catalogModels.join('، ')+'.':''} أي موديل تفضّل؟`:`برای ${halfSetAsked?'نیم‌ست':'جعبه'}، گزینه‌های فهرست فعلی: ${catalogNames.join('، ')}.${catalogModels.length?' مدل‌ها: '+catalogModels.join('، ')+'.':''} کدام مدل را می‌پسندید؟`;}
-      else if(guidanceUsed){action=guidanceUsed.kind==='color'?'answer_color_selection':'answer_information';askedField=null;draft=guidanceUsed.text;}
-      else{
-        const web=colorPick.special||kgAttrKind==='color'?await loadApprovedGuidance(env,{market:conversationMarket,request:{kind:'color'}}).catch(()=>null):null;
-        if(web){guidanceUsed=web;action='answer_color_selection';draft=web.text;askedField=null;}
-        else{action='continue_conversation';askedField=null;draft=language==='Iraqi Arabic'?(known.product_or_model?'هالتفصيل مو واضح عندي. شنو الميزة اللي تقصدها بالضبط؟':'حتى أجاوبك بدقة، شنو الموديل اللي تقصده؟'):(known.product_or_model?'برای این ویژگی هنوز اطلاعات کافی ندارم. دقیقاً چه ویژگی‌ای مدنظرتونه؟':'برای اینکه دقیق راهنمایی‌تون کنم، کدوم مدل مدنظرتونه؟');}
-      }
-      const facts=[...authorityFacts,...(salesEvidence?.facts||[]),...catalogEntries.flatMap(c=>salesMemoryAnswerEvidence({product:c.product,models:c.models||[],sizes:c.sizes||[],market:conversationMarket}))];
-      validation=validateSalesBrainDraft(guidanceUsed?maskApprovedGuidance(draft,guidanceUsed):draft,{allowedNumbers:aiAllowedNumbers,authoritativeFacts:facts,markets:knowledgeMarkets});
-      aiEvidenceFacts.push(...facts);replySource='ai_service_policy';aiInfo.service_repair=true;
-    }
-    needsOwner=false;needsOwnerReason=null;ownerTopic=null;
-  }
-  // Keep informational answers alongside financial handling; the exact segment is independently re-read before send.
-  if(guidanceUsed?.kind==='information'&&!draft.includes(guidanceUsed.text)){
-    draft=draft.split(INFORMATION_SLOT).join('').trim()+'\n'+guidanceUsed.text;
-    validation=validateSalesBrainDraft(maskApprovedGuidance(draft,guidanceUsed),{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:[...authorityFacts,...aiEvidenceFacts,...(salesEvidence?.facts||[])],markets:knowledgeMarkets});
-  }
-  // A second question about approved colours must not disappear behind a printing/delivery paragraph.
-  if(!turnPolicy&&serviceTurn&&guidanceUsed&&colorOptions.length&&!colorsRecorded&&!['choice','correction'].includes(ai?.facts?.color_statement)&&(ai?.requests?.includes('colors_available')||SALES_COLOR_QUESTION.test(String(row.message))&&knowledgeLooksLikeQuestion(row.message))){
-    const colorsLine=language==='Iraqi Arabic'?`الألوان المتوفرة: ${colorOptions.join('، ')}.`:`رنگ‌های استاندارد: ${colorOptions.join('، ')}.`;
-    const composed=draft+'\n'+colorsLine,facts=[...authorityFacts,...aiEvidenceFacts,...colorEvidenceFacts,...(salesEvidence?.facts||[])];
-    const v=validateSalesBrainDraft(maskApprovedGuidance(composed,guidanceUsed),{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:facts,markets:knowledgeMarkets});
-    if(v.valid){draft=composed;validation=v;aiEvidenceFacts.push(...facts);replySource='ai_service_policy';aiInfo.service_color_answer=true;}
-  }
-  // Preserve safe conversational parts without giving model prose authority over a service fact.
-  // The companion selector accepts only neutral courtesies, supported image submission and one missing-preference question.
-  if(serviceTurn&&(ai?.reply||aiServiceReply)&&(guidanceUsed||serviceMarketQuestion)&&!(turnPolicy&&["ai","ai+commercial"].includes(replySource))){
-    const extra=serviceCompanionParts(ai?.reply||aiServiceReply,{message:row.message,market:conversationMarket,destination:memory.destination||null,quantity:quantityValid?knownQuantity:null,productKnown:known.product_or_model,colorsChosen:selectedColors.length>0});
-    const hasQuestion=/[؟?]/u.test(draft),tail=[...extra.answers,...(!hasQuestion&&extra.question?[extra.question]:[])];
-    const opening=extra.opening&&!draft.startsWith(extra.opening)?extra.opening:'';
-    if(opening||tail.length){const composed=[opening,draft,...tail.filter(x=>!draft.includes(x))].filter(Boolean).join('\n');
-      const v=validateSalesBrainDraft(guidanceUsed?maskApprovedGuidance(composed,guidanceUsed):composed,{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:[...authorityFacts,...aiEvidenceFacts,...(salesEvidence?.facts||[])],markets:knowledgeMarkets});
-      if(v.valid){draft=composed;validation=v;aiInfo.safe_companion_used=true;}
-    }
-  }
+  // Service uncertainty and missing model sections are handled by the final AI
+  // authorship gate below. Never clear an owner requirement or inject fixed prose here.
   // ---- Payment-terms negotiation. The market's deposit (e.g. IRAN 50% advance / 50% before shipping) is the DEFAULT, not a wall: a
   // customer asking for other terms (another advance %, paying in full, paying after delivery) gets a natural reply and the request
   // goes to the owner as ONE PAYMENT_TERMS decision for this deal/order. Nothing is agreed here; an approved override applies to
@@ -10523,7 +10530,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     else{action='commercial_owner';needsOwner=true;needsOwnerReason='commercial_owner_review_required';ownerTopic='deposit_waiver';}
     askedField=null;
     const hold=language==='Iraqi Arabic'?'إلغاء العربون يحتاج موافقة مالية من المدير؛ ما تمت الموافقة عليه حالياً.':'حذف بیعانه نیاز به تأیید مالی مدیر دارد؛ در حال حاضر تأیید نشده است.';
-    draft=guidanceUsed.text+'\n'+hold;replySource='ai_service_policy';
+    draft=guidanceUsed.text+'\n'+hold;replySource='service_policy';
     validation=validateSalesBrainDraft(maskApprovedGuidance(draft,guidanceUsed),{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
     aiInfo.deposit_waiver_review=true;
   }
@@ -10535,44 +10542,88 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       if(!draft||!validation.valid||serviceFollowupPromise(draft)){
         draft=turnPolicy.asks_commercial?commercialLimitReply(language,meaning?.requests.includes('payment')?'terms':meaning?.requests.includes('discount')?'discount':'price'):policyClarification(language);
         if(guidanceUsed)draft=guidanceUsed.text+'\n'+draft;
-        action='ai_answer';askedField=null;replySource='ai_policy_fallback';
+        action='ai_answer';askedField=null;replySource='policy_fallback';
         validation=validateSalesBrainDraft(guidanceUsed?maskApprovedGuidance(draft,guidanceUsed):draft,{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
       }
     }
   }
-  if(turnPolicy?.closed_payment_scope||turnPolicy&&action==='policy_constraint')replySource='ai_policy_fallback';
+  if(turnPolicy?.closed_payment_scope||turnPolicy&&action==='policy_constraint')replySource='policy_fallback';
 
-  // Phase48: preserve valid natural prose; complete only omitted informational model sections from selected approved facts.
-  // This is the existing knowledge renderer, not a second provider call or a model-specific answer template.
-  if(comparisonPlan&&serviceTurn&&!protectedServiceAction&&!turnPolicy?.payment_stage&&!turnPolicy?.may_handoff&&!needsOwner&&!/payment|order|accept|quote|owner/u.test(action)&&validation?.valid){
-    const beforeCoverage=salesComparisonCoverage(draft,comparisonPlan.requested_models,aiKnowledgeEvidenceRecords,(pricing?.catalog_summary||[]).flatMap(c=>c.models||[])),missing=beforeCoverage.unanswered_models;
-    const selected=aiKnowledgeEvidenceRecords.filter(r=>['fact','capability','availability'].includes(r.envelope.kind)&&!r.envelope.conditions?.length&&!r.envelope.effect&&!r.envelope.relation&&r.envelope.value!==false&&!knowledgeIsCommercial(r.concept,r.envelope));
-    const extra=missing.map(name=>{
-      const records=selected.filter(r=>salesComparisonRecordModels(r,[name],(pricing?.catalog_summary||[]).flatMap(c=>c.models||[])).length);
-      const groups=[...new Set(records.map(r=>r.concept))].map(concept=>({concept,entity:name,records:records.filter(r=>r.concept===concept)}));
-      const facts=composeKnowledgeAnswers(groups,language);
-      const gap=language==='Iraqi Arabic'?'تفاصيل آلية هذا الموديل مو كاملة بالمعلومات المعتمدة عندي.':'شرح کامل مکانیزم این مدل در اطلاعات تأییدشده فعلی کامل نیست.';
-      const hasMechanism=records.some(r=>/mechanism|opening|construction_description|مکانیزم/u.test(r.concept));
-      return '• '+name+': '+[facts,!hasMechanism&&gap].filter(Boolean).join(' ');
-    });
-    if(extra.length||comparisonPlan.clarification_needed){
-      const composed=comparisonPlan.clarification_needed?(language==='Iraqi Arabic'?'أي موديلات تقصد بالتحديد؟':'دقیقاً کدام مدل‌ها را می‌گویید؟'):[...(comparisonPlan.followup&&!beforeCoverage.addressed_models.length?[]:[draft]),...extra].join('\n');
-      const facts=salesBrainAuthoritativeFacts({knowledge:selected.map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))});
-      const checked=validateReplyParts(guidanceUsed?maskApprovedGuidance(composed,guidanceUsed):composed,replyParts,validateSalesBrainDraft,{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:[...authorityFacts,...aiEvidenceFacts,...facts],markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key||null});
-      if(checked.valid){draft=composed;validation=checked;aiEvidenceFacts.push(...facts);replySource='ai_service_policy';aiInfo.comparison_repair={missing_models:missing};}
-    }
-    aiInfo.comparison={...comparisonPlan,...salesComparisonCoverage(draft,comparisonPlan.requested_models,aiKnowledgeEvidenceRecords,(pricing?.catalog_summary||[]).flatMap(c=>c.models||[]))};
-  }
+  // Coverage is a validation signal. Missing sections are drafted by the authorized model,
+  // never completed by a knowledge renderer or a fixed customer-facing paragraph.
+  if(comparisonPlan)aiInfo.comparison={...comparisonPlan,...salesComparisonCoverage(draft,comparisonPlan.requested_models,aiKnowledgeEvidenceRecords,(pricing?.catalog_summary||[]).flatMap(c=>c.models||[]))};
 
-  // No model prose or product monetary segment is appended to the approved service-only disclosure.
+  // O11 supplies typed evidence and atomic commercial clauses, never a sales paragraph.
+  let activeRibbonContract=null;
   if(optionalFee&&!needsOwner&&!postSaleReview&&!['accept_offer','accepted','quote','order_status','payment_info','payment_claim_owner','payment_ready_owner','policy_constraint'].includes(action)){
-    guidanceUsed=optionalFee;draft=optionalFee.text;action='answer_information';askedField=null;replySource='approved_optional_service';
-    validation=validateSalesBrainDraft(maskApprovedGuidance(draft,guidanceUsed),{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
+    guidanceUsed=optionalFee;activeRibbonContract=ribbonAuthoringContract(optionalFee);draft=activeRibbonContract.parts.join('\n');action='answer_information';askedField=null;replySource='approved_optional_service';
+    validation={valid:true};
+  }
+  // Final authorship gate. Verified business decisions above remain authoritative data.
+  // Only provider-authored text can become an AI-FIRST conversational reply. A failed
+  // provider call is never retried here, nor replaced by a canned acknowledgement.
+  if(aiFirstOn){
+    const replyComparison=turnPolicy?.payment_stage?null:comparisonPlan;
+    const coverageMissing=!!replyComparison&&!!aiInfo.comparison?.unanswered_models?.length;
+    const clarifiesModels=text=>/(?:کدام|کدوم|چه|أي|ای|شنو)\s*(?:مدل|مودیل|موديل)/u.test(replyKey(text));
+    const clarificationMissing=replyComparison?.clarification_needed&&!clarifiesModels(draft);
+    const recommendationCoverage=conversationReplyCoverage(draft,requestPlan,{records:aiKnowledgeEvidenceRecords,catalog:pricing?.catalog_summary||[]});
+    aiInfo.answer_coverage=recommendationCoverage;
+    const primaryRetained=replySource==='ai'&&validation.valid&&hasSubstantiveAiReply(draft,meaning?.requests)&&recommendationCoverage.valid&&!aiInfo.repaired&&!coverageMissing&&!clarificationMissing&&(!guidanceUsed||!draft.includes(guidanceUsed.text))&&!ai?.owner_escalation_needed;
+    aiInfo.authorship={verified:primaryRetained,stage:primaryRetained?'primary':'pending',contract_version:2};
+    if(!primaryRetained){
+      if(coverageMissing)aiInfo.comparison_repair={missing_models:aiInfo.comparison.unanswered_models,source:'ai_author'};
+      const requiredParts=[...new Set([...(activeRibbonContract?[]:(replyParts||[]).filter(p=>p.kind==='commercial').map(p=>p.text)),...(activeRibbonContract?activeRibbonContract.parts:guidanceUsed?.kind==='information'?guidanceUsed.protected_parts||[]:guidanceUsed?[guidanceUsed.text]:[])])];
+      // Transaction outcomes and owner limits are immutable for this wording pass.
+      if(!requiredParts.length&&(['payment_ready_owner','policy_constraint','payment_info','payment_claim_owner','payment_claim_unmatched','payment_terms_owner','payment_unavailable','accept_offer','accepted','order_status','quote','answer_extra_cost','price_owner','commercial_owner','moq_owner','answer_moq_limit','policy_limit','policy_terms','policy_discount','answer_price','negotiate','handle_objection','answer_moq'].includes(action)||needsOwner)){
+        const control=guidanceUsed?.kind==='information'?String(draft||'').replace(guidanceUsed.text,'').trim():draft;
+        if(control)requiredParts.push(control);
+      }
+      const authorKnowledge=aiKnowledgeEvidenceRecords.map(r=>({id:r.id,version:r.version,topic:r.concept,about:r.entity_key,kind:r.envelope.kind,value:r.envelope.value??null,conditions:r.envelope.conditions||[],effect:r.envelope.effect||null,relation:r.envelope.relation||null}));
+      const authorInput=replyAuthoringInput({message:row.message,language,market:conversationMarket,decision:activeRibbonContract?null:draft,requiredParts,catalog:requestPlan?.construction_only?[]:pricing?.catalog_summary||[],knowledge:authorKnowledge,colors:{approved:colorOptions},comparison:replyComparison,requestPlan,context:authorContext,optionalService:activeRibbonContract?.facts||null});
+      const mayCall=aiInfo.enabled&&(!aiInfo.provider_called||aiInfo.provider_succeeded||aiInfo.reused_decision)&&!aiInfo.error;
+      let authored=null;
+      if(mayCall&&authorInput){
+        const started=Date.now(),provider=salesAiProvider(env),model=salesAiModel(env);
+        authored=await salesAiSingleFlight(env,{key:'inbox:'+row.id+':reply_author',row,provider,requestedModel:model,leaseMs:salesAiTimeoutMs(env)+10000,call:()=>callSalesAi(env,{instructions:replyAuthoringPolicy(language),input:authorInput})});
+        timing.ai_author_ms=Date.now()-started;
+        aiInfo.author_call={provider_called:SALES_AI_FLIGHT_CALLED.has(authored.flight?.role),provider_succeeded:!!authored.ok,model:authored.model,returned_model:authored.returned_model||null,error:authored.error||null,usage:authored.usage||null};
+      }
+      const text=authored?.ok?authored.decision.reply:null,prose=text?protectedReplyProse(text,requiredParts):null;
+      const atomicControl=action==='answer_extra_cost'&&requiredParts.length===1&&/^(?:نه|لا)[.]?$/u.test(requiredParts[0])&&text===requiredParts[0];
+      const authorKnowledgeFacts=salesBrainAuthoritativeFacts({knowledge:aiKnowledgeEvidenceRecords.filter(r=>['fact','capability','availability'].includes(r.envelope.kind)&&!r.envelope.conditions?.length&&!r.envelope.effect&&!r.envelope.relation&&r.envelope.value!==false).map(r=>({domain:KNOWLEDGE_DOMAIN,attribute:r.concept,entity_key:r.entity_key,market:r.market,value_json:JSON.stringify(knowledgeEvidenceValue(r))}))});
+      const ribbonModel=activeRibbonContract?guidanceUsed.price_evidence.product_name.split(' · ').at(-1):null;
+      const authorFacts=[...authorityFacts,...aiEvidenceFacts,...authorKnowledgeFacts,...colorEvidenceFacts,...printingEvidenceFacts,...(salesEvidence?.facts||[]),...(activeRibbonContract?[{source:'approved_optional_service',category:'capability',entity_key:ribbonModel,market:conversationMarket,values:[ribbonModel,language==='Iraqi Arabic'?'طباعة مخصصة على الشريط للجرارة مع كيس بطلب العميل.':'چاپ سفارشی روی روبان کشویی بگ دار به درخواست مشتری انجام می شود.']}]:[]),...(pricing?.catalog_summary||[]).flatMap(c=>salesMemoryAnswerEvidence({product:c.product,models:c.models||[],sizes:c.sizes||[],market:conversationMarket}).map(f=>({...f,entity_key:c.product})))];
+      const protectedChecks=requiredParts.map(part=>activeRibbonContract?.parts.includes(part)?{valid:true}:validateSalesBrainDraft(guidanceUsed?maskApprovedGuidance(part,guidanceUsed):orderStatusAsked?maskOrderIdentifiers(part,postSaleOrder):part,{allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[]}));
+      const protectedValid=protectedChecks.every(check=>check.valid);
+      // A required part is validated under its original authority; the model's added
+      // prose gets no price, payment, production or shipping authority from that part.
+      const authorNumbers=[...answerNumbers,...aiAllowedNumbers,...(gallery?galleryAllowedNumbers(gallery):[])];
+      const proseIssues=prose===null?['required_reply_part_missing']:atomicControl?[]:salesAiProseIssues(prose,{allowedNumbers:authorNumbers,preferenceTerms:[...colorOptions,...printingOptions]});
+      const checked=prose!==null?validateSalesBrainDraft(prose,{allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key}):{valid:false,reason:'required_reply_part_missing'};
+      const protectedContext=prose!==null&&requiredParts.length?protectedContextIssue(prose,{authoritativeFacts:authorFacts,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,requireProductExplanation:!!activeRibbonContract}):{valid:true};
+      const answerCoverage=conversationReplyCoverage(text,requestPlan,{records:aiKnowledgeEvidenceRecords,catalog:pricing?.catalog_summary||[]});
+      const coverage=replyComparison&&text?salesComparisonCoverage(text,replyComparison.requested_models,aiKnowledgeEvidenceRecords,(pricing?.catalog_summary||[]).flatMap(c=>c.models||[])):null;
+      // A one-word verified billing answer and an existing-order status are
+      // operational facts; neither requires padding with unrelated sales prose.
+      if(text&&text.length<=6000&&(orderStatusAsked||atomicControl||hasSubstantiveAiReply(prose,requiredParts.length?['verified_response']:meaning?.requests))&&protectedValid&&protectedContext.valid&&answerCoverage.valid&&!authored.decision.owner_escalation_needed&&!proseIssues.length&&checked.valid&&(!coverage||!coverage.unanswered_models.length)&&(!replyComparison?.clarification_needed||clarifiesModels(text))){
+        draft=text;validation={valid:true};replySource='ai_verified';
+        aiEvidenceFacts.push(...authorFacts);replyParts=requiredParts.filter(p=>!activeRibbonContract?.parts.includes(p)&&(!guidanceUsed||p!==guidanceUsed.text)).map(p=>({kind:'commercial',text:orderStatusAsked?maskOrderIdentifiers(p,postSaleOrder):p,facts:authorFacts}));
+        aiInfo.answer_coverage=answerCoverage;
+        aiInfo.authorship={verified:true,stage:'reply_author',contract_version:2,protected_parts:requiredParts};if(coverage)aiInfo.comparison={...comparisonPlan,...coverage};
+      }else{
+        const reason=authored?.error||(!mayCall?'provider_unavailable':!authorInput?'context_budget_exceeded':!protectedValid?'unverified_protected_fact':proseIssues[0]||(!checked.valid&&checked.reason)||(!protectedContext.valid&&protectedContext.reason)||(!answerCoverage.valid&&answerCoverage.reason)||coverage?.unanswered_models.length&&'incomplete_comparison'||'unverified_reply');
+        validation={valid:false,reason:String(reason)};replySource='owner_escalation';aiInfo.authorship={verified:false,stage:'owner_escalation',reason:String(reason)};
+        aiInfo.author_rejection={prose_issues:proseIssues,validation:checked,protected_context:protectedContext,answer_coverage:answerCoverage,protected_failures:protectedChecks.filter(check=>!check.valid),clarification_missing:!!replyComparison?.clarification_needed&&!clarifiesModels(text)};
+        needsOwner=true;needsOwnerReason='approved_knowledge_missing';ownerTopic='verified_reply_unavailable';
+        if(turnPolicy)turnPolicy.reply_failure=true;
+      }
+    }
   }
   aiInfo.reply_source=replySource;
   // AI-02 observability: «called» / «used» stay as before; these say whether the provider was reached, answered, and whether its
   // reply actually reached the draft (and if not, why) — without any customer text.
-  if(aiInfo.enabled){aiInfo.provider_called=!!aiInfo.provider_called;aiInfo.provider_succeeded=!!aiInfo.provider_succeeded;aiInfo.reply_used=replySource==='ai'||replySource==='ai+commercial';
+  if(aiInfo.enabled){aiInfo.provider_called=!!aiInfo.provider_called;aiInfo.provider_succeeded=!!aiInfo.provider_succeeded;aiInfo.reply_used=AI_REPLY_SOURCES.has(replySource)&&aiInfo.authorship?.verified===true;
     aiInfo.fallback_reason=aiInfo.reply_used?null:aiInfo.fallback||aiInfo.error||(aiInfo.provider_called?"deterministic_reply":orderStatusAsked?"not_called:order_status":formalQuoteReply?"not_called:formal_quote":"not_called");}
   timing.validator_ms=Date.now()-validatorStarted;
   // A short holding reply ("checking the exact price") is safe to send while the owner decides; it carries no commercial claim.
@@ -10585,8 +10636,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if((serviceTurn||turnPolicy)&&!conversationMarket&&(catalogAsk||lastDecision?.catalog_pending))result.catalog_pending=catalogAsk?catalogQuestion:lastDecision.catalog_pending;
   if(serviceTurn&&!conversationMarket&&(informationRequest||lastDecision?.service_pending))result.service_pending=informationRequest?String(resumeService||row.message):lastDecision.service_pending;
   if(guidanceUsed)result.approved_guidance=guidanceUsed;
-  if(replyParts.length&&replyParts.every(p=>draft.includes(p.text))){result.reply_parts=replyParts;if(catalogAnswer)result.catalog_evidence=catalogAnswer;}
-  if(/^ai/.test(replySource)&&(pricing?.catalog_summary||[]).length)result.catalog_claim_scope={market:conversationMarket,product_key:aiInfo.interpretation?.product_key||null,catalog:pricing.catalog_summary};
+  if(replyParts.length&&replyParts.every(p=>draft.includes(p.text)))result.reply_parts=replyParts;
+  if(AI_REPLY_SOURCES.has(replySource)&&(pricing?.catalog_summary||[]).length)result.catalog_claim_scope={market:conversationMarket,product_key:aiInfo.interpretation?.product_key||null,catalog:pricing.catalog_summary};
   // A reply carrying this deal's total waits for the owner. Only the very figures the owner already released may be shown again.
   const quoteTotal=(priceReply?.offer?priceReply.texts:negotiation?.offer?negotiation.texts:[])[1]||null,quoteReleased=offerReleased&&!!currentOfferHash&&currentOfferHash===dealCandidate?.offer?.offer_hash;
   result.final_quote_released=quoteReleased;
@@ -10605,7 +10656,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   result.self_check=salesSelfCheck(draft,{action,ownerPending:needsOwner||dealEscalations.length>0||action==="accept_offer"||action==="wait_for_owner"});
   if(candidateWrite){const s=Date.now();await upsertConversationMemoryFact(env,{leadId:row.lead_id,conversationId:row.conversation_id,sourceMessageId:row.id,fact:{fact_type:"order_candidate",memory_key:"order_candidate",value:candidateWrite}});timing.order_candidate_ms=Date.now()-s;}
   // The reply language becomes the conversation's ACTIVE language (language policy); the market is kept once established.
-  const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,language=?,market=COALESCE(?,market),version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=?").bind(stage,action,language,conversationMarket,row.id,t,row.conversation_id,row.lead_id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
+  const t=now();await env.DB.batch([env.DB.prepare("UPDATE conversation_sales_state SET sales_stage=?,next_action=?,language=?,market=COALESCE(?,market),version=version+1,source_message_id=?,updated_at=? WHERE conversation_id=? AND lead_id=? AND NOT EXISTS("+NEWER_CONVERSATION_INBOUND_SQL+")").bind(stage,action,language,conversationMarket,row.id,t,row.conversation_id,row.lead_id,row.id),env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Sales negotiation brain decision recorded',?,?)").bind("sales-brain:"+row.id,"sales_brain_decision",JSON.stringify(result),t)]);
   const escalationStarted=Date.now();
   const escalation=await ensureOwnerEscalationFromBrain(env,row,result);if(escalation?.escalation)result.owner_escalation_id=escalation.escalation.id;
   timing.escalation_ms=Date.now()-escalationStarted;
@@ -10736,6 +10787,10 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
   if(!recipient)throw Error("Linked Telegram conversation has no sendable numeric contact");
   // The brain reuses this turn's row (with its classified category), history and resolved image reference instead of reloading them.
   const brainStarted=Date.now(),brain=await runSalesNegotiationBrain(env,inboxId,{row:{...row,category:intent},context,imageReference:captureOut.imageReference||null,timing});timing.brain_ms=Date.now()-brainStarted;
+  if(brain.superseded_inbound){
+    await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound superseded by newer customer message',?,?)").bind('inbound-outcome:'+row.id,'inbound_outcome',JSON.stringify({inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,customer_visible:'none',reason:'superseded_inbound',superseded_by:brain.superseded_by}),now()).run();
+    return {processed:true,superseded:true};
+  }
   // A validated holding reply is not an owner-review draft (its owner escalation is already open and durable).
   const ownerReviewDraft=!!brain.needs_owner&&brain.owner_holding_reply!==true;
   const message=brain.draft_customer_reply||negotiationReplyDraft(intent,language),t=now(),outreachId=uid(),outreachStarted=Date.now();
@@ -10762,7 +10817,7 @@ async function processNegotiationInbound(env,inboxId,timing={}) {
   const {webhook_started_at,...stages}=timing;
   try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound sales pipeline timing',?,?)").bind("inbound-timing:"+inboxId,"inbound_pipeline_timing",JSON.stringify({inbox_message_id:inboxId,conversation_id:row.conversation_id,action:brain.next_sales_action||null,next_best_action:brain.next_best_action||null,auto_sent:!!autoSend?.sent,acknowledged:!!autoSend?.acknowledgement?.sent,ai_calls:(stages.vision_called?1:0)+(stages.ai_understanding_called?1:0)+(Number.isFinite(stages.ai_ms)?1:0),...stages}),now()).run();}catch{}
   // An undecided outcome (the auto-send step itself failed) is retried once by the caller; the resume path completes it safely.
-  if(autoSend?.reason==="auto_send_error")throw Error("Inbound outcome was not decided; retry resumes it");
+  if(autoSend?.reason==="auto_send_error"||autoSend?.retryable)throw Error("Inbound outcome was not decided; retry resumes it");
   return {processed:true,idempotent:outreach.id!==outreachId,intent,language,outreach,auto_send:autoSend};
 }
 
@@ -10903,7 +10958,7 @@ const RESET_MOQ_PHRASE=/حداقل\s*(?:تعداد\s*)?(?:سفارش|خرید)|�
 const RESET_MOQ_NUMBER=/\d+\s*(?:عدد|تا|دانه|قطعه|حبه|pieces?|pcs|units?)?/u;   // one number only: a second one is not the MOQ
 const resetDigits=t=>t.replace(/[۰-۹]/g,d=>"۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٠-٩]/g,d=>"٠١٢٣٤٥٦٧٨٩".indexOf(d));
 // A validated Claude reply under AI-first (its prose already passed the money / payment / order-commitment gates).
-export const salesAiFirstReply=brain=>brain?.ai_first==="on"&&/^ai/.test(String(brain?.ai_brain?.reply_source||""))&&brain?.validation?.valid===true;
+export const salesAiFirstReply=hasAiAuthorship;
 export function resetFinancialTurn(row,brain,outreach,{commercialCurrent=false}={}){
   if(commercialCurrent&&brain.commercial_evidence?.source_message_id===row.id&&brain.turn_policy&&!brain.turn_policy.may_handoff&&brain.validation?.valid)return false;
   if(brain.turn_policy&&!brain.turn_policy.may_handoff&&brain.validation?.valid&&(brain.standard_total||salesAiFirstReply(brain)))return false;
@@ -10968,7 +11023,31 @@ async function currentSalesAiKnowledge(env,brain){
     return true;
   }catch{return false;}
 }
-async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
+async function conversationalReplyProofReason(env,{row,brain,outreach}){
+  if(!salesAiFirstReply(brain))return 'ai_reply_unavailable';
+  if(!row||brain.lead_id!==row.lead_id||brain.conversation_id!==row.conversation_id||brain.source_message_id!==row.id||outreach.inbox_message_id!==row.id||outreach.message!==brain.draft_customer_reply)return 'draft_not_from_validated_brain';
+  const protectedParts=brain.ai_brain.authorship.protected_parts||[...(brain.reply_parts||[]).map(part=>part.text),...(brain.approved_guidance?.optional_ribbon_fee?ribbonAuthoringContract(brain.approved_guidance).parts:brain.approved_guidance?.text&&String(outreach.message).includes(brain.approved_guidance.text)?[brain.approved_guidance.text]:[])];
+  const ownProse=protectedReplyProse(outreach.message,[...new Set(protectedParts)]),facts=brain.knowledge_answer_facts||[],numbers=(brain.answer_numbers||[]).filter(Number.isFinite);
+  const atomicControl=brain.next_sales_action==='answer_extra_cost'&&protectedParts.length===1&&/^(?:نه|لا)[.]?$/u.test(protectedParts[0])&&outreach.message===protectedParts[0];
+  if(ownProse===null||protectedParts.length&&!atomicControl&&brain.next_sales_action!=='order_status'&&!hasSubstantiveAiReply(ownProse,['verified_response'])||!atomicControl&&salesAiProseIssues(ownProse,{allowedNumbers:numbers}).length)return 'validator_blocked';
+  if(protectedParts.length&&!protectedContextIssue(ownProse,{authoritativeFacts:facts,catalog:brain.catalog_claim_scope?.catalog||[],selectedProductKey:brain.catalog_claim_scope?.product_key,requireProductExplanation:!!brain.approved_guidance?.optional_ribbon_fee}).valid)return 'validator_blocked';
+  if(!await currentTurnCommercialEvidence(env,row,brain))return 'commercial_evidence_changed';
+  if(brain.approved_guidance&&!await approvedGuidanceCurrent(env,brain.approved_guidance))return 'approved_guidance_changed';
+  if(!await currentSalesAiKnowledge(env,brain))return 'ai_knowledge_changed';
+  let checked=brain.approved_guidance?maskApprovedGuidance(outreach.message,brain.approved_guidance):outreach.message;
+  if(brain.next_sales_action==='order_status'&&brain.order_reference?.order_id){
+    const order=await env.DB.prepare('SELECT order_number,status,carrier,tracking_reference FROM lead_orders WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1').bind(brain.order_reference.order_id,row.lead_id,row.conversation_id).first();
+    if(!order||['order_number','status','carrier','tracking_reference'].some(key=>(order[key]??null)!==(brain.order_reference[key]??null)))return 'commercial_evidence_changed';
+    if(order.status==='confirmed'&&Number((await env.DB.prepare('SELECT COUNT(*) AS n FROM lead_order_payments WHERE order_id=?').bind(brain.order_reference.order_id).first())?.n||0)>0)return 'commercial_evidence_changed';
+    checked=maskOrderIdentifiers(checked,order);
+  }
+  const gallery=brain.gallery?.items?.length?brain.gallery:null;
+  const valid=validateReplyParts(checked,brain.reply_parts||[],validateSalesBrainDraft,{allowedNumbers:[...numbers,...(Number.isSafeInteger(brain.customer_known_facts?.requested_quantity)?[brain.customer_known_facts.requested_quantity]:[]),...(gallery?galleryAllowedNumbers(gallery):[])],authoritativeFacts:[...facts,...(gallery?[{category:'availability',values:galleryAuthorityValues(gallery)}]:[])],markets:[brain.knowledge_market?.conversation_market,'GLOBAL'].filter(Boolean),catalog:brain.catalog_claim_scope?.catalog,selectedProductKey:brain.catalog_claim_scope?.product_key});
+  return valid.valid?null:'validator_blocked';
+}
+async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient,skipRateLimit=false}){
+  if(await newerConversationInbound(env,row.id))return 'superseded_inbound';
+  const proofReason=await conversationalReplyProofReason(env,{row,brain,outreach});if(proofReason)return proofReason;
   // A product-only total must not masquerade as a payable amount including O11 with unknown terms.
   if(ribbonFinancialMix(row?.message))return 'optional_service_financial_scope_requires_owner';
   // Phase 23: totals and discounted offers are never sent automatically (the wording check also covers a reply that lost the mark).
@@ -10997,7 +11076,7 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
   const photoReply=brain.next_sales_action==="visual"&&brain.gallery,galleryNumbers=photoReply?galleryAllowedNumbers(brain.gallery):[],galleryFacts=photoReply?[{category:"availability",values:galleryAuthorityValues(brain.gallery)}]:[];
   if(brain.validation?.valid!==true||!validateReplyParts(checked,brain.reply_parts||[],validateSalesBrainDraft,{allowedNumbers:[...(Number.isSafeInteger(ownQuantity)?[ownQuantity]:[]),...(brain.answer_numbers||[]).filter(Number.isSafeInteger),...galleryNumbers],authoritativeFacts:[...(brain.knowledge_answer_facts||[]),...galleryFacts],markets:[brain.knowledge_market?.conversation_market,'GLOBAL'].filter(Boolean),catalog:brain.catalog_claim_scope?.catalog,selectedProductKey:brain.catalog_claim_scope?.product_key}).valid)return "validator_blocked";
   if(brain.next_sales_action==="clarify_photo_or_order"){if(!galleryClarifySafe(outreach.message))return "action_requires_owner_review";}
-  else if(brain.next_sales_action==="visual"){const why=await galleryAutoSendBlock(env,{row,brain,outreach});if(why)return why;}
+  else if(brain.gallery?.items?.length){const why=await galleryAutoSendBlock(env,{row,brain,outreach});if(why)return why;}
   // AI-FIRST (owner directive 2026-11-08): a status answer read from THIS conversation's D1 order record (masked identifiers, validated
   // above) is automatic; every other non-listed action needs a validated AI reply outside the money / order / payment actions.
   else if(!(brain.turn_policy&&!brain.turn_policy.may_handoff&&brain.validation?.valid)&&!INBOUND_AUTO_SEND_ACTIONS.has(brain.next_sales_action)&&!(salesAiFirstReply(brain)&&!SALES_AI_FIRST_HOLD_ACTIONS.has(brain.next_sales_action))&&!(brain.ai_first==="on"&&brain.next_sales_action==="order_status"&&brain.order_status_ai_only===true&&!!brain.order_reference?.order_id))return "action_requires_owner_review";
@@ -11016,7 +11095,7 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
   if(!newPaymentEvent&&!requestedRepeat&&recent.slice(0,3).some(x=>salesBrainClaimText(x.message)===key))return "repetitive_reply";
   // Bot self-loop guard: an inbound that merely echoes one of our own recent replies is never answered automatically.
   if(inboundKey&&recent.some(x=>salesBrainClaimText(x.message)===inboundKey))return "echo_of_outbound";
-  if(counts.hour>=INBOUND_AUTO_REPLY_HOURLY_LIMIT||counts.burst>=INBOUND_AUTO_REPLY_BURST_LIMIT)return "auto_send_rate_limited";
+  if(!skipRateLimit&&(counts.hour>=INBOUND_AUTO_REPLY_HOURLY_LIMIT||counts.burst>=INBOUND_AUTO_REPLY_BURST_LIMIT))return "auto_send_rate_limited";
   return null;
 }
 async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing={}}){
@@ -11037,48 +11116,19 @@ async function autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing
   if(!Number(approved?.meta?.changes))return {sent:false,reason:"draft_changed"};
   const telegramStarted=Date.now(),result=await sendApprovedTelegramOutreach(env,outreach.id);timing.telegram_send_ms=Date.now()-telegramStarted;
   // AUTO-02: the remaining albums of an automatically sent photo reply, in order (each re-gated; stops at the first problem)
-  if(result.ok&&brain.next_sales_action==="visual")try{const more=await sendGalleryFollowUpAlbums(env,{row,brain,outreach,recipient});if(more.albums||more.stopped)timing.gallery_albums=more;}catch(error){try{await audit(env,"gallery_album_auto_send_error","Automatic gallery albums stopped after an error",{inbox_message_id:row.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+  let galleryIncomplete=false;
+  if(result.ok&&brain.gallery?.items?.length)try{const more=await sendGalleryFollowUpAlbums(env,{row,brain,outreach,recipient});if(more.albums||more.stopped)timing.gallery_albums=more;galleryIncomplete=!!more.stopped;}catch(error){galleryIncomplete=true;try{await audit(env,"gallery_album_auto_send_error","Automatic gallery albums stopped after an error",{inbox_message_id:row.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   try{await audit(env,result.ok?"inbound_auto_reply_sent":"inbound_auto_reply_send_failed",result.ok?"Safe inbound reply auto-sent":"Safe inbound auto-reply did not complete",{...base,status:result.status||null,action:brain.next_sales_action});}catch{}
-  return {sent:!!result.ok,status:result.status||null};
+  return {sent:!!result.ok,status:result.status||null,reason:galleryIncomplete?'gallery_delivery_incomplete':result.reason||(!result.ok?result.status||'telegram_send_failed':null)};
 }
-// A held reply (owner-gated, validator-blocked, a would-be repeat or a capped flood) still gets ONE customer-visible message.
+// Reasons recorded for held replies; none authorizes a fixed customer message.
 const INBOUND_ACK_REASONS=new Set(["commercial_evidence_changed","reset_financial_owner","photo_pilot_not_allowed","gallery_market_unknown","gallery_media_mismatch","owner_required","validator_blocked","action_requires_owner_review","draft_not_from_validated_brain","repetitive_reply","auto_send_rate_limited","mixed_order_status_and_sales","post_sale_owner_review","final_quote_owner_approval"]);
-// Acknowledgements say only that the message arrived and is being handled: no price, number, capability, timing or promise.
-const INBOUND_ACKNOWLEDGEMENTS={
-  fa:{pending:["پیامتون رسید؛ بررسی می‌کنم و خبرتون می‌دم.","دریافت شد؛ در حال بررسیه و خبرتون می‌دم.","ممنون، پیامتون رسید؛ به‌زودی خبرتون می‌دم.","حتماً، بررسی می‌کنم و نتیجه رو خبرتون می‌دم."],
-    repeat:["جواب این مورد رو کمی قبل فرستادم؛ اگه سؤال دیگه‌ای هست بفرمایید.","این مورد رو بالاتر جواب دادم؛ اگه چیز دیگه‌ای لازم دارید بفرمایید.","همون جواب قبلی برقراره؛ اگه سؤال دیگه‌ای دارید در خدمتم.","پیامتون رسید؛ جوابش در پیام قبلیه. سؤال دیگه‌ای هست؟"],
-    handoff:["پیام‌هاتون رسید؛ همکارم بررسی می‌کنه و به‌زودی خبرتون می‌دیم."],
-    photo:["حتماً، عکس‌های موجود رو براتون آماده می‌کنم."]},
-  ar:{pending:["وصلت رسالتك، راح أراجع وأرجعلك.","وصلتني، الموضوع قيد المراجعة وراح أبلغك.","شكراً، رسالتك وصلت وراح أرجعلك قريباً.","أكيد، راح أراجع وأبلغك بالنتيجة."],
-    repeat:["جاوبت على هذا قبل شوية؛ إذا عندك سؤال ثاني تفضل.","هذا جوابه بالرسالة السابقة؛ إذا تحتاج شي ثاني تفضل.","نفس الجواب السابق؛ إذا عندك سؤال ثاني بالخدمة.","وصلت رسالتك؛ الجواب بالرسالة السابقة. عندك سؤال ثاني؟"],
-    handoff:["وصلت رسائلك، زميلي راح يراجعها ونرجعلك قريباً."],
-    photo:["أكيد، راح أجهزلك الصور المتوفرة."]}
-};
-// Sent through the same approved-outreach path (status CAS → exactly one Telegram send). One per inbound message (id keyed by the
-// inbound); while a flood/loop is capped, one hand-off per conversation per hour. The owner-review draft itself is untouched.
-async function sendInboundAcknowledgement(env,{row,brain,outreach,recipient,reason}){
-  const gate=await inboundSendGateReason(env,{row,outreach,recipient});if(gate)return {sent:false,reason:gate};
-  const counts=await inboundAutomatedReplyCounts(env,row);
-  const capped=reason==="auto_send_rate_limited"||counts.hour>=INBOUND_AUTO_REPLY_HOURLY_LIMIT||counts.burst>=INBOUND_AUTO_REPLY_BURST_LIMIT;
-  const kind=capped?"handoff":brain?.next_sales_action==="visual"?"photo":reason==="repetitive_reply"?"repeat":"pending";
-   const language=brain?.detected_language||outreach.language||"Persian",understood=brain?.turn_policy?.semantic_valid&&brain.turn_policy.mode!=='uncertain',unavailable=language==='Iraqi Arabic'?'سؤالك واضح، بس ما قدرت أجهز جواب موثوق هسه. ممكن تعيد السؤال حتى أحاول من جديد؟':'سؤالتون روشنه، اما الان نتونستم جواب قابل اطمینان آماده کنم. لطفاً دوباره بپرسید تا تلاش کنم.',texts=brain?.ai_first==='on'&&!policyAllowsOwner(brain)?[capped?(language==='Iraqi Arabic'?'وصلت رسائلك؛ خلينا نكمل بسؤال واحد بكل مرة.':'پیام‌هاتون رسید؛ لطفاً هر بار یک سؤال بفرستید تا بتونیم ادامه بدیم.'):understood?unavailable:policyClarification(language)]:INBOUND_ACKNOWLEDGEMENTS[language==="Iraqi Arabic"?"ar":"fa"][kind];
-  const id=capped?`inbound-handoff-${row.conversation_id}-${new Date().toISOString().slice(0,13)}`:`inbound-ack-${row.id}`;
-  const existing=await env.DB.prepare("SELECT id,status FROM lead_outreach WHERE id=? LIMIT 1").bind(id).first();
-  // A redelivery may only finish a claimed-but-unsent acknowledgement; it never writes or sends a second one.
-  if(existing&&existing.status!=="approved")return {sent:false,reason:capped?"handoff_already_sent":"already_acknowledged",id,kind};
-  if(!existing){
-    const recent=((await env.DB.prepare("SELECT message FROM lead_outreach WHERE lead_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 3").bind(row.lead_id,row.conversation_id).all()).results||[]).map(x=>salesBrainClaimText(x.message));
-    const text=texts.find(x=>!recent.includes(salesBrainClaimText(x)))||texts[0];
-    if(!validateSalesBrainDraft(text,{allowedNumbers:[]}).valid)return {sent:false,reason:"acknowledgement_not_valid",kind};
-    const t=now();
-    await env.DB.prepare("INSERT OR IGNORE INTO lead_outreach(id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,approved_at,approved_by,created_at,updated_at) VALUES(?,?,?,?,NULL,'telegram',?,?,?,'approved',?,'inbound_ack_policy',?,?)").bind(id,row.lead_id,outreach.contact_id,row.conversation_id,recipient,text,language,t,t,t).run();
-  }
-  const result=await sendApprovedTelegramOutreach(env,id);
-  try{await audit(env,result.ok?"inbound_acknowledgement_sent":"inbound_acknowledgement_not_sent",result.ok?"Held inbound reply acknowledged to the customer":"Inbound acknowledgement did not complete",{outreach_id:id,draft_outreach_id:outreach.id,inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,kind,reason,status:result.status||null});}catch{}
-  return {sent:!!result.ok,id,kind,status:result.status||null};
+// A held reply has no automatic fixed customer acknowledgement. Owner review
+// remains durable; only a newly verified model reply may answer the conversation.
+async function sendInboundAcknowledgement(){
+  return {sent:false,reason:'ai_authored_acknowledgement_unavailable'};
 }
-// Decides and records the ONE customer-visible outcome of a linked inbound: the validated reply, or — when that reply is held —
-// a short acknowledgement. The durable "inbound-outcome" marker means a redelivery/retry never decides it a second time.
+// The durable outcome marker prevents duplicate customer delivery on retries.
 const OWNER_PAYMENT_ALERT_ACTIONS={payment_ready_owner:"payment_readiness",payment_claim_owner:"payment_claim",payment_claim_unmatched:"payment_claim",payment_terms_owner:"payment_terms"};
 // Owner directive 2026-11-08 (§9): what the owner needs to act, read from the stored records of THIS lead and conversation — the
 // order's own authoritative amounts (never recomputed by text or guessed), the deposit terms, the recorded (owner-verified) payments
@@ -11115,9 +11165,19 @@ async function ownerAlertDetails(env,{row,order,paidCount,paidMinor,market:brain
 }
 const OWNER_ACTION_TEXT={payment_claim:"اقدام لازم: بررسی و تأیید واریز (ادعای مشتری هنوز تأیید نشده است)",order_authorization:"اقدام لازم: تأیید نهایی سفارش",payment_terms:"اقدام لازم: بررسی درخواست شرایط پرداخت"};
 async function settleInboundOutcome(env,{row,brain,outreach,recipient,timing={}}){
-  const sendStarted=Date.now();let outcome;
+  const sendStarted=Date.now();let outcome,reviewFailed=false;
   try{outcome=await autoSendSafeInboundReply(env,{row,brain,outreach,recipient,timing});}
   catch(error){outcome={sent:false,reason:"auto_send_error"};try{await audit(env,"inbound_auto_reply_failed","Inbound auto-reply failed safely; draft kept for owner review",{outreach_id:outreach.id,inbox_message_id:row.id,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+  // A fact revoked during model generation must not leave a silent, unowned
+  // failure. This is a review case, never a relaxation of the send/price gates.
+  if(brain&&(!outcome.sent||outcome.reason==='gallery_delivery_incomplete')&&['ai_reply_unavailable','commercial_evidence_changed','approved_guidance_changed','ai_knowledge_changed','validator_blocked','draft_not_from_validated_brain','optional_service_financial_scope_requires_owner','gallery_delivery_incomplete','send_failed','send_ambiguous','telegram_send_failed','repetitive_reply'].includes(outcome.reason)){
+    const deliveryFailure=['gallery_delivery_incomplete','send_failed','send_ambiguous','telegram_send_failed'].includes(outcome.reason);
+    brain.needs_owner=true;brain.needs_owner_reason=deliveryFailure?'telegram_delivery_verification':'approved_knowledge_missing';brain.owner_topic=deliveryFailure?'delivery_verification':'send_time_verification';
+    brain.turn_policy={...(brain.turn_policy||{}),reply_failure:true};
+    try{const review=await ensureOwnerEscalationFromBrain(env,row,brain);if(review?.escalation)brain.owner_escalation_id=review.escalation.id;}
+    catch(error){reviewFailed=true;try{await env.DB.prepare("UPDATE lead_outreach SET status=CASE WHEN status IN ('sent','send_ambiguous','send_failed') THEN status ELSE 'draft' END,approved_by=CASE WHEN status IN ('sent','send_ambiguous','send_failed') THEN approved_by ELSE NULL END,approved_at=CASE WHEN status IN ('sent','send_ambiguous','send_failed') THEN approved_at ELSE NULL END,error_code='owner_review_pending',error_detail=?,updated_at=? WHERE id=? AND (status IN ('draft','sent','send_ambiguous','send_failed') OR (status='approved' AND approved_by='inbound_auto_policy'))").bind(outcome.reason,now(),outreach.id).run();}catch{}try{await audit(env,'inbound_verification_review_failed','Unable to persist verification review',{inbox_message_id:row.id,reason:outcome.reason,error:sanitizeOperationalError(error?.message||error)});}catch{}}
+  }
+  if(reviewFailed)return {...outcome,reason:'owner_review_persistence_failed',retryable:true};
   timing.send_ms=Date.now()-sendStarted;
   if(!outcome.sent&&INBOUND_ACK_REASONS.has(outcome.reason)){
     const ackStarted=Date.now();
@@ -11136,7 +11196,7 @@ async function settleInboundOutcome(env,{row,brain,outreach,recipient,timing={}}
   const act=brain?.next_sales_action,acceptance=act==="accept_offer"||act==="accepted",paymentAlert=!!OWNER_PAYMENT_ALERT_ACTIONS[act];
   const alertCase=act==='payment_ready_owner'&&brain?.turn_policy?.deal_reference==='new'?{order:null,paidCount:0,paidMinor:0}:(paymentAlert||acceptance||brain?.owner_escalation_id)&&outcome.reason!=="final_quote_owner_approval"?await ownerAlertCase(env,{row}).catch(()=>({order:null,paidCount:0,paidMinor:0})):null;
   const alertKey=act==="payment_ready_owner"?(brain?.owner_escalation_id||(alertCase?.order?"order-approval:"+alertCase.order.id:null)):paymentAlert?"payment:"+(alertCase?.order?alertCase.order.id+":"+alertCase.paidCount:row.id):acceptance&&alertCase?.order?.status==="order_candidate"?"order-approval:"+alertCase.order.id:brain?.owner_escalation_id||null;
-  if(policyAllowsOwner(brain)&&alertKey&&outcome.reason!=="final_quote_owner_approval")try{const reason=paymentAlert?OWNER_PAYMENT_ALERT_ACTIONS[act]:acceptance&&alertKey.startsWith("order-approval:")?"order_authorization":ownerEscalationReason(brain);
+  if((policyAllowsOwner(brain)||brain?.turn_policy?.reply_failure===true)&&alertKey&&outcome.reason!=="final_quote_owner_approval")try{const reason=paymentAlert?OWNER_PAYMENT_ALERT_ACTIONS[act]:acceptance&&alertKey.startsWith("order-approval:")?"order_authorization":ownerEscalationReason(brain);
     const details=[await ownerAlertDetails(env,{row,...alertCase,market:brain?.knowledge_market?.conversation_market||null}).catch(()=>null),OWNER_ACTION_TEXT[reason]||"اقدام لازم: بررسی درخواست خاص تجاری"].filter(Boolean).join("\n");
     await recordEscalationAlert(env,{escalation_id:alertKey,lead_id:row.lead_id,reason_code:reason,at:now(),details});const alert=await notifyEscalationOwner(env,alertKey);await audit(env,"owner_escalation_alert","Owner alert for an escalation",{escalation_id:alertKey,lead_id:row.lead_id,sent:!!alert.sent,reason:alert.reason||null});}catch(error){try{await audit(env,"owner_escalation_alert_failed","Owner escalation alert could not be completed",{escalation_id:alertKey,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   if(outcome.reason!=="auto_send_error")try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound customer message outcome',?,?)").bind("inbound-outcome:"+row.id,"inbound_outcome",JSON.stringify({inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,customer_visible:visible,reason:outcome.reason||null,acknowledgement_id:outcome.acknowledgement?.id||null}),now()).run();}catch{}
@@ -11146,7 +11206,37 @@ async function settleInboundOutcome(env,{row,brain,outreach,recipient,timing={}}
 }
 // Completes the outcome of a RECENT inbound whose first attempt stopped before deciding it. Only an undecided, unedited draft that
 // is still exactly the validated brain draft qualifies; anything already decided, edited by the owner or old is left untouched.
+async function recoverPendingInboundReview(env,{row,outreach}){
+  if(outreach.error_code==='owner_review_pending'&&['draft','sent','send_ambiguous','send_failed'].includes(outreach.status)){
+    // Pending outcomes recover REVIEW ONLY: never redraft, reset
+    // their receipt/status, invoke a model or touch the customer transport.
+    let brain;try{brain=JSON.parse((await env.DB.prepare("SELECT details_json FROM system_events WHERE id=? LIMIT 1").bind('sales-brain:'+row.id).first())?.details_json||'null');}catch{}
+    if(!brain||brain.source_message_id!==row.id||brain.lead_id!==row.lead_id||brain.conversation_id!==row.conversation_id||outreach.status!=='draft'&&brain.draft_customer_reply!==outreach.message)return {sent:false,reason:'owner_review_proof_missing'};
+    const deliveryFailure=outreach.status!=='draft'||['gallery_delivery_incomplete','send_failed','send_ambiguous','telegram_send_failed'].includes(outreach.error_detail);
+    brain.needs_owner=true;brain.needs_owner_reason=deliveryFailure?'telegram_delivery_verification':'approved_knowledge_missing';brain.owner_topic=deliveryFailure?'delivery_verification':'send_time_verification';brain.turn_policy={...(brain.turn_policy||{}),reply_failure:true};
+    let review;try{review=await ensureOwnerEscalationFromBrain(env,row,brain);}catch{return {sent:false,reason:'owner_review_persistence_failed',retryable:true};}
+    if(!review?.escalation)return {sent:false,reason:'owner_review_persistence_failed',retryable:true};
+    const reason=outreach.error_detail||'telegram_delivery_verification',visible=outreach.status==='sent'?'reply':'none';
+    await env.DB.batch([
+      env.DB.prepare("UPDATE lead_outreach SET error_code=CASE WHEN status='sent' THEN NULL ELSE 'delivery_requires_review' END,updated_at=? WHERE id=? AND status=? AND error_code='owner_review_pending'").bind(now(),outreach.id,outreach.status),
+      env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Delivery owner review recovered without resend',?,?)").bind('inbound-outcome:'+row.id,'inbound_outcome',JSON.stringify({inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,customer_visible:visible,reason,review_recovered:true}),now())
+    ]);
+    try{await recordEscalationAlert(env,{escalation_id:review.escalation.id,lead_id:row.lead_id,reason_code:ownerEscalationReason(brain),at:now(),details:'Delivery requires owner verification: '+reason});await notifyEscalationOwner(env,review.escalation.id);}catch{}
+    return {sent:outreach.status==='sent',reason,review_recovered:true};
+  }
+  return null;
+}
+export async function retryPendingInboundReviews(env,{limit=5}={}){
+  const rows=(await env.DB.prepare("SELECT * FROM lead_outreach WHERE channel='telegram' AND error_code='owner_review_pending' AND status IN ('draft','sent','send_ambiguous','send_failed') ORDER BY updated_at LIMIT ?").bind(Math.max(1,Math.min(5,Math.floor(Number(limit)||5)))).all()).results||[],outcomes=[];
+  for(const outreach of rows){
+    const row=await env.DB.prepare("SELECT * FROM inbox_messages WHERE id=? AND lead_id=? AND conversation_id=? AND status<>'trashed' LIMIT 1").bind(outreach.inbox_message_id,outreach.lead_id,outreach.conversation_id).first();
+    if(!row)continue;
+    try{outcomes.push(await recoverPendingInboundReview(env,{row,outreach}));}catch{outcomes.push({sent:false,reason:'owner_review_persistence_failed',retryable:true});}
+  }
+  return {examined:rows.length,recovered:outcomes.filter(outcome=>outcome?.review_recovered).length};
+}
 async function resumeInboundOutcome(env,{row,outreach,timing={}}){
+  if(outreach.error_code==='owner_review_pending')return recoverPendingInboundReview(env,{row,outreach});
   if(outreach.status!=="draft"||outreach.error_code||outreach.approved_by)return null;
   if(!(Date.parse(outreach.created_at||"")>=Date.now()-INBOUND_RESUME_WINDOW_MS))return null;
   if(await env.DB.prepare("SELECT id FROM system_events WHERE id=? LIMIT 1").bind("inbound-outcome:"+row.id).first())return null;
@@ -12383,7 +12473,7 @@ async function enrichTelegramInboundContact(env, linked, {chatId,providerSenderI
 
 async function persistTelegramOutreachSuccess(env,outreach,contact,result){
   const providerMessageId=String(result?.message_id??'').trim(),providerConversationId=normalizeTelegramPrivateChatId(result?.chat?.id);
-  if(!/^\d+$/.test(providerMessageId)||!providerConversationId)throw Error('Telegram success response is missing durable message identifiers');
+  if(!/^[1-9]\d*$/.test(providerMessageId)||!providerConversationId||providerConversationId!==normalizeTelegramPrivateChatId(outreach.recipient))throw Error('Telegram success response has missing or uncorrelated durable message identifiers');
   let lastError;
   for(let attempt=0;attempt<3;attempt++){
     try{
@@ -12457,6 +12547,17 @@ async function sendApprovedTelegramOutreach(env,outreachId){
   if(album.items.length&&message.length>GALLERY_CAPTION_MAX)return {ok:false,statusCode:409,error:'Photo caption is too long; shorten the draft'};
   const quoteBlocked=await quoteSendBlock(env,outreach.id,message);
   if(quoteBlocked)return {ok:false,statusCode:409,error:quoteBlocked,status:outreach.status};
+  // Owner approval cannot turn edited/legacy prose into model authorship. Formal
+  // approved quote documents use their separate, already verified financial path.
+  const formalQuote=await env.DB.prepare("SELECT id FROM lead_quotes WHERE outreach_id=? AND status='approved' LIMIT 1").bind(outreach.id).first();
+  const operationalDocument=!outreach.inbox_message_id&&await verifiedOperationalDocument(env,outreach);
+  const galleryIndex=!outreach.inbox_message_id&&album.items.length&&await verifiedGalleryIndexDocument(env,outreach);
+  if(!formalQuote&&!operationalDocument&&!galleryIndex){
+    const incoming=await env.DB.prepare("SELECT i.*,c.platform AS conversation_platform FROM inbox_messages i JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id WHERE i.id=? AND i.lead_id=? AND i.conversation_id=?").bind(outreach.inbox_message_id,outreach.lead_id,outreach.conversation_id).first();
+    const event=await env.DB.prepare('SELECT details_json FROM system_events WHERE id=?').bind('sales-brain:'+outreach.inbox_message_id).first();let proof=null;try{proof=JSON.parse(event?.details_json||'null');}catch{}
+    const reason=!incoming||!proof?'ai_reply_unavailable':outreach.approved_by==='inbound_auto_policy'?await inboundAutoSendBlockReason(env,{row:incoming,brain:proof,outreach,recipient:String(chatId),skipRateLimit:true}):await conversationalReplyProofReason(env,{row:incoming,brain:proof,outreach});
+    if(reason)return {ok:false,statusCode:409,error:'Final conversational reply proof failed',reason,status:outreach.status};
+  }
   const claimed=await env.DB.prepare("UPDATE lead_outreach SET status='sending',error_code=NULL,error_detail=NULL,updated_at=? WHERE id=? AND status='approved'").bind(now(),outreach.id).run();
   if(!claimed.meta?.changes)return {ok:false,statusCode:409,error:'Outreach send was already claimed'};
   let result;
@@ -12662,10 +12763,63 @@ async function approvalGatedSalesDraft(env,{key,leadId,conversationId,language,m
   const recipient=telegramLeadContactChatId(conversation);if(!recipient)return {created:false,reason:"no_sendable_telegram_contact",sending_enabled:false};
   const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(eventId)),outreachId=`sales-draft-${Array.from(new Uint8Array(digest).slice(0,12),b=>b.toString(16).padStart(2,"0")).join("")}`,t=now();
   await env.DB.prepare("INSERT OR IGNORE INTO lead_outreach(id,lead_id,contact_id,conversation_id,inbox_message_id,channel,recipient,message,language,status,created_at,updated_at) VALUES(?,?,?,?,NULL,'telegram',?,?,?,'draft',?,?)").bind(outreachId,leadId,conversation.contact_id||null,conversationId,recipient,String(message||"").trim().slice(0,4000),language||"Persian",t,t).run();
-  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?, 'info',?,?,?)").bind(eventId,eventType||"sales_draft_created",eventMessage||"Approval-gated sales draft created",JSON.stringify({...details,outreach_id:outreachId,snapshot:details.snapshot||null}),t).run();
+  await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?, 'info',?,?,?)").bind(eventId,eventType||"sales_draft_created",eventMessage||"Approval-gated sales draft created",JSON.stringify({...details,outreach_id:outreachId,snapshot:details.snapshot||null,engine_document:{version:1,lead_id:leadId,conversation_id:conversationId,message_sha256:await knowledgeHash(String(message||'').trim().slice(0,4000)),...(eventType==='payment_terms_decision_draft_created'?{terms_fingerprint:await paymentTermsNoticeFingerprint(env,{...details,lead_id:leadId,conversation_id:conversationId})}:{} )}}),t).run();
   return {created:true,idempotent:false,outreach_id:outreachId,sending_enabled:false};
 }
 
+// Albums after the conversational first caption carry only numbered media labels.
+// Their authority comes from that exact sent AI reply, not from a sales template.
+async function verifiedGalleryIndexDocument(env,outreach){
+  const event=await env.DB.prepare("SELECT details_json FROM system_events WHERE type='gallery_album_draft_created' AND json_valid(details_json) AND json_extract(details_json,'$.outreach_id')=? LIMIT 1").bind(outreach.id).first();
+  let data;try{data=JSON.parse(event?.details_json||'null');}catch{return false;}
+  const proof=data?.engine_document;
+  if(!data||!Number.isInteger(data.album)||data.album<2||!proof||proof.lead_id!==outreach.lead_id||proof.conversation_id!==outreach.conversation_id||proof.message_sha256!==await knowledgeHash(outreach.message))return false;
+  const parent=await env.DB.prepare("SELECT * FROM lead_outreach WHERE id=? AND lead_id=? AND conversation_id=? AND inbox_message_id=? AND status='sent' LIMIT 1").bind(data.first_outreach_id,outreach.lead_id,outreach.conversation_id,data.inbox_message_id).first();if(!parent)return false;
+  const incoming=await env.DB.prepare('SELECT i.*,c.platform AS conversation_platform FROM inbox_messages i JOIN lead_conversations c ON c.id=i.conversation_id AND c.lead_id=i.lead_id WHERE i.id=? AND i.lead_id=? AND i.conversation_id=?').bind(data.inbox_message_id,outreach.lead_id,outreach.conversation_id).first();
+  const recorded=await env.DB.prepare('SELECT details_json FROM system_events WHERE id=?').bind('sales-brain:'+data.inbox_message_id).first();let brain;try{brain=JSON.parse(recorded?.details_json||'null');}catch{return false;}
+  if(!brain?.gallery?.items?.length||await conversationalReplyProofReason(env,{row:incoming,brain,outreach:parent}))return false;
+  const g=brain.gallery,chunk=g.items.slice((data.album-1)*GALLERY_MAX_ALBUM,data.album*GALLERY_MAX_ALBUM);
+  if(!chunk.length||outreach.message!==galleryAlbumText(g,outreach.language,data.album))return false;
+  if(data.album>2&&!await env.DB.prepare("SELECT o.id FROM system_events e JOIN lead_outreach o ON o.id=json_extract(e.details_json,'$.outreach_id') WHERE e.type='gallery_album_draft_created' AND json_valid(e.details_json) AND json_extract(e.details_json,'$.first_outreach_id')=? AND json_extract(e.details_json,'$.album')=? AND o.status='sent' LIMIT 1").bind(parent.id,data.album-1).first())return false;
+  const media=(await env.DB.prepare('SELECT visual_media_id FROM lead_outreach_media WHERE outreach_id=? ORDER BY position').bind(outreach.id).all()).results||[];
+  if(JSON.stringify(media.map(item=>item.visual_media_id))!==JSON.stringify(chunk.map(item=>item.visual_media_id)))return false;
+  if(outreach.approved_by==='inbound_auto_policy'){
+    if(await inboundSendGateReason(env,{row:incoming,outreach,recipient:outreach.recipient}))return false;
+    if(await galleryAutoSendBlock(env,{row:incoming,brain:{...brain,gallery:{...g,items:chunk}},outreach}))return false;
+  }
+  return true;
+}
+async function paymentTermsNoticeFingerprint(env,details){
+  const latest=await env.DB.prepare("SELECT id,status,owner_answer_json,resolved_at FROM owner_decisions WHERE decision_type='PAYMENT_TERMS' AND status IN ('RESOLVED','REJECTED') AND lead_id=? AND conversation_id=? ORDER BY resolved_at DESC,created_at DESC LIMIT 1").bind(details.lead_id,details.conversation_id).first();
+  if(!latest||latest.id!==details.decision_id)return null;
+  const order=details.order_id?await env.DB.prepare('SELECT * FROM lead_orders WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1').bind(details.order_id,details.lead_id,details.conversation_id).first():null;
+  if(details.order_id&&!order)return null;
+  const decision=await env.DB.prepare('SELECT market FROM owner_decisions WHERE id=?').bind(latest.id).first();
+  const setting=await getSetting(env,'deposit_percent',{market:order?.market||decision?.market||'IRAN',product_key:null});
+  const config=order?await paymentRequestConfig(env,order).catch(()=>null):null;if(order&&!config)return null;
+  return knowledgeHash(knowledgeCanonical({latest,setting:setting?{id:setting.id,version:setting.version,value:setting.value}:null,order_config:config?.fingerprint||null}));
+}
+// Only exact owner-approved payment/shipping records are operational documents.
+// Product advice, catalogs, reminders and edited text never inherit this exception.
+async function verifiedOperationalDocument(env,outreach){
+  const row=await env.DB.prepare("SELECT type,details_json FROM system_events WHERE id LIKE 'sales-draft:%' AND json_valid(details_json) AND json_extract(details_json,'$.outreach_id')=? LIMIT 1").bind(outreach.id).first();
+  const allowed=new Set(['lead_order_update_draft_created','shipment_notification_draft_created','payment_completed_draft_created','payment_received_draft_created','balance_request_draft_created','payment_terms_decision_draft_created']);
+  if(!row||!allowed.has(row.type)||!outreach.approved_by||outreach.approved_by==='inbound_auto_policy')return false;
+  let details;try{details=JSON.parse(row.details_json);}catch{return false;}
+  const proof=details.engine_document;
+  if(proof?.version!==1||proof.lead_id!==outreach.lead_id||proof.conversation_id!==outreach.conversation_id||proof.message_sha256!==await knowledgeHash(outreach.message))return false;
+  if(row.type==='payment_terms_decision_draft_created'){
+    const decision=await env.DB.prepare("SELECT id FROM owner_decisions WHERE id=? AND decision_type='PAYMENT_TERMS' AND status IN ('RESOLVED','REJECTED') AND lead_id=? AND conversation_id=? LIMIT 1").bind(details.decision_id,outreach.lead_id,outreach.conversation_id).first();
+    if(!decision)return false;
+    const current=await paymentTermsNoticeFingerprint(env,{...details,lead_id:outreach.lead_id,conversation_id:outreach.conversation_id});
+    if(!current||current!==proof.terms_fingerprint)return false;
+  }else{
+    const events={lead_order_update_draft_created:'payment_request',shipment_notification_draft_created:'shipment_notice',payment_completed_draft_created:'payment_completed',payment_received_draft_created:'payment_received',balance_request_draft_created:'balance_request'};
+    if(details.event!==events[row.type]||!details.order_id)return false;
+    const order=await env.DB.prepare('SELECT id FROM lead_orders WHERE id=? AND lead_id=? AND conversation_id=? LIMIT 1').bind(details.order_id,outreach.lead_id,outreach.conversation_id).first();if(!order)return false;
+  }
+  return (await salesOutreachStillCurrent(env,outreach.id)).current;
+}
 // A payment/shipping draft may be sent only while its stored order snapshot remains current.
 async function salesOutreachStillCurrent(env,outreachId){
   const quote=await finalQuoteFreshness(env,outreachId,{discountRule:market=>salesListDiscountRule(env,market)});if(!quote.current)return quote;
@@ -14457,6 +14611,8 @@ const WORKER = {
     // Owner alerts for held quotes that are due a bounded retry; never sends to a customer, never repeats a delivered alert.
     ctx.waitUntil(isolate("retry_final_quote_alerts",()=>retryFinalQuoteAlerts(env,{limit:5})));
     ctx.waitUntil(isolate("retry_escalation_alerts",()=>retryEscalationAlerts(env,{limit:5})));
+    // Review-only recovery; no model call, customer send or status reset.
+    ctx.waitUntil(isolate("retry_inbound_verification_reviews",()=>retryPendingInboundReviews(env,{limit:5})));
     // MEM-02 retention: per-inbox AI results are cleared after their reuse window, rows after 7 days (bounded; live leases kept).
     ctx.waitUntil(isolate("purge_ai_call_flights",()=>purgeAiCallFlights(env)));
     // Independent agent watchdog (Stage 3): own waitUntil + try/catch, reads ops tables and raises alerts; never runs or sends anything.

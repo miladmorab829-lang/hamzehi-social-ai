@@ -1,0 +1,64 @@
+{
+  "schema": "hamzehi.optional-ribbon-fee.v1",
+  "typed_domain": "optional_service",
+  "attribute": "ribbon_printing",
+  "new_table": false,
+  "existing_lifecycle": "propose -> sensitive owner review -> preview -> apply",
+  "records": [
+    {
+      "record_id": "phase50c-o11-iran-v1",
+      "payload": {
+        "id": "phase50c-o11-iran-v1",
+        "operation": "ADD",
+        "domain": "optional_service",
+        "attribute": "ribbon_printing",
+        "entity_type": "model",
+        "entity_key": "کشویی بگ‌دار",
+        "market": "IRAN",
+        "value": {
+          "schema": "hamzehi.optional-ribbon-fee.v1",
+          "service": "custom_ribbon_printing",
+          "model": "کشویی بگ‌دار",
+          "size_scope": "approved_base_price_sizes",
+          "activation": "explicit_customer_request",
+          "amount_minor": 6000,
+          "currency": "TOMAN",
+          "minor_unit_scale": 1,
+          "basis": "per_box",
+          "discount_effect": "UNKNOWN",
+          "deposit_effect": "UNKNOWN",
+          "source_ref": "PHASE50B-RECOVERY-O11-20261111-v1",
+          "policy_version": 1
+        }
+      }
+    },
+    {
+      "record_id": "phase50c-o11-arab-v1",
+      "payload": {
+        "id": "phase50c-o11-arab-v1",
+        "operation": "ADD",
+        "domain": "optional_service",
+        "attribute": "ribbon_printing",
+        "entity_type": "model",
+        "entity_key": "کشویی بگ‌دار",
+        "market": "ARAB",
+        "value": {
+          "schema": "hamzehi.optional-ribbon-fee.v1",
+          "service": "custom_ribbon_printing",
+          "model": "کشویی بگ‌دار",
+          "size_scope": "approved_base_price_sizes",
+          "activation": "explicit_customer_request",
+          "amount_minor": 30,
+          "currency": "USD",
+          "minor_unit_scale": 100,
+          "basis": "per_box",
+          "discount_effect": "UNKNOWN",
+          "deposit_effect": "UNKNOWN",
+          "source_ref": "PHASE50B-RECOVERY-O11-20261111-v1",
+          "policy_version": 1
+        }
+      }
+    }
+  ],
+  "activation": "pending production approval"
+}

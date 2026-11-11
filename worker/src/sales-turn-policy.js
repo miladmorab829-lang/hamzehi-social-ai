@@ -29,15 +29,15 @@ export function planSalesTurn({enabled,interpretation,valid=false,semantics,requ
     repeat_requested:!!i&&s.repeat_requested,semantic_valid:!!i};
 }
 export function policyAllowsOwner(brain){return brain?.turn_policy?brain.turn_policy.may_handoff===true:brain?.ai_first==='on'?['payment_claim_owner','payment_claim_unmatched','payment_ready_owner'].includes(brain.next_sales_action):true;}
-export function trustedQuantityProjection({memory,candidate,sourceId,sourceDecision}={}){
+export function trustedQuantityProjection({memory,candidate,sourceId,sourceDecision,market=undefined}={}){
   const value=memory?.requested_quantity,p=sourceDecision?.turn_policy;
   const proof=p?.quantity_source;
-  const trusted=Number.isSafeInteger(value)&&value>0&&proof?.source_message_id===sourceId&&proof?.value===value&&proof?.role==='order_count'&&proof?.verified===true&&!!proof.market&&(!candidate||proof.product_key===candidate.product?.key&&proof.market===candidate.market);
+  const trusted=Number.isSafeInteger(value)&&value>0&&proof?.source_message_id===sourceId&&proof?.value===value&&proof?.role==='order_count'&&proof?.verified===true&&!!proof.market&&(market===undefined||!!market&&proof.market===market)&&(!candidate||proof.product_key===candidate.product?.key&&proof.market===candidate.market);
   const projected={...memory};if(!trusted)delete projected.requested_quantity;
   // Never revive an older superseded count. Historical order records/accepted offers themselves are not altered.
-  const q=candidate?.quantity_provenance,quoteTrusted=q?.verified===true&&q.role==='quote_only'&&q.product_key===candidate.product?.key&&q.market===candidate.market&&q.value===candidate.quantity&&Number.isSafeInteger(q.value)&&q.value>0;
+  const q=candidate?.quantity_provenance,quoteTrusted=q?.verified===true&&q.role==='quote_only'&&q.product_key===candidate.product?.key&&q.market===candidate.market&&(market===undefined||!!market&&q.market===market)&&q.value===candidate.quantity&&Number.isSafeInteger(q.value)&&q.value>0;
   const deal=candidate?{...candidate,quantity:trusted?value:quoteTrusted?q.value:null,...(!trusted&&!quoteTrusted&&candidate.status!=='accepted'?{offer:null,price:null,status:'draft'}:{})}:null;
-  return {memory:projected,candidate:deal,quantity:trusted?value:null,quoteQuantity:quoteTrusted?q.value:null,masked:!trusted&&Number.isSafeInteger(value)};
+  return {memory:projected,candidate:deal,quantity:trusted?value:null,quoteQuantity:quoteTrusted?q.value:null,source_product_key:trusted?proof.product_key:null,masked:!trusted&&Number.isSafeInteger(value)};
 }
 export function policyClarification(language){return language==='Iraqi Arabic'?'ما فهمت قصدك بشكل كافي. ممكن توضح شنو تريد تعرف عن هالموديل؟':'منظورتون رو کامل نگرفتم؛ می‌تونید بگید دقیقاً چه چیزی درباره این مدل می‌خواید بدونید؟';}
 export function commercialLimitReply(language,kind,{minimum=null}={}){

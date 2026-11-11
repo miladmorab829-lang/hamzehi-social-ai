@@ -1,0 +1,16 @@
+{
+  "id": "PHASE50D-O11-FINANCIAL-v2",
+  "policy_version": 2,
+  "source": "Direct owner instruction in this conversation: HAMZEHI SOCIAL AI PHASE 50-D, section 2",
+  "prior_source": "PHASE50B-RECOVERY-O11-20261111-v1",
+  "model": "کشویی بگ‌دار",
+  "size_scope": "approved_base_price_sizes",
+  "activation": "explicit_customer_request",
+  "market_rates": [{"market":"IRAN","amount_minor":6000,"currency":"TOMAN","minor_unit_scale":1},{"market":"ARAB","amount_minor":30,"currency":"USD","minor_unit_scale":100}],
+  "discount_effect": "SAME_APPROVED_PRODUCT_QUANTITY_RULE",
+  "deposit_effect": "HALF_COMBINED_POST_DISCOUNT",
+  "calculation_order": ["base_product_raw","service_raw","existing_eligible_discount_each_component","combined_net","50_percent_deposit"],
+  "base_price_changes": false,
+  "payment_authorized": false,
+  "production_execution_permitted": false
+}

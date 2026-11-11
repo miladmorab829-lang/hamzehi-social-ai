@@ -1,0 +1,357 @@
+{
+  "candidate_fingerprint": "1af7b854212ac7e9710781cb3286d67c7f2ed881454cab3995f02381e42de1fc",
+  "baseline": "a44e4c78b4e2c9ebe48e9313de358534c0d246c2",
+  "verification": {
+    "assertions": 479,
+    "suites": 10,
+    "scope": "OFFLINE_ONLY",
+    "live_model": "NOT_VERIFIED",
+    "real_telegram": "NOT_VERIFIED"
+  },
+  "publication": {
+    "runtime_files": 10,
+    "harness_files": 17,
+    "static_fixture_files": 10
+  },
+  "files": [
+    {
+      "path": "reports/phase50-recovery/O11-OWNER-DECISION-v1.json",
+      "kind": "added",
+      "bytes": 1241,
+      "utf16_chars": 1214,
+      "sha256": "a11b11b0f5f2f9c183ee8c44258678565d63fc887703af6b1273a013ed2789e8",
+      "git_blob_sha": "c6b72d5b63fc0a4c18b60b07d2b2d9dd82ee6225",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50-recovery/original/PHASE50-KNOWLEDGE-IMPORT-READY.json",
+      "kind": "added",
+      "bytes": 90958,
+      "utf16_chars": 79951,
+      "sha256": "833f84e72bcd5579679b96a681537cf4727547a70b4f142342c349e8a01d016c",
+      "git_blob_sha": "fb4e4b7aec66b438399a580e7f53732a234fa0ff",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50-recovery/original/PHASE50-KNOWLEDGE-IRAN.json",
+      "kind": "added",
+      "bytes": 411167,
+      "utf16_chars": 390800,
+      "sha256": "5e80a34ca450f99e95e37307dc96a65d81e07166aa007cbf6f92bf359b70e2f4",
+      "git_blob_sha": "08b29a25ea85a1afe5582c5f058dc4bc70b44f6d",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50-recovery/original/PHASE50-KNOWLEDGE-IRAQ.json",
+      "kind": "added",
+      "bytes": 231239,
+      "utf16_chars": 217150,
+      "sha256": "df1c1cd4c1bd50161f7d8b0f278163049abb8ed1e6c4f584b1953f78f6f21d27",
+      "git_blob_sha": "66d64d7958161a3a460af9260d259b166b0cc749",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50-recovery/original/PHASE50B-CORRECTED-IMPORT-PACKAGE.json",
+      "kind": "added",
+      "bytes": 92568,
+      "utf16_chars": 81111,
+      "sha256": "ddcf2652dc066d7810d694593131c811415616dab765f8227cfedc82ecc22566",
+      "git_blob_sha": "f3c6f02da2739bf9c3af4db2d1cf203429e9f386",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50-recovery/original/evidence/phase50-isolated-tests.json",
+      "kind": "added",
+      "bytes": 8418,
+      "utf16_chars": 8271,
+      "sha256": "c5f789635094783c4f5cc2dd4984dbfaf22c0b86b8257dfac429a1e69781e233",
+      "git_blob_sha": "e493949d358754d04e60bfc3486a73cca879f469",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50c/PHASE50C-IMPORT-PACKAGE.json",
+      "kind": "added",
+      "bytes": 95939,
+      "utf16_chars": 84434,
+      "sha256": "595458911a0a28bc25acd3b68c8205797f3d23f509dd30b34e385717f025da0c",
+      "git_blob_sha": "0628e04f922dbc6378e771b3c5ab59e7f13a5a81",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50c/PHASE50C-OPTIONAL-FEE-SCHEMA.json",
+      "kind": "added",
+      "bytes": 2116,
+      "utf16_chars": 2068,
+      "sha256": "52fa1d89b55d22a3948dc2e3858a255a37f077b3ad2c9df5b2b8a9757770b8c4",
+      "git_blob_sha": "097bd2b7bd013e3d064343e53aca2f0feafaf162",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50d/O11-FINANCIAL-OWNER-DECISION-v2.json",
+      "kind": "added",
+      "bytes": 879,
+      "utf16_chars": 867,
+      "sha256": "55dec54038f7fc844b726e2aa8dd467bd1562413cd287616417a68645e8c2250",
+      "git_blob_sha": "d92acd72a9f5b6b804a9b574ac17e64a20066673",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "reports/phase50d/PHASE50D-IMPORT-PACKAGE.json",
+      "kind": "added",
+      "bytes": 96622,
+      "utf16_chars": 85117,
+      "sha256": "090045cbca462c7fe2d955a3c00b136317b8238a5d98519ce7e56d42a7b005f1",
+      "git_blob_sha": "d827c7d2544885592c4e8b90c9bdd0825d707c89",
+      "category": "static_regression_fixture"
+    },
+    {
+      "path": "tests/harness/phase41_integrity_guards.mjs",
+      "kind": "modified",
+      "bytes": 10710,
+      "utf16_chars": 9620,
+      "sha256": "83637edaacac30bc85898cd63c3daacd1ef8b339e4aae2047cdcb3b6935674ef",
+      "git_blob_sha": "9be37e8aa62de6cfb6bf3fc7697ea8b7f8ec475d",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase44_acceptance_matrix.mjs",
+      "kind": "modified",
+      "bytes": 16338,
+      "utf16_chars": 15406,
+      "sha256": "5f21c841bca776f6fca2e6225768f6533948344c9e9ccde96f24d5ea36f1cae7",
+      "git_blob_sha": "a9ca71f584e3e9b643d4b65baf64e92667197ca3",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase48_multi_model.mjs",
+      "kind": "modified",
+      "bytes": 23810,
+      "utf16_chars": 21964,
+      "sha256": "277bf5e48d8728fc308ffbec14bb11619518dc55028f1ebec846c4fc16353d59",
+      "git_blob_sha": "245ab8c622fe094d86d264f76ea6d99279dce374",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase50b_commercial_safety.mjs",
+      "kind": "added",
+      "bytes": 12576,
+      "utf16_chars": 10725,
+      "sha256": "2baed9884e00d575c9f6d8439ed6a7f074ea3089208f59642b674bcfa6b78502",
+      "git_blob_sha": "c383b7d57f6941f6216597cb3937fd439d7751ac",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase50b_native_package.mjs",
+      "kind": "added",
+      "bytes": 4267,
+      "utf16_chars": 4262,
+      "sha256": "c16e57e0a729bfe8988bf83dc97f3eada81d6de1c55caa5ac5aff7c3bdeeec16",
+      "git_blob_sha": "9a4db57a20b1245241a4b3c21a335c6d99a31d82",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase50c_optional_fee.mjs",
+      "kind": "added",
+      "bytes": 14084,
+      "utf16_chars": 13334,
+      "sha256": "49111b871358a0f41189b9f6659b8a0f7b9f36e303dd0f5c048e3b37a748159e",
+      "git_blob_sha": "463c25eb2d1476bcba882331f5de1ae3debfb909",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase50d_financial.mjs",
+      "kind": "added",
+      "bytes": 12269,
+      "utf16_chars": 12066,
+      "sha256": "11d17787e2410a4734a8523a93b4ff38d87fbfa85532d8f54de41f320bc8ff01",
+      "git_blob_sha": "f2c7076a7c784d7638b79a2023bc7ed3739d83f2",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51-evaluation-world.mjs",
+      "kind": "added",
+      "bytes": 8602,
+      "utf16_chars": 7162,
+      "sha256": "0ff90b9d5ff396870f256862c065202035d3a4609928e7684131a02878a9aa4d",
+      "git_blob_sha": "aeacd3ac038cfdab454bc70156f746589f00d7b3",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_conversation.mjs",
+      "kind": "added",
+      "bytes": 20073,
+      "utf16_chars": 18250,
+      "sha256": "0c19a76e387c249e58fe0e3f10367bdbc3b41894dc2152cc0c413a41f71cdabd",
+      "git_blob_sha": "82f00305da72e0a1a5089341f4b564b1b9d8de98",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_gallery_delivery.mjs",
+      "kind": "added",
+      "bytes": 3604,
+      "utf16_chars": 3454,
+      "sha256": "f19fe63d1ea2bf327e72b23cbafc25372712d513f39d2fe5eba854c6f346c629",
+      "git_blob_sha": "0bd43f902977246de41e6c946616dfb7e29fbddf",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_live_model.mjs",
+      "kind": "added",
+      "bytes": 5055,
+      "utf16_chars": 5055,
+      "sha256": "a299399c9aedadef1c8f452d56fec613ab839438c283257d65254c122f77b268",
+      "git_blob_sha": "769faae58a9f019609fdbba171927b91d290a30d",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_operational_documents.mjs",
+      "kind": "added",
+      "bytes": 7650,
+      "utf16_chars": 7522,
+      "sha256": "dc3a734c7a34bced42e65e989fc24e09ee6ae98f8702bcd6b385d24d4ff1cd5e",
+      "git_blob_sha": "aea76a8d0d344089b12edb81795cbac534e22e32",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_release_candidate.mjs",
+      "kind": "added",
+      "bytes": 18595,
+      "utf16_chars": 16335,
+      "sha256": "055a518a512156394da2ad912e11de4a1f56c9f5a0973367e2ad78fb44d009ad",
+      "git_blob_sha": "da5a63442c49422fade4718ef16620d3502877cd",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_ribbon_financial.mjs",
+      "kind": "added",
+      "bytes": 4303,
+      "utf16_chars": 4212,
+      "sha256": "35f511e5cdfd8059278bda6d4a40c6d097baf575cbc20b691d1c73dcf55ec8d5",
+      "git_blob_sha": "6c8a307376aa770a953de04b2324115241e9cd88",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_stage2_conversation.mjs",
+      "kind": "added",
+      "bytes": 16207,
+      "utf16_chars": 13755,
+      "sha256": "07aa160700af5918c7cd8ecab39cac87f03b602465385aa133ab8df65eaa79cd",
+      "git_blob_sha": "42ddda0e77036a217b2a97e9e3a62b50ea371c5a",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_stage2_media.mjs",
+      "kind": "added",
+      "bytes": 6811,
+      "utf16_chars": 6661,
+      "sha256": "c12e14b013991438605ef22a9133d5003a7c2c912ff27a99461643f15586db0e",
+      "git_blob_sha": "e4cf879c5379dc2122415f1f590813a1ad2737f7",
+      "category": "regression_harness"
+    },
+    {
+      "path": "tests/harness/phase51_stage2_reliability.mjs",
+      "kind": "added",
+      "bytes": 26228,
+      "utf16_chars": 25843,
+      "sha256": "663a1da82f9c75bae8286ae658dcebad5b7a24bd2dfd92f7021ae96e864c3967",
+      "git_blob_sha": "c1dd86b6269601d2ab3ebe19b92d07777a25e5f4",
+      "category": "regression_harness"
+    },
+    {
+      "path": "worker/src/approved-sales-guidance.js",
+      "kind": "modified",
+      "bytes": 22871,
+      "utf16_chars": 19428,
+      "sha256": "de185ef4769f0e6a1b41dd01a1ad710925b78744fc48f4f1d92919761c314560",
+      "git_blob_sha": "30f28b16bb6249119241545205850473f822c2f2",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/final-quote-review.js",
+      "kind": "modified",
+      "bytes": 25379,
+      "utf16_chars": 24708,
+      "sha256": "a22033e064e7535ad5037cabba186b8a0e65ff6c135ea962e2e8494fdd69006a",
+      "git_blob_sha": "374dbae1fd5475cc9607a86c6d4631b67bbc778a",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/index.js",
+      "kind": "modified",
+      "bytes": 1586836,
+      "utf16_chars": 1538157,
+      "sha256": "12949d5b19d19ce462e2f156e3618fa2dc2ca85e5587a912ef5f0a512d2d4cf4",
+      "git_blob_sha": "198c79907074f2825725dcb2c6300d66d4a5c380",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/optional-ribbon-authoring.js",
+      "kind": "added",
+      "bytes": 3048,
+      "utf16_chars": 2394,
+      "sha256": "8720559d43bbb2f49462f74fbe6aa030a21e4a46f81c7626880d5fcbd4f86ec4",
+      "git_blob_sha": "3b430fb007361e612f61f31ae518abe1879fa61f",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/sales-ai-brain.js",
+      "kind": "modified",
+      "bytes": 60064,
+      "utf16_chars": 55666,
+      "sha256": "1aa225f53ff0f35718375d88357a19753de40d52e8548f332be4b17339e1637f",
+      "git_blob_sha": "cee6efbff02571016bacd2267788a85ab8a32713",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/sales-conversation-author.js",
+      "kind": "added",
+      "bytes": 15410,
+      "utf16_chars": 14112,
+      "sha256": "6b8d292d98201a0581a3ed8362929920465bb0c0c5e74ca71a9fd61136b4bb9b",
+      "git_blob_sha": "4bc2d162f49ad87bd1e25c857913215a86771dc8",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/sales-factual-grounding.js",
+      "kind": "added",
+      "bytes": 13842,
+      "utf16_chars": 11907,
+      "sha256": "9375d45e7e0055b771a668b198dd0441380451c4bf322e6056bd6dcb50628b4b",
+      "git_blob_sha": "029ffeb30c0697e6e2c8662d60fff0a18043de24",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/sales-memory.js",
+      "kind": "modified",
+      "bytes": 56160,
+      "utf16_chars": 54120,
+      "sha256": "67ab8ee7a9a39f7b5b1cfbabfce7e8f94d16fccbbe3f3df302abff4b22593447",
+      "git_blob_sha": "32005cc416f00f4879342da988a691ef3a0b36e4",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/sales-reply-integrity.js",
+      "kind": "modified",
+      "bytes": 8501,
+      "utf16_chars": 8036,
+      "sha256": "37ae7ed5dfe52c4fa075659ab028061bcfae1aef7cf1a4f01a92e2035d0396ce",
+      "git_blob_sha": "72b127f1b3d8e6910509e00fcbec8c70f87c3b87",
+      "category": "runtime"
+    },
+    {
+      "path": "worker/src/sales-turn-policy.js",
+      "kind": "modified",
+      "bytes": 6063,
+      "utf16_chars": 5411,
+      "sha256": "fc5d286add81cc010c045677a834fa00387716514f104736021765d9c97044d8",
+      "git_blob_sha": "e6f11ce5f7a043b8d91da68e2349cf4171be362c",
+      "category": "runtime"
+    }
+  ],
+  "production_activation": "NOT_AUTHORIZED_WITHOUT_PROVEN_OWNER_ISOLATION",
+  "notes": [
+    "All file contents are unchanged from the sealed candidate.",
+    "Fixtures are inert approved business-policy/regression inputs, not executable import authorization.",
+    "No environment, credentials, customer export, raw logs, archives or nested reconstructed project is published."
+  ]
+}

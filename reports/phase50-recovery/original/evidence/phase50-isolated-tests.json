@@ -1,0 +1,298 @@
+{
+  "tests": [
+    {
+      "id": "QA310-preserve-all",
+      "status": "PASS",
+      "observed": 310,
+      "expected": 310,
+      "detail": "Same IDs and ordering retained."
+    },
+    {
+      "id": "QA310-ids",
+      "status": "PASS",
+      "observed": 310,
+      "expected": 310,
+      "detail": "No fabricated additional base scenario."
+    },
+    {
+      "id": "prices-exact",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "52 canonical rows each market retained without mutation."
+    },
+    {
+      "id": "ring1000",
+      "status": "PASS",
+      "observed": 56700000,
+      "expected": 56700000,
+      "detail": "Pure calculation, no order/payment."
+    },
+    {
+      "id": "no-held-market-to-global",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "No GLOBAL fallback."
+    },
+    {
+      "id": "no-hold-in-import",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "HOLD excluded."
+    },
+    {
+      "id": "batch-limits",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Atomic expansion counted."
+    },
+    {
+      "id": "execution-disabled",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "No endpoint called."
+    },
+    {
+      "id": "grey-not-black",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Colour meanings preserved."
+    },
+    {
+      "id": "no-unit-conversion",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Raw 6 mil not normalized."
+    },
+    {
+      "id": "slanted-no-ribbon",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "No ribbon inheritance."
+    },
+    {
+      "id": "two-piece-one-foam",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Website two-layer claim not imported."
+    },
+    {
+      "id": "others-foam-range",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Range retained."
+    },
+    {
+      "id": "bag-palette-exception",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Not hardbox/ribbon out-of-list authority."
+    },
+    {
+      "id": "iraq-alias",
+      "status": "PASS",
+      "observed": 1,
+      "expected": 1,
+      "detail": "Both names retained, no row deletion."
+    },
+    {
+      "id": "conflicts",
+      "status": "PASS",
+      "observed": 2,
+      "expected": 2,
+      "detail": "No production fix claimed."
+    },
+    {
+      "id": "quarantine",
+      "status": "PASS",
+      "observed": 15,
+      "expected": 15,
+      "detail": "O15 not blanket approval."
+    },
+    {
+      "id": "refund-authority",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Financial authority preserved."
+    },
+    {
+      "id": "cancel-before-logo",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "No logo does not mean not produced."
+    },
+    {
+      "id": "order-three-days-not-auto-cancel",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Window is normal amendment window only."
+    },
+    {
+      "id": "ribbon-extra-cost-preserved",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "No commercial:false bypass."
+    },
+    {
+      "id": "natural-bilingual-records",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Translation available; language review not a live Claude test."
+    },
+    {
+      "id": "RUNTIME-carton-fa",
+      "status": "FAIL",
+      "observed": true,
+      "expected": false,
+      "detail": {
+        "question": "کارتن هزینه اضافه دارد؟",
+        "meaning": "True enters existing exact no-extra-charge reply; these are current committed predicates, not live messages."
+      }
+    },
+    {
+      "id": "RUNTIME-ribbon-foil-fa",
+      "status": "FAIL",
+      "observed": true,
+      "expected": false,
+      "detail": {
+        "question": "طلاکوب روبان هزینه اضافه دارد؟",
+        "meaning": "True enters existing exact no-extra-charge reply; these are current committed predicates, not live messages."
+      }
+    },
+    {
+      "id": "RUNTIME-shipping-fa",
+      "status": "PASS",
+      "observed": false,
+      "expected": false,
+      "detail": {
+        "question": "هزینه ارسال اضافه است؟",
+        "meaning": "True enters existing exact no-extra-charge reply; these are current committed predicates, not live messages."
+      }
+    },
+    {
+      "id": "RUNTIME-standard-tax-fa",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": {
+        "question": "مالیات یا هزینه اضافه دارد؟",
+        "meaning": "True enters existing exact no-extra-charge reply; these are current committed predicates, not live messages."
+      }
+    },
+    {
+      "id": "RUNTIME-carton-ar",
+      "status": "FAIL",
+      "observed": true,
+      "expected": false,
+      "detail": {
+        "question": "الكرتون بيه كلفة إضافية؟",
+        "meaning": "True enters existing exact no-extra-charge reply; these are current committed predicates, not live messages."
+      }
+    },
+    {
+      "id": "RUNTIME-ribbon-foil-ar",
+      "status": "FAIL",
+      "observed": true,
+      "expected": false,
+      "detail": {
+        "question": "الطباعة الذهبية على الشريط بيها كلفة إضافية؟",
+        "meaning": "True enters existing exact no-extra-charge reply; these are current committed predicates, not live messages."
+      }
+    },
+    {
+      "id": "native-new-commercial-gates",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Semantically commercial concept names preserve current gates."
+    },
+    {
+      "id": "native-shipping-preserves-both",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Prior approved terms retained verbatim, two version-pinned replacements."
+    },
+    {
+      "id": "no-fact-cut",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "All source qualifiers retained within the generic value limit."
+    },
+    {
+      "id": "discount-boundaries",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Same-size Iran1000/Iraq1001 rules preserved."
+    },
+    {
+      "id": "all-six-structure-source",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Source-backed descriptions for six models remain held until market is assigned."
+    },
+    {
+      "id": "four-model-reference-coverage",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Comparison reference includes all four; bag movement limit disclosed."
+    },
+    {
+      "id": "shipping-guidance-before-IRAN",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Existing committed guidance works before the proposed replacement."
+    },
+    {
+      "id": "shipping-guidance-after-IRAN",
+      "status": "FAIL",
+      "observed": false,
+      "expected": true,
+      "detail": "Candidate terms containing cost words are rejected by the current MONEY guard; candidate held, never applied."
+    },
+    {
+      "id": "shipping-guidance-before-ARAB",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Existing committed guidance works before the proposed replacement."
+    },
+    {
+      "id": "shipping-guidance-after-ARAB",
+      "status": "FAIL",
+      "observed": false,
+      "expected": true,
+      "detail": "Candidate terms containing cost words are rejected by the current MONEY guard; candidate held, never applied."
+    },
+    {
+      "id": "runtime-unsafe-shipping-held",
+      "status": "PASS",
+      "observed": true,
+      "expected": true,
+      "detail": "Both schema-valid but behavior-breaking replacements excluded from ready batches."
+    }
+  ],
+  "pass": 33,
+  "fail": 6,
+  "note": "Known runtime policy gaps reported, not fixed in phase A. Reference evaluation is separate from these executed local checks."
+}

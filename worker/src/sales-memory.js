@@ -112,7 +112,7 @@ export async function salesAiSingleFlight(env,{key,row,provider,requestedModel,c
     // call was still paid (recorded with fenced_out = 1).
     const cur=await readFlight(env,key);let winner=null;try{winner=cur?.status==="succeeded"&&cur.result_json?JSON.parse(cur.result_json):null;}catch{}
     if(winner)return {...winner,ms:res.ms,flight:{role:"stale_reused_winner",fence:claim.fence,renew_lost:renewLost}};
-    return {...res,flight:{role:"stale",fence:claim.fence,renew_lost:renewLost}};
+    return {ok:false,model:res.model,ms:res.ms,error:'single_flight_stale',flight:{role:"stale",fence:claim.fence,renew_lost:renewLost}};
   }
   return {...res,flight:{role:"owner",fence:claim.fence,attempt:claim.attempt}};
 }

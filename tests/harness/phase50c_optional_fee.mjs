@@ -1,0 +1,91 @@
+﻿import fs from 'node:fs';
+import crypto from 'node:crypto';
+import {makeWorld,reporter} from './harness.mjs';
+import {validateSalesBrainDraft} from '../../worker/src/index.js';
+import {maskApprovedGuidance} from '../../worker/src/approved-sales-guidance.js';
+import {RIBBON_MODEL,RIBBON_SCHEMA,validateRibbonFee,loadRibbonFee,selectRibbonFee,ribbonFeeCurrent,explicitRibbonRequest,ribbonFinancialMix} from '../../worker/src/optional-ribbon-fee.js';
+const {ok,done}=reporter('phase50c_optional_fee');
+const read=p=>JSON.parse(fs.readFileSync(new URL(p,import.meta.url),'utf8').replace(/^\uFEFF/,''));
+const owner=read('../../reports/phase50-recovery/O11-OWNER-DECISION-v1.json');
+const old=read('../../reports/phase50-recovery/original/PHASE50B-CORRECTED-IMPORT-PACKAGE.json');
+const W=await makeWorld({aiBrain:'on'});
+for(const p of ['/api/quotes','/api/si/knowledge/product','/api/owner-escalations','/api/leads/outreach'])await W.call(p,null,'GET');
+await W.call('/api/sales-ai-first',{mode:'on'});
+const catalog=read('./fixtures/phase41-catalog.json'),iraq=read('./fixtures/phase44-approved-iraq-rows.json');
+for(const row of [...catalog.items,...iraq]){const keys=Object.keys(row);W.dbrun(`INSERT INTO commercial_price_items(${keys.join(',')}) VALUES(${keys.map(()=>'?')})`,Object.values(row));}
+const snapshot=()=>crypto.createHash('sha256').update(JSON.stringify(W.q('SELECT * FROM commercial_price_items ORDER BY id'))).digest('hex'),before=snapshot();
+const additions=[],results=[];let uid=955000;
+for(const rate of owner.market_rates){
+ const market=rate.market,scale=market==='IRAN'?1:100;
+ const amount=market==='IRAN'?Number(rate.amount_decimal):Number(rate.amount_decimal.replace('.',''));
+ const value={schema:RIBBON_SCHEMA,service:'custom_ribbon_printing',model:RIBBON_MODEL,size_scope:'approved_base_price_sizes',activation:'explicit_customer_request',amount_minor:amount,currency:rate.currency,minor_unit_scale:scale,basis:'per_box',discount_effect:'UNKNOWN',deposit_effect:'UNKNOWN',source_ref:owner.id,policy_version:1};
+ const payload={id:'phase50c-o11-'+market.toLowerCase()+'-v1',operation:'ADD',domain:'optional_service',attribute:'ribbon_printing',entity_type:'model',entity_key:RIBBON_MODEL,market,value};
+ additions.push({record_id:payload.id,payload});
+ const r=await W.call('/api/sales-knowledge/propose',payload);ok('Native propose '+market,r.body.ok===true,r);
+ const request=W.q('SELECT * FROM sales_knowledge_change_requests WHERE id=?',[payload.id])[0];
+ const premature=await W.call('/api/sales-knowledge/apply',{id:payload.id,proposal_hash:request.proposal_hash});ok('No apply without owner review '+market,premature.body.ok!==true);
+ const insensitive=await W.call('/api/sales-knowledge/review',{id:payload.id,decision:'approve',proposal_hash:request.proposal_hash,confirm_sensitive:false});ok('Sensitive owner confirmation required '+market,insensitive.body.ok!==true);
+ await W.approveK(payload.id);
+ const fact=W.q("SELECT * FROM sales_knowledge_facts WHERE domain='optional_service' AND market=? AND status='active'",[market])[0];ok('Native approval activates scoped fee '+market,!!fact&&fact.authority==='owner_approved',fact);
+ const price=W.q('SELECT * FROM commercial_price_items WHERE market=? AND active=1',[market]).find(p=>/کشویی بگ|جرّارة مع كيس/u.test(p.product_name));
+ if(!price)throw Error('No recorded approved bag price '+market);
+ const [product,size,model]=price.product_name.split(' · ');
+ const q=market==='IRAN'?`برای 1000 جعبه ${product} ${size} ${model} چاپ سفارشی روی روبان می خواهم`:`أريد طباعة على الشريط لـ 1000 علبة ${product} ${size} ${model}`;
+ const g=await loadRibbonFee(W.env,{market,message:q});
+ ok('RUNTIME-ribbon-foil-'+(market==='IRAN'?'fa':'ar')+' exact raw service amount',g?.service.raw_subtotal_minor===(market==='IRAN'?'6000000':'30000')&&g.service.amount_minor===amount,{text:g?.text,service:g?.service});
+ if(!g)continue;
+ ok('Fresh exact evidence '+market,await ribbonFeeCurrent(W.env,g));
+ for(const inquiry of ['می خواهم بدانم چاپ روی روبان چقدر هزینه دارد','أريد أن أعرف كلفة الطباعة على الشريط'])ok('Scoped inquiry is not service request '+market+inquiry,await loadRibbonFee(W.env,{market,message:`1000 ${market==='IRAN'?'جعبه':'علبة'} ${product} ${size} ${model} ${inquiry}`})===null);
+ ok('Appended invented monetary prose still rejected '+market,!validateSalesBrainDraft(maskApprovedGuidance(g.text+' قیمت نهایی 999999 تومان است.',g),{allowedNumbers:[],authoritativeFacts:[],markets:[market]}).valid);
+ for(const words of ['چاپ چهاررنگ بگ و روبان ساتن می خواهم','چاپ تک رنگ درب و روبان استاندارد می خواهم','أريد طباعة الكيس والشريط الساتان','أريد طباعة الغطاء والشريط القياسي'])ok('Scoped standard service remains free '+market+words,await loadRibbonFee(W.env,{market,message:`1000 ${market==='IRAN'?'جعبه':'علبة'} ${product} ${size} ${model} ${words}`})===null);
+ for(const standard of ['چاپ چهاررنگ بگ و روبان ساتن می خواهم','أريد طباعة الكيس والشريط الساتان','لا نريد طباعة على الشريط','ما نريد طباعة على الشريط'])ok('Standard/negation not custom '+market+standard,!explicitRibbonRequest(standard));
+ for(const change of [{authority:'unapproved'},{status:'inactive'},{effective_until:'2020-01-01'},{effective_from:'bad-date'},{entity_key:'global'}])ok('Bad fee evidence '+market+JSON.stringify(change),selectRibbonFee([{...fact,...change}],[price],{market,message:q})===null);
+ ok('Changed fee version revalidation '+market,!await ribbonFeeCurrent(W.env,{...g,facts:g.facts.map(f=>({...f,version:f.version+1}))}));
+ ok('Unrelated desire and ribbon question not request '+market,!explicitRibbonRequest(q.replace(/چاپ سفارشی روی روبان می خواهم/u,'روبان استاندارد می خواهم. چاپ روی روبان چیست؟').replace(/أريد طباعة على الشريط/u,'أريد الشريط القياسي. ما هي الطباعة على الشريط؟')));
+ ok('Overflow rejected '+market,await loadRibbonFee(W.env,{market,message:q.replace('1000','9999999999999999999999')})===null);
+ for(const [label,msg] of [['no request',`${product} ${size} ${model} 1000 جعبه`],['standard bag','چاپ چهاررنگ استاندارد بگ'],['standard ribbon','روبان ساتن معمولی'],['standard lid','چاپ تک رنگ استاندارد درب'],['negated FA',q+' نمی خواهم'],['negated AR',q.replace('أريد','لا نريد')+' لا نريد'],['mixed payment',q+' پرداخت عربون'],['other model',q.replace(model,'کشویی روبان‌دار')],['other model 2',q.replace(model,'2 تکه')],['other model 3',q.replace(model,'3 تکه')],['other angled',q.replace(model,'3 تکه کج')],['other drawer',q.replace(model,'کشویی کج')],['mixed models',q+' و 2 تکه'],['unknown size',q.replace(size,'999x999')]])ok('No fee '+market+' '+label,await loadRibbonFee(W.env,{market,message:msg})===null);
+ for(const change of [{active:0},{currency:'IQD'},{approved_by:null},{effective_until:'2020-01-01'},{effective_from:'2099-01-01'}])ok('Bad price evidence '+market+JSON.stringify(change),selectRibbonFee([fact],[{...price,...change}],{market,message:q})===null);
+ ok('Duplicate price fails closed '+market,selectRibbonFee([fact],[price,{...price,id:'duplicate'}],{market,message:q})===null);
+ ok('Duplicate policy fails closed '+market,selectRibbonFee([fact,{...fact,id:'duplicate'}],[price],{market,message:q})===null);
+ ok('Cross market fails closed '+market,selectRibbonFee([fact],[price],{market:market==='IRAN'?'ARAB':'IRAN',message:q})===null);
+ for(const change of [{amount_minor:0.3},{discount_effect:'APPLY'},{deposit_effect:'50%'},{currency:'IQD'},{unexpected:true}]){let rejected=false;try{validateRibbonFee({...value,...change},market);}catch{rejected=true;}ok('Strict schema '+market+JSON.stringify(change),rejected);}
+ W.dbrun('UPDATE commercial_price_items SET active=0 WHERE id=?',[price.id]);ok('Stale price revalidation '+market,!await ribbonFeeCurrent(W.env,g));W.dbrun('UPDATE commercial_price_items SET active=1 WHERE id=?',[price.id]);
+ const u={id:++uid,name:'IsolatedO11',username:'o11'+uid};await W.send(u,market==='IRAN'?'سلام':'هلا');W.setMarket(u,market==='IRAN'?'iran':'iraq');
+ W.AI.script.set(q,()=>W.D({reply:market==='IRAN'?'اطلاعات خدمت را بررسی می‌کنم.':'هذه معلومات الخدمة.',requests:['product_info'],interpretation:{primary_intent:'product_info',product_key:null,reference:'none',requested_size:null,requested_color:[],requested_structure:null,requested_printing:null,quantity:null,ambiguity:'none',confidence:'high'},semantics:{mode:'browse',quantity_role:'none',deal_reference:'none',repeat_requested:false},facts:{color_statement:'none',negated_colors:[]}}));
+ const n=W.tg.length,delivered=await W.send(u,q),text=W.tg.slice(n).filter(t=>t.method==='sendMessage').map(t=>JSON.parse(t.body)).filter(t=>String(t.chat_id)===String(u.id)).map(t=>t.text).join('\n');
+ ok('Full worker mock delivery '+market,text===g.text,{text,outcome:delivered.outcome,action:delivered.action,brainAction:delivered.brain?.next_sales_action,needsOwner:delivered.brain?.needs_owner,block:delivered});
+ results.push({market,question:q,service:g.service,text,customer_visible:delivered.outcome?.customer_visible});
+ const mixed=q+(market==='IRAN'?'؛ قیمت نهایی و بیعانه را بگو':'؛ احسب الخصم والعربون');
+ ok('Mixed final/deposit request requires owner '+market,ribbonFinancialMix(mixed));
+ W.AI.script.set(mixed,W.AI.script.get(q));
+ const mixStart=W.tg.length,mixResult=await W.send(u,mixed);
+ const mixTexts=W.tg.slice(mixStart).filter(t=>t.method==='sendMessage').map(t=>JSON.parse(t.body)).filter(t=>String(t.chat_id)===String(u.id));
+ ok('Full worker withholds mixed financial disclosure '+market,mixTexts.length===0,{outcome:mixResult.outcome});
+ for(const suffix of ['?','؟',' هل تحسب الخصم والعربون؟']){
+  const mq=mixed+suffix;ok('Mixed financial punctuation hold '+market+suffix,ribbonFinancialMix(mq));W.AI.script.set(mq,W.AI.script.get(q));
+  const n=W.tg.length,rr=await W.send(u,mq);const sent=W.tg.slice(n).filter(t=>t.method==='sendMessage').map(t=>JSON.parse(t.body)).filter(t=>String(t.chat_id)===String(u.id));
+  ok('Full mixed financial punctuation withheld '+market+suffix,sent.length===0,{outcome:rr.outcome});
+ }
+ // Change authority after draft selection, before the real autosend revalidation SELECT.
+ const prepare=W.env.DB.prepare.bind(W.env.DB);let reads=0;
+ W.env.DB.prepare=(sql)=>{if(sql.includes("domain='optional_service'")&&++reads===2)W.dbrun("UPDATE sales_knowledge_facts SET status='superseded' WHERE id=?",[fact.id]);return prepare(sql);};
+ const n2=W.tg.length,stale=await W.send(u,q);
+ const staleTexts=W.tg.slice(n2).filter(t=>t.method==='sendMessage').map(t=>JSON.parse(t.body)).filter(t=>String(t.chat_id)===String(u.id)).map(t=>t.text);
+ W.env.DB.prepare=prepare;
+ ok('Full send rejects revoked fee '+market,reads>=2&&!staleTexts.some(t=>t.includes(g.text)),{reads,outcome:stale.outcome});
+}
+ok('Base prices byte-identical',before===snapshot());
+ok('No orders/payments',W.q('SELECT * FROM lead_orders').length===0&&W.q('SELECT * FROM lead_order_payments').length===0);
+ok('No network escapes',W.offNet().length===0);
+const plan={...old,schema:'hamzehi.phase50c.review-plan.v1',schema_compatible_proposal_count:22,ready_atomic_record_count:22,ready_new_record_count:17,execution_permitted:false,production_approval_received:false,phase50c:{owner_source:owner.id,owner_source_sha256:crypto.createHash('sha256').update(fs.readFileSync(new URL('../../reports/phase50-recovery/O11-OWNER-DECISION-v1.json',import.meta.url))).digest('hex'),supplement:'Phase50C owner instruction section2 includes two standard satin bag handles and approved single-color lid printing',new_operations:2,activation:'PROPOSED_ONLY_NOT_ACTIVE_IN_PRODUCTION'},batches:[...old.batches,...additions.map(r=>({market:r.payload.market,execute:false,method:'POST',endpoint:'/api/sales-knowledge/propose',requests:[r]}))]};
+plan.historical_phase50b={required_isolated_patch:old.required_isolated_patch,readiness:old.readiness,worker_base_version:old.worker_base_version};
+delete plan.worker_base_version;
+plan.required_isolated_patch={base_commit:old.worker_base_commit,source_manifest:'AFTER-SHA256.json',scope:'Phase50B recovered changes plus Phase50C optional-service changes; all required before import'};
+plan.readiness={new_native_operations:2,total_operations:plan.batches.flatMap(b=>b.requests).length,production_action_permitted:false,status:'LOCAL_VALIDATION_SEE_FINAL_CHECKPOINT',market_approval:'IRAN_AND_ARAB_CONFIRMED',attribute:'optional_service.ribbon_printing'};
+ok('Original 20 operations and HOLD preserved',JSON.stringify(plan.batches.slice(0,old.batches.length))===JSON.stringify(old.batches)&&JSON.stringify(plan.held_unscoped_records)===JSON.stringify(old.held_unscoped_records));
+ok('22 unique disabled operations',plan.batches.flatMap(b=>b.requests).length===22&&new Set(plan.batches.flatMap(b=>b.requests).map(r=>r.payload.id)).size===22&&plan.batches.every(b=>b.execute===false));
+fs.writeFileSync(new URL('../../reports/phase50c/PHASE50C-IMPORT-PACKAGE.json',import.meta.url),JSON.stringify(plan,null,2)+'\n');
+fs.writeFileSync(new URL('../../reports/phase50c/PHASE50C-OPTIONAL-FEE-SCHEMA.json',import.meta.url),JSON.stringify({schema:RIBBON_SCHEMA,typed_domain:'optional_service',attribute:'ribbon_printing',new_table:false,existing_lifecycle:'propose -> sensitive owner review -> preview -> apply',records:additions,activation:'pending production approval'},null,2)+'\n');
+console.log('PHASE50C_RESULTS '+JSON.stringify(results));
+process.exitCode=done()?1:0;
+

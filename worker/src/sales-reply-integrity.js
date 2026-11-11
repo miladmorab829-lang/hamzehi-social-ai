@@ -1,17 +1,24 @@
 // Typed product specifications and exact response parts. Neither helper authorizes prices or payments.
 export const replyKey=value=>String(value??'').normalize('NFKC').toLowerCase().replace(/[۰-۹٠-٩]/g,d=>String('۰۱۲۳۴۵۶۷۸۹'.includes(d)?'۰۱۲۳۴۵۶۷۸۹'.indexOf(d):'٠١٢٣٤٥٦٧٨٩'.indexOf(d))).replace(/ي/g,'ی').replace(/ك/g,'ک').replace(/[\s\u200c]+/g,' ').trim();
-export const dimensionKey=value=>replyKey(value).replace(/٫/g,'.').replace(/\s*(?:x|×|در)\s*/g,'x');
+export const dimensionKey=value=>replyKey(value).replace(/٫/g,'.').replace(/\s*(?:x|×|در|فی)\s*/g,'x');
+// A dimension embedded in an exact approved product label is an identifier, not
+// another asserted size (e.g. "علبة طقم مجوهرات 20×20" with a 20x20x20 variant).
+export function catalogSpecificationText(text,catalog=[]){
+ let result=String(text);
+ for(const entry of catalog.filter(c=>c.product).slice().sort((a,b)=>b.product.length-a.product.length))result=result.replaceAll(entry.product,' ');
+ return result;
+}
 export function typedSpecifications(text){
  const dimensions=[],components=[];let invalid=false;
- let scalar=String(text).replace(/[0-9۰-۹٠-٩]+(?:[.٫][0-9۰-۹٠-٩]+)?(?:\s*[x×]\s*[0-9۰-۹٠-٩]+(?:[.٫][0-9۰-۹٠-٩]+)?){1,2}/giu,(value,offset,whole)=>{
+ let scalar=String(text).replace(/[0-9۰-۹٠-٩]+(?:[.٫][0-9۰-۹٠-٩]+)?(?:\s*(?:[x×]|در|في|فی)\s*[0-9۰-۹٠-٩]+(?:[.٫][0-9۰-۹٠-٩]+)?){1,2}/giu,(value,offset,whole)=>{
   const before=whole.slice(Math.max(0,offset-28),offset),after=whole.slice(offset+value.length,offset+value.length+22);
   if(/(?:قیمت|سعر|حداقل(?: سفارش)?|minimum|price)\s*[:：]?\s*$/iu.test(before)||/^\s*(?:تومان|ریال|دلار|دولار|عدد|درصد|٪|%|روز|هفته|ماه|days?|weeks?|usd|pieces)(?=$|[^\p{L}])/iu.test(after)){invalid=true;return value;}
   dimensions.push(dimensionKey(value));return ' ';
  });
- scalar=scalar.replace(/[0-9۰-۹٠-٩]+\s*(?:تکه|تیکه|قطعه|قطع)(?=$|[^\p{L}])/gu,(value,offset,whole)=>{
+ scalar=scalar.replace(/(?:[0-9۰-۹٠-٩]+|دو|سه)\s*(?:تکه|تیکه|قطعه|قطع)(?=$|[^\p{L}])/gu,(value,offset,whole)=>{
   const before=whole.slice(Math.max(0,offset-35),offset);
   if(/(?:حداقل(?: سفارش| تعداد)?|تعداد|کمیت|كمية|minimum(?: order)?|moq)(?:\s+(?:ما|این مدل|برای این مدل|our|لهذا الموديل))?\s*[:：]?\s*$/iu.test(before))return value;
-  components.push(replyKey(value));return ' ';
+  components.push(replyKey(value).replace(/^دو/u,'2').replace(/^سه/u,'3'));return ' ';
  });
  return {scalar,dimensions,components,invalid};
 }
@@ -25,7 +32,7 @@ export function validateReplyParts(text,parts,validate,options){
  }
  return validate(prose,options);
 }
-const modelKey=value=>replyKey(value).replace(/تیکه/g,'تکه');
+const modelKey=value=>replyKey(value).replace(/تیکه/g,'تکه').replace(/(?<![\p{L}])دو\s*تکه/gu,'2 تکه').replace(/(?<![\p{L}])سه\s*تکه/gu,'3 تکه');
 // Validate relational catalog claims before generic word/number evidence. A size or model belonging to another product is not proof.
 export function catalogClaimIssue(text,catalog=[],selectedKey=null){
  if(!catalog.length)return null;
@@ -46,7 +53,7 @@ export function catalogClaimIssue(text,catalog=[],selectedKey=null){
     const bare=list.text.split(/\s+/u).filter(w=>!['و','یا','او','أو','and','or'].includes(w)).join('').replace(/[،:;\[\]]/gu,'');
     if(boundary>=0&&list.count>1&&!bare&&allModels.some(m=>tail.includes(m)))start=boundary;
    }
-   const part=s.slice(start,end),spec=typedSpecifications(part),dims=spec.dimensions;
+   const part=s.slice(start,end),spec=typedSpecifications(catalogSpecificationText(part,names.map(c=>({product:modelKey(c.product)})))),dims=spec.dimensions;
    let variants=a.c.variants;
    if(dims.length){if(!dims.every(d=>variants.some(v=>dimensionKey(v.size)===d)))return 'catalog_size_mismatch';variants=variants.filter(v=>dims.includes(dimensionKey(v.size)));}
    const spans=[...part.matchAll(/\d+\s*تکه(?:\s+کج)?/gu)].map(m=>({at:m.index,end:m.index+m[0].length,value:m[0]}));

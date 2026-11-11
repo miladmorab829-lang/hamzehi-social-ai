@@ -1,0 +1,21 @@
+import {evaluationWorld} from './phase51-evaluation-world.mjs';
+import {reporter} from './harness.mjs';
+const {ok,done}=reporter('phase51_gallery_delivery'),{W,client}=await evaluationWorld();
+await W.teach('COLOR | مشکی سلفون | IRAN','IRAN','gallery51-black');
+const price=W.q("SELECT * FROM commercial_price_items WHERE product_name='انگشتر کوچک · 5x5 · 2 تکه' AND market='IRAN'")[0];
+for(let index=0;index<11;index++)await W.upload({market:'IRAN',product_key:price.product_key,pieces:2,lid_color:'مشکی سلفون',base_color:'مشکی سلفون'});
+const users=[await client(),await client()];
+const policy=await W.call('/api/sales-autonomy/policy',{capability:'photo_album',mode:'live',photo_album_pilot_chat_ids:users.map(user=>String(user.id))});ok('Local photo pilot explicitly covers only the test chats',policy.body.ok,policy.body);
+const question='عکس انگشتر کوچک سایز 5x5 مدل 2 تکه را بفرست';
+W.AI.script.set(question,ctx=>W.D({requests:['product_info'],reply:ctx.authoring?'انگشتر کوچک مدل 2 تکه در فهرست موجود است.\n'+ctx.authoring.required_parts.join('\n'):'عکس همین مدل را می‌فرستم.',interpretation:{primary_intent:'see_photo',product_key:ctx.product_keys?.find(p=>p.product==='انگشتر کوچک')?.key||null,reference:'none',requested_size:'5x5',requested_color:[],requested_structure:'2 تکه',requested_printing:null,quantity:null,ambiguity:'none',confidence:'high'},semantics:{mode:'browse',quantity_role:'none',deal_reference:'none',repeat_requested:false},facts:{product:'انگشتر کوچک',model:'2 تکه',size:'5x5',color_statement:'none',negated_colors:[]}}));
+let start=W.tg.length;const result=await W.send(users[0],question),media=W.tg.slice(start).filter(call=>['sendMediaGroup','sendPhoto'].includes(call.method));
+ok('A verified eleven-photo request sends two bounded albums',result.brain?.gallery?.items?.length===11&&media.length===2,{action:result.action,outcome:result.outcome,gallery:result.brain?.gallery?.items?.length,media:media.length});
+const childEvent=W.q("SELECT details_json FROM system_events WHERE type='gallery_album_draft_created' AND json_extract(details_json,'$.first_outreach_id')=?",[result.draft.id])[0],child=childEvent?JSON.parse(childEvent.details_json):null;
+ok('Second album has exact parent proof and reaches sent state',!!child&&W.q('SELECT status FROM lead_outreach WHERE id=?',[child.outreach_id])[0]?.status==='sent',child);
+if(child){W.dbrun("UPDATE lead_outreach SET status='approved',message=message||' edited' WHERE id=?",[child.outreach_id]);start=W.tg.length;const edited=await W.call('/api/leads/outreach/send-telegram',{id:child.outreach_id});ok('Edited numbered caption cannot borrow parent AI provenance',!edited.body.ok&&W.tg.length===start,edited.body);}
+let switched=false;W.TG.after=async method=>{if(!switched&&['sendMediaGroup','sendPhoto'].includes(method)){switched=true;await W.call('/api/sales-autonomy/policy',{capability:'photo_album',mode:'off'});}};
+start=W.tg.length;const paused=await W.send(users[1],question);W.TG.after=null;
+ok('Pause after first album prevents all later albums',switched&&W.tg.slice(start).filter(call=>['sendMediaGroup','sendPhoto'].includes(call.method)).length===1,{action:paused.action,outcome:paused.outcome});
+ok('Gallery engineering tests never create money or orders',!W.q('SELECT 1 FROM lead_order_payments').length&&!W.q('SELECT 1 FROM lead_orders').length);
+ok('Every request remains inside recording mocks',W.offNet().length===0);
+process.exitCode=done()?1:0;

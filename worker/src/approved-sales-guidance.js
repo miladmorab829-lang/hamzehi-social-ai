@@ -1,5 +1,6 @@
 import {ARAB_MOQ} from './commercial-policy.js';
 import {ribbonFeeCurrent} from './optional-ribbon-fee.js';
+import {maskRibbonAuthoringFacts} from './optional-ribbon-authoring.js';
 // Informational answers from active owner knowledge, separate from prices and order status.
 const norm = value => String(value || '').normalize('NFKC').replace(/[يى]/g, 'ی').replace(/ك/g, 'ک');
 const TIME = /زمان|مدت|چند\s*(?:روز|هفته|ماه)|طول\s*می|کی\s*(?:آماده|میرسه|می‌رسه|تحویل)|مدة|مده|وقت|متی|متى|delivery time|lead time/iu;
@@ -21,7 +22,16 @@ export function serviceFollowupPromise(text){
  return t.split(/[.!?؟\n؛;]/u).some(s=>person.test(s)&&handoff.test(s));
 }
 export function serviceCatalogQuestion(message){const t=norm(message);return /(?:چه|کدوم|کدام|شنو|شکو|شنهي|أي|ای)\s+(?:(?:نوع|انواع|أنواع)\s*)?(?:ال)?(?:مدل|مودیل|موديل|جعبه|علب)|(?:مدل|مودیل|موديل).*(?:دارید|دارین|عندکم|موجود|متوفر|معرفی)|نیم[‌\s]*(?:ست|سرویس)\s+چی\s+دار/iu.test(t);}
-export function unverifiedServiceDetail(text,guidance){return !!guidance&&/(?:روز|هفته|ماه|یوم|يوم|أیام|ايام|أيام|اسبوع|أسبوع|شهر|ساعت|ساعة|ساعه|دقیقه|دقيقة|ارسال|تحویل|آماده|توصیل|توصل|تسلیم|جاهز|مضمون|ضمان|قطعی|تضمین|قول|فردا|امروز|باچر|باجر|بکرة|بکره|غدا|غداً|رایگان|مجانی|مجاني|مجانية|free|days?|weeks?|months?|tomorrow|today|guarantee|deliver|ready)/iu.test(norm(maskApprovedGuidance(text,guidance)));}
+export function unverifiedServiceDetail(text,guidance){
+ if(!guidance)return false;
+ return norm(maskApprovedGuidance(text,guidance)).split(/(?<=[.!؟?\n؛;])\s*/u).some(part=>{
+  // Requests for a destination or a logo file assert no delivery capability/time.
+  // A date, guarantee, free-service claim or money figure keeps the normal fail-closed check.
+  const risky=/[0-9۰-۹٠-٩]|روز|هفته|ماه|یوم|يوم|أیام|ايام|أيام|اسبوع|أسبوع|ساعت|ساعة|مضمون|ضمان|قطعی|تضمین|قول|فردا|امروز|باچر|باجر|بکرة|غدا|رایگان|مجانی|مجاني|free|tomorrow|guarantee/iu.test(part);
+  if(!risky&&(/[؟?]\s*$/u.test(part)&&/(?:کدوم|کدام|چه)\s*شهر|وین|وين/iu.test(part)||/(?:فایل|لوگو|طرح|تصویر|عکس|صورة|شعار|تصمیم)/iu.test(part)&&/(?:ارسال کنید|بفرستید|بفرستین|ارسل|أرسل|دز)/iu.test(part)))return false;
+  return /(?:روز|هفته|ماه|یوم|يوم|أیام|ايام|أيام|اسبوع|أسبوع|شهر|ساعت|ساعة|ساعه|دقیقه|دقيقة|ارسال|تحویل|آماده|توصیل|توصل|تسلیم|جاهز|مضمون|ضمان|قطعی|تضمین|قول|فردا|امروز|باچر|باجر|بکرة|بکره|غدا|غداً|رایگان|مجانی|مجاني|مجانية|free|days?|weeks?|months?|tomorrow|today|guarantee|deliver|ready)/iu.test(part);
+ });
+}
 export function serviceRibbonPrintQuestion(text){
  const n=String(text||"").normalize("NFKC").replace(/[يى]/g,"ی").replace(/ك/g,"ک").replace(/[ً-ٰٟ]/g,"");
  const ribbon="(?:روبان|ربان|شریط|نوار\\s*ساتن)",print="(?:چاپ|طلا[ ‌]*کوبی?|طباع[ةه]|طبع)";
@@ -126,23 +136,23 @@ export function selectApprovedGuidance(rows, {market, request, at = Date.now()})
   if(request.kind==='delivery'&&request.topic==='method'&&market!=='IRAN')return null;
   const eligible = rows.filter(r=>active(r,market,at));
   if(request.kind==='information'){
-    const parts=[],facts=[],answered=[];
+    const parts=[],facts=[],answered=[],protectedParts=[];
     for(const topic of request.topics||[]){
       if(topic==='ribbon_printing'){
         const matches=eligible.filter(r=>r.domain==='knowledge'&&r.attribute==='order_custom_ribbon_printing');
         if(matches.length===1){const fact=matches[0];let v;try{v=JSON.parse(fact.value_json);}catch{}
           const text=v?.value;
-          if(v?.schema==='hamzehi.knowledge.v1'&&v.commercial===true&&['fact','rule'].includes(v.kind)&&!(v.conditions?.length||v.relation||v.effect)&&typeof text==='string'&&text.length<=200&&ribbonPrintingPolicyOnly(text)){parts.push(text.trim());facts.push({id:fact.id,version:fact.version,value_json:fact.value_json});answered.push(topic);}}
+          if(v?.schema==='hamzehi.knowledge.v1'&&v.commercial===true&&['fact','rule'].includes(v.kind)&&!(v.conditions?.length||v.relation||v.effect)&&typeof text==='string'&&text.length<=200&&ribbonPrintingPolicyOnly(text)){parts.push(text.trim());protectedParts.push(text.trim());facts.push({id:fact.id,version:fact.version,value_json:fact.value_json});answered.push(topic);}}
         continue;
       }
       if(topic==='shipping_payer'){
         const matches=eligible.filter(r=>r.domain==='shipping'&&r.attribute==='terms');
         if(matches.length===1){const fact=matches[0];let v;try{v=JSON.parse(fact.value_json);}catch{}
-          if(typeof v==='string'&&v.trim()&&v.length<=2000&&shippingTermsHaveOnlyPayerPolicy(v)){parts.push(v.trim());facts.push({id:fact.id,version:fact.version,value_json:fact.value_json});answered.push(topic);}}
+          if(typeof v==='string'&&v.trim()&&v.length<=2000&&shippingTermsHaveOnlyPayerPolicy(v)){parts.push(v.trim());protectedParts.push(v.trim());facts.push({id:fact.id,version:fact.version,value_json:fact.value_json});answered.push(topic);}}
         continue;
       }
       if(topic==='timing'||topic==='method'){
-        const g=selectApprovedGuidance(rows,{market,request:{kind:'delivery',topic,insist:false},at});if(g){parts.push(g.text);facts.push(...g.facts);answered.push(topic);}continue;
+        const g=selectApprovedGuidance(rows,{market,request:{kind:'delivery',topic,insist:false},at});if(g){parts.push(g.text);protectedParts.push(g.text);facts.push(...g.facts);answered.push(topic);}continue;
       }
       const spec={moq:['quantity','quantity_rule'],lid:['knowledge','included_services_lid_spec'],design:['knowledge','included_services'],contact:['knowledge','lid_contact_layout'],bag:['knowledge','bag_drawer_print_surfaces']}[topic];if(!spec||topic==='moq'&&market!=='IRAN')continue;
       const matches=eligible.filter(r=>r.domain===spec[0]&&r.attribute===spec[1]);if(matches.length!==1)continue;
@@ -154,14 +164,14 @@ export function selectApprovedGuidance(rows, {market, request, at = Date.now()})
       const needsLid=topic==='design'&&rows.some(r=>r.status==='active'&&r.authority==='owner_approved'&&r.market===market&&r.entity_key==='global'&&r.domain==='knowledge'&&r.attribute==='included_services_lid_spec');
       const lid=needsLid?selectApprovedGuidance(rows,{market,request:{kind:'information',topics:['lid']},at}):null;
       if(needsLid&&!lid)continue;
-      parts.push(v.trim());facts.push({id:fact.id,version:fact.version,value_json:fact.value_json});answered.push(topic);
+      parts.push(v.trim());if(topic==='moq')protectedParts.push(v.trim());facts.push({id:fact.id,version:fact.version,value_json:fact.value_json});answered.push(topic);
       if(lid){parts.push(lid.text);facts.push(...lid.facts);}
     }
     // Iraq's existing universal minimum stays under the same deterministic commercial policy; no price data is changed.
-    if(parts.length&&market==='ARAB'&&request.topics.includes('moq')){const m=ARAB_MOQ.standard;if(Number.isSafeInteger(m)){parts.push(`الحد الأدنى لكل قياس ${m} قطعة.`);answered.push('moq');}}
+    if(parts.length&&market==='ARAB'&&request.topics.includes('moq')){const m=ARAB_MOQ.standard;if(Number.isSafeInteger(m)){const text=`الحد الأدنى لكل قياس ${m} قطعة.`;parts.push(text);protectedParts.push(text);answered.push('moq');}}
     const missing=(request.topics||[]).filter(t=>!answered.includes(t));
     if(parts.length&&missing.length){const names={ribbon_printing:['طلاکوب سفارشی روبان','الطباعة المخصّصة على الشريط'],shipping_payer:['مسئولیت هزینه حمل و کارتن','مسؤولية أجور النقل والكرتون'],timing:['زمان آماده‌سازی','مدة التجهيز'],method:['روش ارسال','طريقة الشحن'],moq:['حداقل سفارش','الحد الأدنى'],lid:['چاپ درب','طباعة الغطاء'],design:['طراحی و کلیشه','التصميم والكليشة'],contact:['اطلاعات زیر لوگو','معلومات تحت الشعار'],bag:['چاپ بدنه و بگ','طباعة الجسم والكيس']};parts.push(market==='IRAN'?`اطلاعات تأییدشدهٔ ${missing.map(t=>names[t]?.[0]).join(' و ')} در دسترسم نیست؛ نام مدل دقیق را می‌فرمایید؟`:`تفاصيل ${missing.map(t=>names[t]?.[1]).join(' و ')} غير واضحة عندي؛ شنو اسم الموديل بالضبط؟`);}
-    return parts.length?{kind:'information',request,market,text:[...new Set(parts)].join('\n'),facts,missing_topics:missing,insist:false}:null;
+    return parts.length?{kind:'information',request,market,text:[...new Set(parts)].join('\n'),protected_parts:[...new Set(protectedParts)],facts,missing_topics:missing,insist:false}:null;
   }
   const domain = request.kind === 'color' ? 'knowledge' : market === 'IRAN' && request.topic === 'timing' ? 'production' : 'shipping';
   const attribute = request.kind === 'color' ? 'color_selection_website' : domain === 'production' ? 'timing_rule' : 'terms';
@@ -189,6 +199,7 @@ export async function loadApprovedGuidance(env, options) {
   return selectApprovedGuidance(rows,options);
 }
 export function maskApprovedGuidance(text, guidance) {
+  if(guidance?.optional_ribbon_fee&&String(text)!==guidance.text)return maskRibbonAuthoringFacts(text,guidance);
   // Only a single exact, approved segment is exempted. Anything added by the model still meets the ordinary validator.
   return guidance?.text && String(text).includes(guidance.text) ? String(text).replace(guidance.text,'') : text;
 }

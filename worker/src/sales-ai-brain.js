@@ -1,13 +1,15 @@
 import { TURN_MODES, QUANTITY_ROLES, DEAL_REFERENCES, normalizeTurnSemantics } from './sales-turn-policy.js';
 import { statesLessThanQuantity } from "./commercial-policy.js";
 import { splitSalesReply } from './sales-reply-composition.js';
+import {typedSpecifications} from './sales-reply-integrity.js';
 // ============================================================================================================================
 // Sales AI Gateway — the conversational understanding + drafting layer of the Telegram Sales Brain.
 //
 // The LLM UNDERSTANDS the customer's whole turn (several requests at once, references, corrections, paraphrases) and DRAFTS a
 // natural reply from a bounded, grounded context. It never decides commercial truth: prices, totals, discounts, MOQ figures and order
 // outcomes come only from the deterministic layer (they are inserted at {{COMMERCIAL}}), every extracted fact is validated against
-// D1 before it is stored, and a reply that fails validation falls back to the deterministic reply. Nothing here touches D1.
+// D1 before it is stored. AI-FIRST validation failures use a bounded final authoring pass or controlled owner review; policy text
+// cannot substitute for an AI-authored reply. Nothing here touches D1.
 // No chain-of-thought is requested or stored: only the structured decision below.
 // ============================================================================================================================
 
@@ -74,11 +76,12 @@ export function salesAiPolicy(language,{aiFirst=false}={}){
     "Answer explicit questions first, then ask at most ONE useful next question. Never ask for anything already known in CONTEXT (customer, deal, recent messages). Resolve references (همون، این مدل، اون رنگ، مثل قبلی، وسطش…) from the deal and recent messages.",
     "Natural tone: briefly acknowledge the customer's actual need. In Persian prefer warm everyday forms such as «می‌خواید» and «بفرستید» over bureaucratic phrases. A greeting or a thank-you is welcome when appropriate; don't repeat it every turn. Never confuse a mention ('logo later') with a question about that topic. If they ask two things, answer both before moving on.",
     "GROUNDING — use ONLY facts given in CONTEXT. Never invent products, models, sizes, colours, capabilities, prices, discounts, MOQ, delivery times or policies.",
+    "CURRENT ADVICE — state.request is the current customer purpose, never an order choice. If asks_recommendation is true, give a conditional recommendation and an approved reason about that SAME model before any optional question. For construction_only perfume advice, use approved construction/printing facts and do not list jewellery families or assert perfume fit/stock. State unknown fit honestly. Shared کشویی … یا کج compares those two drawer constructions.",
     "COMPARISON CONTINUITY — state.comparison is informational, never a product choice, order quantity or money authority. Answer every requested_models member separately in natural language using its approved knowledge. Give all available facts; identify missing details for that model only. Do not infer mechanisms from names or keywords. A followup refers to the unresolved models listed there, not the old deal choice or a website redirect. Do not ask which of the already named models the customer means. When clarification_needed is true, ask which model names they mean, do not silently answer a different count or revert to a prior choice. A bare list is not an explanation. Do not save a recommendation as a customer choice.",
     "CATALOG — catalog.product is a product family (ring, pendant, set); catalog.models and variants.configuration are construction models (two-piece, three-piece, drawer). They are different dimensions. When asked how models differ, explain the approved construction/features in knowledge, not just names. State which model's details are missing; never infer mechanisms, quality or price from its name. Answer the CURRENT product/colour/size question even when earlier messages concern another family.",
     `COMMERCIAL TRUTH — never write a price, total, currency amount, discount, MOQ number, delivery date, and never say an order is registered/confirmed. When the customer asks about price/discount/MOQ/terms or accepts an offer, write ${SALES_AI_COMMERCIAL_SLOT} where the system will insert the authoritative answer, and do not write about it yourself.`,
     "COLOURS — offer and recommend only names from colors.approved, written exactly as given. A box model may have parts (colors.parts); each part may take any approved colour; colors.suggestion is only a common suggestion, never a rule. An unverified colour goes in facts.unknown_colors: never confirm its availability. In AI-FIRST use the approved website-selection guidance or ask a precise clarification; do not refer a nonfinancial question to the owner.",
-    aiFirst?"OWNER POLICY — the owner handles ONLY the stage when this customer is ready to transfer money, or reports a transfer/payment problem. Price questions, discounts, below-minimum requests, payment-policy questions, missing knowledge and order configuration do NOT trigger referral. Use the approved terms, explain an unavailable exception, or offer an approved alternative. Never grant an unapproved concession and never promise to check with someone or report back. An old pending owner question must not stop an unrelated answer.":"If a capability or policy is missing, do not guess; set owner_escalation_needed with the matching reason.",
+    aiFirst?"OWNER POLICY — commercial approval remains with the existing payment/owner controls. Price questions, discounts, below-minimum requests and order configuration use the approved terms or an approved alternative; never grant an unapproved concession. If the facts needed for an answer are missing, conflicting or unverifiable, set owner_escalation_needed with the matching reason. Do not invent an answer or ask the customer to repeat a clear question because of a technical failure. Never promise to check with someone or report back before a real review case exists. An old pending owner question must not stop an unrelated verified answer.":"If a capability or policy is missing, do not guess; set owner_escalation_needed with the matching reason.",
     "FACTS — report only what the customer stated or clearly confirmed in THIS message (resolved with context): quantity as an integer, product/model/size as named in catalog, destination city, the customer's own name, chosen colours (exact approved names) and per-part choices (part names exactly as in colors.parts). Leave everything else null / empty. A later statement that corrects an earlier one is the new value.",
     ...(aiFirst?["COLOUR STATEMENT — facts.color_statement says what the customer's colour words in THIS message are: choice (they pick colours: «مشکی و طلایی رو انتخاب کردم», «همین سرمه‌ای باشه»), correction (they replace an earlier choice: «قبلاً مشکی گفتم، الان سرمه‌ای می‌خوام»), question (asking about colours), comparison («مشکی بهتره یا سرمه‌ای؟»), hypothetical («اگه طلایی باشه چطوره؟»), negation (they reject a colour: «مشکی نمی‌خوام»), none. Put colours in facts.colors / facts.color_parts ONLY for choice or correction; never turn your own recommendation into the customer's choice. facts.negated_colors = approved colours the customer explicitly rejects now.",
     "MARKET FIRST — if market is null and the question depends on products, sizes, colours, MOQ or delivery, ask Iran or Iraq BEFORE quantity. Never infer country from language. Once clarified, answer the original question from recent messages first. Product questions must not become a sales questionnaire.",
@@ -143,7 +146,7 @@ export function buildSalesAiInput(ctx,{onKnowledgeSelection}={}){
 
 // ---- Provider (OpenAI Responses API). One call, bounded by a timeout; errors are sanitised codes, never provider internals.
 // The customer waits for this call: a slow model is abandoned after SALES_AI_TIMEOUT_MS (default 8 s, bounded 1–20 s) and the
-// deterministic reply is sent instead. No retry (a retried call could double provider cost and reply twice).
+// caller follows its controlled review policy. A failed call is not retried (a retry could double cost and reply twice).
 export function salesAiTimeoutMs(env){const v=Number(env?.SALES_AI_TIMEOUT_MS);return Number.isFinite(v)?Math.min(20000,Math.max(1000,Math.round(v))):8000;}
 // Phase 16.4 cost protection. (1) Cooldown: after the provider answers 429 (rate/quota) or 401/403 (key/permission), the next calls in
 // this isolate skip the provider for a short time and return provider_cooldown — the SAME fail-closed path as any failed call
@@ -258,7 +261,7 @@ export function normalizeSalesAiDecision(raw){
     owner_escalation_needed:raw?.owner_escalation_needed===true,escalation_reason:SALES_AI_ESCALATIONS.includes(raw?.escalation_reason)?raw.escalation_reason:null,
     missing_information:arr(raw?.missing_information).map(s).filter(Boolean).slice(0,6),
     summary_update:typeof raw?.summary_update==="string"&&raw.summary_update.trim()?raw.summary_update.trim().slice(0,800):null,
-    reply:typeof raw?.reply==="string"?raw.reply.trim().slice(0,1500):"",
+    reply:typeof raw?.reply==="string"?raw.reply.trim():"",
     reply_colors:[...new Set(arr(raw?.reply_colors).map(s).filter(Boolean))].slice(0,30)
   };
 }
@@ -326,11 +329,21 @@ export function salesAiMessageQuantities(message){
 // model part) and only when it names no order word and no number; otherwise it is an order commitment. Questions offer, not confirm.
 const GATE_CONFIRM=/(?:ثبت|تایید|نهایی|قطعی)\s*(?:شد|شده|شدن|کردم|کردیم|میشه|می شه|میشن|می شن|میشود|می شود|میشوند|می شوند|شود|بشه|خواهد شد|خواهند شد|میگردد|می گردد|گردید|میکنم|می کنم|میکنیم|می کنیم|کنم|میزنم|می زنم|میزنیم|می زنیم)|ثبتش|ثبتشون|ثبتتون|تم (?:تاکید|تسجیل|اعتماد)|سیتم (?:تاکید|تسجیل|اعتماد)|(?:راح|رح|سوف) (?:نسجل|نثبت|نعتمد|یتسجل|یتثبت)|نسجل(?:ه|ها)?(?!\p{L})|سجلت|سجلنا|اعتمدنا|confirmed|registered|finali[sz]ed|placed/u;
 const GATE_ORDER=/(?:سفارش|خرید|فاکتور|قرارداد|طلب|فاتوره|order|purchase|invoice)/u;
+function gateInformationalConfirmation(s){
+ if(GATE_ORDER.test(s)||/(?:پرداخت|واریز|بیعانه|عربون|دفع|حواله|payment|مالک|مدیر|مسئول|موافقت|اجازه|تصمیم|درخواست|انتخابی|شما|چاپتون|رنگتون)/u.test(s))return false;
+ let factual=s.replace(/(?:ثبت|تایید)\s*شده(?=\s+(?:در|تو)\s+(?:اطلاعات|مشخصات|فهرست|کاتالوگ))/gu,'')
+  .replace(/((?:اطلاعات|مشخصات|دانش|فهرست|کاتالوگ)\s+)(?:تایید|ثبت)\s*شده/gu,'$1');
+ if(/چاپ|طبع|ابعاد|اندازه|سایز|جنس/u.test(s))factual=factual.replace(/تایید\s*شده/gu,'');
+ return factual!==s&&!GATE_CONFIRM.test(factual);
+}
 function gateConfirmationIssue(text,preferenceTerms){
   const prefs=preferenceTerms.map(gateNorm).filter(p=>p.length>=2);
   for(const raw of String(text).split(/(?<=[.!?؟\n؛;])/u)){
     const s=gateNorm(raw);
     if(!GATE_CONFIRM.test(s)||/[?؟]\s*$/u.test(raw.trim()))continue;
+    // Approved/catalogue information is not an order registration. Exempt only
+    // these passive descriptions; an order or payment confirmation still fails.
+    if(gateInformationalConfirmation(s))continue;
     if(GATE_ORDER.test(s)||gateNumberMentions(raw).length||!prefs.some(p=>s.includes(p)))return true;
   }
   return false;
@@ -340,7 +353,7 @@ function gateConfirmationIssue(text,preferenceTerms){
 export function salesAiClaimsColoursRecorded(text,colours){
   const names=(colours||[]).map(gateNorm).filter(c=>c.length>=2);
   if(!names.length)return false;
-  return String(text||"").split(/(?<=[.!?؟\n؛;])/u).some(raw=>{const s=gateNorm(raw);return (GATE_CONFIRM.test(s)||/یادداشت\s*(?:شد|شده|کردم|کردیم)/u.test(s))&&!/[?؟]\s*$/u.test(raw.trim())&&names.some(c=>s.includes(c));});
+  return String(text||"").split(/(?<=[.!?؟\n؛;])/u).some(raw=>{const s=gateNorm(raw);return !gateInformationalConfirmation(s)&&(GATE_CONFIRM.test(s)||/یادداشت\s*(?:شد|شده|کردم|کردیم)/u.test(s))&&!/[?؟]\s*$/u.test(raw.trim())&&names.some(c=>s.includes(c));});
 }
 const GATE_PRICE_WORDS=/(?<!\p{L})(?:قیمت\p{L}*|فی|هزینه\p{L}*|مبلغ\p{L}*|سعر\p{L}*|السعر|کلفه|الکلفه|بیش|price\p{L}*|cost\p{L}*|total)(?!\p{L})/u,GATE_MIN_WORDS=/(?<!\p{L})(?:حداقل|کمترین|دست کم|الحد الادنی|اقل|minimum|at least)(?!\p{L})/u;
 // ---- Payment-terms negotiation. A customer may ask for other terms (another advance %, full payment, paying after delivery); the
@@ -416,13 +429,21 @@ export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[]}=
     if(GATE_PRICE_WORDS.test(s)&&mentions.some(m=>!GATE_QTY_UNITS.has(m.next)&&m.next!=="dim"))issues.push("price_claim");
     if(GATE_MIN_WORDS.test(s)&&mentions.length)issues.push("moq_claim");
   }
-  if(/(?:تومان|تومن|ریال|دلار|دولار|\$|USD|TOMAN|IQD|دینار)/iu.test(text))issues.push("currency");
+  if(/\p{Sc}/u.test(text)||/(?:تومان|تومن|ریال|دلار|دولار|دینار|درهم|یورو|پوند|\b(?:usd|toman|iqd|irr|eur|gbp|aed|sar|try|cad|aud|chf|cny|jpy)\b)/iu.test(gateNorm(text)))issues.push("currency");
+  // A grounded quantity is not authority for an amount or a payment instruction.
+  // Every financial/action assertion belongs to an independently protected engine fact.
+  const normalized=gateNorm(text);
+  if(/(?<!\p{L})(?:پرداخت\p{L}*|واریز\p{L}*|بیعانه|عربون|حواله|حوالتک|ادفع\p{L}*|تدفع\p{L}*|تدفعین|(?:ال)?دفع\p{L}*|حول\p{L}*|تحول\p{L}*|payment|payments|pay|paid|transfer)(?!\p{L})/u.test(normalized))issues.push('unapproved_payment_authority');
+  if(/(?:متن|جمله|شرط|قانون|قاعده|موافقت|تایید|مدیر|مالک|کلام|النص|شرط|قاعده|موافقه|المدیر|owner|approval|rule|terms?)[^.!؟?\n]{0,55}(?:غلط|اشتباه|اعتبار ندارد|معتبر نیست|لازم نیست|نیاز نیست|نادیده|برعکس|غیر صحیح|مو صحیح|لا تعتمد|لا تتبع|تجاهل|invalid|wrong|ignore|disregard|override)|(?:غلط|اشتباه|برعکس عمل|لا تتبع|لا تعتمد|ignore|disregard|override)/iu.test(normalized))issues.push('protected_authority_override');
+  if(GATE_ORDER.test(normalized)&&/(?:قطعی است|پذیرفته شد|قبول شد|مقبول|موافق علیه|مؤکد|موکد|accepted|confirmed|registered|approved)/iu.test(normalized))issues.push('order_commitment');
+  for(const amount of gateNumberMentions(typedSpecifications(text).scalar))if(amount.value>=100&&!GATE_QTY_UNITS.has(amount.next)&&!['مدل','مودیل','لون','رنگ','بخش','جزء'].includes(amount.next))issues.push('untyped_numeric_role');
   // A sentence that only RELAYS the customer's payment-terms request to the owner («۳۰ درصد بیعانه رو با مدیر هماهنگ می‌کنم») is not a
   // commercial claim: it is left out of the discount / payment checks (its numbers are still grounded). Agreeing or stating terms is not.
   if(/(?:بدون\s*(?:هزینه|پرداخت)|بی[‌\s]*هزینه|ببلاش|بلاش|بدون\s*(?:کلفة|كلفة|تكلفة|مقابل)|no\s*(?:extra\s*)?charge)/iu.test(text))issues.push("unapproved_free_service");
   const termsText=salesAiWithoutTermsRelays(text);
-  if(/(?:تخفیف|خصم|discount|آف\b|درصد|[%٪]|بالمي[ةه]|بالمئ[ةه]|percent)/iu.test(termsText))issues.push("discount");
+  if(/(?:تخفیف|تخفیض|خصم|discount|اف\b|درصد|[%٪]|بالمی[هه]|بالمئ[هه]|percent)/iu.test(gateNorm(termsText)))issues.push("discount");
   if(gateConfirmationIssue(text,preferenceTerms))issues.push("order_commitment");
+  if(/(?:چاپ[^.؟!?\n]{0,30}(?:شما|تون|تان)|(?:طباعه|طباعة)[^.؟!?\n]{0,30}(?:طلبک|طلبك|الخاصه بک))[^.؟!?\n]{0,25}(?:تایید\s*شد|تم\s*(?:اعتماد|تاکید)|confirmed|approved)/iu.test(normalized))issues.push('unapproved_printing_approval');
   if(/(?:سفارش[^.؟!?]{0,25}(?:ثبت|تایید|تأیید)\s*شد|(?:ثبت|تایید|تأیید)\s*شد[^.؟!?]{0,25}سفارش|تم\s*(?:تأكيد|تاكيد|تسجيل)\s*الطلب|سجلت\s*الطلب|order\s+(?:is\s+)?(?:confirmed|registered))/iu.test(text))issues.push("order_commitment");
   // The model is never given commercial knowledge (it is filtered out of its context), so any of these in its OWN words would be
   // invented: they reach the customer only through the deterministic segment ({{COMMERCIAL}}).

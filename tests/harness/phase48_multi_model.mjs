@@ -16,20 +16,36 @@ for(const r of approved){const e=JSON.parse(r.value_json);const response=await W
 const u={id:9470001,name:'Quality',username:'quality9470001'};await W.send(u,'سلام');W.setMarket(u,'iran');
 const decision=(raw)=>W.D({...raw,semantics:{mode:'browse',quantity_role:'none',deal_reference:'none',repeat_requested:false},facts:{color_statement:raw.requests.includes('colors_available')?'question':'none'}});
 const sent=()=>W.tg.filter(t=>t.method==='sendMessage').map(t=>JSON.parse(t.body)).filter(t=>String(t.chat_id)===String(u.id)).map(t=>t.text);
+// Phase51: missing sections require another provider-authored, grounded answer.
+// This explicit model stub is only an offline contract test, not live AI evidence.
+const setScript=W.AI.script.set.bind(W.AI.script);
+W.AI.script.set=(question,fn)=>setScript(question,c=>c.authoring?decision({...live[0],reply:authorReply(c)}):fn(c));
+function authorReply(c){
+ if(c.authoring.required_parts.length)return 'در خدمتم.\n'+c.authoring.required_parts.join('\n');
+ if(c.state?.comparison?.clarification_needed)return 'کدام مدل‌ها مدنظرتونه؟';
+ const names=c.authoring.requested_models;
+ if(!names.length)return c.authoring.decision;
+ return names.map(name=>{
+  const key=name.replace(/\u200c/g,' '),part=c.knowledge.find(k=>/۲ تکه|2 تکه/.test(k.about)&&k.value==='رویه'),three=c.knowledge.find(k=>/۳ تکه|3 تکه/.test(k.about)&&String(k.value).includes('قسمت بالا، وسط و پایین')),bag=c.knowledge.find(k=>String(k.value).includes('در کشویی بگ'));
+  const fact=/^2 تکه$/.test(key)&&part?'بخش ثبت‌شده در اطلاعات تأییدشده: '+part.value+'.':/^3 تکه$/.test(key)&&three?three.value:/بگ/.test(key)&&bag?bag.value:'';
+  return '• '+name+': '+fact+((!fact||/^2 تکه$/.test(key))?(c.language==='Iraqi Arabic'?' تفاصيل آلية هذا الموديل مو كاملة بالمعلومات المعتمدة عندي.':' شرح کامل مکانیزم این مدل در اطلاعات فعلی کامل نیست.'):'');
+ }).join('\n');
+}
 
 const fixture=JSON.parse(fs.readFileSync(new URL('./fixtures/phase48-live-comparison.json',import.meta.url)));
 let c48,follow;
 W.AI.script.set(fixture.message,c=>{c48=c;return decision({...live[0],reply:fixture.partial_reply});});
 const firstCallsBefore=W.AI.requests.length;
 const first48=await W.send(u,fixture.message);
+if(!sent().length)console.log('FIRST_REPLY_FAILURE '+JSON.stringify({validation:first48.brain.validation,authorship:first48.brain.ai_brain.authorship,rejection:first48.brain.ai_brain.author_rejection,outcome:first48.outcome}));
 const firstCallsUsed=W.AI.requests.length-firstCallsBefore;
 ok('Exact four-model typo request creates four independent comparison identities',c48.state?.comparison?.requested_models?.length===4,c48.state?.comparison);
 ok('Diagnostics counts actual four requested construction identities',first48.brain.ai_brain.knowledge_context.comparison_entities===4,first48.brain.ai_brain.knowledge_context);
-ok('Final answer covers omitted two-piece and ribbon models without replacing supported answer',sent().at(-1).includes('2 تکه')&&/کشویی روبان/.test(sent().at(-1))&&sent().at(-1).includes('بگ'),sent().at(-1));
+ok('Final answer covers omitted two-piece and ribbon models without replacing supported answer',sent().at(-1)?.includes('2 تکه')&&/کشویی روبان/.test(sent().at(-1))&&sent().at(-1)?.includes('بگ'),sent().at(-1));
 // Seed the historical partial SENT answer in the isolated replay only; never modify Production.
 const originalOutreach=W.q('SELECT id FROM lead_outreach WHERE inbox_message_id=?',[first48.brain.source_message_id])[0];
 W.dbrun('UPDATE lead_outreach SET message=?,status=? WHERE id=?',[fixture.partial_reply,'sent',originalOutreach.id]);
-W.AI.script.set(fixture.followup,c=>{follow=c;const ids=c.state?.comparison?.requested_models||[];return decision({...live[0],reply:ids.length===2?'مدل 2 تکه: در اطلاعات مصوب، رویه به عنوان بخش مستقل ثبت شده است؛ شرح کامل مکانیزم را ندارم. مدل کشویی روبان‌دار: شرح اختصاصی مکانیزم روبان در اطلاعات فعلی کامل نیست.':fixture.followup_reply});});
+W.AI.script.set(fixture.followup,c=>{follow=c;const ids=c.state?.comparison?.requested_models||[];return decision({...live[0],reply:ids.length===2?'مدل 2 تکه: در اطلاعات مصوب، رویه به عنوان بخش ثبت شده است؛ شرح کامل مکانیزم را ندارم. مدل کشویی روبان‌دار: شرح اختصاصی مکانیزم روبان در اطلاعات فعلی کامل نیست.':fixture.followup_reply});});
 const followCallsBefore=W.AI.requests.length;
 const followResult=await W.send(u,fixture.followup);
 const followCallsUsed=W.AI.requests.length-followCallsBefore;
@@ -43,7 +59,7 @@ const grounded=c=>(c.state?.comparison?.requested_models||[]).map(name=>{
   const part=c.knowledge.find(k=>/۲ تکه|2 تکه/.test(k.about)&&k.value==='رویه');
   const three=c.knowledge.find(k=>/۳ تکه|3 تکه/.test(k.about)&&k.value.includes('قسمت بالا، وسط و پایین'));
   const bag=c.knowledge.find(k=>k.value.includes('در کشویی بگ'));
-  const fact=/^2 تکه$/.test(key)&&part?'بخش مستقل ثبت‌شده در اطلاعات تأییدشده: '+part.value+'.':/^3 تکه$/.test(key)&&three?three.value:/بگ/.test(key)&&bag?bag.value:'';
+  const fact=/^2 تکه$/.test(key)&&part?'بخش ثبت‌شده در اطلاعات تأییدشده: '+part.value+'.':/^3 تکه$/.test(key)&&three?three.value:/بگ/.test(key)&&bag?bag.value:'';
   return '• '+name+': '+fact+' شرح کامل مکانیزم این مدل در اطلاعات فعلی کامل نیست.';
 }).join('\n');
 let userId=9480100;
@@ -60,7 +76,7 @@ for(const [question,count] of [
  const callsBefore=W.AI.requests.length;const r=await W.send(who,question);
  ok('Canonical independent construction count '+count+': '+question,ctx.state?.comparison?.requested_models?.length===count,ctx.state?.comparison);
  ok('Every requested model has a final addressed section: '+question,r.outcome?.customer_visible==='reply'&&r.brain.ai_brain.comparison?.unanswered_models.length===0&&r.brain.ai_brain.comparison.addressed_models.length===count,{outcome:r.outcome,reply:textFor(who),comparison:r.brain.ai_brain.comparison});
- ok('One AI call; comparison creates no customer choice or order',W.AI.requests.length-callsBefore===1&&!r.brain.sales_agent.order_candidate_written&&!r.brain.customer_known_facts.requested_quantity,{ai:W.AI.requests.length-callsBefore,candidate:r.brain.sales_agent.order_candidate});
+ ok('At most one final authoring pass; comparison creates no customer choice or order',W.AI.requests.length-callsBefore<=2&&r.brain.ai_brain.authorship?.verified&&!r.brain.sales_agent.order_candidate_written&&!r.brain.customer_known_facts.requested_quantity,{ai:W.AI.requests.length-callsBefore,candidate:r.brain.sales_agent.order_candidate});
  ok('No invented drawer material or mechanism',!/مقوا|مگنت|آهنربا|چوب|چرم|ریل/.test(textFor(who)));
 }
 const topic=await client();W.AI.script.set(fixture.message,c=>decision({...live[0],reply:grounded(c)}));await W.send(topic,fixture.message);

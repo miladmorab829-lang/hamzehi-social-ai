@@ -1,0 +1,2257 @@
+{
+  "schema": "hamzehi.phase50.review-plan.v1",
+  "execution_permitted": false,
+  "final_owner_approval_required": true,
+  "not_an_executable_sql_migration": true,
+  "unique_owner_clauses": 54,
+  "schema_compatible_proposal_count": 20,
+  "ready_atomic_record_count": 18,
+  "ready_new_record_count": 15,
+  "complete_or_correct_existing_count": 2,
+  "deactivate_legacy_count": 1,
+  "batches": [
+    {
+      "market": "IRAN",
+      "batch_number": 1,
+      "max_atomic_records": 25,
+      "atomic_records": 11,
+      "method": "POST",
+      "endpoint": "/api/sales-knowledge/propose",
+      "requests": [
+        {
+          "record_id": "P50:O08:pendant_current_size:IRAN",
+          "payload": {
+            "id": "phase50-ed44f6752af7ce7e7aecd3",
+            "operation": "REPLACE",
+            "domain": "size",
+            "entity_type": "model",
+            "entity_key": "آویز",
+            "attribute": "available_size",
+            "market": "IRAN",
+            "target_fact_id": "knowledge-fact-owner-import-owner-import-0296f44c-306b-4104-909f-8765cde66e57-00074",
+            "target_version": 1,
+            "value": "5x7.5"
+          }
+        },
+        {
+          "record_id": "P50:O14:bag_custom_palette:IRAN:کشویی بگ‌دار",
+          "payload": {
+            "id": "phase50-0051ff86d8246b746bbe61",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "model",
+            "entity_key": "کشویی بگ‌دار",
+            "attribute": "order_bag_custom_palette",
+            "market": "IRAN",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "بگ بیرونی می‌تواند رنگ یا ترکیب اختصاصی حتی خارج از فهرست روکش هاردباکس داشته باشد؛ موجودی، زمان و هزینه گزینه خارج استاندارد تأیید جدا می‌خواهد.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O18:iran_order_timing:IRAN",
+          "payload": {
+            "id": "phase50-bc9aa38dbd145e26e930dc",
+            "operation": "REPLACE",
+            "domain": "production",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "timing_rule",
+            "market": "IRAN",
+            "target_fact_id": "knowledge-fact-owner-telegram-20261109-01",
+            "target_version": 1,
+            "value": "زمان معمول سفارش چاپی ایران ۲ تا ۳ هفته از ثبت سفارش است؛ زمان رسیدن و تضمین موعد از این گزاره نتیجه نمی‌شود."
+          }
+        },
+        {
+          "record_id": "P50:O18:iran_logo_last_stage:IRAN:2 تکه",
+          "payload": {
+            "id": "phase50-4214969258841ff931bc29",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "model",
+            "entity_key": "2 تکه",
+            "attribute": "production_logo_last_stage",
+            "market": "IRAN",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "در مدل‌های غیر بگ‌دار ایران، چاپ لوگو آخرین مرحله تولید است؛ دیر رسیدن لوگو مراحل قبلی را متوقف نمی‌کند و دلیل شروع‌نشدن تولید نیست.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O18:iran_logo_last_stage:IRAN:3 تکه",
+          "payload": {
+            "id": "phase50-d99899f3695c299877e946",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "model",
+            "entity_key": "3 تکه",
+            "attribute": "production_logo_last_stage",
+            "market": "IRAN",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "در مدل‌های غیر بگ‌دار ایران، چاپ لوگو آخرین مرحله تولید است؛ دیر رسیدن لوگو مراحل قبلی را متوقف نمی‌کند و دلیل شروع‌نشدن تولید نیست.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O18:iran_logo_last_stage:IRAN:3 تکه کج",
+          "payload": {
+            "id": "phase50-013d9c7c9d4e1d72eea9a0",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "model",
+            "entity_key": "3 تکه کج",
+            "attribute": "production_logo_last_stage",
+            "market": "IRAN",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "در مدل‌های غیر بگ‌دار ایران، چاپ لوگو آخرین مرحله تولید است؛ دیر رسیدن لوگو مراحل قبلی را متوقف نمی‌کند و دلیل شروع‌نشدن تولید نیست.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O18:iran_logo_last_stage:IRAN:کشویی روبان‌دار",
+          "payload": {
+            "id": "phase50-b4a5a8d11374d8ca61fd94",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "model",
+            "entity_key": "کشویی روبان‌دار",
+            "attribute": "production_logo_last_stage",
+            "market": "IRAN",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "در مدل‌های غیر بگ‌دار ایران، چاپ لوگو آخرین مرحله تولید است؛ دیر رسیدن لوگو مراحل قبلی را متوقف نمی‌کند و دلیل شروع‌نشدن تولید نیست.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O18:iran_logo_last_stage:IRAN:کشویی کج",
+          "payload": {
+            "id": "phase50-c43a613fa69fd86b3c0665",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "model",
+            "entity_key": "کشویی کج",
+            "attribute": "production_logo_last_stage",
+            "market": "IRAN",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "در مدل‌های غیر بگ‌دار ایران، چاپ لوگو آخرین مرحله تولید است؛ دیر رسیدن لوگو مراحل قبلی را متوقف نمی‌کند و دلیل شروع‌نشدن تولید نیست.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O18:iran_bag_timing_guard:IRAN:کشویی بگ‌دار",
+          "payload": {
+            "id": "phase50-850b84b9edaca4f7c8672a",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "model",
+            "entity_key": "کشویی بگ‌دار",
+            "attribute": "iran_bag_timing_guard",
+            "market": "IRAN",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "بگ‌دار به علت طراحی و تأیید بگ شرایط اختصاصی دارد؛ موعد متفاوت یا قطعی بدون تأیید ساخته نشود.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O20:extra_protective_packaging:IRAN",
+          "payload": {
+            "id": "phase50-c665cdb87b0c53500caf6d",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "shipping_packaging_policy",
+            "market": "IRAN",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "طبق گفته مالک، بسته‌بندی محافظ اضافی ضرورت ندارد؛ این گفته تضمین نبود آسیب حمل یا بیمه نیست.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O25:legacy_moq_deactivate:IRAN",
+          "payload": {
+            "id": "phase50-cc7e8046d5bf7af8c603e1",
+            "operation": "DEACTIVATE",
+            "domain": "quantity",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "moq",
+            "market": "IRAN",
+            "target_fact_id": "knowledge-fact-knowledge-cmd-ccd8d2bb-1bb7-42d9-95e7-5cf5fe4c3c1a",
+            "target_version": 1
+          }
+        }
+      ],
+      "execute": false
+    },
+    {
+      "market": "ARAB",
+      "batch_number": 2,
+      "max_atomic_records": 25,
+      "atomic_records": 7,
+      "method": "POST",
+      "endpoint": "/api/sales-knowledge/propose",
+      "requests": [
+        {
+          "record_id": "P50:O13:brown_color_aliases:ARAB",
+          "payload": {
+            "id": "phase50-f1984f3178555522874d4f",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "brown_color_aliases",
+            "market": "ARAB",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "في العراق «بني سيلوفان» و«قهوائي سيلوفان» اسمان لنفس اللون؛ يُحفظ الاسمان وسجلّهما.",
+              "commercial": false
+            }
+          }
+        },
+        {
+          "record_id": "P50:O14:independent_part_colors:ARAB",
+          "payload": {
+            "id": "phase50-4a7245cac8ae666bbcd3b3",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "independent_part_colors",
+            "market": "ARAB",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "في إيران والعراق يمكن اختيار ألوان أجزاء العلبة بشكل مستقل؛ لون أجزاء الهارد بوكس يكون من ألوان المجموعة المتاحة.",
+              "commercial": false
+            }
+          }
+        },
+        {
+          "record_id": "P50:O14:bag_custom_palette:ARAB:کشویی بگ‌دار",
+          "payload": {
+            "id": "phase50-d450a6c2bb0ec573c322a6",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "model",
+            "entity_key": "جرّارة مع كيس",
+            "attribute": "order_bag_custom_palette",
+            "market": "ARAB",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "يمكن اختيار لون أو مزيج ألوان خاص للكيس الخارجي حتى خارج قائمة ألوان تغليف الهارد بوكس؛ التوفّر ووقت الإنتاج وكلفة الخيارات غير القياسية تحتاج تأكيداً منفصلاً.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O18:iraq_carrier_handoff:ARAB",
+          "payload": {
+            "id": "phase50-78d96fd87c5c1448bdcbe2",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "production_carrier_handoff",
+            "market": "ARAB",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "تجهيز طلب العراق وتسليمه لشركة النقل يستغرق نحو شهر من تاريخ الطلب؛ هذه ليست مدة الوصول النهائي إلى العراق.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O18:iraq_dispatch_document:ARAB",
+          "payload": {
+            "id": "phase50-97e21f48775dacc895d371",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "shipping_dispatch_document",
+            "market": "ARAB",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "بعد تسليم الشحنة لشركة النقل يُرسل وصل الشحن للزبون؛ الوصول النهائي يعتمد على الطريق والناقل والحدود ولا يُضمن موعده.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O19:iraq_shipping_method:ARAB",
+          "payload": {
+            "id": "phase50-26f5524f276afbbdcb210e",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "iraq_shipping_method",
+            "market": "ARAB",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "الشحن إلى العراق عبر شركة نقل بضائع إلى العراق؛ لا يُضمن التسليم المباشر للعنوان النهائي دون مستند.",
+              "commercial": true
+            }
+          }
+        },
+        {
+          "record_id": "P50:O20:extra_protective_packaging:ARAB",
+          "payload": {
+            "id": "phase50-500677853fd78f8f15f88d",
+            "operation": "ADD",
+            "domain": "knowledge",
+            "entity_type": "business",
+            "entity_key": "global",
+            "attribute": "shipping_packaging_policy",
+            "market": "ARAB",
+            "value": {
+              "schema": "hamzehi.knowledge.v1",
+              "kind": "fact",
+              "priority": 50,
+              "conditions": [],
+              "keywords": [],
+              "labels": {},
+              "value": "بحسب المالك لا حاجة لتغليف وقائي إضافي؛ هذا لا يضمن عدم تضرّر الشحنة ولا يعني وجود تأمين.",
+              "commercial": true
+            }
+          }
+        }
+      ],
+      "execute": false
+    }
+  ],
+  "held_scoped_records": [
+    {
+      "id": "P50:O20:shipping_cost_responsibility:IRAN",
+      "clause_id": "P50:O20:shipping_cost_responsibility",
+      "market": "IRAN",
+      "product_family": null,
+      "model": null,
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "shipping_cost_responsibility",
+      "kind": "fact",
+      "text": {
+        "fa": "در ایران و عراق، هزینه ارسال، کارتن و حمل تا باربری بر عهده مشتری و خارج از قیمت خود جعبه است؛ مبلغ دقیق بدون مدرک اعلام نشود.",
+        "ar": "في إيران والعراق يتحمّل الزبون أجور الشحن والكرتون والنقل إلى شركة الشحن، وهي خارج سعر العلبة؛ لا يُذكر مبلغ غير موثّق."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O20"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "shipping_cost",
+        "packaging"
+      ],
+      "status": "HOLD_RUNTIME_REGRESSION",
+      "blockers": [
+        "APPROVED_GUIDANCE_REJECTS_MONEY_IN_SHIPPING_TERMS"
+      ],
+      "automatic_activation": false,
+      "proposed_action": "REPLACE",
+      "existing_target": {
+        "record_id": "FACT:knowledge-fact-owner-telegram-20261109-02",
+        "source_id": "knowledge-fact-owner-telegram-20261109-02",
+        "version": 1,
+        "source_value_hash": "d030f55de7b088ec7a99fa3cb12136843ac5ca4acce52f5ece41bdc9a516f6b0",
+        "old_value": "ارسال در تهران با اسنپ یا وانت انجام می‌شود. ارسال شهرستان با باربری و بسته‌بندی کارتنی انجام می‌شود."
+      },
+      "change_class": "COMPLETE_OR_CORRECT_EXISTING_RECORD",
+      "native_proposal": {
+        "id": "phase50-f053380912433d41f41931",
+        "operation": "REPLACE",
+        "domain": "shipping",
+        "entity_type": "business",
+        "entity_key": "global",
+        "attribute": "terms",
+        "market": "IRAN",
+        "target_fact_id": "knowledge-fact-owner-telegram-20261109-02",
+        "target_version": 1,
+        "value": "ارسال در تهران با اسنپ یا وانت انجام می‌شود. ارسال شهرستان با باربری و بسته‌بندی کارتنی انجام می‌شود.\nدر ایران، هزینه ارسال، کارتن و حمل تا باربری بر عهده مشتری و خارج از قیمت خود جعبه است؛ مبلغ دقیق بدون مدرک اعلام نشود."
+      },
+      "schema_compatible": true
+    },
+    {
+      "id": "P50:O20:shipping_cost_responsibility:ARAB",
+      "clause_id": "P50:O20:shipping_cost_responsibility",
+      "market": "ARAB",
+      "product_family": null,
+      "model": null,
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "shipping_cost_responsibility",
+      "kind": "fact",
+      "text": {
+        "fa": "در ایران و عراق، هزینه ارسال، کارتن و حمل تا باربری بر عهده مشتری و خارج از قیمت خود جعبه است؛ مبلغ دقیق بدون مدرک اعلام نشود.",
+        "ar": "في إيران والعراق يتحمّل الزبون أجور الشحن والكرتون والنقل إلى شركة الشحن، وهي خارج سعر العلبة؛ لا يُذكر مبلغ غير موثّق."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O20"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "shipping_cost",
+        "packaging"
+      ],
+      "status": "HOLD_RUNTIME_REGRESSION",
+      "blockers": [
+        "APPROVED_GUIDANCE_REJECTS_MONEY_IN_SHIPPING_TERMS"
+      ],
+      "automatic_activation": false,
+      "proposed_action": "REPLACE",
+      "existing_target": {
+        "record_id": "FACT:knowledge-fact-owner-telegram-20261109-04",
+        "source_id": "knowledge-fact-owner-telegram-20261109-04",
+        "version": 1,
+        "source_value_hash": "2ef571221b070492ef6c02c2d6fd548ae34eed2fc5343b753b3e39c126829038",
+        "old_value": "المدة المعتادة للتسليم إلى العراق حوالي شهر ونصف، وهي تقديرية حسب وضع الطرق والحدود، وليست موعداً مضموناً."
+      },
+      "change_class": "COMPLETE_OR_CORRECT_EXISTING_RECORD",
+      "native_proposal": {
+        "id": "phase50-198436c25b0cd8880f3ad7",
+        "operation": "REPLACE",
+        "domain": "shipping",
+        "entity_type": "business",
+        "entity_key": "global",
+        "attribute": "terms",
+        "market": "ARAB",
+        "target_fact_id": "knowledge-fact-owner-telegram-20261109-04",
+        "target_version": 1,
+        "value": "المدة المعتادة للتسليم إلى العراق حوالي شهر ونصف، وهي تقديرية حسب وضع الطرق والحدود، وليست موعداً مضموناً.\nفي العراق يتحمّل الزبون أجور الشحن والكرتون والنقل إلى شركة الشحن، وهي خارج سعر العلبة؛ لا يُذكر مبلغ غير موثّق."
+      },
+      "schema_compatible": true
+    }
+  ],
+  "held_unscoped_records": [
+    {
+      "id": "P50:O01:two_piece_structure",
+      "market": null,
+      "product_family": null,
+      "model": "2 تکه",
+      "models": [
+        "2 تکه"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "two_piece_structure",
+      "kind": "fact",
+      "text": {
+        "fa": "دوتکه یک درب و یک کف دارد؛ درب رو به بالا حرکت می‌کند و کاملاً از کف جدا می‌شود.",
+        "ar": "علبة القطعتين تتكوّن من غطاء وقاعدة؛ يرتفع الغطاء إلى الأعلى وينفصل تماماً عن القاعدة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O01"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "parts",
+        "opening",
+        "closing",
+        "model_differences"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [
+        "teach-c89f1e90fdb7948241ce-02"
+      ],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O01:two_piece_laminate",
+      "market": null,
+      "product_family": null,
+      "model": "2 تکه",
+      "models": [
+        "2 تکه"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "two_piece_laminate",
+      "kind": "fact",
+      "text": {
+        "fa": "داخل جعبه دوتکه لمینت است؛ رابطه لمینت با فوم و آستر از این گزاره نتیجه گرفته نمی‌شود.",
+        "ar": "داخل علبة القطعتين لامينيت؛ لا يحدّد هذا الوصف العلاقة بين اللامينيت والفوم والبطانة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O01"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "inner_material"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O01:two_piece_description",
+      "market": null,
+      "product_family": null,
+      "model": "2 تکه",
+      "models": [
+        "2 تکه"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "two_piece_description",
+      "kind": "owner_description",
+      "text": {
+        "fa": "به گفته مالک، دوتکه ساده‌ترین و معمولی‌ترین و ارزان‌ترین مدل مجموعه است؛ قیمت عددی فقط از فهرست مصوب همان ترکیب خوانده شود.",
+        "ar": "يصف المالك موديل القطعتين بأنه الأبسط والأقل سعراً؛ السعر الفعلي يؤخذ فقط من قائمة الأسعار المعتمدة لنفس القياس والموديل."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O01"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "OWNER_ATTRIBUTION_ONLY_NOT_INDEPENDENT_PROOF"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O02:three_piece_structure",
+      "market": null,
+      "product_family": null,
+      "model": "3 تکه",
+      "models": [
+        "3 تکه"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "three_piece_structure",
+      "kind": "fact",
+      "text": {
+        "fa": "سه‌تکه شامل درب، قسمت میانی و کف است؛ میانی و کف متصل‌اند و درب به سمت بالا باز و جدا می‌شود.",
+        "ar": "علبة الثلاث قطع تتكوّن من غطاء وجزء أوسط وقاعدة؛ الوسط والقاعدة متّصلان، والغطاء يرتفع وينفصل."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O02"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "parts",
+        "opening",
+        "closing",
+        "model_differences"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [
+        "teach-c89f1e90fdb7948241ce-03",
+        "teach-c89f1e90fdb7948241ce-04"
+      ],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O03:slanted_three_structure",
+      "market": null,
+      "product_family": null,
+      "model": "3 تکه کج",
+      "models": [
+        "3 تکه کج"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "slanted_three_structure",
+      "kind": "fact",
+      "text": {
+        "fa": "مکانیزم سه‌تکه کج مانند سه‌تکه معمولی است و تفاوت ظاهری دارد؛ زاویه یا برش دقیق از این تأیید نتیجه نمی‌شود.",
+        "ar": "آلية الثلاث قطع المائلة مثل الثلاث قطع العادية والاختلاف في الشكل؛ زاوية الميل وتفاصيل القص غير محدّدة هنا."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O03"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "parts",
+        "opening",
+        "closing",
+        "model_differences"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O03:relative_heights",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [
+        "3 تکه",
+        "3 تکه کج",
+        "2 تکه"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "relative_heights",
+      "kind": "fact",
+      "text": {
+        "fa": "ارتفاع سه‌تکه معمولی و کج برابر است؛ مالک گفته هر دو حدود ۱ تا ۱٫۵ سانتی‌متر از دوتکه بلندترند، ولی خانواده، سایز و مبنای اندازه‌گیری مشمول مشخص نیست.",
+        "ar": "ارتفاع الثلاث قطع العادية والمائلة متساوٍ؛ قال المالك إنهما أعلى من القطعتين بنحو ١ إلى ١٫٥ سم، لكن العائلة والقياس وأساس القياس غير محدّدة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O03"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "relative_height"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "SCOPE_PRODUCT_FAMILY",
+        "SCOPE_SIZE"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O03:three_piece_description",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [
+        "3 تکه",
+        "3 تکه کج"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "three_piece_description",
+      "kind": "owner_description",
+      "text": {
+        "fa": "مالک سه‌تکه معمولی و کج را شکیل‌تر و پرطرفدارتر از دوتکه توصیف کرده؛ این توصیف آمار فروش یا اختلاف قیمت قطعی نیست.",
+        "ar": "يصف المالك الثلاث قطع العادية والمائلة بأنها أكثر أناقة ورواجاً من القطعتين؛ الوصف ليس إحصاء مبيعات أو فرق سعر ثابتاً."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O03"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "OWNER_ATTRIBUTION_ONLY_NOT_INDEPENDENT_PROOF"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [
+        "Owner qualitative small-price-gap statement requires exact approved tuple price comparison; no universal price gap asserted."
+      ],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O04:ribbon_drawer_structure",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی روبان‌دار",
+      "models": [
+        "کشویی روبان‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "ribbon_drawer_structure",
+      "kind": "fact",
+      "text": {
+        "fa": "کشویی روبان‌دار کف متحرک داخلی و غلاف بیرونی دارد؛ نام داخلی غلاف «درب» است. با کشیدن روبان، کف از غلاف بیرون می‌آید.",
+        "ar": "الجرّارة مع شريط لها قاعدة داخلية متحرّكة وغلاف خارجي يسمّيه المصنع «غطاء»؛ بسحب الشريط تخرج القاعدة من الغلاف."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O04"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "parts",
+        "opening",
+        "model_differences"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [
+        "teach-c89f1e90fdb7948241ce-06"
+      ],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O04:ribbon_drawer_description",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی روبان‌دار",
+      "models": [
+        "کشویی روبان‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "ribbon_drawer_description",
+      "kind": "owner_description",
+      "text": {
+        "fa": "مالک کشویی روبان‌دار را پرطرفدار توصیف کرده؛ این ادعا آمار مستقل فروش نیست.",
+        "ar": "يصف المالك الجرّارة مع شريط بأنها رائجة؛ هذا وصف من المالك وليس إحصاء مبيعات مستقلاً."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O04"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "OWNER_ATTRIBUTION_ONLY_NOT_INDEPENDENT_PROOF"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O05:slanted_drawer_structure",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی کج",
+      "models": [
+        "کشویی کج"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "slanted_drawer_structure",
+      "kind": "fact",
+      "text": {
+        "fa": "کشویی کج کف متحرک و غلاف بیرونی دارد و روبان ندارد؛ بخش مخصوص بیرون‌کشیدن کف دارد. شکل آن با روبان‌دار فرق می‌کند؛ زاویه دقیق تأیید نشده.",
+        "ar": "الجرّارة المائلة لها قاعدة متحرّكة وغلاف خارجي بلا شريط، وفيها جزء يساعد على سحب القاعدة. شكلها يختلف عن ذات الشريط؛ الزاوية الدقيقة غير معتمدة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O05"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "parts",
+        "opening",
+        "model_differences"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [
+        "teach-c89f1e90fdb7948241ce-06"
+      ],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O06:bag_drawer_structure",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی بگ‌دار",
+      "models": [
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "bag_drawer_structure",
+      "kind": "fact",
+      "text": {
+        "fa": "بگ‌دار سه بخش دارد: کف داخلی، درب یا غلاف بالایی و بگ بیرونی. کف و درب هاردباکس‌اند؛ ترتیب کامل حرکت و اتصال هنوز مشخص نیست.",
+        "ar": "موديل الجرّارة مع كيس له قاعدة داخلية وغطاء أو غلاف علوي وكيس خارجي؛ القاعدة والغطاء هارد بوكس. تسلسل الحركة والاتصال الكامل غير محدّد."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O06"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "parts",
+        "model_differences"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [
+        "teach-c89f1e90fdb7948241ce-06"
+      ],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O06:bag_material",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی بگ‌دار",
+      "models": [
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "bag_material",
+      "kind": "fact",
+      "text": {
+        "fa": "بگ بیرونی از مقوای گلاسه «۳۰۰ گرم» است؛ این عبارت به گرم بر مترمربع یا وزن کل بگ تبدیل نشده است.",
+        "ar": "الكيس الخارجي من كرتون غلاسيه بوصف المالك «٣٠٠ غرام»؛ لم تُحدّد قاعدة القياس، فلا يُحوّل إلى غرام/م² أو وزن الكيس."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O06",
+          "O12"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "bag_material"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "UNIT_NOT_NORMALIZED:basis_of_300_grams"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": "basis_of_300_grams",
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O06:bag_handles",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی بگ‌دار",
+      "models": [
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "bag_handles",
+      "kind": "fact",
+      "text": {
+        "fa": "بگ دو دسته از روبان ساتن با عرض ۱٫۳ سانتی‌متر دارد و نقش بسته‌بندی دستی را هم انجام می‌دهد؛ برای همین محصول بگ جدا لازم نیست.",
+        "ar": "للكيس مقبضان من شريط ساتان بعرض ١٫٣ سم، ويُستخدم للحمل أيضاً؛ لا يلزم طلب كيس منفصل لهذا المنتج."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O06",
+          "O12"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "bag_material",
+        "use_case"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O06:bag_print_options",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی بگ‌دار",
+      "models": [
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "bag_print_options",
+      "kind": "fact",
+      "text": {
+        "fa": "روی بگ چاپ چهاررنگ، پترن دلخواه، لوگو و اطلاعات مشتری ممکن است؛ قابلیت چاپ، هزینه تمام گزینه‌های اختصاصی را تعیین نمی‌کند.",
+        "ar": "يمكن طباعة التصميم بأربعة ألوان والنمط والشعار وبيانات الزبون على الكيس؛ إمكانية الطباعة لا تحدّد كلفة كل خيار خاص."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O06"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "printing_types",
+        "printing_surfaces"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O07:internal_measurement_basis",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "internal_measurement_basis",
+      "kind": "fact",
+      "text": {
+        "fa": "برچسب‌های سایز بر مبنای ابعاد داخلی‌اند؛ طول و عرض داخل‌به‌داخل و ارتفاع ذکرشده نیز داخلی است. واحد نامعلوم و ابعاد خارجی حدس زده نشوند.",
+        "ar": "تسميات القياس مبنية على الأبعاد الداخلية: الطول والعرض من الداخل إلى الداخل، والارتفاع المذكور داخلي أيضاً. لا تُفترض الوحدة أو الأبعاد الخارجية."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O07"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "measurement_basis"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "UNIT_NOT_NORMALIZED:measurement_unit_not_newly_confirmed"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": "measurement_unit_not_newly_confirmed",
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O09:hardbox_material",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "hardbox_material",
+      "kind": "fact",
+      "text": {
+        "fa": "طبق تأیید مالک، بدنه تمام مدل‌ها «هاردباکس ۶ میل» است؛ بگ بیرونی استثنا و گلاسه ۳۰۰ گرم است. «۶ میل» به میلی‌متر یا واحد دیگری تبدیل نشود.",
+        "ar": "بحسب المالك، أجسام الموديلات من «هارد بوكس ٦ ميل»؛ يستثنى الكيس الخارجي فهو غلاسيه ٣٠٠ غرام. لا تُحوّل «٦ ميل» إلى مليمتر أو وحدة أخرى."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O09"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "outer_material"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "UNIT_NOT_NORMALIZED:raw_6_mil_unit"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": "raw_6_mil_unit",
+      "description_attribution": {
+        "fa": "مالک استحکام را بالا توصیف کرده؛ آزمون فنی مستقل ادعا نمی‌شود.",
+        "ar": "يصف المالك المتانة بأنها عالية؛ لا يُدّعى وجود اختبار فني مستقل."
+      },
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O10:hard_foam",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "hard_foam",
+      "kind": "fact",
+      "text": {
+        "fa": "فوم همه مدل‌ها سخت است؛ چگالی، ترکیب صنعتی و ضخامت از این تأیید نتیجه گرفته نمی‌شود.",
+        "ar": "الفوم في الموديلات صلب؛ الكثافة والتركيب الصناعي والسماكة غير محدّدة بهذا التأكيد."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O10"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "foam"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O10:suede_lining",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "suede_lining",
+      "kind": "fact",
+      "text": {
+        "fa": "یک لایه آستر جیر وجود دارد؛ جنس طبیعی یا مصنوعی جیر تأیید نشده است.",
+        "ar": "توجد طبقة بطانة شمواه؛ لم يُحدّد إن كانت طبيعية أو صناعية."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O10"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "inner_material",
+        "foam"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O10:two_piece_foam_layers",
+      "market": null,
+      "product_family": null,
+      "model": "2 تکه",
+      "models": [
+        "2 تکه"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "two_piece_foam_layers",
+      "kind": "fact",
+      "text": {
+        "fa": "دوتکه یک لایه فوم با روکش جیر دارد؛ «داخل لمینت» جدا حفظ می‌شود و رابطه ساختاری این دو حدس زده نمی‌شود.",
+        "ar": "موديل القطعتين فيه طبقة فوم واحدة مكسوّة بالشمواه؛ وصف الداخل باللامينيت محفوظ منفصلاً ولا تُفترض العلاقة التركيبية بينهما."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O10"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "foam"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O10:other_foam_layers",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [
+        "3 تکه",
+        "3 تکه کج",
+        "کشویی روبان‌دار",
+        "کشویی کج",
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "other_foam_layers",
+      "kind": "fact",
+      "text": {
+        "fa": "مدل‌های غیر دوتکه دو تا سه لایه فوم دارند و یکی از لایه‌ها با جیر روکش شده است؛ عدد ثابت و ضخامت مشخص اعلام نشود.",
+        "ar": "الموديلات غير القطعتين فيها طبقتان إلى ثلاث طبقات فوم، وإحدى الطبقات مكسوّة بالشمواه؛ لا يُعلن عدد ثابت أو سماكة غير معتمدة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O10"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "foam"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O11:ribbon_specification",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی روبان‌دار",
+      "models": [
+        "کشویی روبان‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "ribbon_specification",
+      "kind": "fact",
+      "text": {
+        "fa": "روبان ساتن با عرض ۱٫۳ سانتی‌متر است؛ این مشخصه به کشویی کجِ بدون روبان تعمیم داده نمی‌شود.",
+        "ar": "الشريط من الساتان بعرض ١٫٣ سم؛ لا يُعمّم على الجرّارة المائلة التي لا تحتوي على شريط."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O11"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "ribbon_material"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O11:ribbon_color_selection",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی روبان‌دار",
+      "models": [
+        "کشویی روبان‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "ribbon_color_selection",
+      "kind": "fact",
+      "text": {
+        "fa": "رنگ روبان مستقل از رنگ جعبه و از رنگ‌های متنوع قابل بررسی است؛ موجودی رنگ درخواستی باید بررسی شود.",
+        "ar": "يمكن اختيار لون الشريط مستقلاً عن لون العلبة من الألوان المتاحة بعد التحقّق من توفّر اللون المطلوب."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O11"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "ribbon_material",
+        "color_combinations"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O11:ribbon_custom_foil_cost_policy",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [
+        "کشویی روبان‌دار",
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "ribbon_custom_foil_cost_policy",
+      "kind": "fact",
+      "text": {
+        "fa": "طلاکوب سفارشی روی خود روبان امکان‌پذیر است و هزینه جدا دارد؛ مبلغ بدون تأیید اعلام نشود.",
+        "ar": "يمكن تنفيذ طباعة ذهبية خاصة على الشريط نفسه مقابل كلفة منفصلة؛ لا يُذكر مبلغ غير معتمد."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O11"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "printing_types"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O12:handle_color_selection",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی بگ‌دار",
+      "models": [
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "handle_color_selection",
+      "kind": "fact",
+      "text": {
+        "fa": "رنگ دسته‌های ساتن بگ بر اساس موجودی بازار قابل انتخاب است؛ موجودی هیچ رنگی بدون بررسی تضمین نمی‌شود.",
+        "ar": "يمكن اختيار لون مقابض الساتان حسب المتوفّر في السوق؛ لا يُضمن توفّر أي لون دون التحقّق."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O12"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "bag_material",
+        "color_combinations"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O13:grey_shades",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "grey_shades",
+      "kind": "fact",
+      "text": {
+        "fa": "طوسی سلفون و نوک‌مدادی سلفون دو رنگ متفاوت‌اند؛ طوسی روشن‌تر و نوک‌مدادی بسیار تیره و نزدیک مشکی است، اما مشکی نیست.",
+        "ar": "«طوسی سلفون» و«نوک‌مدادی سلفون» لونان مختلفان؛ الأول أفتح، والثاني رمادي داكن جداً قريب من الأسود لكنه ليس أسود."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O13"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "standard_colors"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O15:orderability",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "orderability",
+      "kind": "fact",
+      "text": {
+        "fa": "ترکیب دارای هویت معتبر و قیمت مصوب معتبر قابل سفارش است؛ به معنی موجودی آماده نیست. بدون قیمت، عرضه و مبلغ خودکار تعیین نمی‌شود؛ قرنطینه معتبر نمی‌شود.",
+        "ar": "التركيبة الصحيحة ذات السعر المعتمد قابلة للطلب، وليست مخزوناً جاهزاً. لا يُسعّر غير المسعّر ولا تُغيّر إتاحته دون موافقة المالك، ولا تُعتمد هويات المنتجات المعزولة للمراجعة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O15"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "listing"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O16:bag_standard_price_inclusions",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی بگ‌دار",
+      "models": [
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "bag_standard_price_inclusions",
+      "kind": "fact",
+      "text": {
+        "fa": "قیمت محصول بگ‌دار شامل چاپ چهاررنگ استاندارد بگ و دسته‌ها/روبان استاندارد است؛ طلاکوب سفارشی روبان، حمل و کارتن جزو این شمول نیستند.",
+        "ar": "سعر منتج الجرّارة مع كيس يشمل طباعة الكيس القياسية بأربعة ألوان والمقابض والشريط القياسي؛ لا يشمل الطباعة الذهبية الخاصة على الشريط أو أجور الشحن والكرتون."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O16"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "design_services",
+        "printing_surfaces"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O17:logo_inputs",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "logo_inputs",
+      "kind": "fact",
+      "text": {
+        "fa": "مشتری فایل لوگو و در صورت نیاز نشانی اینستاگرام، آدرس فروشگاه یا تلفن را می‌فرستد؛ درج تماس تابع فضای کافی و خوانایی است.",
+        "ar": "يرسل الزبون ملف الشعار وبيانات إنستغرام أو العنوان أو الهاتف عند الحاجة؛ إدراجها مشروط بالمساحة والوضوح."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O17"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "design_services"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O17:bag_design_approval",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی بگ‌دار",
+      "models": [
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "bag_design_approval",
+      "kind": "fact",
+      "text": {
+        "fa": "پس از سفارش و تأیید بیعانه توسط مسئول مجاز، طراحی بگ انجام و برای تأیید مشتری ارسال می‌شود؛ AI دریافت وجه را تأیید نمی‌کند.",
+        "ar": "بعد الطلب وتأكيد العربون من المسؤول المخوّل، يُصمّم الكيس ويُرسل للزبون للموافقة؛ الذكاء الاصطناعي لا يؤكّد استلام المال."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O17"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "design_services"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O17:other_logo_process",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [
+        "2 تکه",
+        "3 تکه",
+        "3 تکه کج",
+        "کشویی روبان‌دار",
+        "کشویی کج"
+      ],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "other_logo_process",
+      "kind": "fact",
+      "text": {
+        "fa": "در مدل‌های غیر بگ‌دار اگر لوگو قابل چاپ نباشد اطلاع داده می‌شود؛ وگرنه طبق استاندارد چاپ می‌شود و تأیید طرح جدا الزامی نیست.",
+        "ar": "في غير موديل الكيس يُبلّغ الزبون إن كان الشعار غير قابل للطباعة؛ وإلا يُطبع حسب المعيار، ولا تلزم موافقة تصميم منفصلة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O17"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "design_services"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O17:website_logo_preview",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "website_logo_preview",
+      "kind": "fact",
+      "text": {
+        "fa": "مشتری می‌تواند لوگو را روی مدل و سایز انتخابی در سایت پیش‌نمایش کند؛ پیش‌نمایش با تأیید نهایی طراحی بگ یکسان نیست.",
+        "ar": "يمكن معاينة الشعار على الموديل والقياس المختارين بالموقع؛ المعاينة ليست الموافقة النهائية على تصميم الكيس."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O17"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "design_services"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": true,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O21:sample_policy",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "sample_policy",
+      "kind": "fact",
+      "text": {
+        "fa": "نمونه استاندارد یا تکیِ مدل‌های معمول ارائه نمی‌شود؛ سفارش اختصاصی خارج از سایز استاندارد با تیراژ متفاوت فقط موردی بررسی می‌شود و نمونه یا قیمت تضمین نیست.",
+        "ar": "لا تُقدّم عيّنة قياسية أو مفردة للموديلات المعتادة؛ الطلب الخاص خارج القياسات القياسية وبكمية مختلفة يُدرس حالةً بحالة، بلا ضمان عيّنة أو سعر."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O21"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "sample_policy"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O21:historical_marketing_claims",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "historical_marketing_claims",
+      "kind": "owner_description",
+      "text": {
+        "fa": "ادعای «اولین تولیدکننده خاورمیانه» و «مرجع قیمت‌گذاری» اظهارات مالک‌اند؛ بدون مدرک مستقل، واقعیت تاریخی یا تبلیغ قطعی محسوب نمی‌شوند.",
+        "ar": "ادّعاء «أول منتج في الشرق الأوسط» و«مرجع التسعير» منسوب للمالك؛ بلا دليل مستقل لا يُقدّم كحقيقة تاريخية أو إعلان قطعي."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O21"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "OWNER_ATTRIBUTION_ONLY_NOT_INDEPENDENT_PROOF"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O22:order_change_window",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "order_change_window",
+      "kind": "fact",
+      "text": {
+        "fa": "مهلت معمول تغییر سفارش سه روز کاری پس از ثبت است؛ این بازه مجوز لغو یا بازپرداخت خودکار نیست.",
+        "ar": "المهلة المعتادة لتعديل الطلب ثلاثة أيام عمل بعد التسجيل؛ ليست إذناً تلقائياً بالإلغاء أو ردّ المال."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O22"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "order_change"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O22:late_order_change",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "late_order_change",
+      "kind": "fact",
+      "text": {
+        "fa": "پس از مهلت معمول، وضعیت شروع تولید استعلام می‌شود؛ اگر تولید شروع نشده باشد، تغییر سایز، مدل یا رنگ با هماهنگی مجموعه قابل بررسی است.",
+        "ar": "بعد المهلة المعتادة يُستعلم عن بدء الإنتاج؛ إن لم يبدأ، يمكن دراسة تغيير القياس أو الموديل أو اللون بالتنسيق مع المجموعة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O22"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "order_change"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O22:order_cancellation",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "order_cancellation",
+      "kind": "fact",
+      "text": {
+        "fa": "اگر سفارش تولید یا چاپ شده باشد، لغو مجاز نیست، حتی اگر لوگو ارسال نشده باشد؛ شروع‌نشدن تولید/چاپ را فقط مسئول مجاز بررسی می‌کند.",
+        "ar": "إذا صُنّع الطلب أو طُبع فلا يُسمح بإلغائه ولو لم يُرسل الشعار؛ المسؤول المخوّل وحده يتحقّق من عدم بدء الإنتاج أو الطباعة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O22"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "order_change"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O22:refund_authority",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "refund_authority",
+      "kind": "fact",
+      "text": {
+        "fa": "فقط پس از تأیید لغو مجاز پیش از شروع تولید/چاپ، بیعانه به حساب مشتری برگردانده می‌شود؛ بررسی و اجرای بازپرداخت با مسئول مجاز است، نه AI.",
+        "ar": "فقط بعد موافقة المسؤول على إلغاء مسموح قبل بدء الإنتاج أو الطباعة يُعاد العربون لحساب الزبون؛ التحقّق والتنفيذ للمسؤول المخوّل، لا للذكاء الاصطناعي."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O22"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "order_change"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O23:damage_contact_process",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "damage_contact_process",
+      "kind": "fact",
+      "text": {
+        "fa": "برای آسیب، مشکل چاپ یا مغایرت، مشتری با مجموعه تماس می‌گیرد؛ موضوع موردی با گفت‌وگو بررسی می‌شود و جبران، تعویض یا بازپرداخت از پیش تضمین نیست.",
+        "ar": "عند الضرر أو مشكلة الطباعة أو عدم المطابقة يتواصل الزبون مع المجموعة؛ تُراجع الحالة بالحوار ولا يُضمن مسبقاً تعويض أو استبدال أو ردّ مبلغ."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O23"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "damage_policy",
+        "returns"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O24:quality_replacement",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "commercial_policy",
+      "attribute": "quality_replacement",
+      "kind": "fact",
+      "text": {
+        "fa": "ضمانت مدت‌دار عمومی وجود ندارد؛ اگر پایین‌بودن کیفیت تعدادی از جعبه‌ها نسبت به استاندارد مجموعه تأیید شود، همان تعداد تعویض می‌شوند.",
+        "ar": "لا يوجد ضمان عام محدّد المدة؛ إذا تأكّد أن جودة عدد من العلب دون معيار المجموعة، يُستبدل العدد المتأثّر نفسه."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O24"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": true,
+      "features": [
+        "warranty"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O24:quality_occurrence_description",
+      "market": null,
+      "product_family": null,
+      "model": null,
+      "models": [],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "quality_occurrence_description",
+      "kind": "owner_description",
+      "text": {
+        "fa": "مالک گفته موارد افت کیفیت نادر است؛ این توصیف، نرخ آماری مستقل یا تضمین بی‌عیب‌بودن نیست.",
+        "ar": "يذكر المالك أن حالات انخفاض الجودة نادرة؛ هذا ليس معدّلاً إحصائياً مستقلاً أو ضماناً لخلوّ المنتج من العيوب."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O24"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED",
+        "OWNER_ATTRIBUTION_ONLY_NOT_INDEPENDENT_PROOF"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    },
+    {
+      "id": "P50:O06:bag_lid_monochrome",
+      "market": null,
+      "product_family": null,
+      "model": "کشویی بگ‌دار",
+      "models": [
+        "کشویی بگ‌دار"
+      ],
+      "size": null,
+      "topic": "product_knowledge",
+      "attribute": "bag_lid_monochrome",
+      "kind": "fact",
+      "text": {
+        "fa": "چاپ روی درب بگ‌دار تک‌رنگ و از نوع طلاکوب، نقره‌کوب یا مشکی‌کوب است؛ این محدودیت چاپ، رنگ روکش جعبه را تعیین نمی‌کند.",
+        "ar": "الطباعة على غطاء موديل الكيس بلون واحد: ذهبية أو فضية أو سوداء؛ هذا قيد للطباعة ولا يحدّد لون تغليف العلبة."
+      },
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O06"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "commercial": false,
+      "features": [
+        "printing_types",
+        "printing_surfaces"
+      ],
+      "status": "OWNER_CONTENT_CONFIRMED_MARKET_UNRESOLVED",
+      "blockers": [
+        "MARKET_SCOPE_UNRESOLVED"
+      ],
+      "renewal_of_rejected_proposals": [],
+      "unit_pending": null,
+      "description_attribution": null,
+      "limitations": [],
+      "requires_independent_site_verification": false,
+      "automatic_activation": false
+    }
+  ],
+  "already_approved_confirmations": [
+    {
+      "clause_id": "P50:O14:independent_part_colors",
+      "market": "IRAN",
+      "source": {
+        "type": "DIRECT_OWNER_INSTRUCTION",
+        "library_file_id": "libfile_31c37477261c8191a20c5b4622060e87",
+        "read_text_sha256": "19a11f6d851545d24e7a77f93aa807323a99535a9348e809e8387f9abeaf40f8",
+        "sections": [
+          "O14"
+        ],
+        "date": "2026-11-10",
+        "note": "New statement only; no old rejection status changed."
+      },
+      "status": "ALREADY_APPROVED_NO_DUPLICATE_IMPORT",
+      "existing_ids": [
+        "FACT:knowledge-fact-teach-1ce903dc44bd3ce041e4-02",
+        "FACT:knowledge-fact-teach-c89f1e90fdb7948241ce-09"
+      ]
+    }
+  ],
+  "requirements": [
+    "Owner phase B approval",
+    "Fresh source HEAD/version/table-hash CAS preflight",
+    "Pinned target fact/version",
+    "Per-proposal review and owner authorization for commercial rules",
+    "Apply through existing service only after approval; no public preview in phase A because it bootstraps DDL",
+    "Never use GLOBAL for an unresolved market",
+    "No price changes/no new customer financial authority"
+  ]
+}

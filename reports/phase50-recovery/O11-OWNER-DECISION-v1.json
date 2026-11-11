@@ -1,0 +1,28 @@
+{
+  "schema": "hamzehi.owner-decision-evidence.v1",
+  "id": "PHASE50B-RECOVERY-O11-20261111-v1",
+  "version": 1,
+  "source": "Explicit owner instruction in this conversation: PHASE 50-B RECOVERY & COMPLETION, section 2",
+  "record_type": "NON_EXECUTABLE_OWNER_DECISION_EVIDENCE_NOT_IMPORT_PAYLOAD",
+  "execution_permitted": false,
+  "scope": {
+    "model": "کشویی بگ‌دار",
+    "sizes": "ALL_AND_ONLY_SIZES_WITH_APPROVED_BASE_PRICES",
+    "service": "CUSTOM_PRINTING_ON_RIBBON",
+    "optional": true,
+    "customer_request_required": true,
+    "excluded": "کشویی روبان‌دار and every other model"
+  },
+  "market_rates": [
+    {"market": "IRAN", "amount_decimal": "6000", "currency": "TOMAN", "unit": "PER_BOX"},
+    {"market": "ARAB", "amount_decimal": "0.30", "currency": "USD", "unit": "PER_BOX"}
+  ],
+  "standard_ribbon": "INCLUDED_IN_APPROVED_BASE_PRICE",
+  "standard_four_color_bag_printing": "INCLUDED_IN_APPROVED_BASE_PRICE",
+  "base_price_changes": false,
+  "discount_effect": "UNKNOWN",
+  "deposit_effect": "UNKNOWN",
+  "historical_O11_and_41_HOLD": "PRESERVE_UNCHANGED",
+  "market_approval": "CONFIRMED_BOTH_MARKETS",
+  "import_status": "BLOCKED_BY_UNSUPPORTED_SAFE_OPTIONAL_SERVICE_SCHEMA_AND_CONSUMER"
+}
