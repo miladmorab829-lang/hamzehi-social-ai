@@ -9,10 +9,15 @@ export function claimEntities(text,options={}){
  const {facts=[],catalog=[],selectedProductKey=null}=options;
  const models=options._index?.models||[...new Set([...catalog.flatMap(c=>c.models||c.variants?.map(v=>v.configuration)||[]),...facts.map(entityOf).filter(value=>value&&modelLike(value))])];
  const products=options._index?.products||[...new Set([...catalog.map(c=>c.product),...facts.map(entityOf)].filter(value=>value&&normal(value)!=='global'))];
- const specific=list=>list.filter(name=>!list.some(other=>other!==name&&normal(other).length>normal(name).length&&includes(other,name)));
+ const subjectKey=value=>normal(value).replace(/^مدل\s+/u,'');
+ // "مدل کشویی" is a parent of "کشویی بگ‌دار", not a second product claim.
+ const specific=list=>list.filter(name=>!list.some(other=>other!==name&&(subjectKey(other).length>subjectKey(name).length&&includes(subjectKey(other),subjectKey(name))||subjectKey(other)===subjectKey(name)&&normal(other).length<normal(name).length)));
  const found=specific(models.filter(name=>includes(text,name)));
  if(found.length)return found;
  const families=specific(products.filter(name=>includes(text,name)));if(families.length)return families;
+ // A pronoun followed by an indefinite predicate continues the established
+ // subject ("این مدل یه بگ ... داره"); it does not name a new model.
+ if(/(?<!\p{L})(?:این|همین|آن|اون|هذا|هذه)\s+(?:مدل|جعبه|علبه|مودیل)\s+(?:یه|یک)(?!\p{L})/u.test(normal(text)))return [];
  const explicit=normal(text).match(/(?:^|\s)(?:جعبه|مدل|علبه|مودیل)\s+(.+?)(?=\s+(?:از|با|دارای|دارد|داره|ساخته|بسته|باز|موجود|مصنوع|مجهز)|$)/u)?.[1];
  if(explicit&&!/^(?:از|با|دارای|ساخته|بسته|باز)(?:\s|$)/u.test(explicit))return [explicit];
  const selected=catalog.find(c=>c.key===selectedProductKey);return selected?[selected.product]:[];
@@ -32,8 +37,21 @@ const affirmative=/(?<!\p{L})(?:است|هست|هستند|دارد|دارند|د�
 const gap=/(?:اطلاعات|توضیح|شرح|جزئیات|مکانیزم|معلومات|تفاصیل).*(?:ندارم|کافی ندار|کامل نیست|کامل ندار|مو واضح|مو کامله|ما عندی|نیست)|ما عندی.{0,30}(?:معلومات|تفاصیل|شرح)|(?:مناسب|قیاس|ابعاد|اندازه).*(?:مشخص|معلوم|روشن|تاییدشده) نیست|(?:مو|ما) متاکد\p{L}*.*(?:قیاس|یناسب)/u;
 const uncertainFitFrame=value=>!affirmative.test(value.replace(/(?<!\p{L})(?:یناسب|مناسبه|مناسب)(?!\p{L})/gu,' '))&&(/^(?:مناسب بودن|قیاس|ابعاد|اندازه).*(?:مشخص|معلوم|روشن|تاییدشده) نیست$/u.test(value)||/^(?:(?:بس|بعدنا|هنوز)\s+)*(?:مو|ما) متاکد\p{L}*.*(?:قیاس|یناسب)/u.test(value));
 const negativeFeature=value=>/(?:ندارد|ندارن|نداره|نیست|نمی\s*(?:شه|شود|تونه|توان)|ما\s*(?:تگدر|تکدر|یمکن|بیها|عدنا)|مو\s*(?:متوفر|موجود)|لا\s*یمکن)/u.test(normal(value));
-function assertionClauses(text){
- return String(text||'').split(/(?<=[.!؟?؛;\n])\s+|[،,]|\s+(?:ولی|اما|لکن|و?لكن(?:ها|ه|هم|هن)?|بس)\s+/u).flatMap(clause=>{
+function assertionClauses(text,options={}){
+ return String(text||'').split(/(?<=[.!؟?؛;\n])\s+|\s+(?:ولی|اما|لکن|و?لكن(?:ها|ه|هم|هن)?|بس)\s+/u).flatMap(sentence=>{
+  const clauses=[];
+  for(const part of sentence.split(/[،,]/u)){
+   const value=normal(part);
+   // List continuations inherit their preceding predicate. Splitting "می‌شه طرح،
+   // اطلاعات یا پترن ... چاپ کرد" must not hide an unsupported printing method.
+   const separateQuestion=/[؟?]\s*$|^(?:چه|کدام|کدوم|چند|آیا|هل|شنو|كم|what|which|how)(?!\p{L})/iu.test(part.trim());
+   const separateSubject=claimEntities(part,{...options,selectedProductKey:null}).length>0;
+   const precedingGap=clauses.length&&gap.test(normal(clauses[clauses.length-1]));
+   if(clauses.length&&!precedingGap&&!separateQuestion&&!separateSubject&&!affirmative.test(value)&&!negativeFeature(value)&&!gap.test(value))clauses[clauses.length-1]+='، '+part;
+   else clauses.push(part);
+  }
+  return clauses;
+ }).flatMap(clause=>{
   // Split a coordinated disclaimer/assertion, not ordinary lists of attributes.
   // A knowledge gap never exempts an independently asserted feature beside it.
   const parts=normal(clause).split(/\s+و\s*/u);
@@ -47,14 +65,18 @@ export function isExclusiveKnowledgeGap(text){
 }
 const stem=word=>normal(word).replace(/^(?:ال)(?=.{3})/u,'').replace(/(.{3,})(?:هایی|های|شون|تون|تان|ها)$/u,'$1');
 for(const word of 'پیشنهاد توصیه ترجیح اولیه میکنم کنم دهم بین وجود تایید مودیل چون بنابراین دلیل همین منظور مدنظر درخواست خواسته نظر ظاهر شیک زیبایی امکانش میتونید داشته باشید بله سلام مثلا طباعة طباعه طلبتها اللي تخص اقتراح اقتراحي انصح انصحک اول من ناحیه حتی اذا لان'.split(' '))stop.add(word);
+// Discourse/preference words carry no material, mechanism or commercial authority.
+for(const word of 'دلیلش اینه عنوان'.split(' '))stop.add(word);
 export function productAssertionIssue(text,{authoritativeFacts=[],catalog=[],selectedProductKey=null,requireEvidence=false}={}){
- const facts=authoritativeFacts,options={facts,catalog,selectedProductKey,_index:{models:[...new Set([...catalog.flatMap(c=>c.models||c.variants?.map(v=>v.configuration)||[]),...facts.map(entityOf).filter(value=>value&&modelLike(value))])],products:[...new Set([...catalog.map(c=>c.product),...facts.map(entityOf)].filter(value=>value&&normal(value)!=='global'))],factModels:new WeakMap()}};let previous=[];
+ const facts=authoritativeFacts,options={facts,catalog,selectedProductKey,_index:{models:[...new Set([...catalog.flatMap(c=>c.models||c.variants?.map(v=>v.configuration)||[]),...facts.map(entityOf).filter(value=>value&&modelLike(value))])],products:[...new Set([...catalog.map(c=>c.product),...facts.map(entityOf)].filter(value=>value&&normal(value)!=='global'))],factModels:new WeakMap()}};let previous=[],explicitScope=false;
  // Build polarity and scope indexes once per validation. Nothing is cached across
  // turns/customers, and a source that changes gets a new independent validation.
  const eligibleByPolarity=[false,true].map(negative=>facts.filter(fact=>['capability','material','availability','color','size'].includes(fact.category)).map(fact=>({...fact,values:(fact.values||[]).filter(value=>negativeFeature(value)===negative)})));
- for(const clause of assertionClauses(text)){
-  const entities=claimEntities(clause,options);if(entities.length)previous=entities;
-  const subjects=entities.length?entities:previous;
+ for(const clause of assertionClauses(text,options)){
+  const entities=claimEntities(clause,{...options,selectedProductKey:null});
+  if(entities.length){previous=entities;explicitScope=true;}
+  if(!entities.length&&/(?<!\p{L})(?:این|همین|ان|اون)\s+(?:دو|چند|همه)\s+مدل/u.test(normal(clause))){previous=[];explicitScope=true;}
+  const subjects=entities.length?entities:explicitScope?previous:claimEntities(clause,options);
   const normalized=normal(clause),risk=[...normalized.matchAll(risky)].map(match=>normal(match[0]));
   const assertion=epistemicAssertion(normalized);
   if(gap.test(normalized)&&!affirmative.test(assertion))continue;
@@ -74,6 +96,9 @@ export function productAssertionIssue(text,{authoritativeFacts=[],catalog=[],sel
   // validation. Descriptive construction assertions need evidence of their attributes.
   if(!requireEvidence&&!modelLike(subjects.join(' '))&&!/ساخته|جنس|مصنوع|بسته|باز|دارای|مجهز|مزود/u.test(normalized))continue;
   let content=normal(typedSpecifications(clause).scalar);
+  // A customer's desired design is not a new printing method or a custom size.
+  // Keep "دلخواه" factual everywhere except as this evidenced design modifier.
+  if(/چاپ|طبع/u.test(normalized))content=content.replace(/((?:طرح|اطلاعات|پترن)\s+)دلخواه(?:تون|تان|شون)?(?!\p{L})/gu,'$1');
   for(const subject of subjects)content=content.replaceAll(normal(subject),' ');
   const terms=[...new Set(content.split(' ').map(stem).filter(word=>word.length>=3&&!stop.has(word)&&!/^\d+$/.test(word)))];
   for(const subject of subjects){

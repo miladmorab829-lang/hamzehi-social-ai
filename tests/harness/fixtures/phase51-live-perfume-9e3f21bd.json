@@ -1,0 +1,267 @@
+{
+  "kind": "CAPTURED_PRODUCTION_NORMALIZED_PROVIDER_DECISION_NOT_RAW_HTTP",
+  "inbox_id": "9e3f21bd-3857-4e7d-be34-a185d0d1d1df",
+  "question": "برای بسته‌بندی عطر دنبال جعبه شیکم، چه مدلی پیشنهاد می‌کنی و دلیلش چیه؟",
+  "commit": "8c3b434f03d23a3f5865cc0446d621dc296f454e",
+  "worker_version": "eb80fbb9-70c2-4986-84cd-743b1b8d3791",
+  "source_fingerprint": "1af7b854212ac7e9710781cb3286d67c7f2ed881454cab3995f02381e42de1fc",
+  "provider": "claude-opus-5-5",
+  "primary": {
+    "ok": true,
+    "model": "claude-opus-5-5",
+    "returned_model": "claude-opus-5-5",
+    "decision": {
+      "semantics": {
+        "mode": "browse",
+        "quantity_role": "none",
+        "deal_reference": "none",
+        "repeat_requested": false
+      },
+      "requests": [
+        "product_info"
+      ],
+      "interpretation": {
+        "primary_intent": "product_info",
+        "product_key": null,
+        "reference": "none",
+        "requested_size": null,
+        "requested_color": [],
+        "requested_structure": null,
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": null,
+        "model": null,
+        "size": null,
+        "destination": null,
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [
+        "تناسب ابعاد جعبه‌ها با شیشه عطر"
+      ],
+      "summary_update": null,
+      "reply": "اگه دنبال یه بسته‌بندی شیک و برنددار برای عطرتون هستید، کشویی بگ‌دار رو پیشنهاد می‌کنم؛ چون علاوه بر چاپ طلاکوب، نقره‌کوب یا مشکی‌کوب روی درب و بدنهٔ میانی، روی بگ بیرونی‌ش هم می‌شه طرح، اطلاعات یا پترن دلخواهتون رو چاپ کرد و ظاهر کار خیلی حرفه‌ای‌تر می‌شه. فقط اطلاعات دقیقی درباره تناسب ابعاد این جعبه‌ها با شیشه عطر ندارم؛ مدل‌ها رو در https://www.hamzehibox.com ببینید و اگه یکی به نظرتون مناسب اومد، اسم یا عکسش رو همین‌جا بفرستید.",
+      "reply_colors": []
+    }
+  },
+  "author": {
+    "flight_key": "inbox:9e3f21bd-3857-4e7d-be34-a185d0d1d1df:reply_author",
+    "status": "succeeded",
+    "ok": true,
+    "model": "claude-opus-5-5",
+    "returned_model": "claude-opus-5-5",
+    "decision": {
+      "semantics": {
+        "mode": "browse",
+        "quantity_role": "none",
+        "deal_reference": "none",
+        "repeat_requested": false
+      },
+      "requests": [
+        "product_info"
+      ],
+      "interpretation": {
+        "primary_intent": "product_info",
+        "product_key": null,
+        "reference": "none",
+        "requested_size": null,
+        "requested_color": [],
+        "requested_structure": null,
+        "requested_printing": null,
+        "quantity": null,
+        "ambiguity": "none",
+        "confidence": "high"
+      },
+      "facts": {
+        "quantity": null,
+        "product": null,
+        "model": null,
+        "size": null,
+        "destination": "تهران",
+        "customer_name": null,
+        "colors": [],
+        "color_parts": [],
+        "unknown_colors": [],
+        "color_statement": "none",
+        "negated_colors": []
+      },
+      "acceptance": false,
+      "rejection": false,
+      "owner_escalation_needed": false,
+      "escalation_reason": null,
+      "missing_information": [
+        "perfume_bottle_fit"
+      ],
+      "summary_update": null,
+      "reply": "برای یه بسته‌بندی شیک و برنددار، مدل کشویی بگ‌دار رو پیشنهاد می‌کنم.\nدلیلش اینه که این مدل یه بگ به‌عنوان لایهٔ بیرونی داره. روی بگ بیرونی می‌شه طرح، اطلاعات یا پترن دلخواهتون رو چاپ کرد و روی درب و بدنهٔ میانی هم چاپ طلاکوب، نقره‌کوب یا مشکی‌کوب انجام می‌شه. یعنی برندتون از چند سطح جعبه دیده می‌شه و ظاهر کار هم جلوه‌دار درمیاد.\nفقط اینو صادقانه بگم که اطلاعات دقیقی درباره تناسب ابعاد این جعبه‌ها با شیشه عطر ندارم و نمی‌تونم بگم شیشه داخلش جا می‌شه یا نه. مدل‌ها رو در https://www.hamzehibox.com ببینید و اگه یکی به نظرتون مناسب اومد، اسم یا عکسش رو همین‌جا بفرستید تا دقیق‌تر بررسی کنیم.",
+      "reply_colors": []
+    }
+  },
+  "redactions": [
+    "Only primary.decision.summary_update is cleared; unrelated earlier customer history is unnecessary for factual/delivery regression. Final author decision and reply are unchanged."
+  ],
+  "approved_facts": [
+    {
+      "id": "knowledge-fact-owner-telegram-20261109-06",
+      "entity_key": "global",
+      "attribute": "included_services_lid_spec",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"چاپ درب\",\"طلاکوب\",\"نقره‌کوب\",\"مشکی‌کوب\",\"لوگو\"],\"kind\":\"capability\",\"labels\":{\"fa\":\"چاپ رایگان روی درب\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"چاپ روی درب جعبه به انتخاب مشتری طلاکوب، نقره‌کوب یا مشکی‌کوب است و رایگان انجام می‌شود.\"}"
+    },
+    {
+      "id": "knowledge-fact-owner-telegram-20261109-08",
+      "entity_key": "global",
+      "attribute": "lid_contact_layout",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"زیر لوگو\",\"آدرس\",\"تلفن\",\"اینستاگرام\",\"خوانایی\"],\"kind\":\"capability\",\"labels\":{\"fa\":\"اطلاعات زیر لوگوی درب\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"زیر لوگوی روی درب می‌توان آدرس، شماره تلفن و آدرس اینستاگرام را درج کرد، به شرط فضای کافی و حفظ ظاهر و خوانایی طرح.\"}"
+    },
+    {
+      "id": "knowledge-fact-owner-telegram-20261109-10",
+      "entity_key": "global",
+      "attribute": "bag_drawer_print_surfaces",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"کشویی بگ‌دار\",\"بدنه میانی\",\"بگ\",\"پترن\",\"چاپ\"],\"kind\":\"capability\",\"labels\":{\"fa\":\"محل‌های چاپ کشویی بگ‌دار\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"در کشویی بگ‌دار، چاپ طلاکوب، نقره‌کوب یا مشکی‌کوب روی درب و بدنهٔ میانی و چاپ طرح، اطلاعات یا پترن روی بگِ لایهٔ بیرونی امکان‌پذیر است.\"}"
+    },
+    {
+      "id": "knowledge-fact-owner-telegram-20261109-12",
+      "entity_key": "global",
+      "attribute": "color_selection_website",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"انتخاب رنگ\",\"رنگ\",\"مدل\",\"سایت\",\"تلگرام\"],\"kind\":\"rule\",\"labels\":{\"fa\":\"راهنمای انتخاب رنگ از سایت\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"اگر پاسخ دقیق درباره رنگ نداری، مشتری را به https://www.hamzehibox.com بفرست تا رنگ و مدل را انتخاب کند و نام یا تصویر انتخابش را در تلگرام بفرستد.\"}"
+    },
+    {
+      "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-01",
+      "entity_key": "مدل ۲ تکه",
+      "attribute": "independent_sections",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"مدل ۲ تکه\",\"رویه\",\"کف\",\"بخش مستقل\"],\"kind\":\"fact\",\"labels\":{\"en\":\"Independent sections of 2-piece model\",\"fa\":\"بخش‌های مستقل مدل ۲ تکه\"},\"multi\":true,\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"رویه\"}"
+    },
+    {
+      "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-05",
+      "entity_key": "مدل ۳ تکه",
+      "attribute": "independent_sections",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"مدل ۳ تکه\",\"بالا\",\"وسط\",\"پایین\",\"بخش مستقل\"],\"kind\":\"fact\",\"labels\":{\"en\":\"Independent sections of 3-piece model\",\"fa\":\"بخش‌های مستقل مدل ۳ تکه\"},\"multi\":true,\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"پایین\"}"
+    },
+    {
+      "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-07",
+      "entity_key": "مدل کشویی",
+      "attribute": "independent_sections",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"مدل کشویی\",\"بیرونی\",\"داخل\",\"بخش مستقل\"],\"kind\":\"fact\",\"labels\":{\"en\":\"Independent sections of sliding model\",\"fa\":\"بخش‌های مستقل مدل کشویی\"},\"multi\":true,\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"داخل\"}"
+    },
+    {
+      "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-11",
+      "entity_key": "مدل ۳ تکه",
+      "attribute": "recommended_color_combination",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"ترکیب پیشنهادی رنگ\",\"بالا و پایین یک‌رنگ\",\"وسط رنگ دیگر\",\"مدل ۳ تکه\"],\"kind\":\"relation\",\"labels\":{\"en\":\"Recommended color combination for 3-piece model\",\"fa\":\"ترکیب رنگ پیشنهادی مدل ۳ تکه\"},\"priority\":50,\"relation\":{\"members\":{\"بالا\":\"یک‌رنگ\",\"وسط\":\"رنگ دیگر\",\"پایین\":\"یک‌رنگ\"},\"name\":\"recommended_combination\"},\"schema\":\"hamzehi.knowledge.v1\",\"value\":true}"
+    },
+    {
+      "id": "knowledge-fact-teach-c89f1e90fdb7948241ce-12",
+      "entity_key": "مدل ۳ تکه",
+      "attribute": "recommended_combination_is_optional",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "{\"commercial\":false,\"conditions\":[],\"keywords\":[\"ترکیب اجباری نیست\",\"ترکیب پیشنهادی\",\"انتخاب رنگ مدل ۳ تکه\"],\"kind\":\"rule\",\"labels\":{\"en\":\"Recommended combination is optional\",\"fa\":\"اختیاری بودن ترکیب پیشنهادی\"},\"priority\":50,\"schema\":\"hamzehi.knowledge.v1\",\"value\":\"ترکیب پیشنهادی «بالا و پایین یک‌رنگ + وسط رنگ دیگر» اجباری نیست.\"}"
+    }
+  ],
+  "approved_printing_methods": [
+    {
+      "id": "knowledge-fact-printing-2185e1a02da1f54c1c7d9c29f66f4904",
+      "domain": "printing",
+      "entity_key": "global",
+      "attribute": "type",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "\"مشکی‌کوب\""
+    },
+    {
+      "id": "knowledge-fact-printing-cc423e71020926c592f25d3e871f9c45",
+      "domain": "printing",
+      "entity_key": "global",
+      "attribute": "type",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "\"طلاکوب\""
+    },
+    {
+      "id": "knowledge-fact-printing-db4e6818e2bc6a03c0fc5674a679c9cc",
+      "domain": "printing",
+      "entity_key": "global",
+      "attribute": "type",
+      "market": "IRAN",
+      "version": 1,
+      "status": "active",
+      "authority": "owner_approved",
+      "value_json": "\"نقره‌کوب\""
+    }
+  ],
+  "expected_baseline_rejection": {
+    "valid": false,
+    "reason": "unsupported_factual_claim",
+    "claim_category": "printing",
+    "unsupported_values": [
+      "چاپ"
+    ],
+    "unsupported_claims": [
+      {
+        "category": "printing",
+        "values": [
+          "چاپ"
+        ]
+      }
+    ]
+  },
+  "historical_owner_metrics": {
+    "reported_ai_calls": 1,
+    "ai_author_ms": 10093,
+    "total_processing_ms": 36517,
+    "customer_visible": "none",
+    "outcome": "ai_reply_unavailable"
+  },
+  "live_read_rows_written": 0
+}

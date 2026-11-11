@@ -8172,18 +8172,27 @@ function salesBrainBusinessClaims(text,config={}){
   const {catalog=[]}=config;
   const claimTerms={product:/(?:\b(?:model|product|box|case|collection)\b|مدل|محصول|جعبه|علبة|موديل|منتج)/iu,color:/(?:\b(?:navy|blue|red|green|black|white|cream|gold|silver|burgundy|interior|exterior|colour|color)\b|رنگ|سرمه[‌ای ]|قرمز|داخلی|خارجی|لون|كحلي|أحمر|داخلي|خارجي)/iu,material:/(?:\b(?:leather|wood|metal|velvet|cardboard|paper|material)\b|چرم|چوب|فلز|مخمل|مقوا|جنس|جلد|خشب|معدن|مادة)/iu,size:/(?:\b(?:size|dimension|dimensions|measurement|compatible)\b|اندازه|ابعاد|سایز|مقاس|أبعاد)/iu,printing:/(?:\b(?:foil|foiling|stamp(?:ing)?|printing|print|logo|branding)\b|چاپ|طلاکوب|فویل|لوگو|برند|فويل|طباعة|شعار)/iu,capability:/(?:\b(?:custom(?:ization| configuration)?|configuration|capability|option)\b|سفارشی|شخصی[‌ ]سازی|پیکربندی|قابلیت|تخصیص|تخصيص|مخصص|إمكانية)/iu,moq:/(?:\b(?:moq|minimum order|minimum quantity|quantity restriction|pieces)\b|حداقل سفارش|حداقل تعداد|موک|تعداد|الحد الأدنى|كمية)/iu,price:/(?:\b(?:price|unit price|total price|currency)\b|قیمت|سعر|ارز)/iu,discount:/(?:\b(?:discount|percentage)\b|تخفیف|درصد|خصم|نسبة)/iu,payment:/(?:\b(?:deposit|payment|bank transfer|cash|payment terms|commercial terms)\b|بیعانه|ودیعه|پرداخت|انتقال بانکی|شرایط پرداخت|عربون|دفع|(?:ال)?تحويل (?:ال)?بنكي|نقد|شروط الدفع)/iu,production:/(?:\b(?:production|manufacture|completion|production time|production date)\b|تولید|زمان تولید|تاریخ تولید|انتاج|تصنيع|مدة الإنتاج)/iu,shipping:/(?:\b(?:shipping|ship|delivery|air|ground|courier|baghdad|destination)\b|ارسال|تحویل|هوایی|زمینی|بغداد|شحن|توصيل|جوي|بري)/iu},phrases={material:/(?:leather|wood|metal|velvet|cardboard|paper|چرم|چوب|فلز|مخمل|مقوا|جلد|خشب|معدن|مادة)/giu,color:/(?:navy|blue|red|green|black|white|cream|gold|silver|burgundy|interior|exterior|سرمه(?:[‌ ]?ای)?|قرمز|داخلی|خارجی|كحلي|أحمر|داخلي|خارجي)/giu,printing:/(?:foil(?:ing)?|stamp(?:ing)?|printing|logo|branding|چاپ|طلاکوب|فویل|لوگو|فويل|طباعة|شعار)/giu,capability:/(?:custom(?:ization| configuration)?|configuration|سفارشی|شخصی[‌ ]سازی|پیکربندی|تخصیص|تخصيص|مخصص)/giu,shipping:/(?:air|ground|courier|baghdad|هوایی|زمینی|بغداد|(?:ال)?جوي|(?:ال)?بري)/giu,payment:/(?:bank transfer|cash|انتقال بانکی|نقد|(?:ال)?تحويل (?:ال)?بنكي)/giu},question=/[؟?]$|^(?:do|what|would|how|are you|can you|آیا|چه|کدام|چند|میشه|می‌شود|ممکن است|هل|شنو|كم|ممكن)/iu,safeRequest=/(?:لطفاً|لطفا).*(?:بفرمایید|ارسال کنید|مشخص کنید)|(?:يرجى|يرجي).*(?:حددوا|ارسلوا|توضحون)/iu,explicitAssertion=/\b(?:is|are|made of|supports?|available|can|we ship|we accept|takes?|costs?|give|offer|deliver(?:y)?|complete)\b|(?:ساخته شده|پشتیبانی می‌کند|موجود|می‌توانیم|ارسال می‌دهیم|انجام می‌دهیم|می‌پذیریم|طول می‌کشد|هزینه|ارائه می‌دهیم|تحویل می‌دهیم|ممکن(?: است)?|انجام\s*می[‌\s]?دیم|انجام\s*میدیم|می[‌\s]?دیم|میدیم|داریم|می[‌\s]?زنیم|میزنیم|می[‌\s]?تونیم|میتونیم|می[‌\s]?شه|میشه|امکانش\s*(?:هست|هم\s*هست)|امکان\s*داره|می[‌\s]?فرستیم|میفرستیم|می[‌\s]?کنیم|میکنیم)|(?:مصنوع من|يدعم|متوفر|يمكن|ممكنة|نوفر|نقبل|يستغرق|تكلفة|نسلم|نسوي|نكدر|نگدر|نقدر|عدنا|اكو|يصير|نطبع|نوصل|نسويها)/iu;
   const claims=[];
+  // Resolve references within this draft only. A sentence about the same model's
+  // printing must retain its subject; a newly named model/question/gap replaces it.
+  let priorEntities=[],explicitScope=false;
   // A dot BETWEEN digits is part of a decimal. All other sentence punctuation still separates assertions,
   // including a question immediately adjoining an assertion without whitespace.
   for(const sentence of String(text||"").match(/(?:[^.!؟?]|(?<=[0-9۰-۹٠-٩])\.(?=[0-9۰-۹٠-٩]))+[.!؟?]?/gu)||[]){
+    const explicit=claimEntities(sentence,{facts:config.authoritativeFacts||[],catalog});
+    if(explicit.length){priorEntities=explicit;explicitScope=true;}
+    // An unresolved plural reference must not fall back to one older selection.
+    if(!explicit.length&&/(?<!\p{L})(?:این|همین|ان|اون)\s+(?:دو|چند|همه)\s+مدل/u.test(salesBrainClaimText(sentence))){priorEntities=[];explicitScope=true;}
+    const entities=explicit.length?explicit:explicitScope?priorEntities:claimEntities(sentence,{facts:config.authoritativeFacts||[],catalog,selectedProductKey:config.selectedProductKey});
     if(question.test(sentence)||safeRequest.test(sentence)||isExclusiveKnowledgeGap(sentence))continue;
-    const typed=typedSpecifications(catalogSpecificationText(sentence,catalog)),entities=claimEntities(sentence,{facts:config.authoritativeFacts||[],catalog,selectedProductKey:config.selectedProductKey});
+    const typed=typedSpecifications(catalogSpecificationText(sentence,catalog));
     if(typed.invalid){claims.push({category:'invalid_numeric_role',values:[]});continue;}
     if(typed.dimensions.length)claims.push({category:'size',values:typed.dimensions,entities});
     if(typed.components.length)claims.push({category:'product',values:typed.components.map(v=>v.match(/\d+/)?.[0]).filter(Boolean),entities});
     const matched=Object.entries(claimTerms).filter(([,pattern])=>pattern.test(sentence)).map(([category])=>category),categories=matched.some(category=>category!=="product")?matched.filter(category=>category!=="product"):matched,numbers=typed.scalar.match(/[0-9۰-۹٠-٩]+/g)||[];
     for(const category of categories){
       const numeric=["moq","price","discount","production","shipping"].includes(category)&&numbers.length>0;
-      if(!explicitAssertion.test(sentence)&&!numeric)continue;
+      const descriptiveAssertion=['printing','material','capability'].includes(category)&&/می[‌\s]?(?:شود|شوند)/u.test(sentence);
+      if(!explicitAssertion.test(sentence)&&!numeric&&!descriptiveAssertion)continue;
       const values=[],add=value=>{const normalized=salesBrainClaimText(value);if(normalized&&!values.includes(normalized))values.push(normalized);};
       // A colour is never a number: digits in a colour sentence describe the product («۳ تکه», 7x9) and are checked by the numeric
       // rule above, so they are not made colour values (they made every «… ۳ تکه … رنگ‌ها …» answer unsupported).
@@ -8220,6 +8229,12 @@ export function validateSalesBrainDraft(draft,options=[]){
   // Blocked: only the claims no fact and no collection supports, each with only the values its closest evidence lacks.
   const unsupported=[];
   for(const claim of salesBrainBusinessClaims(text,{...config,authoritativeFacts:facts})){
+    // Generic metadata such as "مدل" cannot prove that a newly named product
+    // exists. Availability needs its actual catalogue/entity or full fact value.
+    if(claim.category==='product'){
+      const unknown=(claim.entities||[]).filter(entity=>!(config.catalog||[]).some(c=>[c.product,...(c.models||[])].some(name=>salesBrainClaimText(name)===salesBrainClaimText(entity)))&&!facts.some(f=>f.category==='availability'&&(salesBrainClaimText(f.entity_key)===salesBrainClaimText(entity)||(f.values||[]).some(value=>salesBrainPhraseIncluded(value,entity)))));
+      if(unknown.length){unsupported.push({category:'product',values:unknown});continue;}
+    }
     const scoped=['material','printing','capability'].includes(claim.category),subjects=scoped&&claim.entities.length?claim.entities:[null];
     for(const subject of subjects){
       const gaps=units.filter(u=>compatible[claim.category]?.has(u.category)&&(!scoped||factAppliesToEntity(u,subject,{catalog:config.catalog||[],facts}))).map(u=>missing(claim,u)).sort((a,b)=>a.length-b.length);
