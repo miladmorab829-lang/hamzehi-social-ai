@@ -1,6 +1,7 @@
 import { planSalesTurn, policyAllowsOwner, trustedQuantityProjection, policyClarification, commercialLimitReply } from './sales-turn-policy.js';
 import { typedSpecifications, validateReplyParts, catalogVariantAnswer, catalogClaimIssue, replyKey, dimensionKey } from './sales-reply-integrity.js';
-import { approvedGuidanceRequest, approvedServiceRequest, INFORMATION_SLOT, serviceFinancialQuestion, serviceFollowupPromise, serviceCatalogQuestion, unverifiedServiceDetail, loadApprovedGuidance, maskApprovedGuidance, approvedGuidanceCurrent } from "./approved-sales-guidance.js";
+import { approvedGuidanceRequest, approvedServiceRequest, serviceRibbonPrintQuestion, INFORMATION_SLOT, serviceFinancialQuestion, serviceFollowupPromise, serviceCatalogQuestion, unverifiedServiceDetail, loadApprovedGuidance, maskApprovedGuidance, approvedGuidanceCurrent } from "./approved-sales-guidance.js";
+import {validateRibbonFee, RIBBON_MODEL, ribbonModelKey, loadRibbonFee, ribbonFinancialMix} from './optional-ribbon-fee.js';
 import { splitSalesReply, serviceCompanionParts, serviceQuestionField } from './sales-reply-composition.js';
 import { liveDashboardHtml, dashboardRoute } from "./live-dashboard-page.js";
 import { handleAutonomy, runAutonomyScheduled, autonomyMasterGate, reserveAdsAutopilotRun, adsGlobalRunCap, reserveCrmFollowupRun, crmFollowupCap, adsDraftDailyCap, canonicalCurrency, CURRENCY_RULES, MARKET_CURRENCY } from "./autonomy-engine.js";
@@ -6340,9 +6341,10 @@ const SALES_KNOWLEDGE_FIELDS = {
   discount: {rule:"text"},
   sales: {rule:"text"},
   negotiation: {rule:"text",behavior:"text"},
-  pricing: {authority:"pricing_authority"}
+  pricing: {authority:"pricing_authority"},
+  optional_service: {ribbon_printing:"optional_ribbon_fee"}
 };
-const SALES_KNOWLEDGE_COMMERCIAL = new Set(["quantity","production","shipping","deposit","payment","discount","pricing"]);
+const SALES_KNOWLEDGE_COMMERCIAL = new Set(["quantity","production","shipping","deposit","payment","discount","pricing","optional_service"]);
 const SALES_KNOWLEDGE_OPERATIONS = new Set(["ADD","EXPAND","UPDATE","REPLACE","DEACTIVATE","DELETE"]);
 
 function knowledgeSensitive(domain,attribute,type,value) {return SALES_KNOWLEDGE_COMMERCIAL.has(domain)||(type==="generic"&&knowledgeIsCommercial(attribute,value));}
@@ -6393,6 +6395,7 @@ function knowledgeValidateValue(domain,attribute,market,value) {
   const type=knowledgeFieldType(domain,attribute);
   if(!type)throw Error("Unsupported knowledge domain/attribute; final prices belong to the existing price list or owner quote");
   if(type==="generic"){validateKnowledgeEnvelope(value);return type;}
+  if(type==="optional_ribbon_fee"){validateRibbonFee(value,market);return type;}
   if(type==="pricing_authority") {
     if(!((market==="ARAB"&&value==="commercial_price_items")||(market==="IRAN"&&value==="owner_confirmed_quote")))throw Error("Pricing authority cannot be overridden");
   } else if(value!==null) {
@@ -6420,6 +6423,7 @@ async function proposeSalesKnowledge(env,body,context={}) {
   if(!SALES_KNOWLEDGE_OPERATIONS.has(operation))throw Error("Invalid knowledge operation");
   const domain=knowledgeKeyPart(body.domain),entityType=knowledgeKeyPart(body.entity_type),entityKey=knowledgeKeyPart(body.entity_key),attribute=knowledgeKeyPart(body.attribute),market=body.market||"GLOBAL";
   if(!["business","product","model"].includes(entityType)||!["GLOBAL","IRAN","ARAB"].includes(market))throw Error("Invalid entity type or market");
+  if(domain==='optional_service'&&(entityType!=='model'||ribbonModelKey(entityKey)!==ribbonModelKey(RIBBON_MODEL)))throw Error('Optional ribbon fee requires exact model scope');
   const type=knowledgeFieldType(domain,attribute);
   if(!type)throw Error("Unsupported knowledge field; use the existing commercial price list for prices");
   const adding=operation==="ADD"||operation==="EXPAND";
@@ -6611,7 +6615,7 @@ const KNOWLEDGE_TEACH_BODY_BYTES=65536;
 const KNOWLEDGE_DECLARATIVE=/(?:است|هستند|می[‌\s]?باشد|مجاز|ممنوع|دارد|دارند|داریم|ندارد|ندارند|نیست|باشد|شود|بشود|\bis\b|\bare\b|\bonly\b|\bmust\b|\ballowed\b)[\s.!؟?]*$/iu;
 // Words of the operational modules the task planner owns (see autonomy-engine fallbackPlan): a named list that mentions one is a planner command.
 const PLANNER_MODULE_TERMS=/(?:تلگرام|واتساپ|اینستاگرام|اینستا|وبسایت|سایت|لید|تبلیغ|اسپانسر|رپورتاژ|محتوا|پست|استوری|ویدیو|عکس|تصویر|یادگیری|درآمد|فروش|مشتری|\b(?:telegram|whatsapp|instagram|website|crm|ads?|content|story|media|video|photo|learning|revenue)\b)/iu;
-function typedKnowledgeCatalog(){return Object.entries(SALES_KNOWLEDGE_FIELDS).filter(([d])=>d!=="pricing").flatMap(([d,fields])=>Object.entries(fields).map(([a,t])=>`${d}.${a} (${t})`));}
+function typedKnowledgeCatalog(){return Object.entries(SALES_KNOWLEDGE_FIELDS).filter(([d])=>d!=="pricing"&&d!=="optional_service").flatMap(([d,fields])=>Object.entries(fields).map(([a,t])=>`${d}.${a} (${t})`));}
 async function extractKnowledgeWithAI(env,text,market,knownFields){
   if(!env.OPENAI_API_KEY)return {error:"ai_unavailable"};
   try{
@@ -8004,8 +8008,11 @@ const SALES_BRAIN_HOLDING_REASONS=new Set(["authoritative_price_required","comme
 // and nothing more. Shipping, a custom / out-of-list product, a message that also states quantities or sizes, and an existing order
 // are not this question: they keep their own path (no new terms are invented).
 const SALES_EXTRA_COST_Q=/(?:مالیات|تکس|(?<![\p{L}])tax(?:es)?(?![\p{L}])|ضريب[ةه]|هزینه[^.؟!?\n]{0,12}(?:اضاف|دیگه[‌\s]?ای|دیگری|جانبی|پنهان)|(?:كلف[ةه]|كلفه|رسوم|مصاريف|تكاليف|فلوس)[^.؟!?\n]{0,12}(?:إضافي|اضافي|زايد|ثاني|اخرى|أخرى)|(?:extra|hidden|additional)\s+(?:cost|fee|charge)s?)/iu;
-const SALES_EXTRA_COST_NOT=/(?:ارسال|حمل|پست|تیپاکس|باربری|کرایه|شحن|توصيل|shipping|delivery|سفارشی|اختصاصی|مخصوص|طرح\s*خاص|سایز\s*خاص|خارج\s*از|تفصيل|custom|bespoke|[0-9۰-۹٠-٩]|قیمت|چقدر|چند|چنده|بکم|بچم|بكم|شكد|شگد|سعر|اسعار|أسعار|how\s+much|price)/iu;
-function salesExtraCostQuestion(text){const t=String(text||"").normalize("NFKC");return SALES_EXTRA_COST_Q.test(t)&&!SALES_EXTRA_COST_NOT.test(t);}
+const SALES_EXTRA_COST_NOT=/(?:ارسال|حمل|پست|تیپاکس|باربری|کرایه|شحن|نقل|توصيل|توصیل|shipping|delivery|سفارشی|اختصاصی|مخصوص|طرح\s*خاص|سایز\s*خاص|خارج\s*از|تفصيل|custom|bespoke|[0-9۰-۹٠-٩]|قیمت|چقدر|چند|چنده|بکم|بچم|بكم|شكد|شگد|سعر|اسعار|أسعار|how\s+much|price)/iu;
+const SALES_EXTRA_COST_CARTON=/(?:کارتن|کارتون|كارتن|كارتون|کرتون|كرتون|کرتونة|كرتونة|کراتین|كراتين|cartons?)/iu;
+// A construction name or ribbon colour does not assert printing on the ribbon itself.
+function salesRibbonPrintQuestion(text){return serviceRibbonPrintQuestion(text);}
+function salesExtraCostQuestion(text){const t=String(text||"").normalize("NFKC");return SALES_EXTRA_COST_Q.test(t)&&!SALES_EXTRA_COST_NOT.test(t)&&!SALES_EXTRA_COST_CARTON.test(t)&&!salesRibbonPrintQuestion(t);}
 const SALES_BRAIN_STATUS_PING=/(?:خبر(?:ی)?\s*(?:نشد|شد|هست|ندارید|نداری)|چی\s*شد|چه\s*شد|نتیجه\s*(?:چی|چه|شد)|پیگیری|منتظر(?:م|یم|\s*هستم)|هنوز\s*(?:خبری|جوابی)|جواب(?:ی)?\s*(?:ندادی|ندادید|نیومد|نشد)|شنو\s*صار|شصار|[أا]ي\s*خبر|في\s*خبر|ماكو\s*خبر|ننتظر|بانتظار|\bany\s+(?:update|news)\b|\bstill\s+waiting\b|\bwhat\s+happened\b|\bfollowing\s+up\b|^\s*(?:update|news)\s*[?؟]*\s*$|^\s*[?؟]+\s*$)/iu;
 const SALES_BRAIN_FACT_LABELS={product_interest:["مدل","الموديل"],requested_quantity:["تعداد","العدد"],requested_size:["سایز","القياس"],printing:["نوع چاپ","نوع الطباعة"],branding:["لوگو","الشعار"],destination:["مقصد","الوجهة"],exterior_color:["رنگ","اللون"],interior_color:["رنگ","اللون"]};
 // "Still checking" phrasings (first = the original). A follow-up while the owner decides gets one of these, never the exact text of
@@ -9978,6 +9985,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const guidanceRequest=aiFirstOn&&!orderStatusAsked&&!orderStatusMixed&&!postSaleReview&&!formalQuoteReply&&!extraCostAsked&&!acceptance&&!["accepted","rejected","asks_price","quote_requested","asks_moq","negotiating","objection_price"].includes(intent)?approvedGuidanceRequest(row.message,earlierInbound,lastDecision?.approved_guidance):null;
   const approvedGuidance=await loadApprovedGuidance(env,{market:conversationMarket,request:guidanceRequest}).catch(()=>null);
   let guidanceUsed=null;
+  // O11 disclosure only. Financial/order actions and owner constraints always retain their normal path.
+  const optionalFee=aiFirstOn&&!needsOwner&&!kgHardStop&&!kgRelations.conflict&&!postSaleOrder&&!formalQuoteReply&&!orderStatusAsked&&!orderStatusMixed&&!acceptance&&!extraCostAsked&&turnPolicy&&!turnPolicy.payment_stage&&!turnPolicy.may_handoff&&!['accepted','quote_requested','negotiating','objection_price'].includes(intent)
+    ?await loadRibbonFee(env,{market:conversationMarket,message:row.message}).catch(()=>null):null;
   let scopedPaymentOrder=postSaleOrder;
   if(turnPolicy&&['current','previous_order'].includes(turnPolicy.deal_reference)&&dealCandidate?.order_id){scopedPaymentOrder=await env.DB.prepare("SELECT * FROM lead_orders WHERE id=? AND lead_id=? AND conversation_id=? AND status<>'cancelled'").bind(dealCandidate.order_id,row.lead_id,row.conversation_id).first().catch(()=>null);}
   const serviceMarketQuestion=!!turnPolicy&&!conversationMarket&&!!lastDecision?.catalog_pending||serviceTurn&&!conversationMarket&&(catalogAsk||!!informationRequest||aiInfo.interpretation_valid&&['product_info','colors_available','size_info','printing','shipping'].includes(aiInfo.interpretation?.primary_intent));
@@ -10239,7 +10249,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   else if(action==="answer_moq"&&pricedNow&&answerNumbers[0]===pricing.moq)salesTexts=[salesDigits(pricing.moq,language)];
   const priceSnapshot=salesPriceSnapshot(pricing);
   let candidate=null,candidateWrite=null,acceptanceDecision=null;
-  if((!turnPolicy||turnPolicy.may_write_candidate&&!(turnPolicy.mode==="pay_ready"&&action!=="accept_offer"))&&conversationMarket&&(pricing?.product||clarifyCandidates||dealCandidate)){
+  if(!optionalFee&&(!turnPolicy||turnPolicy.may_write_candidate&&!(turnPolicy.mode==="pay_ready"&&action!=="accept_offer"))&&conversationMarket&&(pricing?.product||clarifyCandidates||dealCandidate)){
     const product=pricing?.product?{key:pricing.product.key,source:pricing.product.source,name:pricing.product_name||pricing.product.name,confidence:pricing.resolution?.confidence||null}:dealCandidate?.product||null;
     // (a new deal never falls back to the previous deal's quantity)
     const quantity=Number.isSafeInteger(pricing?.quantity)?pricing.quantity:quantityValid?knownQuantity:startingNewDeal?null:dealCandidate?.quantity??null;
@@ -10554,6 +10564,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     aiInfo.comparison={...comparisonPlan,...salesComparisonCoverage(draft,comparisonPlan.requested_models,aiKnowledgeEvidenceRecords,(pricing?.catalog_summary||[]).flatMap(c=>c.models||[]))};
   }
 
+  // No model prose or product monetary segment is appended to the approved service-only disclosure.
+  if(optionalFee&&!needsOwner&&!postSaleReview&&!['accept_offer','accepted','quote','order_status','payment_info','payment_claim_owner','payment_ready_owner','policy_constraint'].includes(action)){
+    guidanceUsed=optionalFee;draft=optionalFee.text;action='answer_information';askedField=null;replySource='approved_optional_service';
+    validation=validateSalesBrainDraft(maskApprovedGuidance(draft,guidanceUsed),{authoritativeFacts:authorityFacts,markets:knowledgeMarkets});
+  }
   aiInfo.reply_source=replySource;
   // AI-02 observability: «called» / «used» stay as before; these say whether the provider was reached, answered, and whether its
   // reply actually reached the draft (and if not, why) — without any customer text.
@@ -10954,6 +10969,8 @@ async function currentSalesAiKnowledge(env,brain){
   }catch{return false;}
 }
 async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
+  // A product-only total must not masquerade as a payable amount including O11 with unknown terms.
+  if(ribbonFinancialMix(row?.message))return 'optional_service_financial_scope_requires_owner';
   // Phase 23: totals and discounted offers are never sent automatically (the wording check also covers a reply that lost the mark).
   if(brain?.final_quote_hold)return "final_quote_owner_approval";
   if(!await currentTurnCommercialEvidence(env,row,brain))return "commercial_evidence_changed";
@@ -10962,7 +10979,7 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient}){
   if(brain.approved_guidance&&!await approvedGuidanceCurrent(env,brain.approved_guidance))return "approved_guidance_changed";
   if(!await currentSalesAiKnowledge(env,brain))return "ai_knowledge_changed";
   if(brain.context_reset&&resetFinancialTurn(row,brain,outreach,{commercialCurrent:!!brain.commercial_evidence}))return "reset_financial_owner";
-  if((!brain.final_quote_released&&!brain.standard_total&&!INBOUND_APPROVED_AMOUNT_ACTIONS.has(brain.next_sales_action)&&INBOUND_TOTAL_WORDING.test(String(outreach.message||""))))return policyAllowsOwner(brain)?"final_quote_owner_approval":"commercial_evidence_changed";
+  if((!brain.final_quote_released&&!brain.standard_total&&!INBOUND_APPROVED_AMOUNT_ACTIONS.has(brain.next_sales_action)&&INBOUND_TOTAL_WORDING.test(String(brain.approved_guidance?.optional_ribbon_fee?maskApprovedGuidance(outreach.message,brain.approved_guidance):outreach.message||""))))return policyAllowsOwner(brain)?"final_quote_owner_approval":"commercial_evidence_changed";
   // Phase 16.1 (S1): the customer asked about an existing order AND something new in one message → the owner answers both
   if(brain.order_status_also_asked&&policyAllowsOwner(brain))return "mixed_order_status_and_sales";
   if(brain.post_sale_review&&policyAllowsOwner(brain))return "post_sale_owner_review";
