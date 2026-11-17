@@ -1,6 +1,8 @@
 import {ARAB_MOQ} from './commercial-policy.js';
 import {ribbonFeeCurrent} from './optional-ribbon-fee.js';
 import {maskRibbonAuthoringFacts} from './optional-ribbon-authoring.js';
+import {shippingClaimAssessment,honestInformationGap,nonAssertiveUncertainty,productionServiceOnly} from './sales-shipping-grounding.js';
+import {maskPropositionScopes} from './sales-proposition-scope.js';
 // Informational answers from active owner knowledge, separate from prices and order status.
 const norm = value => String(value || '').normalize('NFKC').replace(/[يى]/g, 'ی').replace(/ك/g, 'ک');
 const TIME = /زمان|مدت|چند\s*(?:روز|هفته|ماه)|طول\s*می|کی\s*(?:آماده|میرسه|می‌رسه|تحویل)|مدة|مده|وقت|متی|متى|delivery time|lead time/iu;
@@ -22,9 +24,22 @@ export function serviceFollowupPromise(text){
  return t.split(/[.!?؟\n؛;]/u).some(s=>person.test(s)&&handoff.test(s));
 }
 export function serviceCatalogQuestion(message){const t=norm(message);return /(?:چه|کدوم|کدام|شنو|شکو|شنهي|أي|ای)\s+(?:(?:نوع|انواع|أنواع)\s*)?(?:ال)?(?:مدل|مودیل|موديل|جعبه|علب)|(?:مدل|مودیل|موديل).*(?:دارید|دارین|عندکم|موجود|متوفر|معرفی)|نیم[‌\s]*(?:ست|سرویس)\s+چی\s+دار/iu.test(t);}
-export function unverifiedServiceDetail(text,guidance){
+export const flexibleShippingGuidance=guidance=>guidance?.kind==='information'&&guidance.request?.topics?.length>0&&guidance.request.topics.every(topic=>['shipping_payer','method'].includes(topic))&&!guidance.missing_topics?.length;
+export function unverifiedServiceDetail(text,guidance,scope={}){
  if(!guidance)return false;
- return norm(maskApprovedGuidance(text,guidance)).split(/(?<=[.!؟?\n؛;])\s*/u).some(part=>{
+ const context={};
+ // cv58: each sentence is checked with the spans governed by a non-committal operator removed (strict proposition scope);
+ // what remains is checked exactly as before.
+ return norm(maskApprovedGuidance(text,guidance)).split(/(?<=[.!؟?\n؛;])\s*/u).map(part=>maskPropositionScopes(part)).some(part=>{
+  // A complete, closed-vocabulary knowledge-gap sentence ("I don't know the exact delivery
+  // time") asserts nothing; any amount, date, guarantee or action keeps the check below.
+  if(flexibleShippingGuidance(guidance)){const claim=shippingClaimAssessment(part,{...scope,context});if(claim.applicable)return !claim.valid;if(honestInformationGap(part)||nonAssertiveUncertainty(part))return false;
+   // A question back to the customer («شهرتون کجاست؟») asserts nothing unless it carries a
+   // date, number, guarantee or free-service term (checked by the same risky test below).
+   if(/[؟?]\s*$/u.test(part)&&!/[0-9۰-۹٠-٩]|روز|هفته|ماه|یوم|ایام|اسبوع|ساعت|ساعه|مضمون|ضمان|قطعی|تضمین|قول|فردا|امروز|باچر|باجر|بکره|غدا|رایگان|مجانی|free|tomorrow|guarantee/iu.test(part))return false;}
+  // A no-charge statement about a production service (printing/design/cliché) restating an owner-approved
+  // no-charge record of this scope is not a shipping/service promise; freight, time or numbers keep the check.
+  if(flexibleShippingGuidance(guidance)&&/چاپ|طراحی|کلیشه|طباع|تصمیم|تصميم|کلیش|كليش/u.test(part)&&productionServiceOnly(part)&&!/ارسال|باربری|حمل|کرایه|شحن|نقل|توصیل|توصيل|تحویل|[0-9۰-۹٠-٩]|روز|هفته|ماه|یوم|يوم|اسبوع|أسبوع|فردا|غدا|مضمون|ضمان|تضمین/u.test(part)&&(scope.authoritativeFacts||[]).some(f=>f.source==='approved_knowledge'&&(!scope.markets?.length||!f.market||scope.markets.includes(f.market))&&(f.values||[]).some(v=>/رایگان|مجان|بدون\s*(?:هزینه|کلف|كلف)/u.test(norm(String(v))))))return false;
   // Requests for a destination or a logo file assert no delivery capability/time.
   // A date, guarantee, free-service claim or money figure keeps the normal fail-closed check.
   const risky=/[0-9۰-۹٠-٩]|روز|هفته|ماه|یوم|يوم|أیام|ايام|أيام|اسبوع|أسبوع|ساعت|ساعة|مضمون|ضمان|قطعی|تضمین|قول|فردا|امروز|باچر|باجر|بکرة|غدا|رایگان|مجانی|مجاني|free|tomorrow|guarantee/iu.test(part);

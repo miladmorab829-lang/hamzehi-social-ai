@@ -1,0 +1,152 @@
+{
+  "kind": "CAPTURED_NORMALIZED_PRODUCTION_DECISIONS_NOT_RAW_HTTP",
+  "commit": "e52129e3b8d56b749fcec298456e204e9ce94cde",
+  "inbox_id": "00000000-0000-4000-8000-00000000abad",
+  "question": "هزینه ارسال تا ابادان با کی هست؟",
+  "owner_question": "هزینه ارسال تا آبادان با کی هست؟",
+  "approved_shipping": {
+    "id": "knowledge-fact-phase50-f053380912433d41f41931",
+    "domain": "shipping",
+    "entity_key": "global",
+    "attribute": "terms",
+    "market": "IRAN",
+    "value_json": "\"ارسال در تهران با اسنپ یا وانت انجام می‌شود. ارسال شهرستان با باربری و بسته‌بندی کارتنی انجام می‌شود.\\nدر ایران، هزینه کارتن، انتقال بار تا باربری و حمل باربری تا مقصد بر عهده مشتری و خارج از قیمت خود جعبه است؛ مبلغ دقیق این هزینه‌ها نیازمند استعلام معتبر است.\"",
+    "version": 2,
+    "status": "active",
+    "authority": "owner_approved",
+    "effective_from": null,
+    "effective_until": null
+  },
+  "primary": {
+    "semantics": {
+      "mode": "browse",
+      "quantity_role": "none",
+      "deal_reference": "current",
+      "repeat_requested": false
+    },
+    "requests": [
+      "shipping"
+    ],
+    "interpretation": {
+      "primary_intent": "shipping",
+      "product_key": "list:نیم ست مربع",
+      "reference": "current",
+      "requested_size": null,
+      "requested_color": [],
+      "requested_structure": null,
+      "requested_printing": null,
+      "quantity": null,
+      "ambiguity": "none",
+      "confidence": "high"
+    },
+    "facts": {
+      "quantity": null,
+      "product": null,
+      "model": null,
+      "size": null,
+      "destination": "آبادان",
+      "customer_name": null,
+      "colors": [],
+      "color_parts": [],
+      "unknown_colors": [],
+      "color_statement": "none",
+      "negated_colors": []
+    },
+    "acceptance": false,
+    "rejection": false,
+    "owner_escalation_needed": false,
+    "escalation_reason": null,
+    "missing_information": [],
+    "summary_update": null,
+    "reply": "آبادان جزو ارسال شهرستان حساب می‌شه؛ شرایطش این‌طوره:\n{{INFORMATION}}\nیعنی هزینهٔ ارسال تا آبادان با خودتونه و جدا از قیمت جعبه حساب می‌شه.",
+    "reply_colors": []
+  },
+  "author": {
+    "semantics": {
+      "mode": "quote",
+      "quantity_role": "none",
+      "deal_reference": "current",
+      "repeat_requested": false
+    },
+    "requests": [
+      "shipping"
+    ],
+    "interpretation": {
+      "primary_intent": "shipping",
+      "product_key": "list:نیم ست مربع",
+      "reference": "current",
+      "requested_size": null,
+      "requested_color": [],
+      "requested_structure": null,
+      "requested_printing": null,
+      "quantity": null,
+      "ambiguity": "none",
+      "confidence": "high"
+    },
+    "facts": {
+      "quantity": null,
+      "product": null,
+      "model": null,
+      "size": null,
+      "destination": "آبادان",
+      "customer_name": null,
+      "colors": [],
+      "color_parts": [],
+      "unknown_colors": [],
+      "color_statement": "none",
+      "negated_colors": []
+    },
+    "acceptance": false,
+    "rejection": false,
+    "owner_escalation_needed": false,
+    "escalation_reason": null,
+    "missing_information": [],
+    "summary_update": null,
+    "reply": "برای ارسال به آبادان این توضیحات رو در نظر بگیرید:\n\nارسال در تهران با اسنپ یا وانت انجام می‌شود. ارسال شهرستان با باربری و بسته‌بندی کارتنی انجام می‌شود.\nدر ایران، هزینه کارتن، انتقال بار تا باربری و حمل باربری تا مقصد بر عهده مشتری و خارج از قیمت خود جعبه است؛ مبلغ دقیق این هزینه‌ها نیازمند استعلام معتبر است.\n\nیعنی چون آبادان شهرستان حساب می‌شه، جعبه‌ها داخل کارتن بسته‌بندی می‌شن و با باربری براتون ارسال می‌شن. مبلغ دقیق ارسال رو الان نمی‌تونم بگم و باید استعلام بشه.",
+    "reply_colors": []
+  },
+  "redactions": [
+    "primary.summary_update removed: prior unrelated customer history",
+    "event lead/conversation/outreach identifiers omitted"
+  ],
+  "historical_timing": {
+    "inbox_message_id": "00000000-0000-4000-8000-00000000abad",
+    "action": "ai_answer",
+    "next_best_action": "ESCALATE_OWNER",
+    "auto_sent": false,
+    "acknowledged": false,
+    "ai_calls": 1,
+    "identity_ms": 157,
+    "dedup_ms": 43,
+    "media_ms": 0,
+    "media_lookup_ms": 0,
+    "vision_ms": 0,
+    "vision_called": false,
+    "context_ms": 16,
+    "history_ms": 36,
+    "memory_ms": 187,
+    "brain_setup_ms": 18,
+    "memory_load_ms": 22,
+    "brain_context_ms": 76,
+    "knowledge_ms": 22,
+    "pricing_ms": 59,
+    "ai_context_ms": 50,
+    "ai_ms": 10837,
+    "ai_repricing_ms": 50,
+    "rules_ms": 11219,
+    "decision_ms": 32,
+    "ai_author_ms": 6393,
+    "validator_ms": 6393,
+    "escalation_ms": 2264,
+    "brain_ms": 20149,
+    "outreach_ms": 74,
+    "send_ms": 1106,
+    "outcome": "none",
+    "negotiation_total_ms": 22008,
+    "total_ms": 22302
+  },
+  "expected_baseline_rejection": {
+    "valid": false,
+    "reason": "protected_context_unverified_speech"
+  }
+}

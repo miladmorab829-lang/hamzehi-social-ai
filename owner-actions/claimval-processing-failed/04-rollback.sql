@@ -1,0 +1,3 @@
+-- Rollback (only while no 'processing_failed' rows exist; otherwise resolve them first): rebuild with the previous CHECK list.
+-- Guard: SELECT COUNT(*) FROM owner_escalations WHERE reason_code='processing_failed';  -- must be 0
+-- Then run 02-migration-draft.sql with 'processing_failed' removed from the CHECK list and the table name suffix changed.

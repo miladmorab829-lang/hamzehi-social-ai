@@ -114,6 +114,16 @@ export async function runWatchdog(env,{nowMs=Date.now(),orchestratorOn=env?.AUTO
     if(f+c>=WATCHDOG.versionMinTasks&&f/(f+c)>0.5){const prev=await env.DB.prepare("SELECT version FROM agent_versions WHERE agent=? AND status='previous' ORDER BY activated_at DESC LIMIT 1").bind(v.agent).first();
       raised.push({code:"version_unhealthy",agent:v.agent,level:"warning",cause:`Version ${v.version}: ${f} of ${f+c} tasks failed since activation`,fallback:prev?`Rollback reference: ${prev.version} (owner-approved deploy only)`:"No previous version recorded"});}
   }
+  // 6. Unanswered customer messages (CLAIM-VALIDATION, Role 7 finding 1). When inbound processing fails on both attempts, the
+  // message is stored but gets neither a reply draft nor an owner case, and nothing told the owner. Detection only — nothing is
+  // retried, drafted or sent, no model is called; the alert clears itself once a draft or an owner case exists, or the flight
+  // later completes. Uses existing tables only (ai_call_flights, inbox_messages, lead_outreach, owner_escalations, agent_alerts).
+  try{
+    // A Worker killed mid-processing (CPU limit, eviction) leaves the flight 'running' with an expired lease; a redelivery is then
+    // answered as a duplicate and nothing retries — the same silent loss as a failed flight (release reviewer F3, cv47).
+    const lost=await all("SELECT f.inbox_message_id id FROM ai_call_flights f JOIN inbox_messages i ON i.id=f.inbox_message_id WHERE f.purpose='inbound_processing' AND (f.status='failed' OR (f.status='running' AND f.lease_until<?)) AND f.updated_at>=? AND NOT EXISTS(SELECT 1 FROM lead_outreach o WHERE o.inbox_message_id=i.id) AND NOT EXISTS(SELECT 1 FROM owner_escalations e WHERE e.source_message_id=i.id) ORDER BY f.updated_at DESC LIMIT 50",iso(nowMs-5*60000),iso(nowMs-48*3600000));
+    if(lost.length)raised.push({code:"inbound_unanswered",agent:"sales_inbound",level:"critical",cause:`${lost.length} customer message(s) got no reply and no owner case after inbound processing failed`,tasks:lost.map(r=>r.id),fallback:"The messages stay in the inbox; answer them from the dashboard"});
+  }catch{}
   const keys=await raiseAlerts(env,"watchdog",raised,`watchdog-${t}`,t);
   await recoverOpenAlerts(env,"watchdog",keys,t);
   const healthy=raised.every(a=>a.level!=="critical")?1:0;

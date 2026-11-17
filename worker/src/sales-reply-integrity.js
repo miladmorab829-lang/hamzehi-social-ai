@@ -26,7 +26,9 @@ export function validateReplyParts(text,parts,validate,options){
  let prose=String(text);
  for(const part of parts||[]){
   if(!part.text||prose.split(part.text).length!==2)return {valid:false,reason:'reply_part_mismatch'};
-  const checked=validate(part.text,{...options,catalog:part.kind==='catalog'?[]:options.catalog,authoritativeFacts:part.facts||[]});
+  // F-009: an engine-built commercial part (exact standard offer from the approved price list) is an engine document — numbers are
+  // checked, the prose grounding pass is not applied to it; everything outside the part is validated in full below.
+  const checked=validate(part.text,{...options,catalog:part.kind==='catalog'?[]:options.catalog,authoritativeFacts:part.facts||[],...(part.kind==='commercial'&&part.engine===true?{engineDocument:true}:{})});
   if(!checked.valid)return checked;
   prose=prose.replace(part.text,' . ');
  }
