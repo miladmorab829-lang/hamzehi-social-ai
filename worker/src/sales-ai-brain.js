@@ -427,13 +427,23 @@ export function joinRepairedParts(parts,keep){
   }
   return out.join(" ").replace(/[ \t]{2,}/g," ").trim();
 }
-export function salesAiRepairProse(prose,{allowedNumbers=[],preferenceTerms=[],drop=null}={}){
-  const parts=splitSalesReply(prose),keepFlags=[],dropped=[];
-  for(const p of parts){if(!p.trim()){keepFlags.push(false);continue;}const iss=salesAiProseIssues(p,{allowedNumbers,preferenceTerms}).filter(x=>x!=="empty");
+// RR1: the engine slot is a block of its own. Prose written on the same line as the slot («… {{COMMERCIAL}} ارسالش هم رایگانه.»)
+// is a separate sentence for the repair, so an unsupported claim next to the slot no longer takes the engine segment down with it.
+export function splitReplyBlocks(prose){
+  return splitSalesReply(prose).flatMap(part=>part.split(SALES_AI_COMMERCIAL_SLOT).flatMap((piece,i,all)=>[piece.trim(),...(i<all.length-1?[SALES_AI_COMMERCIAL_SLOT]:[])]).filter(Boolean));
+}
+// RR1: informationalScope (the approved facts the whole-reply check used) is applied to each sentence and to the remainder, so the
+// repair isolates exactly the sentence the whole check rejected instead of failing to find it and discarding the whole reply.
+// RR1 (owner item 2): allowSlotOnly — when the model placed the engine slot, a remainder that is only that slot is still a reply: the
+// engine's own document (e.g. the standard offer with its discount-limit sentence) fills it and is validated under its own authority.
+export function salesAiRepairProse(prose,{allowedNumbers=[],preferenceTerms=[],drop=null,informationalScope=null,allowSlotOnly=false}={}){
+  const parts=splitReplyBlocks(prose),keepFlags=[],dropped=[];
+  for(const p of parts){if(!p.trim()){keepFlags.push(false);continue;}const iss=salesAiProseIssues(p,{allowedNumbers,preferenceTerms,informationalScope}).filter(x=>x!=="empty");
     if(iss.length){dropped.push(iss[0]);keepFlags.push(false);}else if(drop&&drop(p)){dropped.push("caller_rule");keepFlags.push(false);}else keepFlags.push(true);}
   const text=joinRepairedParts(parts,keepFlags);
-  if(!dropped.length||!text.replace(SALES_AI_COMMERCIAL_SLOT,"").trim())return null;
-  return salesAiProseIssues(text,{allowedNumbers,preferenceTerms}).length?null:{text,dropped};
+  if(!dropped.length)return null;
+  if(!text.replace(SALES_AI_COMMERCIAL_SLOT,"").trim())return allowSlotOnly&&text.trim()===SALES_AI_COMMERCIAL_SLOT?{text,dropped}:null;
+  return salesAiProseIssues(text,{allowedNumbers,preferenceTerms,informationalScope}).length?null:{text,dropped};
 }
 export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[],informationalScope=null}={}){
   const text=String(prose||""),issues=[];

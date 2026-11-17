@@ -1,5 +1,5 @@
 import { planSalesTurn, policyAllowsOwner, trustedQuantityProjection, policyClarification, commercialLimitReply } from './sales-turn-policy.js';
-import {partialTopicCoverage, AI_REPLY_SOURCES, hasAiAuthorship, hasSubstantiveAiReply, replyAuthoringPolicy, replyAuthoringInput, protectedReplyProse, informationalEntities, modelMentions, conversationRequestPlan, conversationReplyCoverage } from './sales-conversation-author.js';
+import {partialTopicCoverage, requestTopics, AI_REPLY_SOURCES, hasAiAuthorship, hasSubstantiveAiReply, replyAuthoringPolicy, replyAuthoringInput, protectedReplyProse, informationalEntities, modelMentions, conversationRequestPlan, conversationReplyCoverage } from './sales-conversation-author.js';
 import {claimEntities, factAppliesToEntity, productAssertionIssue, protectedContextIssue, isExclusiveKnowledgeGap,informationalClaims} from './sales-factual-grounding.js';
 import {shippingClaimAssessment,honestInformationGap} from './sales-shipping-grounding.js';
 import {ribbonAuthoringContract} from './optional-ribbon-authoring.js';
@@ -14,7 +14,7 @@ import { KNOWLEDGE_DOMAIN, KNOWLEDGE_SCHEMA, KNOWLEDGE_LIMITS, knowledgeIdent, k
 import { claimFlight, completeFlight, failFlight, salesAiSingleFlight, purgeAiCallFlights } from "./sales-memory.js";
 import { buildMemoryVocabulary, memoryCanonicalize, memoryConceptFromInterpretation, memoryFingerprint, memoryLookup, memoryObserve, memoryReview, memoryList, memoryGalleryRoles, memoryConceptKey, memoryMetrics, memoryConceptAnswer, memoryRenderAnswer, knowledgeVersion } from "./sales-memory.js";
 import { salesAiProvider, salesAiModel, salesAiTimeoutMs } from "./sales-ai-brain.js";
-import { salesAiRepairProse, joinRepairedParts } from "./sales-ai-brain.js";
+import { salesAiRepairProse, joinRepairedParts, splitReplyBlocks } from "./sales-ai-brain.js";
 import { salesAiEnabled, salesAiPolicy, buildSalesAiInput, callSalesAi, salesAiProseIssues, salesAiGroundedNumbers, salesAiPreferenceTerms, salesAiColorIssues, salesAiMessageQuantities, salesAiClaimsColoursRecorded, salesPaymentTermsRequest, salesAiWithoutTermsRelays, SALES_AI_COMMERCIAL_SLOT } from "./sales-ai-brain.js";
 import { paymentClaimSignal, paymentClaimNorm, analyzePaymentEvidence, paymentEvidenceAiAvailable, paymentDestinationCheck, detectPaymentMethod, maskIdentifier } from "./payment-evidence.js";
 import { configureSalesIntelligence, ensureSalesIntelligenceStore, handleSalesIntelligence, openDecision, preparePaymentRequest, orderDepositTerms, paymentRequestConfig, paymentDestinationOnly, DEPOSIT_TERMS_METHOD_KINDS, recordDraftCorrection, getSetting, siCatalogProducts, siApprovedPrice, verifyQuotePriceVersion, marginGuard, engineQuoteText } from "./sales-intelligence.js";
@@ -8423,7 +8423,7 @@ async function ensureOwnerEscalationFromBrain(env,row,brain){
   const source=String(row.id||brain.source_message_id||"").trim(),key=brain.turn_policy?.mode==="pay_ready"?"payment-ready:"+row.conversation_id+":"+(brain.turn_policy.payment_scope||"unscoped"):"owner-escalation:"+(source||await knowledgeHash(knowledgeCanonical([row.lead_id,row.conversation_id,reason,brain.context_hash||""])))+":"+reason;
   const prior=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();
   if(prior){if(brain.turn_policy?.mode==="pay_ready"&&prior.status!=="open")return {escalation:prior,idempotent:true,closed:true};const linkedDecision=await ensureOwnerDecisionForEscalation(env,prior,brain);return {escalation:prior,owner_decision:linkedDecision,idempotent:true};}
-  const t=now(),id="owner-escalation-"+uid(),question=String(verifiedInformationReview(brain)?brain.informational_review.unresolved.join('؛ '):brain.needs_owner_reason||reason).slice(0,300),decision=`Owner decision required: ${question}`;
+  const t=now(),id="owner-escalation-"+uid(),question=String(verifiedInformationReview(brain)?brain.informational_review.unresolved.join('؛ '):brain.owner_topic==='ai_provider_unavailable'?'ai_provider_unavailable':brain.needs_owner_reason||reason).slice(0,300),decision=`Owner decision required: ${question}`;
   try{await env.DB.prepare("INSERT OR IGNORE INTO owner_escalations(id,escalation_key,lead_id,conversation_id,contact_id,channel,source_message_id,sales_brain_event_id,context_hash,current_sales_stage,context_summary,unresolved_question,reason_code,decision_required,status,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open',1,?,?)").bind(id,key,linked?row.lead_id:null,linked?row.conversation_id:null,row.contact_id||null,row.conversation_platform||row.platform||"telegram",source||null,"sales-brain:"+String(brain.source_message_id||source),brain.context_hash||null,brain.current_stage||null,ownerEscalationSummary(row,brain),question,reason,decision,t,t).run();}catch(error){
     const raced=await env.DB.prepare("SELECT * FROM owner_escalations WHERE escalation_key=? LIMIT 1").bind(key).first();if(raced)return {escalation:raced,idempotent:true};throw error;
   }
@@ -9794,7 +9794,11 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       primaryProseIssues=[...issues,...colourIssues];
       aiInfo.called=true;
       // AI-FIRST: a failing sentence is dropped and the rest re-checked whole (an unapproved colour list stays fatal).
-      const repaired=issues.length&&!issues.includes('unapproved_service_detail')&&!colourIssues.length&&(aiFirstOn||aiFirstShadow)?salesAiRepairProse(d.reply,{allowedNumbers:aiAllowedNumbers,preferenceTerms:prefTerms}):null;
+      // RR1: an unapproved service/shipping detail is sentence-scoped (unverifiedServiceDetail reads sentence by sentence), so that
+      // sentence is dropped like any other failing one and the remainder must pass the same service check as a whole.
+      const serviceDrop=issues.includes('unapproved_service_detail')?part=>unverifiedServiceDetail(part,approvedInformation,informationalScope):null;
+      const repairedRaw=issues.length&&!colourIssues.length&&(aiFirstOn||aiFirstShadow)?salesAiRepairProse(d.reply,{allowedNumbers:aiAllowedNumbers,preferenceTerms:prefTerms,informationalScope,drop:serviceDrop,allowSlotOnly:String(d.reply||'').includes(SALES_AI_COMMERCIAL_SLOT)}):null;
+      const repaired=repairedRaw&&!(approvedInformation&&unverifiedServiceDetail(repairedRaw.text,approvedInformation,informationalScope))?repairedRaw:null;
       if(repaired&&aiFirstShadow)aiInfo.ai_first_shadow={...(aiInfo.ai_first_shadow||{}),prose_repair:repaired.dropped.slice(0,6)};
       if(repaired&&aiFirstOn){ai={...d,reply:repaired.text};aiInfo.used=true;aiInfo.requests=ai.requests;aiInfo.repaired={stage:"prose",dropped:repaired.dropped.slice(0,6)};}
       else if(issues.length||colourIssues.length)aiInfo.fallback="prose:"+(issues[0]||colourIssues[0]);
@@ -9802,7 +9806,10 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     }
   }
   if(aiFirstOn&&meaning&&!ai)ai={...meaning,reply:''};
-  const independentOwnerEvent=!!postSaleOrder&&['confirmed','partially_paid'].includes(postSaleOrder.status)||turnPolicy?.payment_stage||['quote','accept','order_support'].includes(turnPolicy?.mode)||meaning?.requests?.some(request=>['payment','acceptance','order_status'].includes(request))||paymentClaimSignal(String(row.message||''),{awaitingPayment:true,paymentRequested:true}).claim||!!salesPaymentTermsRequest(row.message,{paymentContext:true});
+  // RR1: the same predicate split in two; a quote turn is kept apart so the verified partial below can tell a D-016 engine offer
+  // (still gated at send time) from payment / acceptance / order events. independentOwnerEvent itself is unchanged.
+  const nonQuoteOwnerEvent=!!postSaleOrder&&['confirmed','partially_paid'].includes(postSaleOrder.status)||turnPolicy?.payment_stage||['accept','order_support'].includes(turnPolicy?.mode)||meaning?.requests?.some(request=>['payment','acceptance','order_status'].includes(request))||paymentClaimSignal(String(row.message||''),{awaitingPayment:true,paymentRequested:true}).claim||!!salesPaymentTermsRequest(row.message,{paymentContext:true});
+  const independentOwnerEvent=nonQuoteOwnerEvent||turnPolicy?.mode==='quote';
   const supersededBy=aiFirstOn&&!independentOwnerEvent?await newerConversationInbound(env,row.id):null;
   if(supersededBy){
     // Preserve an independent explicit name, but never replay an old deal or
@@ -10069,7 +10076,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // which keep the full prose grounding pass (D-010 colour advice etc.).
   // PD90 continuation: every salesPriceReply text is list-derived (full offer, unit price + MOQ + quantity question, MOQ answer);
   // priceReply is assigned only from salesPriceReply (index.js priceHandled / advise_colors), so the exact joined parts qualify.
-  const engineOfferText=text=>!!priceReply&&Array.isArray(priceReply.parts)&&priceReply.parts.length>0&&typeof text==="string"&&text===priceReply.parts.join(" ");
+  // RR1 (owner item 2): the engine's out-of-rule discount answer (policy_discount: the same list-derived offer followed by the engine's
+  // own discount-limit sentence, built below from exactly these parts) is the same engine document, matched by exact equality.
+  const engineOfferText=text=>!!priceReply&&Array.isArray(priceReply.parts)&&priceReply.parts.length>0&&typeof text==="string"&&(text===priceReply.parts.join(" ")||text===[priceReply.parts.join(" "),commercialLimitReply(language,'discount')].join(" "));
   // PD90 continuation: the engine's acceptance acknowledgement (salesAcceptReply, built only after the order candidate was written in
   // THIS turn) is likewise an engine document; any other text is validated in full.
   let engineAcceptText=null;
@@ -10510,7 +10519,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         if(!v.valid)primaryClaimIssues.push({reason:v.reason,claim_category:v.claim_category||null,unsupported_values:[...(v.unsupported_values||v.unsupported_numbers||[])].slice(0,8)});
         // AI-FIRST: an unsupported claim removes only its sentence (the engine segment is never touched); the rest is re-validated.
         if(!v.valid&&(aiFirstOn||aiFirstShadow)){
-          const sents=splitSalesReply(prose),keepFlags=sents.map(x=>x.includes(SALES_AI_COMMERCIAL_SLOT)||parts.some(p=>x.includes(p.text))||validateSalesBrainDraft(x.split(SALES_AI_COMMERCIAL_SLOT).join(""),vOpts).valid),keep=sents.filter((x,i)=>keepFlags[i]);
+          const sents=splitReplyBlocks(prose),keepFlags=sents.map(x=>x.includes(SALES_AI_COMMERCIAL_SLOT)||parts.some(p=>x.includes(p.text))||validateSalesBrainDraft(x.split(SALES_AI_COMMERCIAL_SLOT).join(""),vOpts).valid),keep=sents.filter((x,i)=>keepFlags[i]);
           const p2=joinRepairedParts(sents,keepFlags),c2=keep.length&&keep.length<sents.length&&p2.replace(SALES_AI_COMMERCIAL_SLOT,"").trim()?composeWith(p2):null,v2=c2?validateComposed(c2):null;
           if(v2?.valid&&aiFirstShadow)aiInfo.ai_first_shadow={...(aiInfo.ai_first_shadow||{}),validator_repair:v.reason};
           if(v2?.valid&&aiFirstOn){aiInfo.repaired={stage:"validator",reason:v.reason,dropped:sents.length-keep.length};composed=c2;v=v2;}
@@ -10736,7 +10745,18 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         const reason=authored?.error||(!mayCall?'provider_unavailable':!authorInput?'context_budget_exceeded':!protectedValid?'unverified_protected_fact':proseIssues[0]||(!checked.valid&&checked.reason)||(!protectedContext.valid&&protectedContext.reason)||(!answerCoverage.valid&&answerCoverage.reason)||coverage?.unanswered_models.length&&'incomplete_comparison'||'unverified_reply');
         validation={valid:false,reason:String(reason)};replySource='owner_escalation';aiInfo.authorship={verified:false,stage:'owner_escalation',reason:String(reason)};
         aiInfo.author_rejection={prose_issues:proseIssues,validation:checked,protected_context:protectedContext,answer_coverage:answerCoverage,protected_failures:protectedChecks.filter(check=>!check.valid),clarification_missing:!!replyComparison?.clarification_needed&&!clarifiesModels(text)};
-        needsOwner=true;needsOwnerReason='approved_knowledge_missing';ownerTopic='verified_reply_unavailable';
+        // RR1: the owner state before this author failure (an earlier, independent owner requirement is kept as it was).
+        const ownerBeforeAuthor={needsOwner,needsOwnerReason,ownerTopic,replyFailure:turnPolicy?turnPolicy.reply_failure:undefined};
+        // RR1 (owner item 5): a provider failure (the model call itself failed) is recorded as such — owner topic, the case's unresolved
+        // question and the owner alert name it — instead of looking like missing business knowledge. The fixed reason_code list has no
+        // service-error code (schema, owner decision), so reason_code keeps its existing mapping.
+        const providerFailure=!!authored?.error||(!mayCall&&!!aiInfo.error&&aiInfo.error!=='context_budget_exceeded');
+        if(providerFailure)aiInfo.provider_failure={version:1,stage:authored?.error?'reply_author':'primary',error:String(authored?.error||aiInfo.error).slice(0,80)};
+        // The provider label is used only when the service failure is the WHOLE reason: no earlier owner requirement, nothing removed
+        // from the model's reply and no rejected claim. Otherwise an open commercial request (e.g. an out-of-rule discount) keeps the
+        // generic commercial-review label so the owner is not told it is «not a business matter» (business-rules review F1).
+        const providerOnly=providerFailure&&!ownerBeforeAuthor.needsOwner&&!aiInfo.repaired&&!primaryClaimIssues.length&&!primaryProseIssues.length;
+        needsOwner=true;needsOwnerReason='approved_knowledge_missing';ownerTopic=providerOnly?'ai_provider_unavailable':'verified_reply_unavailable';
         if(turnPolicy)turnPolicy.reply_failure=true;
         // Verified PARTIAL answer. The primary draft lost only its unsupported sentences in the AI-first repair and
         // the bounded author correction did not produce a verified full reply. The remaining provider-authored text
@@ -10746,42 +10766,90 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         // Not when the model itself asked for the owner, when a comparison would lose models, or when the removed
         // sentence was the only answer to a requested topic (the customer would get an answer to another question).
         const requestedTopics=(meaning?.requests||[]).filter(r=>['shipping','price','discount','payment','moq','acceptance','order_status','production','delivery'].includes(r));
-        const partialAnswersRequest=text=>!requestedTopics.length||requestedTopics.every(topic=>({shipping:/ارسال|باربری|اسنپ|وانت|حمل|کرایه|شحن|نقل|توصیل|الشحن/u,price:/قیمت|سعر|مدیر|المدیر/u,discount:/تخفیف|خصم|مدیر|المدیر/u,payment:/پرداخت|بیعانه|دفع|عربون|مدیر|المدیر/u,moq:/حداقل|تعداد|الحد|کمیه/u,acceptance:/مدیر|المدیر|سفارش|طلب/u,order_status:/سفارش|طلب|مدیر|المدیر/u,production:/تولید|انتاج|مدیر|المدیر|زمان|وقت/u,delivery:/تحویل|توصیل|ارسال|شحن|زمان|وقت/u}[topic]||/./u).test(salesBrainClaimText(text)));
+        // RR1 (owner directive, rule 5): in a multi-question message, a question whose answer could not be verified does not stop the
+        // verified answer to the other questions; that question stays with the owner case opened above (needsOwner is kept).
+        // A message whose only real question went unanswered still gets no partial.
+        // (a delivered engine offer — the exact list-derived document — is the answer to «price»)
+        const partialUnansweredTopics=text=>requestedTopics.filter(topic=>!(topic==='price'&&engineQuoteTurn&&requiredParts.every(part=>text.includes(part)))&&!partialAnswersRequest([topic])(text));
+        const partialServesRequest=text=>{const missing=partialUnansweredTopics(text);if(!missing.length)return true;
+          return (meaning?.requests||[]).some(r=>!missing.includes(r)&&!['greeting','thanks','other'].includes(r));};
+        const partialAnswersRequest=(topics=requestedTopics)=>text=>!topics.length||topics.every(topic=>({shipping:/ارسال|باربری|اسنپ|وانت|حمل|کرایه|شحن|نقل|توصیل|الشحن/u,price:/قیمت|سعر|مدیر|المدیر/u,discount:/تخفیف|خصم|مدیر|المدیر/u,payment:/پرداخت|بیعانه|دفع|عربون|مدیر|المدیر/u,moq:/حداقل|تعداد|الحد|کمیه/u,acceptance:/مدیر|المدیر|سفارش|طلب/u,order_status:/سفارش|طلب|مدیر|المدیر/u,production:/تولید|انتاج|مدیر|المدیر|زمان|وقت/u,delivery:/تحویل|توصیل|ارسال|شحن|زمان|وقت/u}[topic]||/./u).test(salesBrainClaimText(text)));
         const partialComparisonOk=text=>!replyComparison||(!salesComparisonCoverage(text,replyComparison.requested_models,aiKnowledgeEvidenceRecords,(pricing?.catalog_summary||[]).flatMap(c=>c.models||[])).unanswered_models?.length&&(!replyComparison.clarification_needed||clarifiesModels(text)));
         // Owner rule (verified partial answers): a partial may deliver independently verified information, but it must not silently
         // drop the sentence(s) that answered the customer's central question. When every sentence of the model's answer that shares a
         // content word with the question was removed and the remaining text carries no transparency (uncertainty / owner review), the
         // turn stays with the owner review workflow instead of pretending to have answered.
-        const partialKeepsCentralAnswer=text=>{
-          // cv52: topic-level judgement from the request plan's concept topics when the message has any.
-          const topical=partialTopicCoverage(row.message||'',text);if(topical)return topical.ok;
+        const centralQuestion=(()=>{
           const words=v=>salesBrainClaimText(v).split(/\s+/u).filter(w=>w.length>=3&&!/^(?:برای|درباره|چطور|چطوری|میشه|هست|دارید|دارین|اینو|اون|این|هذا|هذه|شلون|شنو|اکو|عدکم|عندکم|ممکن|لطفا|سلام|مرحبا|هلا|میخوام|ارید|اریده|بخوام|میخواستم)$/u.test(w));
           // cv49 (continuity reviewer C3): the asked TOPIC excludes generic product/model nouns («جعبه», «علبة», «کشویی», «مدل»),
           // so a kept sentence that merely names the product does not count as answering «… ضد آبه؟».
           const generic=/^(?:جعبه\p{L}*|جعبهها|علب\p{L}*|العلب\p{L}*|کشویی|جراره|الجراره|مدل\p{L}*|مودیل\p{L}*|الموديل|موديل\p{L}*|انگشتر|خاتم|محبس|اویز|آویز|قلاده|دستبند|سوار|ساعت\p{L}*|سرویس|طقم|نیمست|نیم|ست|تکه|قطعه|قطع|کیس|بگ|ساک|بگدار|محصول\p{L}*|سفارش\p{L}*|طلب\p{L}*|شما|انتو|حضرتک)$/u;
-          const all=words(row.message||''),topic=all.filter(w=>!generic.test(w)),q=new Set(topic.length?topic:all);if(!q.size)return true;
-          const overlaps=s=>words(s).some(w=>q.has(w)||[...q].some(x=>x.length>=4&&(w.startsWith(x)||x.startsWith(w))));
+          const all=words(row.message||''),topic=all.filter(w=>!generic.test(w)),q=new Set(topic.length?topic:all);
+          return {size:q.size,overlaps:s=>words(s).some(w=>q.has(w)||[...q].some(x=>x.length>=4&&(w.startsWith(x)||x.startsWith(w))))};
+        })();
+        // Only an explicit uncertainty / owner-pending clause discloses that a question is still open.
+        const ownerPendingClause=/نمی\s*(?:دونم|دانم|تونم\s*(?:بگم|تایید|تأیید))|مطم(?:ی|ئ)?ن\s*نیستم|اطلاع\p{L}*\s*(?:\p{L}+\s+){0,4}?ندارم|تایید\p{L}*\s*ندارم|ما\s*عندی\s*(?:معلوم|تاکید|تأکید|جواب)|مو\s*متاکد|ما\s*اعرف|ما\s*اکدر\s*اأکد|(?:مدیر|المدیر|صاحب\s*(?:ال)?(?:شغل|محل|کار|مجموعه))\p{L}*\s+(?:\p{L}+\s+){0,3}?(?:بررسی|تصمیم|تعیین|اطلاع|یقرر|یحدد|یرد|یشوف|یاکد|یأکد|جواب)|بررسی\s*(?:می\s*)?(?:کنم|کنیم|میشه|می\s*شه)\s*(?:و|تا)?|اراجع|اسأل|اسال/u;
+        // RR1 (rule 6): every sentence the repair removed was a volunteered, NON-commercial statement (no shared word and no
+        // commercial concept — price, shipping, payment, discount, time, order, printing, ribbon) and the delivered text defers
+        // nothing to the owner; then nothing the customer asked is unresolved and the author failure alone is no owner decision.
+        // A removed commercial claim, or a reply that says the owner will check, always keeps the owner case (D-004, D-005/D-006).
+        const COMMERCIAL_TOPICS=['price','shipping','payment','discount','time','order','printing','ribbon'];
+        const removedOnlyVolunteered=text=>{
+          if(ownerPendingClause.test(salesBrainClaimText(text))||SALES_CHECKING_WORDS.test(String(text||'')))return false;
+          const kept=new Set(splitReplyBlocks(String(text||'')).map(s=>salesBrainClaimText(s)));
+          const removed=splitReplyBlocks(String(rawAiReply||'')).filter(s=>s!==SALES_AI_COMMERCIAL_SLOT&&!kept.has(salesBrainClaimText(s)));
+          return removed.length>0&&centralQuestion.size>0&&!removed.some(centralQuestion.overlaps)&&!removed.some(s=>requestTopics(s).some(t=>COMMERCIAL_TOPICS.includes(t)));
+        };
+        const partialKeepsCentralAnswer=text=>{
+          // cv52: topic-level judgement from the request plan's concept topics when the message has any.
+          // RR1 (rule 5): with several asked topics, one verified answered topic is enough; the rest stays with the owner case.
+          const topical=partialTopicCoverage(row.message||'',text);if(topical)return topical.ok||topical.asked.length>1&&topical.answered.length>0;
+          if(!centralQuestion.size)return true;const overlaps=centralQuestion.overlaps;
           const original=splitSalesReply(String(rawAiReply||'')),kept=splitSalesReply(String(text||''));
           const answering=original.filter(overlaps);if(!answering.length)return true;
           if(kept.some(overlaps))return true;
           // Only an explicit uncertainty / owner-pending clause discloses that the central question is still open.
-          return /نمی\s*(?:دونم|دانم|تونم\s*(?:بگم|تایید|تأیید))|مطم(?:ی|ئ)?ن\s*نیستم|اطلاع\p{L}*\s*(?:\p{L}+\s+){0,4}?ندارم|تایید\p{L}*\s*ندارم|ما\s*عندی\s*(?:معلوم|تاکید|تأکید|جواب)|مو\s*متاکد|ما\s*اعرف|ما\s*اکدر\s*اأکد|(?:مدیر|المدیر|صاحب\s*(?:ال)?(?:شغل|محل|کار|مجموعه))\p{L}*\s+(?:\p{L}+\s+){0,3}?(?:بررسی|تصمیم|تعیین|اطلاع|یقرر|یحدد|یرد|یشوف|یاکد|یأکد|جواب)|بررسی\s*(?:می\s*)?(?:کنم|کنیم|میشه|می\s*شه)\s*(?:و|تا)?|اراجع|اسأل|اسال/u.test(salesBrainClaimText(text));
+          return ownerPendingClause.test(salesBrainClaimText(text));
         };
-        const partialText=preAuthor.valid&&preAuthor.source==='ai'&&aiInfo.repaired&&!independentOwnerEvent&&!turnPolicy?.payment_stage&&!rawAiDecision?.owner_escalation_needed&&typeof preAuthor.draft==='string'&&preAuthor.draft.trim()&&partialKeepsCentralAnswer(preAuthor.draft)?preAuthor.draft:null;
+        // RR1: a quote turn whose protected parts are exactly the engine's list-derived documents (D-016 standard offer; the send
+        // gates still decide whether that total may go out automatically) may deliver a verified partial like any other turn.
+        const engineQuoteTurn=turnPolicy?.mode==='quote'&&requiredParts.length>0&&requiredParts.every(part=>engineDocText(part))&&!guidanceUsed&&!orderStatusAsked;
+        // (an engine document is delivered as a standalone block, as the author contract and the send-time proof require)
+        const engineBlocks=text=>requiredParts.reduce((t,p)=>t.split(p).join('\n'+p+'\n'),text).replace(/[ \t]*\n[ \t]*/g,'\n').replace(/\n{2,}/g,'\n').trim();
+        const partialCandidate=preAuthor.valid&&(preAuthor.source==='ai'||preAuthor.source==='ai+commercial'&&engineQuoteTurn)&&aiInfo.repaired&&!nonQuoteOwnerEvent&&(turnPolicy?.mode!=='quote'||engineQuoteTurn)&&!turnPolicy?.payment_stage&&!rawAiDecision?.owner_escalation_needed&&typeof preAuthor.draft==='string'&&preAuthor.draft.trim()&&partialKeepsCentralAnswer(preAuthor.draft)?preAuthor.draft:null;
+        // (only when each engine slot stood on its own — after a line start, a colon or sentence end, with nothing after it but a
+        // line break or the end: a slot inside a sentence would leave fragments around the standalone offer)
+        const engineSlotStandalone=text=>{const s=requiredParts.reduce((t,p)=>t.split(p).join(SALES_AI_COMMERCIAL_SLOT),text),n=s.split(SALES_AI_COMMERCIAL_SLOT).length-1;
+          return n>0&&(s.match(/(?:^|[\n:：.!؟?،؛;])[ \t]*\{\{COMMERCIAL\}\}[ \t]*(?=\n|$)/gu)||[]).length===n;};
+        const partialText=partialCandidate&&engineQuoteTurn?(engineSlotStandalone(partialCandidate)?engineBlocks(partialCandidate):null):partialCandidate;
         if(partialText&&requiredParts.every(part=>partialText.includes(part))&&hasSubstantiveAiReply(partialText,meaning?.requests)){
-          const masked=guidanceUsed?maskApprovedGuidance(partialText,guidanceUsed):partialText;
+          // RR1: in an engine quote partial the protected engine documents are checked under their own authority (protectedChecks
+          // above, protectedValid) and the model's remaining prose is checked without them — as in the full author path — so the
+          // list figures are never read as model claims and the prose gets no authority from them.
+          const slotText=engineQuoteTurn?requiredParts.reduce((t,p)=>t.split(p).join(SALES_AI_COMMERCIAL_SLOT),partialText):partialText;
+          const masked=guidanceUsed?maskApprovedGuidance(slotText,guidanceUsed):slotText;
           const pScope={authoritativeFacts:authorFacts,markets:knowledgeMarkets,destination:typeof memory?.destination==='string'?memory.destination:null};
-          const pProse=salesAiProseIssues(masked,{allowedNumbers:authorNumbers,preferenceTerms:[...colorOptions,...printingOptions],informationalScope:pScope});
+          // (only the engine document remains — the same «engine only» reply the author path accepts — so there is no model prose to check)
+          const engineOnlyPartial=engineQuoteTurn&&!slotText.split(SALES_AI_COMMERCIAL_SLOT).join('').trim();
+          const pProse=engineOnlyPartial?[]:salesAiProseIssues(masked,{allowedNumbers:authorNumbers,preferenceTerms:[...colorOptions,...printingOptions],informationalScope:pScope});
           const pService=guidanceUsed?.kind==='information'?unverifiedServiceDetail(partialText,guidanceUsed,pScope):false;
-          const pChecked=validateSalesBrainDraft(masked,{allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key});
-          const pContext=requiredParts.length?protectedContextIssue(partialText,{offerQuantities:offerQuantitiesNow(),authoritativeFacts:authorFacts,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,requireProductExplanation:!!activeRibbonContract,markets:knowledgeMarkets}):{valid:true};
+          const pChecked=validateSalesBrainDraft(masked.split(SALES_AI_COMMERCIAL_SLOT).join(' '),{allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key});
+          const pContext=engineQuoteTurn&&!protectedValid?{valid:false,reason:'unverified_protected_fact'}:requiredParts.length?protectedContextIssue(engineQuoteTurn?slotText.split(SALES_AI_COMMERCIAL_SLOT).join(' ').replace(/\s+/g,' ').trim():partialText,{offerQuantities:offerQuantitiesNow(),authoritativeFacts:authorFacts,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,requireProductExplanation:!!activeRibbonContract,markets:knowledgeMarkets}):{valid:true};
           // The partial must still answer what the customer asked (same coverage signal as the full author reply):
           // a reply reduced to a disclaimer and a link does not answer «which model and why».
-          const pCoverage=conversationReplyCoverage(partialText,requestPlan,{records:aiKnowledgeEvidenceRecords,catalog:pricing?.catalog_summary||[]});
-          if(!UNFILLED_REPLY_SLOT.test(partialText)&&!DANGLING_REPLY.test(partialText)&&!pProse.length&&!pService&&pChecked.valid&&pContext.valid&&pCoverage.valid&&partialComparisonOk(partialText)&&partialAnswersRequest(partialText)){
+          const pCoverage=conversationReplyCoverage(partialText,requestPlan,{records:aiKnowledgeEvidenceRecords,catalog:pricing?.catalog_summary||[]});          if(!UNFILLED_REPLY_SLOT.test(partialText)&&!DANGLING_REPLY.test(partialText)&&!pProse.length&&!pService&&pChecked.valid&&pContext.valid&&pCoverage.valid&&partialComparisonOk(partialText)&&partialServesRequest(partialText)){
             draft=partialText;validation={valid:true};replySource='ai_verified';
+            // RR1 (rule 7): the send-time proof re-checks with the same approved facts this partial was verified against (as the
+            // full author path does) — no new facts, only the ones the decision itself used.
+            aiEvidenceFacts.push(...authorFacts);
             aiInfo.authorship={verified:true,stage:'partial_verified',contract_version:2,protected_parts:requiredParts};
-            aiInfo.partial_delivery={version:1,owner_topic:ownerTopic,stage:aiInfo.repaired?.stage||null,dropped:Array.isArray(aiInfo.repaired?.dropped)?aiInfo.repaired.dropped.slice(0,6).map(x=>String(x).slice(0,60)):[String(aiInfo.repaired?.reason||aiInfo.repaired?.dropped||"").slice(0,60)],author_reason:String(reason).slice(0,80)};
+            const ownerRemainder=partialUnansweredTopics(partialText);
+            aiInfo.partial_delivery={version:1,owner_topic:ownerTopic,stage:aiInfo.repaired?.stage||null,dropped:Array.isArray(aiInfo.repaired?.dropped)?aiInfo.repaired.dropped.slice(0,6).map(x=>String(x).slice(0,60)):[String(aiInfo.repaired?.reason||aiInfo.repaired?.dropped||"").slice(0,60)],author_reason:String(reason).slice(0,80),owner_remainder:ownerRemainder};
+            // RR1 (rule 6): nothing the customer asked was removed → the owner state returns to what it was before the author failure.
+            if(!ownerRemainder.length&&removedOnlyVolunteered(partialText)){
+              needsOwner=ownerBeforeAuthor.needsOwner;needsOwnerReason=ownerBeforeAuthor.needsOwnerReason;ownerTopic=ownerBeforeAuthor.ownerTopic;
+              if(turnPolicy)turnPolicy.reply_failure=ownerBeforeAuthor.replyFailure;aiInfo.partial_delivery.owner_case='not_needed:removed_text_was_volunteered';
+            }
           }
         }
       }
@@ -11357,7 +11425,9 @@ async function ownerAlertDetails(env,{row,order,paidCount,paidMinor,market:brain
   }else if(facts.destination)lines.push("مقصد: "+clip(facts.destination,60));
   return lines.join("\n");
 }
-const OWNER_ACTION_TEXT={payment_claim:"اقدام لازم: بررسی و تأیید واریز (ادعای مشتری هنوز تأیید نشده است)",order_authorization:"اقدام لازم: تأیید نهایی سفارش",payment_terms:"اقدام لازم: بررسی درخواست شرایط پرداخت"};
+const OWNER_ACTION_TEXT={payment_claim:"اقدام لازم: بررسی و تأیید واریز (ادعای مشتری هنوز تأیید نشده است)",order_authorization:"اقدام لازم: تأیید نهایی سفارش",payment_terms:"اقدام لازم: بررسی درخواست شرایط پرداخت",
+  // RR1 (owner item 5): owner-facing only; a temporary AI service failure is not a business-knowledge gap.
+  ai_provider_unavailable:"علت: خطای موقت سرویس هوش مصنوعی (کمبود اطلاعات تجاری نیست)\nاقدام لازم: پاسخ به پیام مشتری"};
 // Holds that stop an automatic reply without opening an owner case themselves. Echo/superseded/draft-changed/rate-limit holds are
 // intentionally excluded (our own echo, a newer message, the owner already acting, flood protection); final quotes alert separately.
 const INBOUND_COMMERCIAL_HOLDS=['action_requires_owner_review','mixed_order_status_and_sales','post_sale_owner_review','reset_financial_owner','opt_out_needs_review'];
@@ -11379,7 +11449,7 @@ async function settleInboundOutcome(env,{row,brain,outreach,recipient,timing={}}
     // with no customer reply AND no owner case. They now open one (review only — nothing is resent or sent automatically).
     const deliveryFailure=['gallery_delivery_incomplete','send_failed','send_ambiguous','telegram_send_failed','auto_send_error'].includes(outcome.reason);
     const commercialHold=INBOUND_COMMERCIAL_HOLDS.includes(outcome.reason);
-    brain.needs_owner=true;brain.needs_owner_reason=outcome.reason==='owner_required'&&brain.needs_owner_reason?brain.needs_owner_reason:deliveryFailure?'telegram_delivery_verification':commercialHold?'commercial_owner_review_required':'approved_knowledge_missing';brain.owner_topic=deliveryFailure?'delivery_verification':'send_time_verification';
+    brain.needs_owner=true;brain.needs_owner_reason=outcome.reason==='owner_required'&&brain.needs_owner_reason?brain.needs_owner_reason:deliveryFailure?'telegram_delivery_verification':commercialHold?'commercial_owner_review_required':'approved_knowledge_missing';brain.owner_topic=deliveryFailure?'delivery_verification':brain.owner_topic==='ai_provider_unavailable'?brain.owner_topic:'send_time_verification';
     brain.turn_policy={...(brain.turn_policy||{}),reply_failure:true};
     try{const review=await ensureOwnerEscalationFromBrain(env,row,brain);if(review?.escalation)brain.owner_escalation_id=review.escalation.id;}
     catch(error){reviewFailed=true;try{await env.DB.prepare("UPDATE lead_outreach SET status=CASE WHEN status IN ('sent','send_ambiguous','send_failed') THEN status ELSE 'draft' END,approved_by=CASE WHEN status IN ('sent','send_ambiguous','send_failed') THEN approved_by ELSE NULL END,approved_at=CASE WHEN status IN ('sent','send_ambiguous','send_failed') THEN approved_at ELSE NULL END,error_code='owner_review_pending',error_detail=?,updated_at=? WHERE id=? AND (status IN ('draft','sent','send_ambiguous','send_failed') OR (status='approved' AND approved_by='inbound_auto_policy'))").bind(outcome.reason,now(),outreach.id).run();}catch{}try{await audit(env,'inbound_verification_review_failed','Unable to persist verification review',{inbox_message_id:row.id,reason:outcome.reason,error:sanitizeOperationalError(error?.message||error)});}catch{}}
@@ -11407,7 +11477,7 @@ async function settleInboundOutcome(env,{row,brain,outreach,recipient,timing={}}
   // order, key «order-approval:<id>»), whether or not the customer's acknowledgement was delivered.
   const acceptedCandidate=acceptance&&typeof alertKey==="string"&&alertKey.startsWith("order-approval:")&&alertCase?.order?.status==="order_candidate";
   if((policyAllowsOwner(brain)||verifiedInformationReview(brain)||brain?.turn_policy?.reply_failure===true||acceptedCandidate)&&alertKey&&outcome.reason!=="final_quote_owner_approval")try{const reason=paymentAlert?OWNER_PAYMENT_ALERT_ACTIONS[act]:acceptance&&alertKey.startsWith("order-approval:")?"order_authorization":ownerEscalationReason(brain);
-    const details=[await ownerAlertDetails(env,{row,...alertCase,market:brain?.knowledge_market?.conversation_market||null}).catch(()=>null),OWNER_ACTION_TEXT[reason]||"اقدام لازم: بررسی درخواست خاص تجاری"].filter(Boolean).join("\n");
+    const details=[await ownerAlertDetails(env,{row,...alertCase,market:brain?.knowledge_market?.conversation_market||null}).catch(()=>null),OWNER_ACTION_TEXT[reason]||(brain?.owner_topic==='ai_provider_unavailable'?OWNER_ACTION_TEXT.ai_provider_unavailable:"اقدام لازم: بررسی درخواست خاص تجاری")].filter(Boolean).join("\n");
     await recordEscalationAlert(env,{escalation_id:alertKey,lead_id:row.lead_id,reason_code:reason,at:now(),details});const alert=await notifyEscalationOwner(env,alertKey);await audit(env,"owner_escalation_alert","Owner alert for an escalation",{escalation_id:alertKey,lead_id:row.lead_id,sent:!!alert.sent,reason:alert.reason||null});}catch(error){try{await audit(env,"owner_escalation_alert_failed","Owner escalation alert could not be completed",{escalation_id:alertKey,error:sanitizeOperationalError(error?.message||error)});}catch{}}
   if(outcome.reason!=="auto_send_error")try{await env.DB.prepare("INSERT OR IGNORE INTO system_events(id,type,severity,message,details_json,created_at) VALUES(?,?,'info','Inbound customer message outcome',?,?)").bind("inbound-outcome:"+row.id,"inbound_outcome",JSON.stringify({inbox_message_id:row.id,lead_id:row.lead_id,conversation_id:row.conversation_id,outreach_id:outreach.id,customer_visible:visible,reason:outcome.reason||null,acknowledgement_id:outcome.acknowledgement?.id||null}),now()).run();}catch{}
   // AUTO-01 shadow: the authority tier is recorded next to what really happened (after it happened; never changes it).
