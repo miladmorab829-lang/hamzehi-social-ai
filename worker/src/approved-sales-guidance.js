@@ -1,4 +1,4 @@
-import {ARAB_MOQ} from './commercial-policy.js';
+import {ARAB_MOQ,moqPolicy} from './commercial-policy.js';
 import {ribbonFeeCurrent} from './optional-ribbon-fee.js';
 import {maskRibbonAuthoringFacts} from './optional-ribbon-authoring.js';
 import {shippingClaimAssessment,honestInformationGap,nonAssertiveUncertainty,productionServiceOnly} from './sales-shipping-grounding.js';
@@ -14,6 +14,37 @@ const COLOR = /رنگ|لون|ألوان|الوان|colour|color/iu;
 const CHOOSE = /کجا|سایت|نمیدون|نمی‌دون|نمی دان|مطمئن نیست|ببینم|وين|وین|موقع|where|website|not sure/iu;
 const PHOTO = /عکس|تصویر|صور|photo|image/iu;
 export const INFORMATION_SLOT='{{INFORMATION}}';
+// MOQ2 — customer-facing form of the owner-approved Iran MOQ fact. The fact text itself carries internal notes (market scope, «do not
+// generalise to a new model», the Iraq minimum) that must not reach an Iran customer verbatim. The minimums shown come from the approved
+// MOQ policy (moqPolicy) for each named model/family and are shown ONLY when the approved fact states the same minimum for the same
+// group (standard models except bag-drawer, half-service/service, bag-drawer); any disagreement → null (the topic stays unanswered).
+// Only the approved models are named (never an unverified configuration), and a family the customer did not ask about is left out.
+const MOQ_FAMILIES={ring:{re:/انگشتر|خاتم/u,product:'انگشتر کوچک',label:'انگشتر'},pendant:{re:/آویز|اویز|گردنبند|قلاده/u,product:'آویز',label:'آویز'},
+ bracelet:{re:/دستبند|سوار/u,product:'دستبند کشیده',label:'دستبند'},watch:{re:/ساعت/u,product:'ساعتی بالشت‌دار',label:'ساعت'},
+ halfset:{re:/نیم[\s‌]*ست(?!\p{L})/u,product:'نیم ست کوچک',label:'نیم‌ست'},service:{re:/سرویس/u,product:'نیم سرویس',label:'نیم‌سرویس و سرویس'}};
+const MOQ_STANDARD_MODELS=['2 تکه','3 تکه','3 تکه کج','کشویی کج','کشویی روبان‌دار'],MOQ_BAG_MODEL='کشویی بگ‌دار';
+const faDigits=v=>String(v).replace(/[0-9]/g,d=>'۰۱۲۳۴۵۶۷۸۹'[d]);
+const faList=items=>items.length<2?items.join(''):items.slice(0,-1).join('، ')+' و '+items.at(-1);
+export const moqFamilies=message=>{const t=norm(message);return Object.keys(MOQ_FAMILIES).filter(k=>MOQ_FAMILIES[k].re.test(t));};
+export function customerMoqText(value,{market,families=[]}={}){
+ if(market!=='IRAN'||typeof value!=='string')return null;
+ const P=(product,configuration)=>moqPolicy({market:'IRAN',product,configuration});
+ const std=P(MOQ_FAMILIES.ring.product,'3 تکه'),bag=P(MOQ_FAMILIES.ring.product,MOQ_BAG_MODEL),svc=P(MOQ_FAMILIES.service.product,'2 تکه');
+ if([std,bag,svc].some(p=>p.status!=='ok'))return null;
+ const stdFamilies=Object.keys(MOQ_FAMILIES).filter(k=>k!=='service');
+ // every model and family named below must carry exactly the policy minimum of its group
+ if(!MOQ_STANDARD_MODELS.every(c=>stdFamilies.every(f=>P(MOQ_FAMILIES[f].product,c).moq===std.moq))||!stdFamilies.every(f=>P(MOQ_FAMILIES[f].product,MOQ_BAG_MODEL).moq===bag.moq)
+  ||!['2 تکه','3 تکه','3 تکه کج'].every(c=>P('سرویس',c).moq===svc.moq&&P(MOQ_FAMILIES.service.product,c).moq===svc.moq)||P(MOQ_FAMILIES.service.product,MOQ_BAG_MODEL).moq!==bag.moq)return null;
+ // the approved fact must state the same minimum for the same group
+ const clauses=norm(value).replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d)).split(/[.؛;\n]/u),nums=c=>(c.match(/[0-9]+/g)||[]).map(Number);
+ const states=(n,re,not=null)=>clauses.some(c=>re.test(c)&&(!not||!not.test(c))&&nums(c).includes(n));
+ if(!states(std.moq,/غیر\s*از\s*کشویی\s*بگ/u)||!states(svc.moq,/نیم[\s‌]*سرویس/u)||!states(bag.moq,/کشویی\s*بگ/u,/غیر\s*از|عراق/u))return null;
+ const asked=families.filter(f=>MOQ_FAMILIES[f]),askedStd=asked.filter(f=>f!=='service'),none=!asked.length;
+ const showStd=none?stdFamilies:askedStd,lines=[];
+ if(showStd.length)lines.push(`حداقل سفارش ${showStd.length===1?'جعبه '+MOQ_FAMILIES[showStd[0]].label:'جعبه‌های '+faList(showStd.map(f=>MOQ_FAMILIES[f].label))} از هر سایز: در مدل‌های ${faList(MOQ_STANDARD_MODELS.map(faDigits))} ${faDigits(std.moq)} عدد و در مدل ${MOQ_BAG_MODEL} ${faDigits(bag.moq)} عدد.`);
+ if(none||asked.includes('service'))lines.push(`حداقل سفارش جعبه ${MOQ_FAMILIES.service.label} از هر سایز ${faDigits(svc.moq)} عدد است و در مدل ${MOQ_BAG_MODEL} ${faDigits(bag.moq)} عدد.`);
+ return lines.join('\n')||null;
+}
 export const serviceFinancialQuestion=message=>MONEY.test(norm(message))||/ثبتش|ثبت سفارش|سجل.*طلب|تایید.*پرداخت|تأیید.*پرداخت/iu.test(norm(message));
 export function serviceFollowupPromise(text){
  const t=norm(text);
@@ -83,7 +114,8 @@ export function approvedServiceRequest(message){
  if(/طراحی|تصمیم|کلیش[هة]|design|clich[eé]/iu.test(t)&&(MONEY.test(t)||/بفلوس|رایگان|مجانی|مجاني|free|charge/iu.test(t)))topics.push('design');
  if(/آدرس|تلفن|اینستا|زیر لوگو|عنوان|هاتف|إنست|انست|تحت الشعار/iu.test(t))topics.push('contact');
  if(/بگ|بدنه|پترن|کيس|کیس|جسم|نقش/iu.test(t)&&/چاپ|کوب|لوگو|طبع|طباع|شعار/iu.test(t))topics.push('bag');
- return topics.length?{kind:'information',topics}:null;
+ // MOQ2: the product families the customer named, so the approved minimum is shown only for what was asked.
+ return topics.length?{kind:'information',topics,...(topics.includes('moq')?{moq_families:moqFamilies(t)}:{})}:null;
 }
 
 export function approvedGuidanceRequest(message, previous = [], previousGuidance = null) {
@@ -179,6 +211,10 @@ export function selectApprovedGuidance(rows, {market, request, at = Date.now()})
       const needsLid=topic==='design'&&rows.some(r=>r.status==='active'&&r.authority==='owner_approved'&&r.market===market&&r.entity_key==='global'&&r.domain==='knowledge'&&r.attribute==='included_services_lid_spec');
       const lid=needsLid?selectApprovedGuidance(rows,{market,request:{kind:'information',topics:['lid']},at}):null;
       if(needsLid&&!lid)continue;
+      // MOQ2: the approved MOQ fact is shown to the customer in customer-facing form (no internal/other-market clauses), and only
+      // when its stated minimums agree with the approved MOQ policy; a fact stating numbers that disagree leaves the topic unanswered
+      // (fail closed). A fact that states no number at all carries no numeric claim and keeps its existing exact form.
+      if(topic==='moq'){const shown=customerMoqText(v,{market,families:request.moq_families||[]});if(shown)v=shown;else if(/[0-9۰-۹٠-٩]/u.test(v))continue;}
       parts.push(v.trim());if(topic==='moq')protectedParts.push(v.trim());facts.push({id:fact.id,version:fact.version,value_json:fact.value_json});answered.push(topic);
       if(lid){parts.push(lid.text);facts.push(...lid.facts);}
     }

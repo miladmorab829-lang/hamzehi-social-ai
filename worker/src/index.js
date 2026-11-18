@@ -10134,6 +10134,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   const guidanceRequest=aiFirstOn&&!orderStatusAsked&&!orderStatusMixed&&!postSaleReview&&!formalQuoteReply&&!extraCostAsked&&!acceptance&&!["accepted","rejected","asks_price","quote_requested","asks_moq","negotiating","objection_price"].includes(intent)?approvedGuidanceRequest(row.message,earlierInbound,lastDecision?.approved_guidance):null;
   const approvedGuidance=await loadApprovedGuidance(env,{market:conversationMarket,request:guidanceRequest}).catch(()=>null);
   let guidanceUsed=null;
+  // MOQ1: the approved MOQ fact answers the turn's only commercial request (no price/discount/payment asked, browse mode, the
+  // approved-information lookup answered «moq» with its exact protected text, and no product under owner MOQ review).
+  const approvedMoqAnswer=()=>turnPolicy?.mode==='browse'&&!!meaning?.requests?.includes('moq')&&!meaning.requests.some(r=>['price','discount','payment'].includes(r))&&approvedInformation?.kind==='information'&&!!approvedInformation.request?.topics?.includes('moq')&&!approvedInformation.missing_topics?.includes('moq')&&(approvedInformation.protected_parts||[]).length>0&&pricing?.status!=='owner_review';
   // O11 disclosure only. Financial/order actions and owner constraints always retain their normal path.
   const optionalFee=aiFirstOn&&!needsOwner&&!kgHardStop&&!kgRelations.conflict&&!postSaleOrder&&!formalQuoteReply&&!orderStatusAsked&&!orderStatusMixed&&!acceptance&&!extraCostAsked&&turnPolicy&&!turnPolicy.payment_stage&&!turnPolicy.may_handoff&&!['accepted','quote_requested','negotiating','objection_price'].includes(intent)
     ?await loadRibbonFee(env,{market:conversationMarket,message:row.message}).catch(()=>null):null;
@@ -10157,6 +10160,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     else if(['accept','configure'].includes(turnPolicy.mode)&&!meaning?.requests.some(r=>['price','discount','moq'].includes(r))){action='ai_answer';}
     else if(meaning?.requests.includes('payment')){action='policy_terms';}
     else if(intent==='asks_moq'&&Number.isSafeInteger(pricing?.moq)){action='answer_moq_limit';}
+    // MOQ1: a browse question whose only commercial request is the minimum order, answered by the owner-approved MOQ fact
+    // (approved information, exact protected text), is an information turn — not the «no reliable number» price limit.
+    else if(approvedMoqAnswer()){action='ai_answer';guidanceUsed=approvedInformation;}
     else if(priceHandled()){}
     else{action='policy_limit';}
     if(meaning?.requests.includes('discount')&&action==='answer_price')action='policy_discount';
@@ -10816,17 +10822,29 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         const engineQuoteTurn=turnPolicy?.mode==='quote'&&requiredParts.length>0&&requiredParts.every(part=>engineDocText(part))&&!guidanceUsed&&!orderStatusAsked;
         // (an engine document is delivered as a standalone block, as the author contract and the send-time proof require)
         const engineBlocks=text=>requiredParts.reduce((t,p)=>t.split(p).join('\n'+p+'\n'),text).replace(/[ \t]*\n[ \t]*/g,'\n').replace(/\n{2,}/g,'\n').trim();
-        const partialCandidate=preAuthor.valid&&(preAuthor.source==='ai'||preAuthor.source==='ai+commercial'&&engineQuoteTurn)&&aiInfo.repaired&&!nonQuoteOwnerEvent&&(turnPolicy?.mode!=='quote'||engineQuoteTurn)&&!turnPolicy?.payment_stage&&!rawAiDecision?.owner_escalation_needed&&typeof preAuthor.draft==='string'&&preAuthor.draft.trim()&&partialKeepsCentralAnswer(preAuthor.draft)?preAuthor.draft:null;
+        // MOQ1: the exact owner-approved information parts (e.g. the approved MOQ fact) are the verified answer to their topic. When the
+        // model's own wording of that topic was removed, the partial carries the exact approved part as its own block (validated under
+        // its own authority: protectedChecks/protectedValid), so the verified rest of the answer is not lost with the removed sentence.
+        const approvedParts=guidanceUsed?.kind==='information'&&guidanceUsed.rendering!=='ai_information'?requiredParts.filter(part=>(guidanceUsed.protected_parts||[]).includes(part)):[];
+        const withApprovedParts=text=>text&&approvedParts.length?[text,...approvedParts.filter(part=>!text.includes(part))].join('\n'):text;
+        // MOQ1: a no-handoff limit turn (e.g. the minimum of a model with no approved MOQ rule) whose only protected parts are the engine's
+        // exact «no reliable number» sentence and approved information parts may also deliver its verified partial: no number is invented
+        // and the conversation is not stopped. Both parts are validated under their own authority (protectedValid).
+        const limitSentence=commercialLimitReply(language,'price');
+        const limitPartial=action==='policy_limit'&&!!turnPolicy&&!turnPolicy.may_handoff&&!!meaning?.requests?.includes('moq')&&!meaning.requests.some(r=>['price','discount','payment'].includes(r))&&requiredParts.includes(limitSentence)&&requiredParts.every(part=>part===limitSentence||approvedParts.includes(part));
+        const partialCandidate=preAuthor.valid&&(preAuthor.source==='ai'||preAuthor.source==='ai+commercial'&&(engineQuoteTurn||limitPartial))&&aiInfo.repaired&&!nonQuoteOwnerEvent&&(turnPolicy?.mode!=='quote'||engineQuoteTurn)&&!turnPolicy?.payment_stage&&!rawAiDecision?.owner_escalation_needed&&typeof preAuthor.draft==='string'&&preAuthor.draft.trim()&&partialKeepsCentralAnswer(withApprovedParts(preAuthor.draft))?preAuthor.draft:null;
         // (only when each engine slot stood on its own — after a line start, a colon or sentence end, with nothing after it but a
         // line break or the end: a slot inside a sentence would leave fragments around the standalone offer)
         const engineSlotStandalone=text=>{const s=requiredParts.reduce((t,p)=>t.split(p).join(SALES_AI_COMMERCIAL_SLOT),text),n=s.split(SALES_AI_COMMERCIAL_SLOT).length-1;
           return n>0&&(s.match(/(?:^|[\n:：.!؟?،؛;])[ \t]*\{\{COMMERCIAL\}\}[ \t]*(?=\n|$)/gu)||[]).length===n;};
-        const partialText=partialCandidate&&engineQuoteTurn?(engineSlotStandalone(partialCandidate)?engineBlocks(partialCandidate):null):partialCandidate;
-        if(partialText&&requiredParts.every(part=>partialText.includes(part))&&hasSubstantiveAiReply(partialText,meaning?.requests)){
+        // (MOQ1: a limit partial's engine sentence is delivered as its own block too, as the send-time proof requires)
+        const partialText=withApprovedParts(partialCandidate&&engineQuoteTurn?(engineSlotStandalone(partialCandidate)?engineBlocks(partialCandidate):null):partialCandidate&&limitPartial?engineBlocks(partialCandidate):partialCandidate);
+        if(partialText&&requiredParts.every(part=>partialText.includes(part))&&(!approvedParts.length&&!limitPartial||protectedValid)&&hasSubstantiveAiReply(partialText,meaning?.requests)){
           // RR1: in an engine quote partial the protected engine documents are checked under their own authority (protectedChecks
           // above, protectedValid) and the model's remaining prose is checked without them — as in the full author path — so the
           // list figures are never read as model claims and the prose gets no authority from them.
-          const slotText=engineQuoteTurn?requiredParts.reduce((t,p)=>t.split(p).join(SALES_AI_COMMERCIAL_SLOT),partialText):partialText;
+          // (MOQ1: the exact approved information parts are checked the same way — under their own authority, not as model prose)
+          const slotText=(engineQuoteTurn||limitPartial?requiredParts:approvedParts).reduce((t,p)=>t.split(p).join(SALES_AI_COMMERCIAL_SLOT),partialText);
           const masked=guidanceUsed?maskApprovedGuidance(slotText,guidanceUsed):slotText;
           const pScope={authoritativeFacts:authorFacts,markets:knowledgeMarkets,destination:typeof memory?.destination==='string'?memory.destination:null};
           // (only the engine document remains — the same «engine only» reply the author path accepts — so there is no model prose to check)
@@ -10834,7 +10852,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
           const pProse=engineOnlyPartial?[]:salesAiProseIssues(masked,{allowedNumbers:authorNumbers,preferenceTerms:[...colorOptions,...printingOptions],informationalScope:pScope});
           const pService=guidanceUsed?.kind==='information'?unverifiedServiceDetail(partialText,guidanceUsed,pScope):false;
           const pChecked=validateSalesBrainDraft(masked.split(SALES_AI_COMMERCIAL_SLOT).join(' '),{allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key});
-          const pContext=engineQuoteTurn&&!protectedValid?{valid:false,reason:'unverified_protected_fact'}:requiredParts.length?protectedContextIssue(engineQuoteTurn?slotText.split(SALES_AI_COMMERCIAL_SLOT).join(' ').replace(/\s+/g,' ').trim():partialText,{offerQuantities:offerQuantitiesNow(),authoritativeFacts:authorFacts,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,requireProductExplanation:!!activeRibbonContract,markets:knowledgeMarkets}):{valid:true};
+          const pContext=engineQuoteTurn&&!protectedValid?{valid:false,reason:'unverified_protected_fact'}:requiredParts.length?protectedContextIssue(engineQuoteTurn||limitPartial||approvedParts.length?slotText.split(SALES_AI_COMMERCIAL_SLOT).join(' ').replace(/\s+/g,' ').trim():partialText,{offerQuantities:offerQuantitiesNow(),authoritativeFacts:authorFacts,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,requireProductExplanation:!!activeRibbonContract,markets:knowledgeMarkets}):{valid:true};
           // The partial must still answer what the customer asked (same coverage signal as the full author reply):
           // a reply reduced to a disclaimer and a link does not answer «which model and why».
           const pCoverage=conversationReplyCoverage(partialText,requestPlan,{records:aiKnowledgeEvidenceRecords,catalog:pricing?.catalog_summary||[]});          if(!UNFILLED_REPLY_SLOT.test(partialText)&&!DANGLING_REPLY.test(partialText)&&!pProse.length&&!pService&&pChecked.valid&&pContext.valid&&pCoverage.valid&&partialComparisonOk(partialText)&&partialServesRequest(partialText)){
@@ -10849,6 +10867,17 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
             if(!ownerRemainder.length&&removedOnlyVolunteered(partialText)){
               needsOwner=ownerBeforeAuthor.needsOwner;needsOwnerReason=ownerBeforeAuthor.needsOwnerReason;ownerTopic=ownerBeforeAuthor.ownerTopic;
               if(turnPolicy)turnPolicy.reply_failure=ownerBeforeAuthor.replyFailure;aiInfo.partial_delivery.owner_case='not_needed:removed_text_was_volunteered';
+            }
+            // MOQ1 (owner item 5): no handoff allowed, no earlier owner requirement, and every removed sentence carried ONLY the model's
+            // own minimum-order wording (re-checked: no other issue), now answered by the exact approved MOQ part delivered above →
+            // nothing is left for the owner to decide. A removed price/discount/payment/other claim, or deferral text, keeps the case.
+            else if(!ownerRemainder.length&&approvedParts.length&&approvedMoqAnswer()&&turnPolicy&&!turnPolicy.may_handoff&&!turnPolicy.payment_stage&&!ownerBeforeAuthor.needsOwner&&!primaryClaimIssues.length&&!ownerPendingClause.test(salesBrainClaimText(partialText))&&!SALES_CHECKING_WORDS.test(partialText)){
+              const kept=new Set(splitReplyBlocks(partialText).map(s=>salesBrainClaimText(s)));
+              const removed=splitReplyBlocks(String(rawAiReply||'')).filter(s=>s!==SALES_AI_COMMERCIAL_SLOT&&!kept.has(salesBrainClaimText(s)));
+              if(removed.length&&removed.every(s=>{const iss=salesAiProseIssues(s,{allowedNumbers:authorNumbers,preferenceTerms:[...colorOptions,...printingOptions],informationalScope:pScope}).filter(x=>x!=='empty');return iss.length>0&&iss.every(x=>x==='moq_claim');})){
+                needsOwner=ownerBeforeAuthor.needsOwner;needsOwnerReason=ownerBeforeAuthor.needsOwnerReason;ownerTopic=ownerBeforeAuthor.ownerTopic;
+                if(turnPolicy)turnPolicy.reply_failure=ownerBeforeAuthor.replyFailure;aiInfo.partial_delivery.owner_case='not_needed:answered_by_approved_moq';
+              }
             }
           }
         }
