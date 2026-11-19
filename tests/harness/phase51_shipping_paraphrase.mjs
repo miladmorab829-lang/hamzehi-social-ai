@@ -274,7 +274,10 @@ for(const [id,market,label,reply] of REVIEW_PROBES.filter(row=>row[2]!=='known_l
 // own reply is rejected, the bounded author correction (same scripted text) is rejected again, one owner case remains.
 for(const id of ['P001','P004','P007','P016','P021']){
  const [,,category,question,reply]=PRODUCT_UNSAFE.find(row=>row[0]===id);const x=await turn(question,reply,null,null,['product_info']);
- ok(`E2E product ${id} (${category}): nothing delivered, one owner case, at most 2 provider calls`,x.texts.length===0&&x.owner===1&&x.attempts<=2&&x.unchanged,{texts:x.texts,owner:x.owner,attempts:x.attempts});
+ // GV1 final owner directive: P007 (material) and P021 (printing location) are informational → delivered as written, no owner case.
+ // P001/P004 (colour printing: the colour topic keeps the D-004 control) and P016 (off-list colour) stay held with one owner case.
+ if(['P007','P021'].includes(id))ok(`E2E product ${id} (${category}): GV1 informational claim delivered once as written, no owner case`,x.texts.length===1&&x.texts[0]===reply&&x.owner===0&&x.unchanged,{texts:x.texts,owner:x.owner,attempts:x.attempts});
+ else ok(`E2E product ${id} (${category}): nothing delivered, one owner case, at most 2 provider calls`,x.texts.length===0&&x.owner===1&&x.attempts<=2&&x.unchanged,{texts:x.texts,owner:x.owner,attempts:x.attempts});
 }
 for(const id of ['G002','G008']){
  const [,,category,question,reply]=PRODUCT_GROUNDED.find(row=>row[0]===id);const x=await turn(question,reply,null,null,['product_info']);

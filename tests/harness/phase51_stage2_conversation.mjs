@@ -87,19 +87,21 @@ for(const market of ['IRAN','ARAB']){
  const mixed=selectApprovedGuidance([...records,moq],{market,request:{kind:'information',topics:['bag','moq','timing','shipping_payer','ribbon_printing']}});
  ok(market+': selected commercial topics retain exact protected controls',!!mixed&&mixed.protected_parts.length>0&&mixed.protected_parts.every(p=>mixed.text.includes(p))&&!mixed.protected_parts.some(p=>p.includes('پترن')||p.includes('نقش متكرر')),mixed);
 }
-// The same unsupported output must be stopped in the final customer path, not only a helper.
+// GV1 final owner directive (2026-11-19): general/informational text checks are read-only (ai_brain.advisory) and never hold a reply or
+// open an owner case; only commercial-authority findings, opt-out and duplicate guards hold. Expectations below updated accordingly.
+// An unsupported mechanism is informational: delivered in the real Worker path and recorded, no owner case.
 for(const [market,reply]of [['IRAN',unsupported[0]],['ARAB',unsupported[2]],['ARAB',unsupported[4]]]){
  const user=await client(market),question=market==='IRAN'?'کشویی کج از کجا باز می‌شود؟':'الجرّارة المائلة منين تنفتح؟';
  W.AI.script.set(question,()=>decision(reply));const start=W.tg.length,result=await W.send(user,question);
- ok(market+': unsupported mechanism held in real Worker path',!sent(user,start).length&&owner(result.row).length===1&&!salesAiFirstReply(result.brain),detail(result));
+ ok(market+': GV1 unsupported mechanism delivered and recorded, no owner case',sent(user,start).length===1&&owner(result.row).length===0&&salesAiFirstReply(result.brain)&&(result.brain?.ai_brain?.advisory||[]).length>0,detail(result));
  observations.push({key:market+' unknown mechanism',kind:'ADVERSARIAL_SCRIPTED_NOT_LIVE',question,provider_reply:reply,final_customer_visible:sent(user,start),owner_cases:owner(result.row).length,...detail(result)});
 }
 for(const [market,base,reference,detail]of [['IRAN',QUESTIONS.faB,REFERENCES.faB,' درباره آدرس و تلفن زیر لوگو هم بگو.'],['ARAB',QUESTIONS.arB,REFERENCES.arB,' وگلي عن العنوان والهاتف تحت الشعار.']]){
  const user=await client(market),question=base+detail;W.AI.script.set(question,()=>decision(reference));const start=W.tg.length,result=await W.send(user,question);
- ok(market+': an answer omitting the explicit second question is held',!sent(user,start).length&&owner(result.row).length===1,detailResult(result));
+ ok(market+': GV1 a partial answer is delivered, not held (coverage recorded)',sent(user,start).length===1&&owner(result.row).length===0,detailResult(result));
  const fragment=reference+(market==='IRAN'?'\nدرباره آدرس و تلفن زیر لوگو.':'\nعن العنوان والهاتف تحت الشعار.');
  W.AI.script.set(question,()=>decision(fragment));const second=await client(market),before=W.tg.length,onlyNames=await W.send(second,question);
- ok(market+': naming the second topic alone is not an answer',!sent(second,before).length&&owner(onlyNames.row).length===1,detailResult(onlyNames));
+ ok(market+': GV1 naming the second topic alone is delivered, not held',sent(second,before).length===1&&owner(onlyNames.row).length===0,detailResult(onlyNames));
 }
 function detailResult(r){return {outcome:r.outcome,validation:r.brain?.validation,rejection:r.brain?.ai_brain?.author_rejection};}
 ok('All provider and Telegram traffic remained intercepted',W.offNet().length===0,W.offNet());

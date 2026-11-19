@@ -33,7 +33,10 @@ for(const [market,keys]of [['IRAN',['faA','faB','faMemory']],['ARAB',['arA','arB
 const badAdvice=['چه ویژگی‌ای از جعبه براتون مهم‌تره؟','اطلاعات مدل‌ها را در سایت ببینید.','سلام! چه کمکی از دستم برمیاد؟','متاسفم.','انگشتر کوچک 5x5 و انگشتر بزرگ 6x6 داریم.','کشویی بگ‌دار را پیشنهاد می‌کنم چون ضدآب است و فوم محافظ عطر دارد.','کشویی کج را پیشنهاد می‌کنم. کشویی بگ‌دار چاپ روی درب و بدنه میانی دارد.','برای عطر کشویی بگ‌دار مناسبه و انتخاب منه. کشویی بگ‌دار چاپ پترن روی بگ بیرونی دارد.','کشویی بگ‌دار انتخاب من نیست. کشویی بگ‌دار چاپ پترن روی بگ بیرونی دارد. درباره مکانیزم کشویی کج اطلاعات تأییدشده ندارم.'];
 for(const question of [QUESTIONS.faA,QUESTIONS.faB])for(const text of badAdvice){
  const user=await client();W.AI.script.set(question,()=>decision(text));const start=W.tg.length,result=await W.send(user,question);
- ok('Generic/unrelated/invented advice never reaches the customer: '+text,!sent(user,start).length&&owned(result.row)&&!salesAiFirstReply(result.brain),brief(result));
+ // GV1 final owner directive: generic/unrelated/unsupported advice is a quality finding — delivered and recorded, no owner case. Only a
+ // reply with no substantive content («متاسفم.») is still not sent.
+ if(text==='متاسفم.')ok('Generic/unrelated/invented advice never reaches the customer: '+text,!sent(user,start).length&&owned(result.row)&&!salesAiFirstReply(result.brain),brief(result));
+ else ok('GV1 quality-only finding is delivered, not held: '+text,sent(user,start).length===1&&!owned(result.row)&&salesAiFirstReply(result.brain),brief(result));
 }
 {
  for(const intro of ['سلام','در خدمتم.','این اطلاعات مربوط به پرسش شماست.']){const user=await client(),question='بیعانه را حذف کن';W.AI.script.set(question,ctx=>decision(ctx.authoring?intro+'\n'+ctx.authoring.required_parts.join('\n'):intro));

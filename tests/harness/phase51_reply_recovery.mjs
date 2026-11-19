@@ -64,10 +64,12 @@ const IR_OFFER=["66000","66000000","59400000","29700000"],IQ_OFFER=["0.60","540.
 function provenance(label,x){const t=num(x.sent.join(" "));ok(label+" automatic total carries D-016 provenance",!/(?<![\d.])(?:59400000|540\.54)(?!\d)/.test(t)||x.r.brain?.standard_total===true&&!!x.r.brain?.standard_offer_authority,{standard_total:x.r.brain?.standard_total});}
 // exact figures (not substrings: 66000 must not be satisfied by 66000000)
 const has=(sent,figs)=>{const t=num(sent.join(" "));return figs.every(f=>new RegExp("(?<![\\d.])"+f.replace(".","\\.")+"(?![\\d])").test(t));};
-// ---- R1: volunteered non-commercial claim removed → correct answer sent, no owner case ----
+// GV1 final owner directive (2026-11-19): general/informational text checks are read-only (ai_brain.advisory) and never hold a reply or
+// open an owner case; only commercial-authority findings, opt-out and duplicate guards hold. Expectations below updated accordingly.
+// ---- R1: volunteered non-commercial claim → correct answer sent as written, no owner case ----
 {const u=await start("IRAN");const x=await turn(u,"جعبه انگشتر کوچک دارید؟",DA("بله، جعبه انگشتر کوچک 3 تکه داریم. داخلش مخمل ضدآب و ضدخش داره.","product_info",{interp:{product_key:PK.IRAN},requests:["product_info"]}));
  ok("R1 product question answered",x.sent.length===1&&/داریم/.test(x.sent[0]),x.sent);
- ok("R1 unapproved description never sent",!x.sent.some(s=>/ضد\s*آب|ضدآب|ضدخش|مخمل/.test(s)),x.sent);
+ ok("R1 GV1: informational description is sent and recorded, not removed",x.sent.some(s=>/مخمل/.test(s))&&(x.r.brain?.ai_brain?.advisory||[]).length>0,{sent:x.sent,advisory:x.r.brain?.ai_brain?.advisory});
  ok("R1 no owner case for a volunteered non-commercial claim",open(u).length===0,open(u));}
 // ---- R2: unapproved shipping-cost sentence removed → payer rule sent, owner case kept ----
 {const u=await start("IRAN");const x=await turn(u,"هزینه ارسال به شیراز با کیه؟",DA("هزینه ارسال به شیراز با خود مشتریه و جدا از قیمت جعبه حساب میشه. هزینه کارتن رو هم ما میدیم.","shipping",{requests:["shipping"],destination:"شیراز"}));
@@ -136,12 +138,12 @@ const has=(sent,figs)=>{const t=num(sent.join(" "));return figs.every(f=>new Reg
  // Known gap (reported every run, never counted as a pass): the earlier stages already withhold a reply whose kept text defers to the
  // owner, so the removedOnlyVolunteered deferral guard is defense in depth and is not reachable end-to-end with this scripted reply.
  gap("G1 deferral guard reachable end-to-end (the deferral sentence is delivered)",deferralSent,{sent:x.sent,owner_cases:open(u)});
- ok("G1 unapproved description never sent",!x.sent.some(s=>/ضد\s*آب|ضدآب|مخمل/.test(s)),x.sent);
- ok("G1 owner case kept because the delivered text defers to the owner",!deferralSent||open(u).length===1,open(u));}
+ ok("G1 GV1: informational description is sent and recorded, not removed",x.sent.some(s=>/مخمل/.test(s))&&(x.r.brain?.ai_brain?.advisory||[]).length>0,{sent:x.sent,advisory:x.r.brain?.ai_brain?.advisory});
+ ok("G1 GV1: honest uncertainty opens no owner case (not a real owner decision)",open(u).length===0,open(u));}
 // G2: the model placed the slot but the turn has no engine segment → the slot-only remainder never becomes an empty message.
 {const u=await start("IRAN");const x=await turn(u,"جعبه انگشتر کوچک دارید؟ (G2)",DA("داخلش مخمل ضدآب داره. {{COMMERCIAL}}","product_info",{interp:{product_key:PK.IRAN},requests:["product_info"]}));
  ok("G2 no empty or slot-only message is sent",x.sent.every(s=>s.trim()&&!/\{\{/.test(s)),x.sent);
- ok("G2 unapproved description never sent",!x.sent.some(s=>/ضد\s*آب|ضدآب|مخمل/.test(s)),x.sent);}
+ ok("G2 GV1: informational description is sent (slot removed), not held",x.sent.length===1&&/مخمل/.test(x.sent[0]),x.sent);}
 // G3: out-of-rule discount, primary call fine, the reply-author call FAILS at the provider → the open commercial request keeps the
 // commercial-review label; the owner is not told it is «not a business matter».
 {const u=await start("IRAN");const msg="برای 1000 عدد انگشتر کوچک 3 تکه ۲۰٪ تخفیف میدید؟ (G3)";

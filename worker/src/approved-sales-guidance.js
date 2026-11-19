@@ -46,11 +46,13 @@ export function customerMoqText(value,{market,families=[]}={}){
  return lines.join('\n')||null;
 }
 export const serviceFinancialQuestion=message=>MONEY.test(norm(message))||/ثبتش|ثبت سفارش|سجل.*طلب|تایید.*پرداخت|تأیید.*پرداخت/iu.test(norm(message));
+// (RG1b: exported unchanged so the reply-gate repair can tell a reply that hands the customer to a staff member from an honest gap)
+export const SERVICE_STAFF_PERSON=/همکار|مالک|مدیر|مدیریت|کارشناس|اپراتور|پشتیبان|مسؤول|مسئول|زمیل|الموظف|الإدارة|الادارة/iu;
 export function serviceFollowupPromise(text){
  const t=norm(text);
  if(/پیگیری|بررسی می[‌ ]?کن|خبر(?:تون|تان)? می|به[‌ ]?زودی.*می[‌ ]?فرست|أراجع|اراجع|أرجعلك|ارجعلك|راح.*أتأكد|راح.*اتأكد/iu.test(t))return true;
  // Inspect the actual customer-facing text even when the model omitted its escalation flag.
- const person=/همکار|مالک|مدیر|مدیریت|کارشناس|اپراتور|پشتیبان|مسؤول|مسئول|زمیل|الموظف|الإدارة|الادارة/iu;
+ const person=SERVICE_STAFF_PERSON;
  const handoff=/ارجاع|می[‌ ]?پرس|بپرس|صحبت|تماس|راهنمایی|پاسخ|جواب|هماهنگ|یجاوب|یساعد|تواصل|اسأل|أسأل|یرد|یفید|یحچي|یحچی/iu;
  return t.split(/[.!?؟\n؛;]/u).some(s=>person.test(s)&&handoff.test(s));
 }

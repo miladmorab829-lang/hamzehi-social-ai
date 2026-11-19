@@ -436,14 +436,17 @@ export function splitReplyBlocks(prose){
 // repair isolates exactly the sentence the whole check rejected instead of failing to find it and discarding the whole reply.
 // RR1 (owner item 2): allowSlotOnly — when the model placed the engine slot, a remainder that is only that slot is still a reply: the
 // engine's own document (e.g. the standard offer with its discount-limit sentence) fills it and is validated under its own authority.
-export function salesAiRepairProse(prose,{allowedNumbers=[],preferenceTerms=[],drop=null,informationalScope=null,allowSlotOnly=false}={}){
+// GV1: `blocking` (optional) keeps only the findings that may remove a sentence (the commercial-authority ones); the default keeps
+// every finding, so callers that did not opt in are unchanged.
+export function salesAiRepairProse(prose,{allowedNumbers=[],preferenceTerms=[],drop=null,informationalScope=null,allowSlotOnly=false,blocking=null}={}){
+  const keep=issue=>!blocking||blocking(issue);
   const parts=splitReplyBlocks(prose),keepFlags=[],dropped=[];
-  for(const p of parts){if(!p.trim()){keepFlags.push(false);continue;}const iss=salesAiProseIssues(p,{allowedNumbers,preferenceTerms,informationalScope}).filter(x=>x!=="empty");
+  for(const p of parts){if(!p.trim()){keepFlags.push(false);continue;}const iss=salesAiProseIssues(p,{allowedNumbers,preferenceTerms,informationalScope}).filter(x=>x!=="empty"&&keep(x));
     if(iss.length){dropped.push(iss[0]);keepFlags.push(false);}else if(drop&&drop(p)){dropped.push("caller_rule");keepFlags.push(false);}else keepFlags.push(true);}
   const text=joinRepairedParts(parts,keepFlags);
   if(!dropped.length)return null;
   if(!text.replace(SALES_AI_COMMERCIAL_SLOT,"").trim())return allowSlotOnly&&text.trim()===SALES_AI_COMMERCIAL_SLOT?{text,dropped}:null;
-  return salesAiProseIssues(text,{allowedNumbers,preferenceTerms,informationalScope}).length?null:{text,dropped};
+  return salesAiProseIssues(text,{allowedNumbers,preferenceTerms,informationalScope}).filter(keep).length?null:{text,dropped};
 }
 export function salesAiProseIssues(prose,{allowedNumbers=[],preferenceTerms=[],informationalScope=null}={}){
   const text=String(prose||""),issues=[];
