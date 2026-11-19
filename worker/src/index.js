@@ -8232,7 +8232,11 @@ const SALES_BRAIN_COLLECTION_CATEGORIES=new Set(["size","color","material","capa
 export function validateSalesBrainDraft(draft,options=[]){
   const config=Array.isArray(options)?{allowedNumbers:options}:options||{},text=String(draft||"");
   if(/\p{L}{33,}/u.test(text))return {valid:false,reason:"malformed_long_token"};
-  const catalogIssue=catalogClaimIssue(text,config.catalog,config.selectedProductKey);if(catalogIssue)return {valid:false,reason:catalogIssue};
+  // Case eb0916b5 (owner directive 2026-11-19): in a turn where the engine itself needs the customer's product choice (clarifyingQuestions),
+  // a question back to the customer («سرویس کامل کشویی بگ‌دار یا نیم‌سرویس؟») names options and asserts no catalogue combination;
+  // only the non-question sentences are checked against the catalogue (the same «a question asserts nothing» rule as sentenceRisk).
+  const catalogText=config.clarifyingQuestions?splitSalesReply(text).filter(sentence=>!/[؟?]\s*$/u.test(String(sentence).trim())).join('\n'):text;
+  const catalogIssue=catalogClaimIssue(catalogText,config.catalog,config.selectedProductKey);if(catalogIssue)return {valid:false,reason:catalogIssue};
   // When the answer's markets are given, evidence of any other market is never used.
   const markets=Array.isArray(config.markets)&&config.markets.length?new Set(config.markets):null,facts=(config.authoritativeFacts||[]).filter(f=>!markets||!f.market||markets.has(f.market));
   // Shipping policy is evaluated semantically per clause, including payer, route,
@@ -10506,6 +10510,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // that cannot be drafted and verified by the authorized model.
   if(approvedInformation&&!postSaleReview&&!orderStatusAsked&&!['accept_offer','accepted','quote','order_status','answer_extra_cost'].includes(action))guidanceUsed=approvedInformation;
   let replySource="legacy",replyParts=[];const aiEvidenceFacts=[],needsOwnerPreAi=needsOwner;
+  // Case eb0916b5: catalogue ambiguity is answered by a clarifying question (clarify_product / ASK_REQUIRED_FIELD), never by the owner.
+  const catalogClarification=aiFirstOn&&(pricing?.status==='missing_attribute'||['ask_attribute','clarify_product'].includes(action));
   if(ai&&ai.reply){
     if(turnPolicy){const originalParts=splitSalesReply(ai.reply.replaceAll(INFORMATION_SLOT,INFORMATION_SLOT+'\n')),kept=originalParts.filter(p=>{const field=serviceQuestionField(p);return !(field==='model'&&known.product_or_model||field==='quantity'&&(quantityValid||turnPolicy.mode==='browse')||field==='destination'&&memory.destination||field==='market'&&conversationMarket);});if(kept.length!==originalParts.length){aiInfo.repaired={stage:'question_filter',dropped:originalParts.length-kept.length};ai={...ai,reply:kept.join(' ')};}}
     const DET_ONLY=["payment_ready_owner","answer_extra_cost","accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","clarify_photo_or_order","answer_sizes","ask_color_placement","ask_image_reference","answer_catalog","welcome"];
@@ -10540,7 +10546,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         // AI-FIRST: the approved catalog of this market that Claude was given (products, models, sizes) is evidence for its answer too.
         if(aiFirstOn)for(const c of (pricing?.catalog_summary||[]))aiEvidenceFacts.push(...salesMemoryAnswerEvidence({product:c.product,models:c.models||[],sizes:c.sizes||[],market:conversationMarket}));
         // GV1: in AI-first the factual check reports informational findings as advisory; commercial claims still fail.
-        const vOpts={allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:aiEvidenceFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,...(aiFirstOn?{informationalAdvisory:true}:{})};
+        const vOpts={allowedNumbers:[...answerNumbers,...aiAllowedNumbers],authoritativeFacts:aiEvidenceFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,...(aiFirstOn?{informationalAdvisory:true}:{}),...(catalogClarification?{clarifyingQuestions:true}:{})};
         const parts=segment&&composed.includes(segment)?[{kind:'commercial',text:segment,facts:[...authorityFacts,...(salesEvidence?.facts||[])],...(!guidanceUsed&&!orderStatusAsked&&engineDocText(segment)?{engine:true}:{})}]:[];
         const validateComposed=text=>validateReplyParts(guidanceUsed?maskApprovedGuidance(text,guidanceUsed):text,parts,validateSalesBrainDraft,vOpts);
         let v=validateComposed(composed);
@@ -10559,7 +10565,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
           const hardOwner=needsOwner&&(turnPolicy?.payment_stage||SEGMENT.includes(action)||colorSpecial||printingSpecial);
           if(ai.owner_escalation_needed&&!needsOwner&&!serviceTurn&&(!turnPolicy||turnPolicy.may_handoff)){needsOwner=true;needsOwnerReason=ai.escalation_reason==="unapproved_terms"?"commercial_owner_review_required":"approved_knowledge_missing";if(!SEGMENT.includes(action))action="knowledge_owner";}
           else if(!ai.owner_escalation_needed&&!hardOwner&&(needsOwner||["wait_for_owner","owner_followup","knowledge_owner"].includes(action))){needsOwner=false;needsOwnerReason=null;action="ai_answer";askedField=null;}
-          draft=composed;validation=v;replySource=segment?"ai+commercial":"ai";replyParts=parts;
+          draft=composed;validation=v;replySource=segment&&composed.includes(segment)?"ai+commercial":"ai";replyParts=parts;
         }
       }
     }
@@ -10767,7 +10773,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
       // completeness are recorded (aiInfo.advisory). The protected parts keep their own full check (protectedChecks above).
       const proseAll=prose===null?['required_reply_part_missing']:atomicControl||engineOnly?[]:salesAiProseIssues(prose,{allowedNumbers:authorNumbers,preferenceTerms:[...colorOptions,...printingOptions],informationalScope:{authoritativeFacts:authorFacts,markets:knowledgeMarkets}});
       const proseIssues=blockingIssues(proseAll);
-      const checked=prose!==null?validateSalesBrainDraft(prose,{allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,informationalAdvisory:true}):{valid:false,reason:'required_reply_part_missing'};
+      const checked=prose!==null?validateSalesBrainDraft(prose,{allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,informationalAdvisory:true,clarifyingQuestions:catalogClarification}):{valid:false,reason:'required_reply_part_missing'};
       const protectedContextAll=prose!==null&&requiredParts.length?protectedContextIssue(prose,{offerQuantities:offerQuantitiesNow(),authoritativeFacts:authorFacts,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,requireProductExplanation:!!activeRibbonContract,markets:knowledgeMarkets}):{valid:true};
       const protectedContext=commercialVerdict(protectedContextAll);
       const answerCoverage=conversationReplyCoverage(text,requestPlan,{records:aiKnowledgeEvidenceRecords,catalog:pricing?.catalog_summary||[]});
@@ -10894,7 +10900,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
           // GV1: commercial-authority findings only; informational findings and answer/comparison coverage are recorded.
           const pProseAll=engineOnlyPartial?[]:salesAiProseIssues(masked,{allowedNumbers:authorNumbers,preferenceTerms:[...colorOptions,...printingOptions],informationalScope:pScope}),pProse=blockingIssues(pProseAll);
           const pService=guidanceUsed?.kind==='information'?unverifiedServiceDetail(partialText,guidanceUsed,pScope):false;
-          const pChecked=validateSalesBrainDraft(masked.split(SALES_AI_COMMERCIAL_SLOT).join(' '),{allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,informationalAdvisory:true});
+          const pChecked=validateSalesBrainDraft(masked.split(SALES_AI_COMMERCIAL_SLOT).join(' '),{allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,informationalAdvisory:true,clarifyingQuestions:catalogClarification});
           const pContext=engineQuoteTurn&&!protectedValid?{valid:false,reason:'unverified_protected_fact'}:requiredParts.length?commercialVerdict(protectedContextIssue(engineQuoteTurn||limitPartial||approvedParts.length?slotText.split(SALES_AI_COMMERCIAL_SLOT).join(' ').replace(/\s+/g,' ').trim():partialText,{offerQuantities:offerQuantitiesNow(),authoritativeFacts:authorFacts,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,requireProductExplanation:!!activeRibbonContract,markets:knowledgeMarkets})):{valid:true};
           // (answer coverage is a recorded signal since GV1; a protected question the partial does not answer still stays with the
           // owner through partialServesRequest / ownerRemainder below)
@@ -10945,7 +10951,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
         if(!validation.valid&&typeof text==='string'&&prose!==null&&!providerFailure&&!authorPartialReview&&!authored?.decision?.owner_escalation_needed&&!nonQuoteOwnerEvent&&turnPolicy&&!turnPolicy.payment_stage&&!['quote','pay_ready','payment_claim','accept'].includes(turnPolicy.mode)&&!activeRibbonContract&&!orderStatusAsked&&!UNFILLED_REPLY_SLOT.test(text)&&protectedValid){
           const sScope={authoritativeFacts:authorFacts,markets:knowledgeMarkets,destination:typeof memory?.destination==='string'?memory.destination:null},prefs=[...colorOptions,...printingOptions];
           // GV1: only commercial-authority findings remove a sentence here (informationalAdvisory / blockingIssues / commercialVerdict).
-          const vOpts2={allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,informationalAdvisory:true};
+          const vOpts2={allowedNumbers:authorNumbers,authoritativeFacts:authorFacts,markets:knowledgeMarkets,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,informationalAdvisory:true,clarifyingQuestions:catalogClarification};
           const ctxOpts={offerQuantities:offerQuantitiesNow(),authoritativeFacts:authorFacts,catalog:pricing?.catalog_summary||[],selectedProductKey:aiInfo.interpretation?.product_key,requireProductExplanation:false,markets:knowledgeMarkets};
           const ordered=[...requiredParts].sort((a,b)=>text.indexOf(a)-text.indexOf(b));
           const blocks=splitReplyBlocks(ordered.reduce((t,p)=>t.split(p).join('\n'+SALES_AI_COMMERCIAL_SLOT+'\n'),text)),keepFlags=[],dropped=[],droppedSentences=[];let keptProse='';
@@ -11027,6 +11033,7 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   if(aiInfo.informational_review)result.informational_review=aiInfo.informational_review;
   if((serviceTurn||turnPolicy)&&!conversationMarket&&(catalogAsk||lastDecision?.catalog_pending))result.catalog_pending=catalogAsk?catalogQuestion:lastDecision.catalog_pending;
   if(serviceTurn&&!conversationMarket&&(informationRequest||lastDecision?.service_pending))result.service_pending=informationRequest?String(resumeService||row.message):lastDecision.service_pending;
+  if(catalogClarification)result.catalog_clarification=true;
   if(guidanceUsed)result.approved_guidance=guidanceUsed;
   if(replyParts.length&&replyParts.every(p=>draft.includes(p.text)))result.reply_parts=replyParts;
   if(AI_REPLY_SOURCES.has(replySource)&&(pricing?.catalog_summary||[]).length)result.catalog_claim_scope={market:conversationMarket,product_key:aiInfo.interpretation?.product_key||null,catalog:pricing.catalog_summary};
@@ -11450,7 +11457,7 @@ async function conversationalReplyProofReason(env,{row,brain,outreach}){
     checked=maskOrderIdentifiers(checked,order);
   }
   const gallery=brain.gallery?.items?.length?brain.gallery:null;
-  const valid=validateReplyParts(checked,brain.reply_parts||[],validateSalesBrainDraft,{allowedNumbers:[...numbers,...(Number.isSafeInteger(brain.customer_known_facts?.requested_quantity)?[brain.customer_known_facts.requested_quantity]:[]),...(gallery?galleryAllowedNumbers(gallery):[])],authoritativeFacts:[...facts,...(gallery?[{category:'availability',values:galleryAuthorityValues(gallery)}]:[])],markets:[brain.knowledge_market?.conversation_market,'GLOBAL'].filter(Boolean),catalog:brain.catalog_claim_scope?.catalog,selectedProductKey:brain.catalog_claim_scope?.product_key,shippingPolicyChecks:!brain.order_reference?.order_id,informationalAdvisory:true});
+  const valid=validateReplyParts(checked,brain.reply_parts||[],validateSalesBrainDraft,{allowedNumbers:[...numbers,...(Number.isSafeInteger(brain.customer_known_facts?.requested_quantity)?[brain.customer_known_facts.requested_quantity]:[]),...(gallery?galleryAllowedNumbers(gallery):[])],authoritativeFacts:[...facts,...(gallery?[{category:'availability',values:galleryAuthorityValues(gallery)}]:[])],markets:[brain.knowledge_market?.conversation_market,'GLOBAL'].filter(Boolean),catalog:brain.catalog_claim_scope?.catalog,selectedProductKey:brain.catalog_claim_scope?.product_key,shippingPolicyChecks:!brain.order_reference?.order_id,informationalAdvisory:true,clarifyingQuestions:brain.catalog_clarification===true});
   return valid.valid?null:'validator_blocked';
 }
 async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient,skipRateLimit=false}){
@@ -11486,7 +11493,7 @@ async function inboundAutoSendBlockReason(env,{row,brain,outreach,recipient,skip
   }
   // (a photo reply may state exactly its own gallery numbers — count, positions, label sizes — and labels; nothing else changes)
   const photoReply=brain.next_sales_action==="visual"&&brain.gallery,galleryNumbers=photoReply?galleryAllowedNumbers(brain.gallery):[],galleryFacts=photoReply?[{category:"availability",values:galleryAuthorityValues(brain.gallery)}]:[];
-  if(brain.validation?.valid!==true||!validateReplyParts(checked,brain.reply_parts||[],validateSalesBrainDraft,{allowedNumbers:[...(Number.isSafeInteger(ownQuantity)?[ownQuantity]:[]),...(brain.answer_numbers||[]).filter(Number.isSafeInteger),...galleryNumbers],authoritativeFacts:[...(brain.knowledge_answer_facts||[]),...galleryFacts],markets:[brain.knowledge_market?.conversation_market,'GLOBAL'].filter(Boolean),catalog:brain.catalog_claim_scope?.catalog,selectedProductKey:brain.catalog_claim_scope?.product_key,shippingPolicyChecks:!brain.order_reference?.order_id,...(brain.ai_first==='on'?{informationalAdvisory:true}:{})}).valid)return "validator_blocked";
+  if(brain.validation?.valid!==true||!validateReplyParts(checked,brain.reply_parts||[],validateSalesBrainDraft,{allowedNumbers:[...(Number.isSafeInteger(ownQuantity)?[ownQuantity]:[]),...(brain.answer_numbers||[]).filter(Number.isSafeInteger),...galleryNumbers],authoritativeFacts:[...(brain.knowledge_answer_facts||[]),...galleryFacts],markets:[brain.knowledge_market?.conversation_market,'GLOBAL'].filter(Boolean),catalog:brain.catalog_claim_scope?.catalog,selectedProductKey:brain.catalog_claim_scope?.product_key,shippingPolicyChecks:!brain.order_reference?.order_id,...(brain.ai_first==='on'?{informationalAdvisory:true}:{}),clarifyingQuestions:brain.catalog_clarification===true}).valid)return "validator_blocked";
   if(brain.next_sales_action==="clarify_photo_or_order"){if(!galleryClarifySafe(outreach.message))return "action_requires_owner_review";}
   else if(brain.gallery?.items?.length){const why=await galleryAutoSendBlock(env,{row,brain,outreach});if(why)return why;}
   // AI-FIRST (owner directive 2026-11-08): a status answer read from THIS conversation's D1 order record (masked identifiers, validated
