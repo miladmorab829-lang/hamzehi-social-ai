@@ -8274,7 +8274,10 @@ export function validateSalesBrainDraft(draft,options=[]){
   const missing=(claim,unit)=>(claim.values||[]).filter(value=>!unit.values.some(actual=>salesBrainPhraseIncluded(actual,value)||salesBrainPhraseIncluded(value,actual)));
   // Blocked: only the claims no fact and no collection supports, each with only the values its closest evidence lacks.
   const unsupported=[];
+  // (clarifyingQuestions: a product named only inside a question back to the customer is offered, not asserted — «کدوم مدل رو می‌خواید؟»)
+  const assertedProducts=config.clarifyingQuestions?new Set(salesBrainBusinessClaims(catalogText,{...config,authoritativeFacts:facts}).filter(claim=>claim.category==='product').flatMap(claim=>claim.entities||[]).map(salesBrainClaimText)):null;
   for(const claim of salesBrainBusinessClaims(text,{...config,authoritativeFacts:facts})){
+    if(assertedProducts&&claim.category==='product'&&!(claim.entities||[]).some(entity=>assertedProducts.has(salesBrainClaimText(entity))))continue;
     // Generic metadata such as "مدل" cannot prove that a newly named product
     // exists. Availability needs its actual catalogue/entity or full fact value.
     if(claim.category==='product'){
@@ -10174,7 +10177,12 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     else if(serviceMarketQuestion){action='ask_destination';askedField='destination';colorNeedsMarket=true;}
     else if(meaning?.requests.includes('payment')){action='policy_terms';}
     else if(turnPolicy.mode==='uncertain'){action='semantic_clarify';}
-    else if(turnPolicy.ambiguity!=='none'&&!(turnPolicy.ambiguity==='structure'&&currentSelection?.configuration&&pricing?.product?.key===currentSelection.product_key&&salesPickVariant(pricing.product,[row.message]).variant?.configuration===pricing.requirements?.configuration&&pricing.status==='priced')){action='ai_answer';}
+    else if(turnPolicy.ambiguity!=='none'&&!(turnPolicy.ambiguity==='structure'&&currentSelection?.configuration&&pricing?.product?.key===currentSelection.product_key&&salesPickVariant(pricing.product,[row.message]).variant?.configuration===pricing.requirements?.configuration&&pricing.status==='priced')){
+      // FINAL STRUCTURAL FIX (owner directive, live 043bf2da: quote + ambiguity=structure + missing_attribute → ai_answer → owner case): a
+      // price question whose product / structure / size the engine itself still needs takes the clarification route (clarify_product /
+      // ask_attribute → ASK_REQUIRED_FIELD) — never the price path. No escalation is allowed from here (mayEscalate:false).
+      if(!(['missing_attribute','product_ambiguous'].includes(pricing?.status)&&priceHandled({mayEscalate:false})))action='ai_answer';
+    }
     else if((turnPolicy.mode==='browse'&&!turnPolicy.asks_commercial)||turnPolicy.mode==='order_support'){action='ai_answer';if(approvedInformation)guidanceUsed=approvedInformation;}
     // PD90 continuation: agreeing to the CURRENT fresh offer (mode accept, deal_reference current) records the order candidate exactly
     // as the non-policy acceptance rule (acceptance&&offerFresh) and pay_ready already do — a pending candidate for the owner's
@@ -10492,6 +10500,10 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   // (the catalog answer is evidenced by exactly the approved catalog it lists: its product names and box types)
   if(action==="answer_catalog")authorityFacts.push({category:"availability",values:[...catalogNames,...catalogModels]});
   if(sizeAnswer)authorityFacts.push({category:"availability",values:sizeAnswer.values});
+  // FINAL STRUCTURAL FIX: the engine's own clarifying question is evidenced by exactly the approved options it lists (the attribute values
+  // of the price list, or the candidate product names) — as the size answer above; nothing else is lent to it.
+  if(action==="ask_attribute"&&attributeAsk)authorityFacts.push({category:"availability",values:[attributeAsk.label,...(attributeAsk.values||[])].filter(Boolean)});
+  if(action==="clarify_product"&&clarifyCandidates)authorityFacts.push({category:"availability",values:clarifyCandidates.map(c=>c.name).filter(Boolean)});
   if(gallery)authorityFacts.push({category:"availability",values:[galleryName,gallery.base,gallery.requested,...(gallery.models||[]),...(gallery.colors||[]),...Object.values(gallery.parts||{}),...(gallery.suggestions||[]),...(gallery.items||[]).map(x=>x.label)].filter(Boolean)});
   if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&salesDraft!==null&&!salesDraft.includes(approvedPrinting))salesDraft=`تمام، سجلت نوع الطباعة: ${approvedPrinting}. `+salesDraft;
   let draft=action==="answer_extra_cost"?(language==="Iraqi Arabic"?"لا.":"نه."):salesDraft!==null?salesDraft:orderStatusAsked?orderStatusReply(postSaleOrder,language):action==="acknowledge_rejection"?negotiationReplyDraft("rejected",language):action==="answer_knowledge"?kgAnswer.text:action==="ask_image_reference"?salesBrainDraft("ask_image_reference",language):SALES_BRAIN_NATURAL_ACTIONS.has(action)?salesBrainNaturalDraft(action,language,{imageAck:currentImage,factsAck:newFacts.length>0&&!currentImage&&priorDecisions.length>0,repeat:askedField?timesAsked(askedField)>0:false,quantity:quantityValid?knownQuantity:null,printing:memory.printing,waitingOn,recorded:[...new Set([...newFacts,...statedDeal])].filter(k=>!((printingPick.unknown||printingSpecial)&&/^printing/.test(k))&&!(ribbonAsked&&/ribbon/.test(k))),moq:answerNumbers[0]??null,avoid:recentReplies,nextAsk:askedField&&{color:"ask_color",size:"ask_size",customization:"ask_customization",destination:"ask_destination"}[askedField]||null,attr:colorSpecial?"special_color":kgAttrKind,details:orderDetails,detailNext:askedField}):action==="ask_details"?salesBrainDiscoveryDraft("details",language,detailMissing,currentImage):salesBrainDraft(action,language);if(printingRecorded&&approvedPrinting&&language==="Iraqi Arabic"&&!String(draft).includes(approvedPrinting)&&String(draft).includes("سجلت نوع الطباعة"))draft=String(draft).replace("سجلت نوع الطباعة","سجلت نوع الطباعة: "+approvedPrinting);
@@ -10500,6 +10512,8 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // like the order document it skips the prose grounding pass — its numbers are still checked against the pricing evidence.
     // Only the exact engine text qualifies; any AI-authored or edited reply is validated in full.
     engineDocument:engineDocText(draft)&&!guidanceUsed&&!orderStatusAsked,
+    // FINAL STRUCTURAL FIX: the engine's clarification question is read with the same «a question asserts nothing» scope
+    ...(aiFirstOn&&['ask_attribute','clarify_product'].includes(action)?{clarifyingQuestions:true}:{}),
     // GV1: in AI-first an informational finding on the deterministic draft never opens an owner case (commercial findings still do).
     ...(aiFirstOn?{informationalAdvisory:true}:{})});if(!validation.valid){needsOwner=true;needsOwnerReason=validation.reason;}
   // ---- AI-FIRST REPLY. The Sales AI's reply is what the customer gets when it passes the deterministic gate; the authoritative
@@ -10512,6 +10526,9 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
   let replySource="legacy",replyParts=[];const aiEvidenceFacts=[],needsOwnerPreAi=needsOwner;
   // Case eb0916b5: catalogue ambiguity is answered by a clarifying question (clarify_product / ASK_REQUIRED_FIELD), never by the owner.
   const catalogClarification=aiFirstOn&&(pricing?.status==='missing_attribute'||['ask_attribute','clarify_product'].includes(action));
+  // FINAL STRUCTURAL FIX: in a clarification turn the engine's validated question (approved option names only, no price) is kept as the
+  // reply when the model's text is not itself a valid clarifying question.
+  const engineClarification=aiFirstOn&&!!turnPolicy&&!turnPolicy.payment_stage&&['ask_attribute','clarify_product'].includes(action)&&!needsOwner&&!!validation?.valid&&typeof draft==='string'&&!!draft.trim()?{text:draft,facts:[...authorityFacts,...(salesEvidence?.facts||[])]}:null;
   if(ai&&ai.reply){
     if(turnPolicy){const originalParts=splitSalesReply(ai.reply.replaceAll(INFORMATION_SLOT,INFORMATION_SLOT+'\n')),kept=originalParts.filter(p=>{const field=serviceQuestionField(p);return !(field==='model'&&known.product_or_model||field==='quantity'&&(quantityValid||turnPolicy.mode==='browse')||field==='destination'&&memory.destination||field==='market'&&conversationMarket);});if(kept.length!==originalParts.length){aiInfo.repaired={stage:'question_filter',dropped:originalParts.length-kept.length};ai={...ai,reply:kept.join(' ')};}}
     const DET_ONLY=["payment_ready_owner","answer_extra_cost","accept_offer","accepted","order_status","acknowledge_rejection","quote","visual","clarify_photo_or_order","answer_sizes","ask_color_placement","ask_image_reference","answer_catalog","welcome"];
@@ -10731,9 +10748,17 @@ async function runSalesNegotiationBrain(env,inboxId,preloaded={}){
     // PD90 continuation (owner rule phase34 E5/E6): the extra-cost answer is exactly «نه.» / «لا.» — nothing more. The validated
     // atomic control is delivered as is (the send path accepts exactly this shape as atomicControl); no author wording pass is
     // allowed to add prose to it.
+    // FINAL STRUCTURAL FIX: the model's reply is used only when it is itself a valid clarifying question (nothing removed from it);
+    // a claim of an unidentified model or a price is replaced by the engine's own clarifying question. Independent of the model's wording.
+    const modelClarifies=primaryRetained&&!aiInfo.repaired&&/[؟?]\s*$/u.test(String(draft||'').trim());
+    const clarificationControl=!!engineClarification&&['ask_attribute','clarify_product'].includes(action)&&!needsOwner&&!modelClarifies;
+    if(clarificationControl){
+      draft=engineClarification.text;validation={valid:true};replySource='ai_verified';replyParts=[{kind:'commercial',text:draft,facts:engineClarification.facts}];aiEvidenceFacts.push(...engineClarification.facts);
+      aiInfo.authorship={verified:true,stage:'engine_clarification',contract_version:2,protected_parts:[draft]};aiInfo.clarification={version:1,source:'engine',model_reply_used:false};
+    }
     const atomicExtraCost=!primaryRetained&&action==='answer_extra_cost'&&/^(?:نه|لا)\.$/u.test(String(draft||''))&&!!validation?.valid&&!guidanceUsed;
     if(atomicExtraCost){replySource='ai_verified';replyParts=[{kind:'commercial',text:draft,facts:[]}];aiInfo.authorship={verified:true,stage:'atomic_control',contract_version:2,protected_parts:[draft]};}
-    if(!primaryRetained&&!atomicExtraCost){
+    if(!primaryRetained&&!atomicExtraCost&&!clarificationControl){
       if(coverageMissing)aiInfo.comparison_repair={missing_models:aiInfo.comparison.unanswered_models,source:'ai_author'};
       const requiredParts=[...new Set([...(activeRibbonContract?[]:(replyParts||[]).filter(p=>p.kind==='commercial').map(p=>p.text)),...(activeRibbonContract?activeRibbonContract.parts:guidanceUsed?.rendering==='ai_information'?[]:guidanceUsed?.kind==='information'?guidanceUsed.protected_parts||[]:guidanceUsed?[guidanceUsed.text]:[])])];
       // Transaction outcomes and owner limits are immutable for this wording pass.
@@ -11434,7 +11459,9 @@ async function conversationalReplyProofReason(env,{row,brain,outreach}){
   if(!row||brain.lead_id!==row.lead_id||brain.conversation_id!==row.conversation_id||brain.source_message_id!==row.id||outreach.inbox_message_id!==row.id||outreach.message!==brain.draft_customer_reply)return 'draft_not_from_validated_brain';
   const protectedParts=brain.ai_brain.authorship.protected_parts||[...(brain.reply_parts||[]).map(part=>part.text),...(brain.approved_guidance?.optional_ribbon_fee?ribbonAuthoringContract(brain.approved_guidance).parts:brain.approved_guidance?.text&&String(outreach.message).includes(brain.approved_guidance.text)?[brain.approved_guidance.text]:[])];
   const ownProse=protectedReplyProse(outreach.message,[...new Set(protectedParts)]),facts=brain.knowledge_answer_facts||[],numbers=(brain.answer_numbers||[]).filter(Number.isFinite);
-  const atomicControl=brain.next_sales_action==='answer_extra_cost'&&protectedParts.length===1&&/^(?:نه|لا)[.]?$/u.test(protectedParts[0])&&outreach.message===protectedParts[0];
+  const atomicControl=brain.next_sales_action==='answer_extra_cost'&&protectedParts.length===1&&/^(?:نه|لا)[.]?$/u.test(protectedParts[0])&&outreach.message===protectedParts[0]
+    // FINAL STRUCTURAL FIX: the engine's exact clarifying question, stored as its only protected part
+    ||brain.ai_brain?.authorship?.stage==='engine_clarification'&&['ask_attribute','clarify_product'].includes(brain.next_sales_action)&&protectedParts.length===1&&outreach.message===protectedParts[0]&&(brain.reply_parts||[]).some(part=>part.text===protectedParts[0]);
   // PD90 continuation: the reply is exactly the engine's list-derived price reply (stored as engine commercial parts by the decision).
   const engineOnly=ownProse!==null&&COURTESY_ONLY_PROSE.test(ownProse.trim())&&protectedParts.length>0&&protectedParts.every(p=>(brain.reply_parts||[]).some(part=>part.kind==='commercial'&&part.engine===true&&part.text===p));
   // PD90 continuation: the send-time re-check reads the reply with the same preference terms the decision used for this turn — the

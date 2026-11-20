@@ -21,8 +21,19 @@ const num=t=>String(t||"").replace(/[۰-۹]/g,d=>"۰۱۲۳۴۵۶۷۸۹".indexOf(
   ok("Case 1 ("+mode+"): ASK_REQUIRED_FIELD, needsOwner=false, no owner case",x.b.next_best_action==="ASK_REQUIRED_FIELD"&&x.b.needs_owner===false&&x.owners.length===0,{nba:x.b.next_best_action,needs_owner:x.b.needs_owner,owners:x.owners});
   ok("Case 1 ("+mode+"): no price or amount is sent",!x.texts.some(t=>/تومان|تومن|[0-9]{3,}/.test(num(t))),x.texts);}
  // the catalogue control itself is unchanged: an asserted off-list combination or an invented price is never sent
- {const x=await run("C1-claim","سرویس کامل کشویی بگ‌دار داریم.");ok("Case 1 control: an asserted catalogue combination is not sent",!x.texts.length,x.texts);}
+ // (FINAL STRUCTURAL FIX, item 4: instead of holding, the engine's own clarifying question replaces the rejected text)
+ {const x=await run("C1-claim","سرویس کامل کشویی بگ‌دار داریم.");ok("Case 1 control: an asserted catalogue combination is never sent; a clarifying question is",x.texts.length===1&&!/داریم/.test(x.texts[0])&&/[؟?]/u.test(x.texts[0])&&x.owners.length===0,{texts:x.texts,owners:x.owners});}
  {const x=await run("C1-price","سرویس کشویی بگ‌دار هر عدد ۵۰ هزار تومنه.");ok("Case 1 control: an invented price is never sent",!x.texts.some(t=>/تومن|تومان|(?<![0-9])50(?![0-9])/.test(num(t))),x.texts);}
+ // Live 043bf2da (FINAL STRUCTURAL FIX): the recorded decision conditions — mode=quote, ambiguity=structure, may_handoff=false,
+ // pricing missing_attribute. Whatever the model writes, the turn takes the clarification route: a valid clarifying question, no price,
+ // ASK_REQUIRED_FIELD, needsOwner=false, no owner case, no Reply Author.
+ const decQ=reply=>W.D({reply,requests:["price"],interpretation:I({ambiguity:"structure"}),semantics:{mode:"quote",quantity_role:"none",deal_reference:"none",repeat_requested:false},facts:{colors:[],color_parts:[],unknown_colors:[],color_statement:"none",negated_colors:[],quantity:null,destination:null,customer_name:null},acceptance:false,rejection:false,owner_escalation_needed:false,escalation_reason:null,missing_information:[]});
+ for(const [tag,reply] of [["correct question",CLARIFY],["claims an unidentified model","سرویس کامل کشویی بگ‌دار داریم و خیلی شیکه."],["price without enough information","سرویس کشویی بگ‌دار هر عدد ۵۰ هزار تومنه."]]){
+  const u=await client("IRAN"),q="کشویی بک دار سرویس چنده؟ (043bf2da "+tag+")";W.AI.script.set(q,ctx=>decQ(ctx?.authoring?reply+"\n"+(ctx.authoring.required_parts||[]).join("\n"):reply));
+  const start=W.tg.length,r=await W.send(u,q),b=r.brain||{},ai=b.ai_brain||{},texts=sent(u,start);
+  ok("043bf2da ("+tag+"): recorded decision conditions reproduced",b.turn_policy?.mode==="quote"&&b.turn_policy?.ambiguity==="structure"&&b.turn_policy?.may_handoff===false&&b.sales_agent?.pricing_status==="missing_attribute",{policy:b.turn_policy,pricing:b.sales_agent?.pricing_status});
+  ok("043bf2da ("+tag+"): one clarifying question is sent, no price",texts.length===1&&/[؟?]/u.test(texts[0])&&!/تومان|تومن|(?<![0-9])50(?![0-9])/.test(num(texts[0]))&&!/داریم/.test(texts[0])&&r.draft?.status==="sent",{texts,err:r.draft?.error_detail});
+  ok("043bf2da ("+tag+"): clarification route — ASK_REQUIRED_FIELD, needsOwner=false, no owner case, no Reply Author",["ask_attribute","clarify_product"].includes(b.next_sales_action)&&b.next_best_action==="ASK_REQUIRED_FIELD"&&b.needs_owner===false&&owners(r.row).length===0&&!ai.author_call,{action:b.next_sales_action,nba:b.next_best_action,needs_owner:b.needs_owner,owners:owners(r.row),stage:ai.authorship?.stage});}
  ok("Case 1: no real network transport",W.offNet().length===0,W.offNet());}
 // ---- Case 2: world with the exact owner-approved MOQ fact (same seeds as phase51_reply_gate_rg1) ----
 {const REPO=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../..");
